@@ -15,8 +15,13 @@ is what lets one server serve the whole suite.
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
+import logging
 import os
+import pathlib
+import random
+import re
 import secrets
 import threading
 import time
@@ -61,7 +66,15 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     DEFAULT_POOL_SIZE,
     MIGRATION_LOCK_KEY,
     NOTIFY_PAYLOAD_LIMIT,
+    SAVE_LOCK_KEY,
+    SCOPE_COLUMN,
+    SCOPE_POLICY_SUFFIX,
+    SCOPE_SETTING,
+    SCOPED_TABLES,
+    CrossScopeWriteRefused,
+    GraphIdentityCollision,
     PostgresGraphPersistenceBackend,
+    ScopeIsolationUnavailable,
     _channel_for,
 )
 from backend.core.storage import GraphStorage  # noqa: E402
@@ -92,6 +105,80 @@ _MEASURE_SECONDS = 5.0
 _UNPACED_FLOOR = 30
 
 
+# One shared length source for every batch-length case in this module.
+#
+# This module used to pin three fixed lengths (2, 7, 41) across the batch
+# and lock-mode tests below. A fixed set leaves every gap between its values
+# untested: a mutation gated on `len(operations) >= N`, or on the operation
+# at index N, for any N the fixed set happens to skip, is invisible to the
+# whole suite - and review repeatedly found exactly that, in the 6..39 gap
+# and above 41. Redrawing the non-structural anchors from a seeded RNG each
+# session does not close any one run's gap either, but it stops the gap from
+# being the *same* gap every run: a threshold anywhere in range eventually
+# falls on a session that draws past it, and CI runs this module on every
+# PR. `CO_TEST_PG_LENGTH_SEED` pins the seed for an exact rerun, and every
+# case that draws from it prints the seed as its first line, so a failure's
+# own captured output already carries what reproduces it.
+#
+# Under pytest-xdist every worker imports this module and collects on its
+# own, and the controller aborts the run unless all of them collect the same
+# parametrized ids. A seed drawn per process would hand each worker different
+# lengths, so without an explicit seed the draw comes from the run's xdist
+# id instead: one value per run, shared by every worker, new on the next run.
+def _pg_length_seed() -> int:
+    override = os.environ.get("CO_TEST_PG_LENGTH_SEED")
+    if override is not None:
+        return int(override)
+    testrun = os.environ.get("PYTEST_XDIST_TESTRUNUID")
+    if testrun is not None:
+        digest = hashlib.sha256(testrun.encode()).digest()
+        return int.from_bytes(digest[:4], "big") % 2**31
+    return random.SystemRandom().randrange(2**31)
+
+
+PG_LENGTH_SEED = _pg_length_seed()
+_LENGTHS_RNG = random.Random(PG_LENGTH_SEED)
+
+
+def _pg_length_seed_banner() -> str:
+    """Printed by every case that draws a length, so a failure's own
+    captured output names the seed that reproduces it - see the module-level
+    comment above `_pg_length_seed`."""
+    return (
+        f"postgres persistence-contract length seed: {PG_LENGTH_SEED} "
+        f"(rerun this exact draw with CO_TEST_PG_LENGTH_SEED={PG_LENGTH_SEED})"
+    )
+
+
+# Kept fixed rather than drawn: `TestPostgresEntityWritesTouchOneRow._long_batch`
+# cycles through 4 slots in runs of `_RUN`, and this length is what truncates
+# that cycle down to only its first slot (a delete_edge run) - a structural
+# case this family exists to cover, not a stand-in for "some short length".
+SHORT_BATCH_LENGTH = 2
+
+# The two non-structural anchors every length-sensitive case below shares -
+# one length in the gap the old fixed values left untested (6..39), and one
+# clearly past the old fixed ceiling (41) so "a long batch" stays
+# unambiguously long whatever it draws. Drawn once per session from the seed
+# above and reused everywhere a case needs "a middling batch" or "a long
+# batch" rather than its own private magic number.
+MID_BATCH_LENGTH = _LENGTHS_RNG.randint(6, 39)
+LONG_BATCH_LENGTH = _LENGTHS_RNG.randint(42, 90)
+_POSTGRES_SOURCE_FILES = (
+    pathlib.Path(__file__).resolve().parents[1] / "postgres_backend.py",
+    pathlib.Path(__file__).resolve(),
+)
+_BOUNDARY_SENSITIVE_TERMS = tuple(
+    "".join(parts)
+    for parts in (
+        ("co", "-", "ten", "ant"),
+        ("co", "_", "ten", "ant"),
+        ("ten", "ant"),
+        ("ten", "ants"),
+    )
+)
+
+
 class _RetryBoundExceeded(BaseException):
     """Raised by a test when a bounded retry loop turns out unbounded."""
 
@@ -100,10 +187,31 @@ def _dbname() -> str:
     return psycopg.conninfo.conninfo_to_dict(DSN).get("dbname", "postgres")
 
 
+def _provision_revision_sequence(conn, schema: str, role: str) -> None:
+    """The operator's half of entity revisions, as PERSISTENCE_BACKENDS.md
+    prescribes it: the sequence, and what the app role needs on it."""
+    conn.execute(
+        psycopg.sql.SQL("CREATE SEQUENCE {}.graph_revision_seq").format(
+            psycopg.sql.Identifier(schema)
+        )
+    )
+    conn.execute(
+        psycopg.sql.SQL(
+            "GRANT USAGE, SELECT, UPDATE ON SEQUENCE {}.graph_revision_seq TO {}"
+        ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(role))
+    )
+
+
 def _dsn_as_role(user: str, password: str) -> str:
     parts = psycopg.conninfo.conninfo_to_dict(DSN)
     parts["user"] = user
     parts["password"] = password
+    return psycopg.conninfo.make_conninfo(**parts)
+
+
+def _dsn_defaulting_to_repeatable_read() -> str:
+    parts = psycopg.conninfo.conninfo_to_dict(DSN)
+    parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
     return psycopg.conninfo.make_conninfo(**parts)
 
 
@@ -178,6 +286,124 @@ def backends():
         backend.close()
 
 
+_BACKEND_LOGGER = "backend.core.postgres_backend"
+
+
+class _Emitted(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+@pytest.fixture
+def reported(caplog, capsys, backends):
+    """What the backend reported since the previous call, one message per line.
+
+    A report is a WARNING record on the backend's module logger. Each one is
+    also checked not to have reached stdout, so a report printed as well as
+    logged fails here rather than reading as a single line.
+
+    Anything louder than WARNING fails outright, on every call and again at
+    teardown. Filtered to WARNING alone, the same text at ERROR would slip
+    past both a positive check and any check that nothing was said - and a
+    record logged after the last call would never be looked at at all.
+
+    The backends are closed here, before that teardown check, rather than
+    left to `backends`: this fixture depends on that one, so it tears down
+    after this one, and whatever closing logged - a listener thread stopping,
+    say - would come too late to be looked at.
+    """
+    caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    def assert_nothing_louder(records):
+        louder = [
+            record.getMessage()
+            for record in records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
+
+    # The records already taken, by identity, rather than caplog.clear(): on
+    # a pytest whose clear() rebinds the record list instead of emptying it,
+    # the list the teardown check reads detaches at the first clear. And a
+    # test that clears caplog itself would otherwise shift new records under
+    # a cursor, so a check that nothing was reported passed over them unread.
+    taken = []
+    # A clear before the first read leaves nothing taken to compare against,
+    # so the backend's records are also counted on a handler of the
+    # fixture's own, which no clear reaches. Setup's records are caplog's
+    # setup list, not the one read here.
+    emitted = _Emitted()
+    backend_logger = logging.getLogger(_BACKEND_LOGGER)
+    backend_logger.addHandler(emitted)
+
+    def take() -> str:
+        records = caplog.records
+        assert records[: len(taken)] == taken, (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        fresh = records[len(taken) :]
+        held = {id(record) for record in records}
+        held.update(id(record) for record in caplog.get_records("setup"))
+        assert all(id(record) in held for record in emitted.records), (
+            "caplog was cleared under the reported fixture; read reports "
+            "through it instead"
+        )
+        taken.extend(fresh)
+        messages = [
+            record.getMessage()
+            for record in fresh
+            if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
+        ]
+        assert_nothing_louder(fresh)
+        out = capsys.readouterr().out
+        leaked = [message for message in messages if message in out]
+        assert not leaked, f"a report went to stdout: {leaked}"
+        return "\n".join(messages)
+
+    try:
+        yield take
+    finally:
+        backend_logger.removeHandler(emitted)
+    for backend in backends:
+        backend.close()
+    backends.clear()
+    assert_nothing_louder(caplog.get_records("call") + caplog.get_records("teardown"))
+
+
+@pytest.mark.parametrize("after_clear", [1, 3])
+def test_the_reported_fixture_refuses_a_caplog_cleared_under_it(
+    caplog, reported, after_clear
+):
+    """A clear behind the fixture's back fails the next read, whether fewer or
+    more records have arrived since than it had already taken: a cursor would
+    skip those new records, and a check that nothing was reported pass."""
+    backend_log = logging.getLogger(_BACKEND_LOGGER)
+    backend_log.warning("first")
+    backend_log.warning("second")
+    assert reported() == "first\nsecond"
+    caplog.clear()
+    for n in range(after_clear):
+        backend_log.warning("after the clear %d", n)
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
+
+
+def test_the_reported_fixture_refuses_a_caplog_cleared_before_its_first_read(
+    caplog, reported
+):
+    """With nothing taken yet there is nothing to compare the records
+    against, so the record the clear dropped would go unread."""
+    logging.getLogger(_BACKEND_LOGGER).warning("before the clear")
+    caplog.clear()
+    with pytest.raises(AssertionError, match="caplog was cleared"):
+        reported()
+
+
 def _statements_issued(action, into=None):
     """Every statement `action` issues, captured on the cursor.
 
@@ -235,7 +461,16 @@ def _rendered(query):
 # empties a table writes as surely as an UPDATE does - `TRUNCATE` inside
 # `checkpoint()` would be invisible to a three-verb filter. `FOR UPDATE`
 # would match by accident on the word UPDATE; `FOR SHARE` would not.
-_WRITING = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "MERGE", "COPY", "FOR SHARE")
+_WRITING = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "MERGE",
+    "COPY",
+    "FOR SHARE",
+    "FOR KEY SHARE",
+)
 
 
 def _writing_statements(issued):
@@ -244,6 +479,28 @@ def _writing_statements(issued):
         for text in (_rendered(q) for q, _ in issued)
         if any(verb in text.upper() for verb in _WRITING)
     ]
+
+
+def _endpoint_locks_first(writes, operations):
+    """The writing statements without the batch's endpoint locks, which are
+    checked here: one primary-key lock per endpoint an edge upsert names and
+    the batch does not upsert itself, all first, all on graph_nodes (§11.3 -
+    an edge write holds its endpoints). What remains is one statement per
+    operation."""
+    upserted = {
+        op.entity_id for op in operations if op.kind == "node" and op.action == "upsert"
+    }
+    endpoints = {
+        op.payload[end]
+        for op in operations
+        if op.kind == "edge" and op.action == "upsert"
+        for end in ("source", "target")
+    } - upserted
+    locks = [text for text in writes if "FOR KEY SHARE" in text.upper()]
+    assert len(locks) == len(endpoints), (endpoints, writes)
+    assert writes[: len(locks)] == locks, writes
+    assert all(_tables_named(text) == {"graph_nodes"} for text in locks), locks
+    return writes[len(locks) :]
 
 
 def _tables_named(text):
@@ -255,11 +512,39 @@ def _tables_named(text):
     }
 
 
-def _sequential_scans(issued):
+# Statements naming a graph table that have no plan: the `ANALYZE` a
+# whole-graph save issues after its transaction, and its kin. `EXPLAIN
+# ANALYZE <table>` is a syntax error rather than a question about scans.
+# A denylist on purpose: an allowlist of verbs would silently drop a
+# `(SELECT ...)` or a `TABLE ...` read and report it as "not scanning",
+# where anything unlisted here is still EXPLAINed and fails loudly if it
+# cannot be planned.
+_MAINTENANCE = frozenset({"ANALYZE", "ANALYSE", "VACUUM"})
+
+# Whitespace and SQL comments ahead of a statement's first keyword. Matched
+# on the raw text: `_rendered` folds newlines, and a folded `--` comment
+# would swallow the statement that follows it.
+_LEADING_NOISE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+
+
+def _leading_verb(conn, query):
+    raw = query.as_string(conn) if hasattr(query, "as_string") else str(query)
+    rest = raw[_LEADING_NOISE.match(raw).end() :]
+    match = re.match(r"[A-Za-z]+", rest)
+    return match.group(0).upper() if match else ""
+
+
+def _sequential_scans(issued, on=None):
     """(statements naming a graph table, those whose plan scans one).
 
     EXPLAIN does not execute, so this is safe to run for every statement.
+    Maintenance statements are skipped, not planned: see `_MAINTENANCE`.
+
+    `on` narrows "scans" to a sequential scan of that one table, and each
+    statement it reports then carries its plan, for a caller whose question
+    is about one table's indexes rather than every relation the plan reads.
     """
+    scan = re.compile(r"Seq Scan on " + re.escape(on) + r"\b" if on else r"Seq Scan")
     touched, scanning = [], []
     with psycopg.connect(DSN, autocommit=True) as conn:
         for query, params in issued:
@@ -267,6 +552,8 @@ def _sequential_scans(issued):
             if "graph_nodes" not in text and "graph_edges" not in text:
                 continue
             if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) in _MAINTENANCE:
                 continue
             touched.append(text)
             if params is None and "%s" in text:
@@ -278,12 +565,219 @@ def _sequential_scans(issued):
                     f"parameters, so its cost is unknown: {text}"
                 )
             rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
-            if "Seq Scan" in "\n".join(r[0] for r in rows):
-                scanning.append(text)
+            plan = "\n".join(r[0] for r in rows)
+            if scan.search(plan):
+                scanning.append(f"{text}\n{plan}" if on else text)
     return touched, scanning
 
 
-def _wait_until_blocking(pid, timeout=15.0, count=1):
+class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
+    """`_EXECUTED_NEVER`, reached rather than left as dead test infrastructure.
+
+    Every other test that calls `_statements_issued` around a save hands it
+    at least one node or edge, so the `executemany` calls for `graph_nodes`
+    and `graph_edges` always carry at least one row and the `rows[0] if
+    rows else _EXECUTED_NEVER` branch above never takes its `else`. An
+    empty save still issues both `executemany` calls - with zero rows - so
+    this is what reaches it, and proves the sentinel is recorded rather than
+    the branch being dead code.
+
+    Deliberately not run through `_sequential_scans`: where that helper
+    backs a "no scan" assertion, it wraps only narrow entity writes (`WHERE
+    id = %s` against the primary key), where a scan is a regression. A
+    whole-graph `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
+    the previous graph - by design, since "replace the whole graph" means
+    every existing row is gone - and an unfiltered delete has no index to
+    seek with, so it correctly plans as a sequential scan regardless of how
+    many rows are involved. Asserting "no scan" around this call would be
+    asserting a property the production code was never meant to have.
+    """
+
+    def test_an_empty_saves_executemany_calls_are_read_as_never_executed(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()  # migrate first, so only the save itself is captured
+
+        issued = _statements_issued(lambda: backend.save_graph_data(snapshot()))
+
+        sentinelled = [q for q, p in issued if p is _EXECUTED_NEVER]
+        assert sentinelled, (
+            "an empty save's executemany calls were not recorded with the "
+            "'executed never' sentinel - _EXECUTED_NEVER is dead code"
+        )
+
+
+class TestPostgresSequentialScanHelperSkipsMaintenance:
+    """`_sequential_scans` around a whole-graph save, ANALYZE included.
+
+    `save_graph_data` ends with an `ANALYZE` of each graph table. Planned as
+    `EXPLAIN ANALYZE <table>` that is a syntax error, so without the verb
+    guard this raises. The guard must not be a blanket skip either: the
+    save's unfiltered `DELETE` of the previous graph has no index to seek
+    with, so it still has to be read as scanning.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        analyzes = [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ]
+        assert len(analyzes) == 2, (
+            f"the save no longer issues its trailing ANALYZE, so this test "
+            f"no longer exercises the guard: {analyzes}"
+        )
+
+        touched, scanning = _sequential_scans(issued)
+
+        assert not [t for t in touched if t.upper().startswith("ANALYZE")]
+        assert any(t.upper().startswith("INSERT") for t in touched), touched
+        deletes = [t for t in touched if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
+        assert set(deletes) <= set(scanning), (
+            f"the whole-graph DELETE plans as a sequential scan and was not "
+            f"reported as one: {scanning}"
+        )
+
+    @pytest.mark.parametrize(
+        "prefix", ["", "  \n\t", "-- note\n", "/* note */ ", "/* a */\n-- b\n  "]
+    )
+    @pytest.mark.parametrize("verb", ["select", "Select", "SELECT"])
+    def test_a_statement_behind_comments_is_still_planned(self, schema, prefix, verb):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{prefix}{verb} doc FROM "{schema}".graph_nodes')
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            '(SELECT doc FROM "{schema}".graph_nodes)',
+            'TABLE "{schema}".graph_nodes',
+            '-- ANALYZE\nSELECT doc FROM "{schema}".graph_nodes',
+        ],
+    )
+    def test_a_read_not_led_by_a_dml_verb_is_still_planned(self, schema, read):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(read.format(schema=schema))
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _sequential_scans([(query, None)]) == ([], [])
+
+
+class TestPostgresPlansHelperSkipsMaintenance:
+    """`_plans` around a whole-graph save, ANALYZE included.
+
+    The same guard `_sequential_scans` needs, for the same reason: planned as
+    `EXPLAIN ANALYZE <table>`, the save's trailing ANALYZE is a syntax error.
+    The rest of the save must still be planned.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        assert [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ], "the save no longer issues its trailing ANALYZE, so this proves nothing"
+
+        planned = [text for text, _ in _plans(issued)]
+
+        # Every other statement naming a graph table, each one planned.
+        expected = [
+            text
+            for text, params in ((_rendered(q), p) for q, p in issued)
+            if ("graph_nodes" in text or "graph_edges" in text)
+            and params is not _EXECUTED_NEVER
+            and not text.upper().startswith("ANALYZE")
+        ]
+        assert planned == expected
+        assert _tables_named(
+            " ".join(t for t in planned if t.upper().startswith("INSERT"))
+        ) == {"graph_nodes", "graph_edges"}
+        deletes = [t for t in planned if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _plans([(query, None)]) == []
+
+
+def _wait_until_blocking(pid, timeout=15.0, count=1, application_name=None):
     """Wait until `count` distinct sessions are blocked on the session `pid`.
 
     Attributed on purpose. A fixed sleep plus `thread.is_alive()` cannot
@@ -300,6 +794,13 @@ def _wait_until_blocking(pid, timeout=15.0, count=1):
     apart from "the first one is still there": the first blocking already
     satisfies count=1 on its own, so re-calling with the default would
     return immediately without the second ever having been checked.
+
+    `application_name` narrows the waiters to the caller's own sessions.
+    The pid alone is enough while the blocker holds a lock only this test
+    can want; it is not when the lock is global - the migration lock is
+    one key for every schema, so under pytest-xdist another worker's
+    migrating backend blocks on the same pid and would answer for this
+    test's thread.
     """
     deadline = time.monotonic() + timeout
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -307,8 +808,9 @@ def _wait_until_blocking(pid, timeout=15.0, count=1):
             waiting = conn.execute(
                 "SELECT count(*) FROM pg_stat_activity"
                 " WHERE datname = current_database()"
-                " AND %s = ANY(pg_blocking_pids(pid))",
-                (pid,),
+                " AND %s = ANY(pg_blocking_pids(pid))"
+                " AND (%s::text IS NULL OR application_name = %s::text)",
+                (pid, application_name, application_name),
             ).fetchone()[0]
             if waiting >= count:
                 return True
@@ -602,7 +1104,12 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         and the migration blocks on the advisory lock whenever another
         instance is migrating, which is the autoscale boot this guards.
         """
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        # Named so the blocking checks below count only this backend's
+        # sessions: the migration lock is global, and another xdist worker
+        # migrating its own schema would otherwise block on the same pid.
+        application_name = f"co_migrate_memo_{uuid.uuid4().hex[:12]}"
+        dsn = psycopg.conninfo.make_conninfo(DSN, application_name=application_name)
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         blocker = psycopg.connect(DSN, autocommit=False)
         errors = []
@@ -626,9 +1133,9 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             # short here starts the second thread before the first has even
             # reached the lock - which would not exercise the memo-set-too-
             # early bug this test is for.
-            assert _wait_until_blocking(blocker.info.backend_pid), (
-                "the first thread never blocked on the migration lock"
-            )
+            assert _wait_until_blocking(
+                blocker.info.backend_pid, application_name=application_name
+            ), "the first thread never blocked on the migration lock"
             # The first thread now holds `backend._migrate_lock` - it only
             # reaches the advisory-lock wait below after acquiring it - and
             # `_ensure_schema` holds that Python lock across its whole
@@ -655,7 +1162,9 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             # Confirm the first thread is still genuinely blocked, rather
             # than assumed to still be: the wait above proves nothing about
             # ordering if the first thread had somehow already finished.
-            assert _wait_until_blocking(blocker.info.backend_pid), (
+            assert _wait_until_blocking(
+                blocker.info.backend_pid, application_name=application_name
+            ), (
                 "the first thread stopped blocking on the migration lock "
                 "while the second thread was still waiting on it"
             )
@@ -754,6 +1263,10 @@ class TestPostgresConcurrentSavesDoNotMerge:
         real_execute = module.psycopg.Connection.execute
         seen = threading.Event()
         holder = []
+        # Filled in below, before `thread.start()` - `stalling` only reads it
+        # once the thread it names has actually begun running `run()`, so the
+        # assignment always happens before any read of it.
+        stalled_thread = []
 
         def spy_execute(conn, query, *args, **kwargs):
             # The save's own lock statement, so `holder` names the session
@@ -764,7 +1277,21 @@ class TestPostgresConcurrentSavesDoNotMerge:
             return real_execute(conn, query, *args, **kwargs)
 
         def stalling(value):
-            if isinstance(value, dict) and "id" not in value:  # the metadata row
+            # `psycopg.types.json.Jsonb` is monkeypatched on the module, so
+            # every save in the process - on every schema, on every
+            # connection - calls this, not only the one this helper was
+            # asked to stall. `Jsonb()` runs synchronously on the thread
+            # that called `save_graph_data`, so checking which thread is
+            # calling scopes the stall to exactly the save this helper
+            # started: a save elsewhere that reaches its own id-less
+            # metadata write while this one is parked must sail through
+            # rather than being caught by this patch too.
+            if (
+                isinstance(value, dict)
+                and "id" not in value  # the metadata row
+                and stalled_thread
+                and threading.current_thread() is stalled_thread[0]
+            ):
                 seen.set()
                 released.wait(30)
             return real(value)
@@ -782,22 +1309,29 @@ class TestPostgresConcurrentSavesDoNotMerge:
                 self.stall_errors.append(f"{type(exc).__name__}: {exc}")
 
         thread = threading.Thread(target=run, daemon=True)
+        stalled_thread.append(thread)
         thread.start()
         assert seen.wait(30), "the stalled save never reached its metadata write"
         assert holder, "the stalled save never issued its own advisory lock statement"
         return thread, holder[0]
 
+    @pytest.mark.parametrize(
+        "repeatable_read", [False, True], ids=["server-default", "repeatable-read"]
+    )
     def test_overlapping_saves_leave_one_writers_graph(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, repeatable_read
     ):
-        # Different graph_name, same store: this falsifies a lock keyed on
-        # graph_name specifically, which two instances of one graph need
-        # not agree on. It does not prove the lock is keyed on the schema
-        # - a lock keyed on a bare constant would pass this too, and
-        # closing that needs a timing assertion against a second schema,
-        # not attempted here.
-        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
-        second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="b")
+        # An inherited REPEATABLE READ snapshot predates the lock wait, so
+        # the waiting writer would fail instead of replacing the first save.
+        dsn = _dsn_defaulting_to_repeatable_read() if repeatable_read else DSN
+        if repeatable_read:
+            with psycopg.connect(dsn) as check:
+                assert (
+                    check.execute("SHOW transaction_isolation").fetchone()[0]
+                    == "repeatable read"
+                ), "the fixture did not establish a non-default level"
+        first = PostgresGraphPersistenceBackend(dsn, schema=schema, graph_name="a")
+        second = PostgresGraphPersistenceBackend(dsn, schema=schema, graph_name="a")
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("seed")]))
 
@@ -847,10 +1381,73 @@ class TestPostgresConcurrentSavesDoNotMerge:
         assert errors == [], f"the second save failed: {errors}"
         assert self.stall_errors == [], f"the first save failed: {self.stall_errors}"
         landed = {n["id"] for n in second.load_graph_data()["nodes"]}
-        assert landed in (
-            {"shared", "only_first"},
-            {"shared", "only_second"},
-        ), f"the store holds a graph neither writer saved: {sorted(landed)}"
+        assert landed == {"shared", "only_second"}, (
+            f"the waiting writer did not replace the first writer's graph: {sorted(landed)}"
+        )
+
+    def test_a_save_on_a_different_schema_does_not_wait_for_this_ones_lock(
+        self, schema, backends, monkeypatch
+    ):
+        """SV_LOCKGLOBAL, the timing assertion the test above says it lacks.
+
+        `test_overlapping_saves_leave_one_writers_graph` says explicitly that
+        it does not prove the lock is keyed on the schema - a lock keyed on
+        `SAVE_LOCK_KEY` alone, with the `hashtext(schema)` half dropped,
+        passes it too, since that test only ever uses one schema. This is
+        the second schema that comment asks for: a save on it must land
+        while this schema's save is still held open, or every schema in the
+        database serialises on one save at a time - the opposite of what
+        the module docstring promises.
+        """
+        other_schema = f"{schema}_other"
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        second = PostgresGraphPersistenceBackend(DSN, schema=other_schema)
+        backends.extend([first, second])
+        try:
+            first.save_graph_data(snapshot([node_payload("seed")]))
+            second.save_graph_data(snapshot([node_payload("seed")]))
+
+            released = threading.Event()
+            # The pid `_stalled_save` reports is for a caller that asks the
+            # server whether a second write is BLOCKED on it
+            # (`_wait_until_blocking`); this test asks the opposite question
+            # - that the second schema's save is NOT blocked - which a
+            # bounded wait answers directly, with nothing to attribute.
+            stalled, _held_pid = self._stalled_save(
+                first, [node_payload("held")], released, monkeypatch
+            )
+
+            done = threading.Event()
+
+            def save_elsewhere():
+                second.save_graph_data(snapshot([node_payload("free")]))
+                done.set()
+
+            other = threading.Thread(target=save_elsewhere, daemon=True)
+            other.start()
+            landed = done.wait(10)
+            # Release before asserting anything, same reason as the lock-mode
+            # class above: failing here with the first save still parked
+            # would leave it holding a pooled connection, an open
+            # transaction and the advisory lock for the rest of its wait.
+            still_holding = stalled.is_alive()
+            released.set()
+            stalled.join(30)
+            other.join(30)
+
+            assert still_holding, "the first save let go before the probe could run"
+            assert not other.is_alive(), "the second schema's save never finished"
+            assert landed, (
+                "a save on a different schema waited for this schema's save "
+                "lock: the lock is keyed on a constant rather than "
+                "hashtext(schema), so every schema in the database "
+                "serialises on one save at a time"
+            )
+            assert self.stall_errors == [], f"the held save failed: {self.stall_errors}"
+            assert {n["id"] for n in second.load_graph_data()["nodes"]} == {"free"}
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE')
 
 
 class TestPostgresBootsForALeastPrivilegeRole:
@@ -977,6 +1574,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
                     " ON ALL TABLES IN SCHEMA {} TO {}"
                 ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
             )
+            _provision_revision_sequence(conn, schema, name)
 
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
@@ -987,8 +1585,46 @@ class TestPostgresBootsForALeastPrivilegeRole:
         assert backend.exists()
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
+    def test_a_store_provisioned_without_the_revision_sequence_says_what_is_missing(
+        self, lowpriv, backends
+    ):
+        """A store provisioned before entity revisions, for a role that may
+        not create: the boot fails, naming the sequence to add, rather than
+        with the server's bare "permission denied for schema"."""
+        name, schema, password = lowpriv
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table, columns in (
+                ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                (
+                    "graph_metadata",
+                    "only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),"
+                    " doc jsonb NOT NULL",
+                ),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(columns),
+                    )
+                )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE"
+                    " ON ALL TABLES IN SCHEMA {} TO {}"
+                ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
+            )
+
+        backend = PostgresGraphPersistenceBackend(
+            _dsn_as_role(name, password), schema=schema
+        )
+        backends.append(backend)
+        with pytest.raises(RuntimeError, match="graph_revision_seq"):
+            backend.exists()
+
     def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
-        self, lowpriv, backends, capsys
+        self, lowpriv, backends, reported
     ):
         """The operator provisioned the store exactly as the docs prescribe -
         tables AND the two traversal indexes - and the role owns none of it.
@@ -1032,13 +1668,14 @@ class TestPostgresBootsForALeastPrivilegeRole:
                     " ON ALL TABLES IN SCHEMA {} TO {}"
                 ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
             )
+            _provision_revision_sequence(conn, schema, name)
 
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend.save_graph_data(snapshot([node_payload("a")]))
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" not in printed, (
             "warned about indexes the store already has: " + printed
         )
@@ -1052,7 +1689,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # "only table or database owner can analyze it", and both are
         # lc_messages-dependent. What this test is about is that the notice
         # reaches the operator at all.
-        # With the colon: "Warning: ANALYZE after save:" is the notice-handler
+        # With the colon: "ANALYZE after save:" is the notice-handler
         # line, which is what this test is about. "could not ANALYZE after
         # save;" is the exception line, and matching both would let a mutation
         # that makes ANALYZE raise outright satisfy an assertion about the
@@ -1063,7 +1700,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # leave four handlers, and an unrelated statement's notices then print
         # four times, each labelled as coming from ANALYZE - which a
         # substring assertion is perfectly happy with.
-        assert printed.count("Warning: ANALYZE after save:") == 2, (
+        assert printed.count("ANALYZE after save:") == 2, (
             "one line per table, once: " + printed
         )
         # A second save must cost the same two lines, not four. A handler
@@ -1073,11 +1710,11 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # four times, each labelled as coming from ANALYZE. A substring
         # assertion is perfectly happy with that; a count is not.
         backend.save_graph_data(snapshot([node_payload("a")]))
-        again = capsys.readouterr().out
-        assert again.count("Warning: ANALYZE after save:") == 2, (
+        again = reported()
+        assert again.count("ANALYZE after save:") == 2, (
             "the notice handler from the first save is still attached: " + again
         )
-        assert "Warning: ANALYZE after save:" in printed, (
+        assert "ANALYZE after save:" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
@@ -1099,7 +1736,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
     statement raises anyway.
     """
 
-    def _boot_with_a_losing_create(self, schema, backends, capsys, really_create):
+    def _boot_with_a_losing_create(self, schema, backends, reported, really_create):
         import psycopg as _psycopg
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -1120,22 +1757,22 @@ class TestPostgresIndexCreationLosesRacesQuietly:
 
         _psycopg.Connection.execute = _lose
         try:
-            capsys.readouterr()
+            reported()
             backend._ensure_schema()
         finally:
             _psycopg.Connection.execute = original
-        return capsys.readouterr().out
+        return reported()
 
-    def test_a_lost_race_is_not_reported(self, schema, backends, capsys):
+    def test_a_lost_race_is_not_reported(self, schema, backends, reported):
         printed = self._boot_with_a_losing_create(
-            schema, backends, capsys, really_create=True
+            schema, backends, reported, really_create=True
         )
         assert "scan instead of seek" not in printed, (
             "reported a failure on a store whose index is there: " + printed
         )
 
     def test_a_create_that_really_failed_is_still_reported(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         # The same index name exists in ANOTHER schema first. The re-check asks
         # the catalog by name and schema; by name alone it finds the neighbour's
@@ -1171,7 +1808,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
                 )
         try:
             printed = self._boot_with_a_losing_create(
-                schema, backends, capsys, really_create=False
+                schema, backends, reported, really_create=False
             )
             for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
                 assert index in printed and "scan instead of seek" in printed, (
@@ -1201,7 +1838,9 @@ class TestPostgresIndexWorkIsDoneOnce:
     nothing exercised the path where it raises.
     """
 
-    def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
+    def test_a_store_that_has_its_indexes_issues_no_ddl(
+        self, schema, backends, reported
+    ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend._ensure_schema()
@@ -1223,7 +1862,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         )
 
     def test_a_catalog_it_cannot_read_is_reported_not_assumed_away(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         """`_index_state` answers "missing" when it cannot ask - a pool blip
         during boot, a server that refuses a connection - so the caller
@@ -1251,7 +1890,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         backend.save_graph_data(snapshot([node_payload("a")]))
         again = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(again)
-        capsys.readouterr()
+        reported()
         ConnectionPool.connection = _blip
         try:
             again._ensure_schema()
@@ -1259,13 +1898,34 @@ class TestPostgresIndexWorkIsDoneOnce:
             pass
         finally:
             ConnectionPool.connection = real
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" in printed, (
             "a catalog that could not be read was taken as an answer: " + printed
         )
 
+    # Both kinds, because the `except` around the ANALYZE is deliberately
+    # broad. A psycopg error alone lets it be narrowed to `psycopg.Error`
+    # with the suite still green, and then a failure that is not the
+    # driver's - `remove_notice_handler` raising ValueError for a handler it
+    # does not hold, say, or composing the table name - escapes and fails a
+    # save that had already committed. Not a pool failure: psycopg_pool's
+    # errors are `psycopg.Error` subclasses, so the narrowed form would still
+    # catch those. Nor the handler's own logging: psycopg catches whatever a
+    # notice handler raises.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda: psycopg.errors.InsufficientPrivilege("no ANALYZE for you"),
+                id="psycopg",
+            ),
+            pytest.param(
+                lambda: ValueError("notice handler not registered"), id="not-psycopg"
+            ),
+        ],
+    )
     def test_an_analyze_that_raises_does_not_fail_the_save(
-        self, schema, backends, capsys
+        self, schema, backends, reported, failure
     ):
         import psycopg as _psycopg
 
@@ -1277,7 +1937,7 @@ class TestPostgresIndexWorkIsDoneOnce:
 
         def _refuse_analyze(self, query, *args, **kwargs):
             if "ANALYZE" in repr(query):
-                raise _psycopg.errors.InsufficientPrivilege("no ANALYZE for you")
+                raise failure()
             return original(self, query, *args, **kwargs)
 
         _psycopg.Connection.execute = _refuse_analyze
@@ -1289,7 +1949,12 @@ class TestPostgresIndexWorkIsDoneOnce:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
             "the save did not land"
         )
-        assert "could not ANALYZE after save" in capsys.readouterr().out
+        # The exception text as well as the prefix: the prefix alone says a
+        # refresh was skipped, and only the text says why.
+        assert (
+            f"could not ANALYZE after save; the traversal's indexes may go "
+            f"unused: {failure()}"
+        ) in reported().splitlines()
 
 
 class TestPostgresReportsAnIndexItCannotUse:
@@ -1302,7 +1967,7 @@ class TestPostgresReportsAnIndexItCannotUse:
     """
 
     def test_an_invalid_index_is_reported_rather_than_taken_as_done(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(
@@ -1348,9 +2013,9 @@ class TestPostgresReportsAnIndexItCannotUse:
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend._ensure_schema()
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "graph_edges_source_idx" in printed and "not valid" in printed, (
             "an index the planner cannot use was taken as done: " + printed
         )
@@ -1466,6 +2131,56 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
             f"after it: reltuples = {rows}"
         )
 
+    # The size the test above was measured at. Smaller is not
+    # a cheaper version of the same test: measured on this server, at 500
+    # nodes / 5 000 edges the planner joins graph_nodes by sequential scan
+    # whatever the indexes, because at that size it is the cheaper plan.
+    PLANNED_NODES = 2000
+    PLANNED_EDGES = 20000
+
+    def test_the_traversal_is_planned_on_its_indexes(self, schema, backends):
+        """The test above asserts that the indexes exist; this one asserts
+        that the traversal is planned on them. An index that exists and is not
+        used - on an expression the level query does not repeat exactly, say -
+        passes every catalog check and leaves the sequential scan in place.
+
+        Depth 1, so the frontier is one id and the plan is the one whose
+        choice does not hinge on how wide a level has grown. Planned against
+        the statistics the save itself left, with no ANALYZE of this test's
+        own. Measured on this seed: a BitmapOr over both indexes, and a
+        sequential scan of graph_edges as soon as either index is dropped.
+
+        Only a scan of graph_edges fails it. The same plan joins graph_nodes
+        for the far end, and whether that join scans depends on the seed's
+        size and the server's cost settings, not on the edge indexes this
+        test is about.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        nodes, edges = self.PLANNED_NODES, self.PLANNED_EDGES
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(nodes)],
+                [
+                    edge_payload(f"e{i}", f"n{i % nodes}", f"n{(i * 7 + 1) % nodes}")
+                    for i in range(edges)
+                ],
+            )
+        )
+
+        issued = _statements_issued(lambda: backend.traverse("n0", 1))
+
+        touched, scanning = _sequential_scans(issued, on="graph_edges")
+        # The level query in particular, so a traversal that stopped issuing
+        # it through a cursor this spy sees cannot pass by planning nothing.
+        assert any("far_id" in text for text in touched), (
+            f"the traversal's level query was not among what it issued: {touched}"
+        )
+        assert not scanning, (
+            "the traversal scans graph_edges sequentially although its "
+            f"indexes exist: {scanning}"
+        )
+
 
 class TestPostgresLoadIsOneMomentInTime:
     """A load taken while another instance saves must not tear.
@@ -1478,7 +2193,9 @@ class TestPostgresLoadIsOneMomentInTime:
     the normal case rather than a race to engineer.
     """
 
-    def test_loading_while_another_instance_saves_never_tears(self, schema, backends):
+    def test_loading_while_another_instance_saves_never_tears(
+        self, schema, backends, monkeypatch
+    ):
         reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([reader, writer])
@@ -1498,50 +2215,42 @@ class TestPostgresLoadIsOneMomentInTime:
             }
 
         writer.save_graph_data(graph("first"))
-        stop = threading.Event()
-        torn, errors = [], []
-        generations = set()
+        interleaved = []
+        real_execute = psycopg.Connection.execute
 
-        def save_repeatedly():
-            tag = 0
-            while not stop.is_set():
-                tag += 1
-                try:
-                    writer.save_graph_data(graph(f"g{tag}"))
-                except Exception as exc:
-                    errors.append(f"writer: {type(exc).__name__}: {exc}")
-                    return
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if (
+                not interleaved
+                and "SELECT doc FROM" in str(query)
+                and "graph_nodes" in str(query)
+            ):
+                interleaved.append(True)
+                writer.save_graph_data(graph("second"))
+            return result
 
-        writing = threading.Thread(target=save_repeatedly, daemon=True)
-        writing.start()
-        try:
-            for _ in range(40):
-                loaded = reader.load_graph_data()
-                ids = {n["id"] for n in loaded["nodes"]}
-                dangling = [e["id"] for e in loaded["edges"] if e["source"] not in ids]
-                if dangling:
-                    torn.append(
-                        f"edges {dangling} have no endpoint among {sorted(ids)}"
-                    )
-                # Metadata is the third of the moment. Each save stamps its
-                # generation into graph_name, so a load that mixes two shows
-                # up here even when the edges happen to line up.
-                generation = loaded["metadata"].get("graph_name")
-                generations.add(generation)
-                if ids and f"n_{generation}" not in ids:
-                    torn.append(
-                        f"metadata says {generation!r} but the nodes are {sorted(ids)}"
-                    )
-        finally:
-            stop.set()
-            writing.join(30)
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        loaded = reader.load_graph_data()
 
-        assert errors == []
+        assert interleaved == [True], "the save was not forced between load reads"
+        ids = {n["id"] for n in loaded["nodes"]}
+        dangling = [e["id"] for e in loaded["edges"] if e["source"] not in ids]
+        torn = (
+            [f"edges {dangling} have no endpoint among {sorted(ids)}"]
+            if dangling
+            else []
+        )
+        # Metadata is the third of the moment. Each save stamps its
+        # generation into graph_name, so a load that mixes two shows up here
+        # even when the edges happen to line up.
+        generation = loaded["metadata"].get("graph_name")
+        if ids and f"n_{generation}" not in ids:
+            torn.append(f"metadata says {generation!r} but the nodes are {sorted(ids)}")
+
         assert torn == [], f"load returned a graph that never existed: {torn[:3]}"
-        # A reader frozen on its first result is maximally consistent and
-        # would satisfy every check above without ever reading the store
-        # again.
-        assert len(generations) > 1, f"the reader never advanced past {generations}"
+        assert [n["id"] for n in loaded["nodes"]] == ["n_first"]
+        assert [e["id"] for e in loaded["edges"]] == ["e_first"]
+        assert loaded["metadata"] == {"version": "1.0", "graph_name": "first"}
 
 
 class TestPostgresSaveFailsWholeOnAnEntityWrite:
@@ -1591,15 +2300,10 @@ class TestPostgresSaveIsolation:
     lock exists for.
     """
 
-    def _dsn_defaulting_to_repeatable_read(self) -> str:
-        parts = psycopg.conninfo.conninfo_to_dict(DSN)
-        parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
-        return psycopg.conninfo.make_conninfo(**parts)
-
     def test_the_save_runs_read_committed_under_a_repeatable_read_default(
         self, schema, backends, monkeypatch
     ):
-        dsn = self._dsn_defaulting_to_repeatable_read()
+        dsn = _dsn_defaulting_to_repeatable_read()
         with psycopg.connect(dsn) as check:
             assert (
                 check.execute("SHOW transaction_isolation").fetchone()[0]
@@ -1639,6 +2343,79 @@ class TestPostgresSaveIsolation:
             f"the save inherited the connection's isolation level: {seen}"
         )
 
+    def test_a_save_that_actually_inherits_hostile_isolation_raises_rather_than_hiding_it(
+        self, schema, backends, monkeypatch
+    ):
+        """ER_SERIAL: were the SET above ever lost, its failure must still
+        reach the caller.
+
+        The test above proves the SET statement runs. This is the other
+        half the docstring names: an inheriting save that waited on the
+        advisory lock takes its snapshot before the lock, so once it
+        unblocks and tries to update the row the other writer already
+        committed, the server raises a genuine SerializationFailure (SQLSTATE
+        40001) rather than letting it proceed. Simulated here by discarding
+        the SET statement specifically - the regression this class exists to
+        catch - so the rest of the save runs for real, under the hostile
+        connection's actual REPEATABLE READ default, against a real
+        contended row. Nothing between the server and `apply_batch`'s caller
+        may turn that into a silent no-op: the caller must see the error, or
+        it believes a write landed that the store never took.
+        """
+        dsn = _dsn_defaulting_to_repeatable_read()
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("contested")]))
+
+        real_execute = psycopg.Connection.execute
+
+        def skip_the_override(conn, query, *args, **kwargs):
+            if "SET TRANSACTION ISOLATION LEVEL READ COMMITTED" in str(query):
+                # The regression under test: the override never reaches the
+                # server, so this transaction runs at the connection's own
+                # (hostile) default instead.
+                return None
+            return real_execute(conn, query, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", skip_the_override)
+
+        blocker = psycopg.connect(dsn, autocommit=False)
+        errors = []
+        contended = False
+        try:
+            blocker.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_nodes SET doc = doc WHERE id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                ("contested",),
+            )
+
+            def contend():
+                try:
+                    backend.save_graph_data(
+                        snapshot([node_payload("contested", name="Second")])
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+            writer = threading.Thread(target=contend, daemon=True)
+            writer.start()
+            contended = _wait_until_blocking(blocker.info.backend_pid)
+            contended = contended and writer.is_alive()
+            blocker.commit()
+            writer.join(30)
+        finally:
+            blocker.close()
+
+        assert contended, "the writer never contended for the row"
+        assert not writer.is_alive(), "the contended save never finished"
+        assert len(errors) == 1 and isinstance(
+            errors[0], psycopg.errors.SerializationFailure
+        ), (
+            "a save that inherited REPEATABLE READ and lost the row race "
+            f"did not raise SerializationFailure to its caller: {errors!r}"
+        )
+
 
 class TestPostgresDeclaresWhatItImplements:
     """Under-declaring is invisible to the contract, by construction.
@@ -1664,6 +2441,7 @@ class TestPostgresDeclaresWhatItImplements:
             transactions=True,
             change_notification=True,
             store_traversal=True,
+            revision_enforcement=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
@@ -1733,32 +2511,30 @@ class TestPostgresEntityWritesTouchOneRow:
         ),
     }
 
-    # Several lengths, and no claim that this pins a property: a
-    # threshold gate can still sit in a gap between them, or above them.
-    # Closing that family would need one shared length source, randomised
-    # per run, driving every length-sensitive test; that is recorded as
-    # follow-up rather than done here.
+    # Three lengths, none of them a fresh magic number: they are the module's
+    # shared anchors (see `SHORT_BATCH_LENGTH` / `MID_BATCH_LENGTH` /
+    # `LONG_BATCH_LENGTH` at module scope), so a threshold gate that survives
+    # this family's draw this run is the same gate the lock-mode and
+    # no-lock-behind families below are also probing with. Still no claim
+    # that any one session pins the property completely - a gate can sit
+    # between whatever this session drew - only that the gap moves every
+    # run instead of sitting still at 2/7/41 forever.
     #
     # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
     # node delete per node, so the length is whatever the caller deleted.
-    # These three are chosen for what each exercises, not for being new to
-    # the module - none of them is:
+    # What each of the three exercises:
     #
-    # - 2 truncates the cycle below, which is the point of running it;
-    # - 7 is the only mid-length under the cost and blast-radius
-    #   assertions - the module's other seven-operation batch is a
-    #   contract clause that checks the resulting graph and not the
-    #   statements;
-    # - 41 is the lock probe's holder length, so that length is also
-    #   reached by a test asking a different question: about the lock's
-    #   mode rather than about what a write costs.
-    #
-    # Why this comment says so little about which lengths the rest of the
-    # module drives: counts of that here have repeatedly gone wrong or
-    # gone stale. The measurements live in the branch history, where a
-    # reader can check one against the commit that made it; a comment
-    # that restates them has to be re-verified on every edit.
-    BATCH_LENGTHS = (2, 7, 41)
+    # - SHORT_BATCH_LENGTH truncates the cycle below, which is the point of
+    #   running it - see the module-level comment on that constant;
+    # - MID_BATCH_LENGTH is a length under the cost and blast-radius
+    #   assertions that is neither the truncating case nor the long one -
+    #   the module's other seven-operation batch is a contract clause that
+    #   checks the resulting graph and not the statements;
+    # - LONG_BATCH_LENGTH is also the lock probe's `batch_many` holder
+    #   length (`TestPostgresEntityWritesDoNotSerialiseAgainstEachOther`),
+    #   so that length is reached by a test asking a different question:
+    #   about the lock's mode rather than about what a write costs.
+    BATCH_LENGTHS = (SHORT_BATCH_LENGTH, MID_BATCH_LENGTH, LONG_BATCH_LENGTH)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
     # node-upsert. Runs rather than strict alternation because
@@ -1767,14 +2543,16 @@ class TestPostgresEntityWritesTouchOneRow:
     # shape - and a backend that merged adjacent ones into a single
     # statement would be invisible to a batch that never has two in a row.
     # Both actions appear from length 5; a shorter length truncates the
-    # cycle, which is what makes 2 worth running as well as 41.
+    # cycle, which is what makes SHORT_BATCH_LENGTH worth running as well as
+    # the longer anchors.
     _RUN = 2
 
     @classmethod
     def _long_batch(cls, length):
         """A cycle of both kinds and both actions, in runs of two, cut off
         at a caller-chosen length - so a short length gets only the start
-        of it, which is what the comment above says 2 is for.
+        of it, which is what the comment above says SHORT_BATCH_LENGTH is
+        for.
         """
         make = (
             lambda i: EntityOperation.delete_edge(f"e{i}"),
@@ -1849,7 +2627,12 @@ class TestPostgresEntityWritesTouchOneRow:
 
         issued = _statements_issued(lambda: action(backend))
 
-        writes = _writing_statements(issued)
+        writes = _endpoint_locks_first(
+            _writing_statements(issued),
+            [EntityOperation.upsert_edge(edge_payload("e0", "n0", "n1"))]
+            if write == "upsert_edge"
+            else [],
+        )
         named = [_tables_named(text) for text in writes]
         assert named == expected, (
             f"{write} should issue {len(expected)} writing statement(s) naming "
@@ -1881,13 +2664,13 @@ class TestPostgresEntityWritesTouchOneRow:
         operation's own table, in the caller's order, and no plan that
         scans.
         """
+        print(_pg_length_seed_banner())
         backend = self._seeded(schema, backends)
 
-        issued = _statements_issued(
-            lambda: backend.apply_batch(self._long_batch(length))
-        )
+        batch = self._long_batch(length)
+        issued = _statements_issued(lambda: backend.apply_batch(batch))
 
-        writes = _writing_statements(issued)
+        writes = _endpoint_locks_first(_writing_statements(issued), batch)
         named = [_tables_named(text) for text in writes]
         assert named == self._long_batch_tables(length), (
             f"a batch of {length} should issue one writing statement per "
@@ -1931,7 +2714,7 @@ class TestPostgresEntityWritesTouchOneRow:
         "write", ["upsert_node", "upsert_edge", "batch", "batch_many"]
     )
     def test_an_entity_write_does_not_lose_a_row_written_while_it_runs(
-        self, schema, backends, write
+        self, schema, backends, write, monkeypatch
     ):
         """The property a read-modify-write quietly breaks.
 
@@ -1975,8 +2758,8 @@ class TestPostgresEntityWritesTouchOneRow:
                     )
             return real_execute(conn, query, *args, **kwargs)
 
-        psycopg.Connection.execute = spy
-        try:
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.Connection, "execute", spy)
             if write == "upsert_node":
                 backend.upsert_node(node_payload("n0", name="Renamed"))
             elif write == "upsert_edge":
@@ -1999,9 +2782,6 @@ class TestPostgresEntityWritesTouchOneRow:
                         ),
                     ]
                 )
-        finally:
-            psycopg.Connection.execute = real_execute
-
         assert injected, "the other instance's write never happened"
         loaded = backend.load_graph_data()
         assert "elsewhere" in by_id(loaded, "nodes"), (
@@ -2173,6 +2953,7 @@ class TestPostgresConcurrentEntityWrites:
         serialization failure rather than wait; the save and the batch both
         state READ COMMITTED so that they wait and win instead.
         """
+        print(_pg_length_seed_banner())
         parts = psycopg.conninfo.conninfo_to_dict(DSN)
         parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
         hostile = psycopg.conninfo.make_conninfo(**parts)
@@ -2207,11 +2988,15 @@ class TestPostgresConcurrentEntityWrites:
                     else:
                         # The isolation statement stated only for short
                         # batches would leave this one aborting on a
-                        # serialization failure instead of waiting.
+                        # serialization failure instead of waiting. The
+                        # filler count is the module's shared mid-length
+                        # anchor (MID_BATCH_LENGTH) rather than a fixed 5,
+                        # so "short" cannot be defined narrowly enough to
+                        # dodge this case run after run.
                         second.apply_batch(
                             [
                                 EntityOperation.upsert_node(node_payload(f"filler{i}"))
-                                for i in range(5)
+                                for i in range(MID_BATCH_LENGTH)
                             ]
                             + [
                                 EntityOperation.upsert_node(
@@ -2399,6 +3184,51 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
         )
 
 
+class TestPostgresConnectionPoolIsConfiguredAsDocumented:
+    """CN_POOLSIZE / CN_MINSIZE / CN_NOVALIDATE.
+
+    Three properties of the pool `__init__` builds, none of them exercised
+    by any functional test: the size a caller asks for is the size
+    enforced, a backend that is constructed and never used holds no server
+    connection at all (the class docstring's own `min_size=0` claim), and a
+    pool size below the documented minimum is refused outright rather than
+    silently accepted as "however many connections psycopg feels like
+    opening".
+    """
+
+    def test_the_pool_enforces_the_requested_max_size(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=2)
+        backends.append(backend)
+        assert backend._pool.max_size == 2, (
+            f"pool_size=2 was requested; the pool enforces max_size="
+            f"{backend._pool.max_size}"
+        )
+
+    def test_an_unused_backend_holds_no_server_connection(self, schema, backends):
+        """`min_size=0`, read off the pool's own stats rather than assumed.
+
+        `pg_stat_activity` would answer the same question but shares the
+        database with whatever else is connected to it - another suite run,
+        a developer's own session - so a count taken there is attributable
+        to nobody. The pool's own stats are this backend's alone.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert backend._pool.min_size == 0, (
+            f"min_size is {backend._pool.min_size}, not the documented 0"
+        )
+        stats = backend._pool.get_stats()
+        assert stats.get("pool_size", 0) == 0, (
+            f"a backend that has done nothing yet already holds "
+            f"{stats.get('pool_size')} connection(s): min_size=0 means an "
+            "unused backend should hold none"
+        )
+
+    def test_a_pool_size_below_the_minimum_is_refused(self, schema):
+        with pytest.raises(ValueError):
+            PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=0)
+
+
 class TestPostgresBatchesSurviveADeadlock:
     """The retry bound, pinned by injection rather than by hammering.
 
@@ -2430,14 +3260,14 @@ class TestPostgresBatchesSurviveADeadlock:
         real_apply = backend._apply_batch_once
         attempts = []
 
-        def flaky(operations):
+        def flaky(operations, *rest):
             attempts.append(1)
             # The documented count, not `backend.DEADLOCK_RETRIES`: a test
             # that reads the bound off the thing it is pinning passes for
             # every value of it, including zero.
             if len(attempts) <= DOCUMENTED_DEADLOCK_RETRIES:
                 raise psycopg.errors.DeadlockDetected("injected")
-            return real_apply(operations)
+            return real_apply(operations, *rest)
 
         backend._apply_batch_once = flaky
         backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
@@ -2447,7 +3277,9 @@ class TestPostgresBatchesSurviveADeadlock:
             "the retry returned without applying the batch"
         )
 
-    @pytest.mark.parametrize("length", [5, 12, 40])
+    @pytest.mark.parametrize(
+        "length", [SHORT_BATCH_LENGTH, MID_BATCH_LENGTH, LONG_BATCH_LENGTH]
+    )
     def test_a_long_batch_interrupted_part_way_lands_nothing(
         self, schema, backends, length
     ):
@@ -2458,10 +3290,15 @@ class TestPostgresBatchesSurviveADeadlock:
         fresh transaction every few operations - committing the first
         chunk and failing on a later one - would satisfy that clause and
         still leave a partly-applied batch behind, which is G1 broken on
-        exactly the length production issues. Several lengths, and the
-        failure on the LAST operation, so a chunk boundary anywhere
-        earlier has already committed something by the time it happens.
+        exactly the length production issues. The module's shared length
+        anchors (see `SHORT_BATCH_LENGTH` and friends at module scope) stand
+        in for the fixed [5, 12, 40] this case used to run, so the same
+        moving gap the cost/blast-radius family closes applies here too -
+        and the failure lands on the LAST operation, so a chunk boundary
+        anywhere earlier has already committed something by the time it
+        happens.
         """
+        print(_pg_length_seed_banner())
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("keep")]))
@@ -2469,11 +3306,11 @@ class TestPostgresBatchesSurviveADeadlock:
         real_apply_one = backend._apply_one
         applied = []
 
-        def fail_on_the_last(conn, operation):
+        def fail_on_the_last(conn, operation, *rest):
             applied.append(operation)
             if len(applied) == length:
                 raise RuntimeError("injected, at the end of the batch")
-            real_apply_one(conn, operation)
+            real_apply_one(conn, operation, *rest)
 
         backend._apply_one = fail_on_the_last
         with pytest.raises(RuntimeError):
@@ -2511,17 +3348,17 @@ class TestPostgresBatchesSurviveADeadlock:
         attempts = []
         applied = []
 
-        def flaky(operations):
+        def flaky(operations, *rest):
             attempts.append(1)
             # Twice, not once: a re-sort applied only from the second
             # retry onward survives a single injected deadlock.
             if len(attempts) <= 2:
                 raise psycopg.errors.DeadlockDetected("injected")
-            return real_apply(operations)
+            return real_apply(operations, *rest)
 
-        def record(conn, operation):
+        def record(conn, operation, *rest):
             applied.append((operation.action, operation.kind, operation.entity_id))
-            real_apply_one(conn, operation)
+            real_apply_one(conn, operation, *rest)
 
         backend._apply_batch_once = flaky
         backend._apply_one = record
@@ -2571,7 +3408,7 @@ class TestPostgresBatchesSurviveADeadlock:
         cap = DOCUMENTED_DEADLOCK_RETRIES + 5
         attempts = []
 
-        def always(operations):
+        def always(operations, *rest):
             attempts.append(1)
             if len(attempts) > cap:
                 # BaseException on purpose: an `except Exception` in the
@@ -2594,38 +3431,114 @@ class TestPostgresBatchesSurviveADeadlock:
         loaded = backend.load_graph_data()
         assert by_id(loaded, "nodes") == {} and by_id(loaded, "edges") == {}
 
+    def test_an_exhausted_deadlock_retry_gives_its_connections_back(
+        self, schema, backends
+    ):
+        """CN_LEAK_DEADLOCK: the deadlock path, not the payload-error path.
+
+        `TestPostgresEntityWritesSpendTheConnectionBudget
+        .test_a_failed_batch_gives_its_connection_back` proves a connection
+        comes back after a payload error - one `apply_batch`'s retry loop
+        never even sees, because it is not a `DeadlockDetected`. It says
+        nothing about the loop's own retried attempts, each of which opens
+        its own connection via a fresh `with self._pool.connection()` inside
+        `_apply_batch_once`. Only `_apply_one` is stubbed here, so every
+        attempt still runs the real connection-acquire/release path; a pool
+        of one turns a leak on any of them into the very next write hanging.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        real_apply_one = backend._apply_one
+
+        def always_deadlocks(conn, operation, *rest):
+            raise psycopg.errors.DeadlockDetected("injected")
+
+        backend._apply_one = always_deadlocks
+        with pytest.raises(psycopg.errors.DeadlockDetected):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        backend._apply_one = real_apply_one
+
+        # The write after exhaustion is the whole test: with a connection
+        # leaked on any of the DEADLOCK_RETRIES + 1 attempts, the pool of
+        # one has nothing left to hand out and this blocks until the pool
+        # times out.
+        backend.upsert_node(node_payload("after"))
+        assert "after" in by_id(backend.load_graph_data(), "nodes")
+
+    def test_a_non_deadlock_error_is_not_retried(self, schema, backends):
+        """RT_WIDE: the retry names DeadlockDetected, not psycopg.Error at large.
+
+        `apply_batch` catches `psycopg.errors.DeadlockDetected` specifically.
+        A version broadened to `except psycopg.Error` would also retry a
+        payload error, a serialization failure, or any other server error up
+        to `DEADLOCK_RETRIES` extra times - each one re-issuing whatever of
+        the batch had already been re-applied before the fresh error, for an
+        error that was never transient to begin with.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        attempts = []
+
+        def always_a_different_error(operations, *rest):
+            attempts.append(1)
+            raise psycopg.errors.UniqueViolation("injected, not a deadlock")
+
+        backend._apply_batch_once = always_a_different_error
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == 1, (
+            f"a non-deadlock psycopg.Error was retried {len(attempts) - 1} "
+            "extra time(s) rather than raised on the first attempt"
+        )
+
     def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
-        """The real path, opportunistically: a cycle may or may not form."""
+        """The real path, opportunistically: a cycle may or may not form.
+
+        Under the production retry bound. postgres_backend.py documents that
+        the bound can occasionally be exhausted under contention - accepted
+        behaviour, not a bug - and two writers forcing opposite orders on the
+        same two rows every batch reach that tail often (observed in CI). So
+        a batch that exhausts it is resubmitted here, as a caller would, and
+        what is asserted is convergence: every batch lands, nothing but a
+        deadlock ever fails one, and the store ends as one batch's whole
+        write. How many retries that took is the injected tests' question,
+        not this one's. The shared deadline bounds the resubmissions too.
+        """
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
         second = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("x"), node_payload("y")]))
 
-        # postgres_backend.py documents that the production bound (pinned at
-        # 3 by the injected tests above) can occasionally be exhausted
-        # under heavy contention - that is accepted behaviour, not a bug. Two
-        # threads is much lighter than the "many instances" load that note is
-        # about, but 30 rapid opposite-order batches still hit that rare tail
-        # often enough to flake this assertion (observed in CI). Raise just
-        # these two instances' retry headroom so the stress test exercises
-        # real contention without asserting on the tail of a distribution the
-        # production default was never meant to eliminate.
-        first.DEADLOCK_RETRIES = 20
-        second.DEADLOCK_RETRIES = 20
-
+        batches = 15
         errors = []
+        landed_batches = {"First": 0, "Second": 0}
         start = threading.Barrier(2)
+        deadline = time.monotonic() + 90
 
         def hammer(backend, name, ids):
             try:
                 start.wait(timeout=30)
-                for _ in range(15):
-                    backend.apply_batch(
-                        [
-                            EntityOperation.upsert_node(node_payload(entity, name=name))
-                            for entity in ids
-                        ]
-                    )
+                for _ in range(batches):
+                    while True:
+                        try:
+                            backend.apply_batch(
+                                [
+                                    EntityOperation.upsert_node(
+                                        node_payload(entity, name=name)
+                                    )
+                                    for entity in ids
+                                ]
+                            )
+                            break
+                        except psycopg.errors.DeadlockDetected:
+                            if time.monotonic() > deadline:
+                                raise
+                    landed_batches[name] += 1
             except Exception as exc:
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
@@ -2637,16 +3550,23 @@ class TestPostgresBatchesSurviveADeadlock:
                 target=hammer, args=(second, "Second", ["y", "x"]), daemon=True
             ),
         ]
-        deadline = time.monotonic() + 90
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(max(0.0, deadline - time.monotonic()))
 
         assert not [t for t in threads if t.is_alive()], "a batch never finished"
-        assert errors == [], f"a batch failed rather than retrying: {errors}"
+        assert errors == [], (
+            "a batch failed with something other than a deadlock, or was "
+            f"still deadlocking at the deadline: {errors}"
+        )
+        assert landed_batches == {"First": batches, "Second": batches}
         landed = by_id(first.load_graph_data(), "nodes")
         assert set(landed) == {"x", "y"}
+        # Each batch writes both rows in one transaction, so whichever batch
+        # committed last owns both: a split means a batch landed partially.
+        names = {landed[entity]["name"] for entity in ("x", "y")}
+        assert len(names) == 1 and names <= {"First", "Second"}, names
 
 
 class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
@@ -2674,34 +3594,43 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
                 EntityOperation.upsert_edge(edge_payload("e", "held", "free")),
             ]
         ),
-        # Long - 41 operations - because the short holders above cannot
-        # see a lock made exclusive only for longer batches. It is still
-        # one length: a gate that opens between it and the next-longest
-        # holder walks past this too, which is why the follow-up asks for
-        # one shared length source rather than more hand-picked values.
+        # Long - LONG_BATCH_LENGTH operations, the module's shared "long
+        # batch" anchor - because the short holders above cannot see a lock
+        # made exclusive only for longer batches. It is still one length: a
+        # gate that opens between it and the next-longest holder walks past
+        # this too, which is why it is drawn from the shared, re-randomised
+        # source rather than pinned as a hand-picked value.
         "batch_many": lambda b: b.apply_batch(
             [EntityOperation.upsert_node(node_payload("held", name="Held"))]
             + [
                 EntityOperation.upsert_edge(edge_payload(f"e{i}", "held", "free"))
-                for i in range(40)
+                for i in range(LONG_BATCH_LENGTH)
             ]
         ),
-        # Delete-leading, and of middling length. Every holder above
-        # begins with an upsert, so a lock made exclusive for batches
-        # that START with a delete - which is exactly the shape
-        # `GraphStorage.delete_nodes` builds, edges first - held open
-        # here would have been invisible.
+        # Delete-leading, and of middling length (the shared MID_BATCH_LENGTH
+        # anchor). Every holder above begins with an upsert, so a lock made
+        # exclusive for batches that START with a delete - which is exactly
+        # the shape `GraphStorage.delete_nodes` builds, edges first - held
+        # open here would have been invisible.
         "batch_deletes_first": lambda b: b.apply_batch(
-            [EntityOperation.delete_edge(f"gone{i}") for i in range(8)]
+            [EntityOperation.delete_edge(f"gone{i}") for i in range(MID_BATCH_LENGTH)]
             + [EntityOperation.upsert_node(node_payload("held", name="Held"))]
         ),
         # Deletes and nothing else, which is what `delete_nodes` emits:
         # a lock keyed on "no operation in this batch is an upsert" is
         # invisible to every other holder here, the delete-leading one
-        # included, because they all end with an upsert.
+        # included, because they all end with an upsert. Split from the
+        # same shared mid-length anchor rather than a fresh pair of
+        # constants.
         "batch_all_deletes": lambda b: b.apply_batch(
-            [EntityOperation.delete_edge(f"gone{i}") for i in range(6)]
-            + [EntityOperation.delete_node(f"absent{i}") for i in range(6)]
+            [
+                EntityOperation.delete_edge(f"gone{i}")
+                for i in range(MID_BATCH_LENGTH // 2)
+            ]
+            + [
+                EntityOperation.delete_node(f"absent{i}")
+                for i in range(MID_BATCH_LENGTH // 2)
+            ]
         ),
     }
 
@@ -2709,6 +3638,7 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
     def test_a_second_instance_writes_while_another_batch_is_open(
         self, schema, backends, holds
     ):
+        print(_pg_length_seed_banner())
         holder = PostgresGraphPersistenceBackend(DSN, schema=schema)
         other = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([holder, other])
@@ -2718,8 +3648,8 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
         paused, release = threading.Event(), threading.Event()
         real_apply_one = holder._apply_one
 
-        def hold_open(conn, operation):
-            real_apply_one(conn, operation)
+        def hold_open(conn, operation, *rest):
+            real_apply_one(conn, operation, *rest)
             paused.set()
             release.wait(30)
 
@@ -2771,9 +3701,19 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
     substitution can be made for edges alone, or for batches alone.
     """
 
+    def _seed_then_delete(b):
+        b.upsert_node(node_payload("gone"))
+        b.delete_node("gone")
+
     WRITES = {
         "node": lambda b: b.upsert_node(node_payload("a")),
         "edge": lambda b: b.upsert_edge(edge_payload("e", "a", "a")),
+        # A delete-only case: every other write above upserts, and the
+        # substitution this class is about could as easily be made only for
+        # the delete path - `_apply_one`'s DELETE branch is a different
+        # statement from its INSERT branch, and either could be the one that
+        # took the wrong lock form.
+        "delete": _seed_then_delete,
         "batch": lambda b: b.apply_batch(
             [
                 EntityOperation.upsert_node(node_payload("a")),
@@ -2781,29 +3721,51 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
             ]
         ),
         "batch_many": lambda b: b.apply_batch(
-            [EntityOperation.upsert_node(node_payload(f"n{i}")) for i in range(40)]
+            [
+                EntityOperation.upsert_node(node_payload(f"n{i}"))
+                for i in range(LONG_BATCH_LENGTH)
+            ]
         ),
     }
 
     @pytest.mark.parametrize("write", sorted(WRITES))
     def test_no_advisory_lock_survives_an_entity_write(self, schema, backends, write):
+        print(_pg_length_seed_banner())
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend.save_graph_data(snapshot())
 
         self.WRITES[write](backend)
 
-        with psycopg.connect(DSN) as conn:
+        # Attributed to the backend under test, not counted database-wide:
+        # `pg_locks` sees every session's advisory locks, so an unrelated
+        # suite run against the same server - a second CI job, a developer's
+        # own session - would false-red this one. Asking the connection the
+        # write actually used whether *it* still holds anything narrows the
+        # question to this backend, the same way `_wait_until_blocking`
+        # narrows "is anything blocked" to "is this pid blocked".
+        #
+        # The pid alone answers for one connection, and the pool may hold
+        # more than one: a lock left on another of this backend's connections
+        # would not be seen. So the lock the entity write takes is also looked
+        # for by its key, on any connection - `(SAVE_LOCK_KEY,
+        # hashtext(schema))` is two int4 keys, which `pg_locks` shows as
+        # classid, objid and objsubid 2. The schema is this test's own, so an
+        # unrelated session cannot hold that key.
+        with backend._pool.connection() as conn:
             held = conn.execute(
                 "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
-                " AND database = (SELECT oid FROM pg_database"
-                " WHERE datname = current_database())"
+                " AND (pid = pg_backend_pid()"
+                " OR (classid = %s::oid AND objid = hashtext(%s)::oid"
+                " AND objsubid = 2))",
+                (SAVE_LOCK_KEY, schema),
             ).fetchone()[0]
 
         assert held == 0, (
-            f"{held} advisory lock(s) outlived the {write} write: a "
-            "session-scoped lock on a pooled connection blocks the next "
-            "whole-graph save for the life of the process"
+            f"{held} advisory lock(s) outlived the {write} write on this "
+            "backend's own connection: a session-scoped lock on a pooled "
+            "connection blocks the next whole-graph save for the life of "
+            "the process"
         )
 
 
@@ -2829,34 +3791,39 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
     """
 
     def _save_paused_before_commit(
-        self, backend, graph, paused, release, errors, holder
+        self, backend, graph, paused, release, errors, holder, monkeypatch
     ):
         """Run a whole-graph save, held open after its DELETEs.
 
         `holder` receives the paused connection's backend pid, so the
         caller can ask the server whether the entity write is blocked on
         *this* save rather than on anything at all.
+
+        The test owns the patch, so a stalled daemon cannot leave it behind
+        after teardown or restore it over a later test's patch.
         """
         real_execute = psycopg.Connection.execute
 
         def spy(conn, query, *args, **kwargs):
             result = real_execute(conn, query, *args, **kwargs)
             text = " ".join(str(query).split())
-            if "DELETE" in text.upper() and "graph_edges" in text:
+            if (
+                threading.current_thread() is thread
+                and "DELETE" in text.upper()
+                and "graph_edges" in text
+            ):
                 holder.append(conn.info.backend_pid)
                 paused.set()
                 release.wait(30)
             return result
 
         def run():
-            psycopg.Connection.execute = spy
             try:
                 backend.save_graph_data(graph)
             except Exception as exc:
                 errors.append(f"save: {type(exc).__name__}: {exc}")
-            finally:
-                psycopg.Connection.execute = real_execute
 
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         assert paused.wait(30), "the save never reached its DELETEs"
@@ -2866,8 +3833,9 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         "operation", ["delete", "upsert", "insert_new", "delete_edge", "batch_many"]
     )
     def test_an_entity_write_committing_after_a_save_is_not_swallowed(
-        self, schema, backends, operation
+        self, schema, backends, operation, monkeypatch
     ):
+        print(_pg_length_seed_banner())
         saver = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([saver, writer])
@@ -2891,6 +3859,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
             release,
             errors,
             holder,
+            monkeypatch,
         )
         assert holder, "the save never reported the connection it paused on"
 
@@ -2903,24 +3872,29 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
                 elif operation == "delete_edge":
                     writer.delete_edge("e")
                 elif operation == "batch_many":
-                    # A length production issues. It is ONE length, not a
-                    # spread, so it says nothing about thresholds either
-                    # side of it: a save lock skipped for batches of 2 to
-                    # 42 survives this and the whole suite - measured. An
-                    # earlier version of this comment claimed the
-                    # opposite, in the same words the length comment on
-                    # TestPostgresEntityWritesTouchOneRow had to withdraw.
-                    # What this case buys is that the interleaving is
-                    # exercised for a batch at all. The filler ids are
-                    # absent, which is not an error and keeps the
-                    # assertion about the three that matter.
+                    # The module's shared "long batch" anchor
+                    # (LONG_BATCH_LENGTH), not a fixed 40. It is still ONE
+                    # length per run, not a spread, so it says nothing about
+                    # thresholds either side of whatever it draws - a save
+                    # lock skipped below it survives this and the whole
+                    # suite - measured, at the old fixed 40. An earlier
+                    # version of this comment claimed the opposite, in the
+                    # same words the length comment on
+                    # TestPostgresEntityWritesTouchOneRow had to withdraw;
+                    # drawing this length from the shared, re-randomised
+                    # source is what keeps that from happening again. The
+                    # filler ids are absent, which is not an error and keeps
+                    # the assertion about the three that matter.
                     writer.apply_batch(
                         [
                             EntityOperation.delete_edge("e"),
                             EntityOperation.delete_node("a"),
                             EntityOperation.delete_node("b"),
                         ]
-                        + [EntityOperation.delete_node(f"absent{i}") for i in range(40)]
+                        + [
+                            EntityOperation.delete_node(f"absent{i}")
+                            for i in range(LONG_BATCH_LENGTH)
+                        ]
                     )
                 else:
                     # An id the paused save is about to insert: without the
@@ -3129,6 +4103,43 @@ class TestPostgresLoadOnAVirginStore:
         assert backend.load_graph_data() == {"nodes": [], "edges": [], "metadata": {}}
 
 
+class TestPostgresLoadOrdersByEntityId:
+    def test_nodes_and_edges_load_in_id_order_regardless_of_insertion_order(
+        self, schema, backends
+    ):
+        """LD_NOORDER: the documented order, not whatever a heap scan gives.
+
+        `load_graph_data` states `ORDER BY id` for both tables, because a
+        plain scan makes no promise about row order at all - correct by
+        accident today, wrong the day autovacuum rewrites the table. Every
+        other save in this module hands ids to `save_graph_data` already in
+        ascending order (`n0`, `n1`, `n2`, ...), so a mutation dropping
+        `ORDER BY id` would pass every one of them by getting the right
+        answer for the wrong reason. Inserting deliberately out of order
+        closes that.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        node_ids = ["n5", "n1", "n9", "n3", "n7"]
+        edge_ids = ["e5", "e1", "e9", "e3", "e7"]
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(i) for i in node_ids],
+                [edge_payload(i, node_ids[0], node_ids[1]) for i in edge_ids],
+            )
+        )
+
+        loaded = backend.load_graph_data()
+        got_nodes = [n["id"] for n in loaded["nodes"]]
+        got_edges = [e["id"] for e in loaded["edges"]]
+        assert got_nodes == sorted(node_ids), (
+            f"nodes did not load in id order: inserted {node_ids}, got {got_nodes}"
+        )
+        assert got_edges == sorted(edge_ids), (
+            f"edges did not load in id order: inserted {edge_ids}, got {got_edges}"
+        )
+
+
 class TestPostgresSaveWritesMetadataLast:
     """The ordering two other tests silently depend on.
 
@@ -3321,11 +4332,17 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
                     (schema,),
                 )
             }
+        # `scope_id` is nullable, and that is the seam's whole optionality:
+        # a row that carries none is the row every store held before the
+        # column existed, and the policy admits it to every session. NOT NULL
+        # here would break every install that keeps no scopes apart.
         assert columns == {
             ("graph_nodes", "id", "text", "NO"),
             ("graph_nodes", "doc", "jsonb", "NO"),
+            ("graph_nodes", SCOPE_COLUMN, "text", "YES"),
             ("graph_edges", "id", "text", "NO"),
             ("graph_edges", "doc", "jsonb", "NO"),
+            ("graph_edges", SCOPE_COLUMN, "text", "YES"),
             ("graph_metadata", "only_row", "boolean", "NO"),
             ("graph_metadata", "doc", "jsonb", "NO"),
         }
@@ -3354,6 +4371,89 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
         assert checked > 0, "graph_metadata lost its CHECK (only_row) constraint"
 
 
+def _race_to_claim_an_unclaimed_store(schema, backends, call, names):
+    """Run `call` on one instance per name against a store with an unclaimed
+    metadata row, both queued on the claim at once; return a
+    (graph name, "owns" or the exception) pair per instance.
+
+    A third connection holds the row so both instances are provably past
+    their read and queued on the write before either may proceed; without
+    that the race is a timing accident, and a test of it passes by luck.
+    Threads are named "a" and "b", not after the graph, so two instances of
+    one name stay two racers.
+    """
+    racers = {
+        thread_name: PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name=graph_name
+        )
+        for thread_name, graph_name in zip(("a", "b"), names)
+    }
+    backends.extend(racers.values())
+    # Migrated while there is no metadata row, so neither has claimed or
+    # checked anything yet.
+    for backend in racers.values():
+        assert not backend.exists()
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+            (psycopg.types.json.Jsonb({"version": "1.0"}),),
+        )
+
+    outcomes = {}
+    pids = {}
+    real_execute = psycopg.Connection.execute
+
+    def spy(conn, query, *args, **kwargs):
+        name = threading.current_thread().name
+        if name in racers:
+            pids.setdefault(name, conn.info.backend_pid)
+        return real_execute(conn, query, *args, **kwargs)
+
+    def run(backend):
+        name = threading.current_thread().name
+        try:
+            getattr(backend, call)()
+            outcomes[name] = "owns"
+        except Exception as exc:
+            outcomes[name] = f"{type(exc).__name__}: {exc}"
+
+    with psycopg.connect(DSN) as holder:
+        holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+        psycopg.Connection.execute = spy
+        try:
+            threads = [
+                threading.Thread(target=run, args=(backend,), name=name)
+                for name, backend in racers.items()
+            ]
+            for thread in threads:
+                thread.start()
+            # Blocked on anything is enough: the first queues on the
+            # holder, and the second on the first's place in that queue.
+            deadline = time.monotonic() + 30
+            with psycopg.connect(DSN, autocommit=True) as watcher:
+                while True:
+                    blocked = [
+                        pid
+                        for pid in pids.values()
+                        if watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pid,)
+                        ).fetchone()[0]
+                    ]
+                    if len(blocked) == 2:
+                        break
+                    assert time.monotonic() < deadline, (
+                        f"both instances never queued on the claim: {pids}"
+                    )
+                    time.sleep(0.02)
+        finally:
+            psycopg.Connection.execute = real_execute
+        holder.commit()
+    for thread in threads:
+        thread.join(30)
+        assert not thread.is_alive()
+    return [(racers[name]._graph_name, outcomes[name]) for name in racers]
+
+
 class TestPostgresStoreIdentity:
     def test_the_tables_existing_is_not_a_graph_existing(self, schema, backends):
         """`exists()` must answer for the graph, not for the migration.
@@ -3372,6 +4472,27 @@ class TestPostgresStoreIdentity:
         backend.save_graph_data(snapshot())
         assert backend.exists()
 
+    def test_exists_after_a_save_whose_metadata_is_empty(self, schema, backends):
+        """SV_SKIPEMPTYMETA: an empty metadata dict is still a save.
+
+        `exists()` reads `graph_metadata`, which `save_graph_data` writes
+        unconditionally. Every other save in this module carries
+        `snapshot()`'s non-empty metadata (`{"version": "1.0", ...}`), so a
+        mutation that skips the metadata upsert when the caller's metadata
+        is falsy - `if metadata:` guarding the write, in place of an
+        unconditional one - passes every one of them while making a real,
+        saved, empty-metadata graph permanently report as never having
+        existed.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert not backend.exists()
+        backend.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
+        assert backend.exists(), (
+            "a save with empty metadata left graph_metadata empty, so "
+            "exists() cannot tell it from a store that was never saved"
+        )
+
     def test_two_schemas_are_two_stores(self, schema, backends):
         """One database serves several independent graphs."""
         other = f"{schema}_other"
@@ -3388,6 +4509,204 @@ class TestPostgresStoreIdentity:
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:
                 conn.execute(f'DROP SCHEMA IF EXISTS "{other}" CASCADE')
+
+    def test_a_saved_schema_refuses_a_different_graph_identity(self, schema, backends):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.save_graph_data(snapshot([node_payload("b")]))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    def test_a_saved_schema_refuses_reads_from_a_different_graph_identity(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.load_graph_data()
+
+    def test_two_first_writers_with_different_graph_identities_cannot_both_save(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        assert not first.exists()
+        assert not second.exists()
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.save_graph_data(snapshot([node_payload("b")]))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    def test_a_saved_schema_refuses_entity_writes_from_a_different_graph_identity(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.upsert_node(node_payload("b"))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    @pytest.mark.parametrize("call", ["exists", "load_graph_data"])
+    def test_two_instances_claiming_an_unclaimed_store_at_once_cannot_both_own_it(
+        self, schema, backends, call
+    ):
+        """The claim is a read then a write, and both can read "unclaimed".
+
+        A store saved before identities existed has a metadata row with no
+        claim. Two differently named instances booting on it together each
+        read that, each decide to claim, and under READ COMMITTED (`exists`)
+        the second UPDATE - having waited on the first's row lock -
+        overwrote the first's claim. Both returned believing they owned the
+        schema, which is the one outcome GraphIdentityCollision exists to
+        prevent. Under REPEATABLE READ (`load_graph_data`) the loser already
+        failed on serialization; that case guards the path, not the fix.
+
+        A third connection holds the row so both instances are provably past
+        their read and queued on the write before either may proceed; without
+        that the race is a timing accident, and a test of it passes by luck.
+        """
+        outcomes = dict(
+            _race_to_claim_an_unclaimed_store(
+                schema, backends, call, ("first", "second")
+            )
+        )
+        owners = sorted(name for name, outcome in outcomes.items() if outcome == "owns")
+        assert len(owners) == 1, f"both instances claimed the schema: {outcomes}"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == owners[0], (
+            f"the store names {stored!r} but {owners[0]!r} believes it owns it"
+        )
+        assert stored.get("version") == "1.0", (
+            f"claiming the store dropped the rest of its metadata: {stored!r}"
+        )
+        loser = "second" if owners[0] == "first" else "first"
+        expected = {
+            "exists": "GraphIdentityCollision",
+            "load_graph_data": "SerializationFailure",
+        }[call]
+        assert outcomes[loser].startswith(expected), outcomes
+
+    def test_two_instances_of_one_graph_claiming_at_once_both_own_it(
+        self, schema, backends
+    ):
+        """The loser of the claim must judge the winner's claim, not its own
+        stale read.
+
+        Its UPDATE matched nothing because someone else claimed first; only a
+        re-read can say whether that someone was the same graph. Comparing
+        the "unclaimed" it read before queueing instead refuses an instance
+        its own store. Only `exists` races here: under REPEATABLE READ the
+        loser fails on serialization whatever the names.
+        """
+        outcomes = _race_to_claim_an_unclaimed_store(
+            schema, backends, "exists", ("first", "first")
+        )
+
+        assert [outcome for _, outcome in outcomes] == ["owns", "owns"], outcomes
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            stored = conn.execute(
+                f'SELECT doc FROM "{schema}".graph_metadata'
+            ).fetchone()[0]
+        assert stored.get("_postgres_graph_identity") == "first", stored
+        assert stored.get("version") == "1.0", stored
+
+    def test_a_claim_whose_row_is_deleted_under_it_owns_nothing(self, schema, backends):
+        """A re-read that finds no row is no claim, and must not be
+        remembered as one.
+
+        The row is deleted while the claim is queued on it, so the UPDATE
+        matches nothing and the re-read finds nothing. Marking the check done
+        there would let this instance skip it for good - and write into the
+        store the next graph claims.
+        """
+        backend = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="first"
+        )
+        backends.append(backend)
+        assert not backend.exists()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"version": "1.0"}),),
+            )
+
+        outcome = {}
+        pids = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            if threading.current_thread().name == "claimant" and not pids:
+                pids.append(conn.info.backend_pid)
+            return real_execute(conn, query, *args, **kwargs)
+
+        def run():
+            try:
+                outcome["exists"] = backend.exists()
+            except Exception as exc:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        with psycopg.connect(DSN) as holder:
+            holder.execute(f'SELECT 1 FROM "{schema}".graph_metadata FOR UPDATE')
+            psycopg.Connection.execute = spy
+            try:
+                thread = threading.Thread(target=run, name="claimant")
+                thread.start()
+                deadline = time.monotonic() + 30
+                with psycopg.connect(DSN, autocommit=True) as watcher:
+                    while not (
+                        pids
+                        and watcher.execute(
+                            "SELECT pg_blocking_pids(%s)", (pids[0],)
+                        ).fetchone()[0]
+                    ):
+                        assert time.monotonic() < deadline, (
+                            "the instance never queued on the claim"
+                        )
+                        time.sleep(0.02)
+            finally:
+                psycopg.Connection.execute = real_execute
+            holder.execute(f'DELETE FROM "{schema}".graph_metadata')
+            holder.commit()
+        thread.join(30)
+        assert not thread.is_alive()
+
+        assert outcome == {"exists": False}, outcome
+        assert backend._graph_identity_checked is False, (
+            "a claim that found no row was remembered as checked"
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                f'INSERT INTO "{schema}".graph_metadata (doc) VALUES (%s)',
+                (psycopg.types.json.Jsonb({"_postgres_graph_identity": "other"}),),
+            )
+        with pytest.raises(GraphIdentityCollision):
+            backend.exists()
 
 
 class _Collector:
@@ -3691,9 +5010,9 @@ class TestPostgresAnnouncesOnlyWhatCommitted:
         real_apply_one = type(writer)._apply_one
         rows_written = []
 
-        def note_row(self, conn, operation):
+        def note_row(self, conn, operation, *rest):
             rows_written.append(operation)
-            return real_apply_one(self, conn, operation)
+            return real_apply_one(self, conn, operation, *rest)
 
         def announce_then_die(self, conn, operations):
             real_announce(self, conn, operations)
@@ -4332,12 +5651,12 @@ class TestPostgresChannelsAreOnePerStore:
         G11 is "for any schema name", and a digest shortened to fit some
         future constraint stays lower-case, stays under 63 bytes and still
         round-trips through LISTEN - so every other assertion in this class
-        survives it. What does not survive is two tenants in one database:
+        survives it. What does not survive is two stores in one database:
         they hear each other's writes and each reads the other's ids out of
         its own schema, reporting deletes for entities that exist elsewhere.
         Measured at four hex characters: a collision inside 211 names.
         """
-        names = [f"co_tenant_{i}" for i in range(20_000)]
+        names = [f"co_scope_{i}" for i in range(20_000)]
         channels = {_channel_for(name) for name in names}
         assert len(channels) == len(names), (
             f"{len(names) - len(channels)} of {len(names)} schema names share "
@@ -4480,6 +5799,11 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             # other wrong type dies in the query. So the id's type has to be
             # checked here rather than left to the server.
             '{"o": "other", "ops": [["n", null]]}',
+            # Well under PostgreSQL's payload cap, but deep enough that
+            # json.loads raises RecursionError rather than the ValueError,
+            # KeyError and TypeError shapes above. Narrowing the parse
+            # containment to those ordinary cases kills the listening thread.
+            "[" * 1000 + "0" + "]" * 1000,
         ],
     )
     def test_an_announcement_this_build_cannot_read_reloads_the_graph(
@@ -4523,7 +5847,9 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
         (change,) = collector.wait_for(1)
         assert change.operations is None
 
-    def test_a_listener_that_raises_does_not_end_the_reporting(self, schema, backends):
+    def test_a_listener_that_raises_does_not_end_the_reporting(
+        self, schema, backends, reported
+    ):
         """One bad refresh must not silence the instance for good: the thread
         that dies here is the only one that would ever hear another write."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -4546,6 +5872,57 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
+        # The refresh that failed is the one thing an operator must hear
+        # about: the instance is behind until the next change reaches it.
+        assert (
+            "applying an external change failed: RuntimeError: "
+            "the application refused this one"
+        ) in reported().splitlines()
+
+    def test_a_non_driver_read_failure_reconnects_and_keeps_reporting(
+        self, schema, backends, monkeypatch
+    ):
+        """The reconnect loop is not only for psycopg failures.
+
+        A failure in the reading loop can come from code beside the driver -
+        for example a parser edge not contained by `_handle`. If the outer
+        loop catches only psycopg errors, that exception ends the one thread
+        that would ever hear the next write.
+        """
+        import backend.core.postgres_backend as module
+
+        monkeypatch.setattr(module, "_NOTIFY_RECONNECT_MIN_SECONDS", 0.05)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        injected = threading.Event()
+        real_read = type(backend)._read_until_stopped
+
+        def fail_once(self, conn):
+            if not injected.is_set():
+                injected.set()
+                raise RuntimeError("injected non-driver read failure")
+            return real_read(self, conn)
+
+        backend._read_until_stopped = fail_once.__get__(backend)
+        backend.start_change_notification(collector)
+        try:
+            assert injected.wait(30), "the injected read failure was never reached"
+            (reload,) = collector.wait_for(1, timeout=10)
+            assert reload.operations is None
+
+            writer.upsert_node(node_payload("after_non_driver_failure"))
+            changes = collector.wait_for(2, timeout=30)
+        finally:
+            backend.stop_change_notification()
+
+        assert any(
+            change.operations
+            and [op.entity_id for op in change.operations]
+            == ["after_non_driver_failure"]
+            for change in changes[1:]
+        ), "the listener thread died after a non-driver read failure"
 
 
 class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
@@ -4742,7 +6119,7 @@ class TestPostgresDoesNotStartASecondListener:
     """
 
     def test_a_start_that_times_out_does_not_leave_a_startable_backend(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -4765,6 +6142,14 @@ class TestPostgresDoesNotStartASecondListener:
         try:
             with pytest.raises(TimeoutError):
                 backend.start_change_notification(_Collector())
+            # The failed start stopped a thread it could not join. That is
+            # the one state in which this backend refuses to start again, so
+            # the operator is told why rather than left to find out.
+            assert (
+                f"the listener thread for {backend._channel} did not stop "
+                f"within 1.0s; notification cannot be started again on this "
+                f"backend"
+            ) in reported().splitlines()
 
             live = [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
             # The thread is still there - that is the situation, not the bug.
@@ -4951,7 +6336,7 @@ class TestPostgresReportsAContractViolationDistinctly:
     """
 
     def test_a_refusal_is_reported_and_reporting_continues(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -4973,7 +6358,10 @@ class TestPostgresReportsAContractViolationDistinctly:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
-        assert "refused" in capsys.readouterr().out
+        assert (
+            "change notification refused: reported from a writing thread"
+            in reported().splitlines()
+        )
 
 
 class TestPostgresStopFromInsideTheListener:
@@ -5078,7 +6466,7 @@ class TestPostgresPacesAServerThatRefusesConnections:
         return [b - a for a, b in zip(attempts, attempts[1:])]
 
     def test_a_refused_connection_is_retried_with_a_growing_wait(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -5086,6 +6474,18 @@ class TestPostgresPacesAServerThatRefusesConnections:
         # High enough that the ceiling never binds: this is about the shape of
         # the escalation, not about where it stops.
         gaps = self._refused_connect_gaps(backend, monkeypatch, 30.0, 4)
+
+        # Both halves of the outage are reported: the connection that
+        # dropped, and each attempt to get it back. A deaf instance that says
+        # nothing looks exactly like a quiet one.
+        lines = reported().splitlines()
+        lost = f"lost the listening connection on {backend._channel}: "
+        assert [line for line in lines if line.startswith(lost)], lines
+        retrying = (
+            f"reconnecting to {backend._channel} after OperationalError: "
+            f"injected: connection refused"
+        )
+        assert lines.count(retrying) >= 3, lines
 
         assert gaps[-1] >= 2 * gaps[0], (
             f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
@@ -5246,7 +6646,9 @@ class TestPostgresReconnectsWithoutLeakingConnections:
     """
 
     def test_repeated_drops_leave_no_connections_behind(self, schema, backends):
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        application_name = f"co_reconnect_{uuid.uuid4().hex[:12]}"
+        dsn = psycopg.conninfo.make_conninfo(DSN, application_name=application_name)
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         collector = _Collector()
 
@@ -5255,6 +6657,8 @@ class TestPostgresReconnectsWithoutLeakingConnections:
                 return conn.execute(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
+                    " AND application_name = %s",
+                    (application_name,),
                 ).fetchone()[0]
 
         backend.start_change_notification(collector)
@@ -5481,7 +6885,9 @@ class TestPostgresSubscribesBeforeItReloads:
     on a slow machine for the wrong reason.
     """
 
-    def test_listen_is_registered_before_the_reconnect_reports(self, schema, backends):
+    def test_listen_is_registered_before_the_reconnect_reports(
+        self, schema, backends, monkeypatch
+    ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         events = []
@@ -5498,7 +6904,7 @@ class TestPostgresSubscribesBeforeItReloads:
             events.append("report")
             collector(change)
 
-        psycopg.Connection.execute = note_listen
+        monkeypatch.setattr(psycopg.Connection, "execute", note_listen)
         try:
             backend.start_change_notification(note_report)
             with psycopg.connect(DSN, autocommit=True) as killer:
@@ -5508,7 +6914,6 @@ class TestPostgresSubscribesBeforeItReloads:
                 )
             collector.wait_for(1, timeout=60)
         finally:
-            psycopg.Connection.execute = real_execute
             backend.stop_change_notification()
 
         assert events[:1] == ["listen"], f"unexpected first event: {events[:3]}"
@@ -5517,6 +6922,75 @@ class TestPostgresSubscribesBeforeItReloads:
         assert events.index("report") > 1, (
             f"the reconnect reported before re-registering LISTEN: {events}"
         )
+
+
+class TestPostgresStartReturnsOnlyAfterListen:
+    """Start's promise is that the channel is registered when it returns.
+
+    Returning after the socket connects but before the LISTEN statement
+    finishes creates a boot-time stale window, and also hides a first LISTEN
+    failure from the caller. The assertion blocks the statement itself rather
+    than racing a writer into a microsecond gap.
+    """
+
+    def test_start_waits_for_the_listen_statement_to_finish(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        listen_entered = threading.Event()
+        release_listen = threading.Event()
+        returned = threading.Event()
+        errors = []
+        real_execute = psycopg.Connection.execute
+
+        def block_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                listen_entered.set()
+                assert release_listen.wait(30), "test never released LISTEN"
+            return real_execute(conn, query, *args, **kwargs)
+
+        def start():
+            try:
+                backend.start_change_notification(_Collector())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                returned.set()
+
+        psycopg.Connection.execute = block_listen
+        starter = threading.Thread(target=start, daemon=True)
+        starter.start()
+        try:
+            assert listen_entered.wait(30), "start never reached LISTEN"
+            assert not returned.wait(0.2), (
+                "start returned before the LISTEN statement completed"
+            )
+            release_listen.set()
+            assert returned.wait(30), "start did not return after LISTEN completed"
+            if errors:
+                raise errors[0]
+        finally:
+            psycopg.Connection.execute = real_execute
+            release_listen.set()
+            starter.join(30)
+            backend.stop_change_notification()
+
+    def test_a_first_listen_failure_is_reported_to_start(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        real_execute = psycopg.Connection.execute
+
+        def fail_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                raise psycopg.OperationalError("injected LISTEN failure")
+            return real_execute(conn, query, *args, **kwargs)
+
+        psycopg.Connection.execute = fail_listen
+        try:
+            with pytest.raises(psycopg.OperationalError, match="LISTEN failure"):
+                backend.start_change_notification(_Collector())
+        finally:
+            psycopg.Connection.execute = real_execute
+            backend.stop_change_notification()
 
 
 class TestPostgresStopHoldsWithABatchAlreadyRead:
@@ -5591,6 +7065,117 @@ class TestPostgresStopHoldsWithABatchAlreadyRead:
         )
 
 
+class TestReadUntilStoppedChecksTheFlagAfterEveryItem:
+    """`_read_until_stopped`'s own defence against a buffered batch: the stop
+    flag is checked again after every single notification is handled, not
+    only once per call to `conn.notifies()` - the class above is the
+    end-to-end shape this matters for, two `pg_notify` calls in one
+    transaction arriving together.
+
+    Isolated at the unit level, on a bare instance with a fake connection,
+    because `TestPostgresStopHoldsWithABatchAlreadyRead` cannot tell this
+    check apart from `_deliver`'s own `_listen_stop` guard below: removing
+    this one alone still leaves that test passing, since `_deliver` refuses
+    to call the listener regardless of how far `_read_until_stopped` got.
+    Asserting on `_handle` calls directly, with `_handle` itself replaced,
+    is what makes the two checks distinguishable.
+    """
+
+    def test_the_rest_of_a_buffered_batch_is_not_handled_after_stop(self):
+        backend = object.__new__(PostgresGraphPersistenceBackend)
+        backend._listen_stop = threading.Event()
+        handled = []
+
+        def fake_handle(payload):
+            handled.append(payload)
+            if payload == "first":
+                backend._listen_stop.set()
+
+        backend._handle = fake_handle
+
+        class _Note:
+            def __init__(self, payload):
+                self.payload = payload
+
+        class _FakeConn:
+            def notifies(self, timeout):
+                # One buffered batch: three notifications the driver hands
+                # over together, as it does when one transaction announced
+                # more than once.
+                return [_Note("first"), _Note("second"), _Note("third")]
+
+        backend._read_until_stopped(_FakeConn())
+
+        assert handled == ["first"], (
+            "the rest of a buffered batch was handled after stop was set "
+            f"mid-batch: {handled}"
+        )
+
+
+class TestDeliverRefusesAfterStop:
+    """`_deliver`'s own guard: once `_listen_stop` is set, it must not call
+    the listener - whatever stopped the read loop that reached it. Pinned
+    independently of the read loop (see the class above) so a regression
+    here is caught even in a call `_read_until_stopped`'s own check would
+    not have prevented, such as `_listen_loop`'s reconnect delivering
+    `ExternalChange.unknown()` after a stop requested mid-reconnect.
+    """
+
+    def test_the_listener_is_not_called_once_stop_is_set(self):
+        backend = object.__new__(PostgresGraphPersistenceBackend)
+        backend._listen_stop = threading.Event()
+        calls = []
+        backend._listener = lambda change: calls.append(change)
+        backend._listen_stop.set()
+
+        backend._deliver(object())
+
+        assert calls == [], "the listener was called after stop was set"
+
+
+class TestPostgresResolveKeepsOneOperationPerAnnouncedPair:
+    """`_resolve` maps `pairs` to operations one-for-one, in the order given -
+    including when the same pair is named twice. `apply_batch`'s own contract
+    allows a batch to touch one entity more than once
+    (`test_a_batch_applies_in_order_and_lands_whole` upserts node "a" twice in
+    one call), so an announcement built from such a batch would repeat a
+    pair too. GraphStorage itself never does this today - it batches nodes
+    before edges, one write per entity per batch - so the case is latent
+    rather than reachable through the production caller, but nothing in
+    `_encode` or `_resolve` refuses it, and each duplicate resolves and
+    applies independently rather than being silently collapsed to one.
+    """
+
+    def test_a_pair_announced_twice_resolves_to_two_operations(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a", name="Alpha")]))
+
+        operations = backend._resolve([("node", "a"), ("node", "a")])
+
+        assert [(op.kind, op.action, op.entity_id) for op in operations] == [
+            ("node", "upsert", "a"),
+            ("node", "upsert", "a"),
+        ], "a pair announced twice did not resolve to one operation per occurrence"
+        assert all(op.payload["name"] == "Alpha" for op in operations)
+
+    def test_a_duplicated_deleted_pair_also_resolves_to_two_operations(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        operations = backend._resolve([("node", "gone"), ("node", "gone")])
+
+        assert [
+            (op.kind, op.action, op.entity_id, op.payload) for op in operations
+        ] == [
+            ("node", "delete", "gone", None),
+            ("node", "delete", "gone", None),
+        ]
+
+
 class TestTheLevelQueryIsNeverPrepared:
     """The traversal's level query must plan against the frontier it was given.
 
@@ -5639,6 +7224,16 @@ class TestTheLevelQueryIsNeverPrepared:
             }
         )
 
+        # Warm a deliberately ordinary statement on the same pinned
+        # connection. This is the control half of the test: `prepare=False`
+        # must belong to the level query itself, not to the whole pool.
+        anchor_probe = psycopg.sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
+            backend._table("graph_nodes")
+        )
+        with backend._pool.connection() as conn:
+            for _ in range(10):
+                assert conn.execute(anchor_probe, ("a",)).fetchone() == (1,)
+
         # Well past psycopg's prepare threshold: each depth-2 traversal issues
         # one level execution per level, so this is ~40 executions.
         for _ in range(20):
@@ -5654,12 +7249,13 @@ class TestTheLevelQueryIsNeverPrepared:
 
         # The opt-out is ONE query, not the pool. Without this half, replacing
         # `prepare=False` with a pool-wide `prepare_threshold=None` passes the
-        # whole of backend/core/tests - 1648 tests - while the property the
-        # change is about is destroyed. The anchor probe is the natural
-        # witness: `traverse` issues it on this same connection, inside the
-        # same call, so if it is missing the backend stopped preparing
-        # everything.
-        assert any("graph_nodes" in s and "WHERE id = $1" in s for s in prepared), (
+        # whole of backend/core/tests while the property the change is about
+        # is destroyed. The explicit anchor probe above is the witness; if it
+        # is missing, the backend stopped preparing everything.
+        assert any(
+            "SELECT 1 FROM" in s and "graph_nodes" in s and "WHERE id = $1" in s
+            for s in prepared
+        ), (
             "the backend stopped preparing its other statements, so the "
             "opt-out is no longer one query but the whole pool: "
             f"{prepared}"
@@ -5716,4 +7312,1376 @@ class TestTheLevelQueryIsNeverPrepared:
 
         assert answers == {(("a", "b", "c"), ("ab", "bc"))}, (
             f"the traversal's answer changed across repeated calls: {answers}"
+        )
+
+
+# --- the optional scope seam ------------------------------------------------
+
+
+def _stored(schema, table, column=SCOPE_COLUMN):
+    """`{id: <column>}` for a table, read past any policy.
+
+    Through the suite's own DSN, whose role created this database and is not
+    subject to row-level security: a test about what was STORED must not ask
+    through the predicate it is testing, or a row written to the wrong scope
+    and a row not written at all read alike.
+    """
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        return {
+            row[0]: row[1]
+            for row in conn.execute(
+                psycopg.sql.SQL("SELECT id, {} FROM {}.{}").format(
+                    psycopg.sql.Identifier(column),
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(table),
+                )
+            )
+        }
+
+
+def _ids_seen_by(dsn, schema, table, scope):
+    """Every id a session with `scope` set can read, asked WITHOUT a predicate.
+
+    That is the whole point of the query's shape: the statement names no
+    scope, so anything it fails to return was refused by the server rather
+    than by the application. `scope=None` leaves the setting unset, which is
+    the case the policy has to fail closed on.
+    """
+    with psycopg.connect(dsn) as conn:
+        if scope is not None:
+            conn.execute("SELECT set_config(%s, %s, false)", (SCOPE_SETTING, scope))
+        return sorted(
+            row[0]
+            for row in conn.execute(
+                psycopg.sql.SQL("SELECT id FROM {}.{}").format(
+                    psycopg.sql.Identifier(schema), psycopg.sql.Identifier(table)
+                )
+            )
+        )
+
+
+def _plans(issued, dsn=DSN, scope=None):
+    """Every plan for a statement of `issued` that names a graph table.
+
+    Planned as `dsn`'s role sees it, with the scope setting bound the way the
+    backend binds it, so the plan is the one the deployment actually gets -
+    policy qual included, where the server applies one. Maintenance
+    statements are skipped, not planned: see `_MAINTENANCE`.
+    """
+    plans = []
+    with psycopg.connect(dsn) as conn:
+        if scope is not None:
+            conn.execute("SELECT set_config(%s, %s, false)", (SCOPE_SETTING, scope))
+        for query, params in issued:
+            text = _rendered(query)
+            if "graph_nodes" not in text and "graph_edges" not in text:
+                continue
+            if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) in _MAINTENANCE:
+                continue
+            rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
+            plans.append((text, "\n".join(r[0] for r in rows)))
+    return plans
+
+
+def _owning_role(mixed_case=False):
+    """A non-superuser role owning a schema of its own, as a deployment has.
+
+    The migration run by this role creates the tables, so the role owns them -
+    the ordinary self-provisioning install, and the one where
+    `ENABLE ROW LEVEL SECURITY` alone would buy nothing: a table's owner is
+    exempt from its own policies until they are FORCEd. A superuser is exempt
+    whatever is declared, which is why the suite's own DSN cannot be used to
+    ask whether the server refuses anything.
+    """
+    suffix = uuid.uuid4().hex[:12]
+    name = f"co_own_{suffix}"
+    schema = f"CoOwn_{suffix}" if mixed_case else f"co_own_{suffix}_sch"
+    password = secrets.token_hex(16)
+    created = False
+    try:
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            try:
+                conn.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        psycopg.sql.Identifier(name),
+                        psycopg.sql.Literal(password),
+                    )
+                )
+            except psycopg.errors.InsufficientPrivilege:
+                pytest.skip("the test role may not create roles")
+            created = True
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
+                    psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name)
+                )
+            )
+        yield name, schema, password
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            if created:
+                conn.execute(
+                    psycopg.sql.SQL("DROP OWNED BY {}").format(
+                        psycopg.sql.Identifier(name)
+                    )
+                )
+                conn.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        psycopg.sql.Identifier(name)
+                    )
+                )
+
+
+class TestTheOptionalScopeSeam:
+    """An opaque scope id on the entity tables, and the policy binding on it.
+
+    Every test here is about one of two halves, and they are deliberately
+    tested apart. The APPLICATION half is the predicate the backend puts in
+    its own statements; it is exercised through the suite's own superuser
+    DSN, where row-level security never applies, so what it asserts cannot be
+    the server's doing. The SERVER half is the policy, and it is exercised as
+    a role that is neither superuser nor exempt - which is why the `owner`
+    fixture exists at all, since a policy is not applied to a table's owner
+    unless it is forced, and not to a superuser however it is declared.
+    """
+
+    def test_scope_wording_stays_generic_in_source(self):
+        """The scope value is opaque, so source prose may not give it a domain."""
+        offenders = []
+        for path in _POSTGRES_SOURCE_FILES:
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                folded = line.lower()
+                if any(term in folded for term in _BOUNDARY_SENSITIVE_TERMS):
+                    offenders.append(
+                        f"{path.relative_to(path.parents[3])}:{line_number}: {line}"
+                    )
+
+        assert offenders == [], (
+            "scope wording must stay generic; replace domain-specific terms: "
+            + "\n".join(offenders)
+        )
+
+    @pytest.fixture(params=["plain", "MixedCase"], ids=["plain", "needs-quoting"])
+    def owner(self, request):
+        """Parametrised over the schema's NAME, like the least-privilege
+        fixture above and for the same reason.
+
+        This seam adds three quoting surfaces: the catalog lookups keyed on
+        `nspname`, the `ALTER TABLE` / `CREATE POLICY` DDL, and the BARE,
+        unqualified table reference in the upsert's `ON CONFLICT … WHERE` -
+        which is the one place in this change where an identifier reaches SQL
+        without its schema. A name that only survives quoted is what tells a
+        correct one from a lookup that parses and case-folds.
+        """
+        yield from _owning_role(mixed_case=request.param == "MixedCase")
+
+    @pytest.fixture
+    def other_owner(self):
+        """A second store of the first one's kind, for a test that needs two.
+
+        Two schemas rather than two graphs in one: the entity tables are keyed
+        on `id` alone, so co-locating two stores that both hold `n0` is not
+        something this seam offers - a schema each is, and it is what the
+        backend has offered since before the column existed.
+        """
+        yield from _owning_role()
+
+    @pytest.fixture
+    def columnless(self):
+        """A store provisioned exactly as the document prescribed BEFORE this
+        column existed, and a role that owns none of it.
+
+        Which is the deployment the seam has to stay optional for: the role
+        holds DML and no DDL, so `ALTER TABLE` is refused and the column will
+        never be there. The indexes are pre-created for the same reason the
+        least-privilege tests create them - an index this role cannot build is
+        a warning of its own, and it would drown out the question here, which
+        is whether the scope seam says anything.
+        """
+        suffix = uuid.uuid4().hex[:12]
+        name = f"co_nocol_{suffix}"
+        schema = f"co_nocol_{suffix}_sch"
+        password = secrets.token_hex(16)
+        created = False
+        try:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                try:
+                    conn.execute(
+                        psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                            psycopg.sql.Identifier(name),
+                            psycopg.sql.Literal(password),
+                        )
+                    )
+                except psycopg.errors.InsufficientPrivilege:
+                    pytest.skip("the test role may not create roles")
+                created = True
+                conn.execute(
+                    psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                        psycopg.sql.Identifier(schema)
+                    )
+                )
+                for table, columns in (
+                    ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                    ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                    (
+                        "graph_metadata",
+                        "only_row boolean PRIMARY KEY DEFAULT true"
+                        " CHECK (only_row), doc jsonb NOT NULL",
+                    ),
+                ):
+                    conn.execute(
+                        psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                            psycopg.sql.Identifier(schema),
+                            psycopg.sql.Identifier(table),
+                            psycopg.sql.SQL(columns),
+                        )
+                    )
+                for index, expression in (
+                    ("graph_edges_source_idx", "((doc->>'source'))"),
+                    ("graph_edges_target_idx", "((doc->>'target'))"),
+                ):
+                    conn.execute(
+                        psycopg.sql.SQL("CREATE INDEX {} ON {}.graph_edges {}").format(
+                            psycopg.sql.Identifier(index),
+                            psycopg.sql.Identifier(schema),
+                            psycopg.sql.SQL(expression),
+                        )
+                    )
+                conn.execute(
+                    psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name)
+                    )
+                )
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "GRANT SELECT, INSERT, UPDATE, DELETE"
+                        " ON ALL TABLES IN SCHEMA {} TO {}"
+                    ).format(
+                        psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name)
+                    )
+                )
+                _provision_revision_sequence(conn, schema, name)
+            yield _dsn_as_role(name, password), schema
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(schema)
+                    )
+                )
+                if created:
+                    conn.execute(
+                        psycopg.sql.SQL("DROP OWNED BY {}").format(
+                            psycopg.sql.Identifier(name)
+                        )
+                    )
+                    conn.execute(
+                        psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                            psycopg.sql.Identifier(name)
+                        )
+                    )
+
+    @staticmethod
+    def _as_owner(owner, backends, scope=None):
+        name, schema, password = owner
+        backend = PostgresGraphPersistenceBackend(
+            _dsn_as_role(name, password), schema=schema, scope=scope
+        )
+        backends.append(backend)
+        return backend
+
+    # -- the server half -----------------------------------------------------
+
+    def test_the_migration_adds_the_column_and_forces_its_policy(self, owner, backends):
+        name, schema, password = owner
+        backend = self._as_owner(owner, backends, scope="scope-a")
+        backend.exists()
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                enabled, forced, policy = conn.execute(
+                    "SELECT c.relrowsecurity, c.relforcerowsecurity,"
+                    " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table),
+                ).fetchone()
+                assert enabled, f"{table} has no row-level security"
+                # FORCE is the half that matters here: this role OWNS the
+                # table, and an owner is exempt from an unforced policy - so
+                # without it every isolation assertion below would pass for a
+                # store that isolates nothing.
+                assert forced, f"{table} does not force row-level security"
+                assert policy, f"{table} has row-level security and no policy"
+
+    def test_the_server_refuses_a_row_belonging_to_another_scope(self, owner, backends):
+        name, schema, password = owner
+        role_dsn = _dsn_as_role(name, password)
+        self._as_owner(owner, backends, scope="scope-a").upsert_node(node_payload("a"))
+        self._as_owner(owner, backends, scope="scope-b").upsert_node(node_payload("b"))
+
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", "scope-a") == ["a"]
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", "scope-b") == ["b"]
+
+    def test_the_server_refuses_a_scoped_row_to_a_session_that_named_no_scope(
+        self, owner, backends
+    ):
+        """The direction that has to fail closed.
+
+        An unset setting is the case a mistake arrives as - a host that forgot
+        to bind it, a connection that came from somewhere else - and the
+        expression is written so that `= NULL` is never true rather than so
+        that an absent value matches everything.
+        """
+        name, schema, password = owner
+        self._as_owner(owner, backends, scope="scope-a").upsert_node(node_payload("a"))
+
+        assert (
+            _ids_seen_by(_dsn_as_role(name, password), schema, "graph_nodes", None)
+            == []
+        )
+
+    def test_a_row_carrying_no_scope_is_refused_to_nobody(self, owner, backends):
+        """What an already-populated table does when this lands.
+
+        Every row written before the column existed carries NULL, and the
+        policy admits NULL to every session: an install that never asked to
+        keep scopes apart does not discover one day that its graph is empty.
+        """
+        name, schema, password = owner
+        role_dsn = _dsn_as_role(name, password)
+        self._as_owner(owner, backends).save_graph_data(snapshot([node_payload("a")]))
+
+        assert _stored(schema, "graph_nodes") == {"a": None}
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", None) == ["a"]
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", "scope-a") == ["a"]
+
+    def test_a_scope_round_trips_every_path_under_its_own_policy(self, owner, backends):
+        """Every path, as the one role a policy is actually enforced against.
+
+        The suite's own DSN is a superuser, so row-level security is inert
+        there and the application's predicate is the only thing under test on a
+        load, a walk or a read-back. Under a forced policy a path that does not
+        bind the scope reads an EMPTY store rather than a wrong one, which is
+        the direction that hides: the load returns nothing, and the whole-graph
+        save - which does bind - then deletes everything the load did not
+        return. Measured on a copy with the load's binding removed: the store
+        ended empty and the instance had destroyed its own graph.
+
+        So this walks the whole contract as that role rather than asserting one
+        statement: save, load, traverse, upsert, delete, exists, and the
+        listener's read-back.
+        """
+        name, schema, password = owner
+        backend = self._as_owner(owner, backends, scope="scope-a")
+
+        backend.save_graph_data(
+            snapshot(
+                [node_payload("a1"), node_payload("a2")],
+                [edge_payload("e1", "a1", "a2")],
+            )
+        )
+
+        assert backend.exists()
+        loaded = backend.load_graph_data()
+        assert [n["id"] for n in loaded["nodes"]] == ["a1", "a2"], (
+            "the instance cannot read the rows it just wrote through its own policy"
+        )
+        assert [e["id"] for e in loaded["edges"]] == ["e1"]
+
+        found = backend.traverse("a1", 2)
+        assert sorted(found["node_ids"]) == ["a1", "a2"]
+        assert found["edge_ids"] == ["e1"]
+
+        backend.upsert_node(node_payload("a3"))
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == [
+            "a1",
+            "a2",
+            "a3",
+        ]
+
+        # The read-back the listener uses: the store decides what happened, and
+        # a row this instance owns has to read as present.
+        resolved = backend._resolve([("node", "a3")])
+        assert [(op.kind, op.action, op.entity_id) for op in resolved] == [
+            ("node", "upsert", "a3")
+        ], f"the read-back lost a row the instance owns: {resolved}"
+
+        backend.delete_node("a3")
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a1", "a2"]
+
+        # And a save of what the load returned is a no-op rather than a loss -
+        # the whole round trip, which is where a path that reads nothing and a
+        # save that deletes everything meet.
+        backend.save_graph_data(backend.load_graph_data())
+        assert _stored(schema, "graph_nodes") == {"a1": "scope-a", "a2": "scope-a"}
+
+    def test_the_server_refuses_a_row_written_into_another_scope(self, owner, backends):
+        """The policy's WRITE direction, which a SELECT probe never asks about.
+
+        `FOR ALL` with no `WITH CHECK` of its own means the `USING` expression
+        governs what a session may write as well as what it may read. Without
+        that, a session could be refused a row and accept one written in its
+        place - so this issues the INSERT the backend never would, with the
+        setting bound to one scope and the row stamped another.
+        """
+        name, schema, password = owner
+        self._as_owner(owner, backends, scope="scope-a").upsert_node(node_payload("a"))
+
+        with psycopg.connect(_dsn_as_role(name, password)) as conn:
+            conn.execute("SELECT set_config(%s, %s, false)", (SCOPE_SETTING, "scope-b"))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "INSERT INTO {}.graph_nodes (id, doc, {}) VALUES (%s, %s, %s)"
+                    ).format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(SCOPE_COLUMN),
+                    ),
+                    (
+                        "smuggled",
+                        psycopg.types.json.Jsonb(node_payload("smuggled")),
+                        "scope-a",
+                    ),
+                )
+            conn.rollback()
+
+        assert "smuggled" not in _stored(schema, "graph_nodes")
+
+        # And the two statements another scope would actually issue. `FOR ALL`
+        # means the USING expression governs these as well, so narrowing the
+        # policy to FOR SELECT would leave the reads refused and the writes
+        # through - and a test that asked only about INSERT would not notice.
+        for scope in ("scope-b", None):
+            with psycopg.connect(_dsn_as_role(name, password)) as conn:
+                if scope is not None:
+                    conn.execute(
+                        "SELECT set_config(%s, %s, false)", (SCOPE_SETTING, scope)
+                    )
+                updated = conn.execute(
+                    psycopg.sql.SQL(
+                        "UPDATE {}.graph_nodes SET doc = %s WHERE id = %s"
+                    ).format(psycopg.sql.Identifier(schema)),
+                    (psycopg.types.json.Jsonb(node_payload("a", name="taken")), "a"),
+                ).rowcount
+                deleted = conn.execute(
+                    psycopg.sql.SQL("DELETE FROM {}.graph_nodes WHERE id = %s").format(
+                        psycopg.sql.Identifier(schema)
+                    ),
+                    ("a",),
+                ).rowcount
+                conn.rollback()
+            assert (updated, deleted) == (0, 0), (
+                f"a session scoped {scope!r} reached another scope's row with a "
+                f"bare UPDATE/DELETE"
+            )
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+
+    def test_the_two_layers_agree_on_a_cross_scope_upsert(self, owner, backends):
+        """The refusal, asked where the server is enforcing as well.
+
+        The application half is tested through the superuser DSN, where no
+        policy applies - so nothing there pins the claim this change makes in
+        both its code and its document: that where the policy IS in force the
+        server refuses the same write. That is a genuine branch in the server
+        rather than a consequence of this SQL (how PostgreSQL treats an
+        `ON CONFLICT DO UPDATE` whose conflicting row is invisible under
+        `USING`), so if it ever changed, a host would start seeing a different
+        exception from the same misconfiguration and nothing would notice.
+        """
+        name, schema, password = owner
+        a = self._as_owner(owner, backends, scope="scope-a")
+        b = self._as_owner(owner, backends, scope="scope-b")
+        a.upsert_node(node_payload("n0", name="A's own"))
+
+        with pytest.raises(CrossScopeWriteRefused):
+            b.upsert_node(node_payload("n0", name="B's version"))
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert by_id(a.load_graph_data(), "nodes")["n0"]["name"] == "A's own"
+
+    def test_the_policy_admits_a_scopeless_row_to_every_session(self, owner, backends):
+        """The `IS NULL` arm, asked of a table that actually has the policy.
+
+        The sibling test writes its scopeless row through an unscoped instance,
+        which by design creates no policy at all - so it cannot tell this arm
+        from a table with no row-level security. Here the policy is provisioned
+        by a scoped instance and the scopeless row is planted underneath it,
+        which is the state an upgraded store is in: rows from before the column
+        existed, under a policy added after them.
+        """
+        name, schema, password = owner
+        role_dsn = _dsn_as_role(name, password)
+        self._as_owner(owner, backends, scope="scope-a").upsert_node(
+            node_payload("mine")
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "INSERT INTO {}.graph_nodes (id, doc) VALUES (%s, %s)"
+                ).format(psycopg.sql.Identifier(schema)),
+                ("legacy", psycopg.types.json.Jsonb(node_payload("legacy"))),
+            )
+
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", "scope-a") == [
+            "legacy",
+            "mine",
+        ]
+        assert _ids_seen_by(role_dsn, schema, "graph_nodes", None) == ["legacy"], (
+            "a row carrying no scope was refused to a session that named none"
+        )
+
+    # -- the application half ------------------------------------------------
+
+    def test_a_scoped_instance_does_not_load_another_scopes_rows(
+        self, schema, backends
+    ):
+        """Through the suite's own DSN, where the policy never applies.
+
+        So this is the backend's own predicate and nothing else: a deployment
+        whose role cannot take a policy - an operator's least-privilege setup -
+        still keeps the scopes apart, and a defect in the SQL cannot hide
+        behind the server.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("a"))
+        b.upsert_node(node_payload("b"))
+
+        assert [n["id"] for n in a.load_graph_data()["nodes"]] == ["a"]
+        assert [n["id"] for n in b.load_graph_data()["nodes"]] == ["b"]
+
+    def test_a_scoped_instance_traverses_through_another_scopes_node(
+        self, schema, backends
+    ):
+        """A node it may not see reads as an endpoint that is not a node.
+
+        Which is the dangling-endpoint rule the walk already has, reached by a
+        second road: the edge is returned, the far id is traversed THROUGH,
+        and it is not in `node_ids`. The alternative - an inner join - would
+        have dropped the edge as well and told the caller a different graph.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("a"))
+        b.upsert_node(node_payload("b"))
+        b.upsert_edge(edge_payload("ab", "a", "b"))
+
+        found = b.traverse("b", 3)
+        assert found["edge_ids"] == ["ab"]
+        assert found["node_ids"] == ["b"], (
+            "a node outside this scope was returned as a node of the walk"
+        )
+
+    def test_a_scoped_instance_traverses_from_nothing_it_does_not_own(
+        self, schema, backends
+    ):
+        """An anchor outside the scope is no traversal, not an empty one.
+
+        The walk's own rule: an anchor that is not there returns nothing at all
+        rather than a lone anchor, and a node this instance may not see is not
+        there as far as it is concerned. Without the anchor probe's predicate
+        the other scope's id comes back as a node of the walk - the one place
+        the traversal reports an id it never read a row for.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("na"))
+
+        assert b.traverse("na", 2) == {"node_ids": [], "edge_ids": []}
+
+    def test_the_read_back_reports_another_scopes_row_as_absent(self, schema, backends):
+        """The listener's read-back, which shares a channel with every scope.
+
+        The notification channel is derived from the SCHEMA, so two scopes
+        behind one set of tables hear each other's announcements. What the
+        read-back must not do is answer one with the foreign row's content: the
+        store decides what happened, and a row this instance may not read did
+        not happen to it.
+
+        `b` is migrated first, and that is the state the read-back runs in
+        rather than a convenience: `_resolve` is reached only from the
+        listening thread, which exists only once `start_change_notification`
+        has run - and that migrates. Calling it on a freshly constructed
+        backend instead asks the question in a state no caller can produce,
+        where the predicate is absent because the store has not yet been
+        examined, and reads as a defect that is not one.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("na", name="A's own"))
+        b.exists()  # migrates b, the way starting its listener would
+
+        resolved = b._resolve([("node", "na")])
+
+        assert [(op.kind, op.action, op.entity_id) for op in resolved] == [
+            ("node", "delete", "na")
+        ], f"the read-back handed over another scope's row: {resolved}"
+        assert all(op.payload is None for op in resolved)
+
+    def test_a_scoped_instance_cannot_delete_another_scopes_row(self, schema, backends):
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("a"))
+
+        b.delete_node("a")
+
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+
+    def test_every_row_a_scoped_instance_writes_carries_its_scope(
+        self, schema, backends
+    ):
+        """Both write paths, because they are separate statements.
+
+        A whole-graph save inserts, an entity write upserts, and stamping one
+        and not the other leaves rows the instance can write and never read
+        again.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+        backend.save_graph_data(
+            snapshot([node_payload("a")], [edge_payload("e", "a", "a")])
+        )
+        backend.upsert_node(node_payload("b"))
+
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a", "b": "scope-a"}
+        assert _stored(schema, "graph_edges") == {"e": "scope-a"}
+
+    def test_an_unscoped_instance_writes_rows_that_carry_no_scope(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        backend.upsert_node(node_payload("b"))
+
+        assert _stored(schema, "graph_nodes") == {"a": None, "b": None}
+
+    def test_a_whole_graph_save_replaces_exactly_what_the_load_returned(
+        self, schema, backends
+    ):
+        """The interesting failure is the save that deletes LESS than it loads.
+
+        A store written before a scope was configured holds rows carrying
+        none, and a scoped instance loads them - the policy and the predicate
+        both admit them. If its save then deleted only rows carrying its own
+        scope, GraphStorage would hand back a row the delete left behind and
+        the insert would die on the primary key. Nothing else in the suite
+        reaches this: it needs a store holding both kinds of row at once.
+        """
+        PostgresGraphPersistenceBackend(DSN, schema=schema).save_graph_data(
+            snapshot([node_payload("old")])
+        )
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        loaded = backend.load_graph_data()
+        assert [n["id"] for n in loaded["nodes"]] == ["old"]
+        backend.save_graph_data(loaded)
+
+        assert _stored(schema, "graph_nodes") == {"old": "scope-a"}
+
+    def test_an_unscoped_instance_does_not_reach_a_scoped_row(self, schema, backends):
+        """The unscoped side of the same predicate, which is not symmetric
+        with the scoped side by accident.
+
+        An instance that named no scope sees rows carrying none - the set the
+        policy would show it - and NOT rows carrying one. The whole-graph save
+        is the half that matters: it deletes what the load returned, so an
+        instance reading every row would delete every row, and a scoped store
+        sharing the schema would lose its graph to a maintenance instance that
+        only meant to re-save its own.
+        """
+        scoped = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        plain = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([scoped, plain])
+        scoped.upsert_node(node_payload("a"))
+
+        assert [n["id"] for n in plain.load_graph_data()["nodes"]] == []
+        plain.save_graph_data(snapshot([node_payload("b")]))
+
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a", "b": None}
+        assert [n["id"] for n in scoped.load_graph_data()["nodes"]] == ["a", "b"]
+
+    def test_a_scoped_instance_does_not_traverse_another_scopes_edge(
+        self, schema, backends
+    ):
+        """The edge half of the traversal's predicate, on its own.
+
+        Both endpoints belong to the traversing scope, so only the EDGE is out
+        of scope - which is what makes this fail for a backend that filters
+        nodes and forgets edges. Without it the walk returns an edge the
+        instance may not see, and with it the far node is unreachable by that
+        road.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("a1"))
+        a.upsert_node(node_payload("a2"))
+        b.upsert_edge(edge_payload("cross", "a1", "a2"))
+
+        found = a.traverse("a1", 3)
+        assert found["edge_ids"] == [], (
+            "the walk returned an edge belonging to another scope"
+        )
+        assert found["node_ids"] == ["a1"]
+
+    def test_a_scoped_upsert_refuses_an_id_another_scope_holds(self, schema, backends):
+        """Through the suite's own DSN, where no policy applies - so this is
+        the application layer refusing, not the server.
+
+        `id` is unique across the table, so the conflicting row may be another
+        scope's, and an upsert is the one write path where the predicate cannot
+        simply hide it: before the conflict carried one, the statement replaced
+        that row's content and restamped its scope, and the other scope's next
+        load returned nothing. A no-op would be no better - the caller would be
+        told a write happened that did not - so it raises.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("n0", name="A's own"))
+
+        with pytest.raises(CrossScopeWriteRefused) as raised:
+            b.upsert_node(node_payload("n0", name="B's version"))
+        assert "n0" in str(raised.value)
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        kept = by_id(a.load_graph_data(), "nodes")["n0"]
+        assert kept["name"] == "A's own", (
+            "another scope's upsert changed the row it may not write"
+        )
+
+    def test_a_scoped_upsert_updates_a_row_this_instance_already_owns(
+        self, schema, backends
+    ):
+        """The arm of the refusal that must NOT refuse.
+
+        The statement has four reachable outcomes - a fresh insert, the
+        adoption of a scopeless row, an update of this instance's own row, and
+        a conflict with another scope's - and only the last is a refusal. With
+        the first three tested and this one missing, the suite cannot tell
+        "refuses a cross-scope write" from "refuses every update": passing the
+        wrong parameter to the conflict predicate collapses it to
+        `scope_id IS NULL`, and every second write to an id raises. Measured on
+        a copy with that one parameter changed - the suite stayed green and a
+        scoped instance could not update a row it had written itself.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        backend.upsert_node(node_payload("n0", name="first"))
+        backend.upsert_node(node_payload("n0", name="second"))
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert by_id(backend.load_graph_data(), "nodes")["n0"]["name"] == "second"
+
+    def test_an_upsert_still_adopts_a_row_that_carries_no_scope(self, schema, backends):
+        """The refusal above must not catch the case it shares a statement with.
+
+        A row written before a scope was configured carries none, and the
+        predicate admits it - so an upsert of it is this instance's to make,
+        and it takes the scope with it.
+        """
+        PostgresGraphPersistenceBackend(DSN, schema=schema).upsert_node(
+            node_payload("old", name="from before")
+        )
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        backend.upsert_node(node_payload("old", name="Renamed"))
+
+        assert _stored(schema, "graph_nodes") == {"old": "scope-a"}
+        assert by_id(backend.load_graph_data(), "nodes")["old"]["name"] == "Renamed"
+
+    def test_a_column_without_its_policy_is_reported_once_asked_for(
+        self, columnless, backends, reported
+    ):
+        """The only thing that tells an operator the server enforces nothing.
+
+        The operator added the column and not the policy - the role owns
+        nothing, so the backend cannot add either - and a scope was configured.
+        The instance then runs on its own predicate alone, which is a fact
+        about that deployment that nothing else would state.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.Identifier(SCOPE_COLUMN),
+                    )
+                )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+        reported()
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        printed = reported()
+        assert "not its row-level security policy" in printed, (
+            f"nothing said the server enforces nothing: {printed}"
+        )
+        for table in SCOPED_TABLES:
+            assert table in printed
+        # And it runs: the application's predicate is what holds here.
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+    # -- optional, and what happens when it cannot be provisioned ------------
+
+    def test_a_store_without_the_column_is_read_and_written_as_it_was(
+        self, columnless, backends, reported
+    ):
+        """Nothing about such a store may change.
+
+        Not the statements, which must not name a column that is not there,
+        and not the output: a store that keeps no scopes apart is not missing
+        anything by having no policy, and a warning that fires when nothing is
+        wrong teaches an operator to ignore warnings.
+        """
+        dsn, schema = columnless
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
+        backends.append(backend)
+        # Migrated first, so what is captured below is the data path rather
+        # than the boot. The migration DOES name the column, once, in the
+        # `ALTER TABLE` this role refuses - that attempt is how the backend
+        # finds out the column is not there, and it is not a statement any
+        # read or write issues.
+        #
+        # The boot's own output is read rather than discarded, though. Clearing
+        # it unread is how a seam that announces itself on every columnless
+        # boot would go unnoticed - and the only thing this store is entitled
+        # to hear about is the ANALYZE its role cannot run, which it heard
+        # about before this seam existed.
+        backend.exists()
+        self._assert_silent_about_the_seam(reported())
+
+        issued = _statements_issued(
+            lambda: (
+                backend.save_graph_data(
+                    snapshot([node_payload("a")], [edge_payload("e", "a", "a")])
+                ),
+                backend.upsert_node(node_payload("b")),
+                backend.delete_node("b"),
+                backend.traverse("a", 2),
+                backend.load_graph_data(),
+            )
+        )
+
+        rendered = [_rendered(query) for query, _ in issued]
+        named = [text for text in rendered if SCOPE_COLUMN in text]
+        assert not named, f"a statement named a column this store has not: {named}"
+        # The PARAMETERS too, not only the SQL. The setting's name reaches the
+        # server as a bind parameter of `set_config`, so it can never appear in
+        # a statement's text - an assertion that looked only there would be one
+        # that cannot fail, and a binding added to the unscoped path would
+        # satisfy it.
+        assert not [
+            (text, params)
+            for text, (_, params) in zip(rendered, issued)
+            if "set_config" in text
+            or (params and SCOPE_SETTING in [str(value) for value in params])
+        ], "an unscoped instance bound a scope setting"
+        self._assert_silent_about_the_seam(reported())
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+    @staticmethod
+    def _assert_silent_about_the_seam(printed):
+        """No line of `printed` is about the scope seam.
+
+        Not silence outright: this role cannot ANALYZE, and the backend has
+        said so since before the seam existed. Silence about THE SEAM, because
+        a store that keeps no scopes apart is not missing anything by having no
+        column and no policy, and a warning that fires when nothing is wrong
+        teaches an operator to ignore warnings.
+        """
+        spoke = [
+            line
+            for line in printed.splitlines()
+            if SCOPE_COLUMN in line
+            or SCOPE_SETTING in line
+            or "row-level" in line.lower()
+            or "scope" in line.lower()
+        ]
+        assert not spoke, (
+            f"the scope seam spoke up on a store that asked for none: {spoke}"
+        )
+
+    def test_a_scope_against_a_store_without_the_column_refuses_to_start(
+        self, columnless, backends
+    ):
+        """The one case that does not degrade quietly.
+
+        Writing rows that carry no scope would hand them to every other
+        session on the store, and a store that cannot be provisioned is an
+        operator's problem with a remedy - so this raises rather than
+        proceeding, and the message names the column to add.
+        """
+        dsn, schema = columnless
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        with pytest.raises(ScopeIsolationUnavailable) as raised:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        assert SCOPE_COLUMN in str(raised.value)
+        assert _stored(schema, "graph_nodes", "id") == {}, (
+            "a row was written by a backend that could not scope it"
+        )
+
+    @pytest.mark.parametrize(
+        "provision",
+        ["column only", "policy, not enabled", "enabled, not forced"],
+    )
+    def test_a_scope_the_server_does_not_enforce_is_reported(
+        self, columnless, backends, reported, provision
+    ):
+        """Three ways for the server to be enforcing nothing, and the warning
+        has to fire for each.
+
+        A policy that exists but was never ENABLEd is inert, and one enabled
+        without FORCE does not apply to the table's owner - so checking only
+        that a policy is PRESENT would report a store as protected when its
+        rows are readable by every session on it. Parametrised because with
+        the column-only case alone, the `enabled` and `forced` conjuncts are
+        never the thing that decides.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.Identifier(SCOPE_COLUMN),
+                    )
+                )
+                if provision == "column only":
+                    continue
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE POLICY {} ON {}.{} FOR ALL USING ({col} IS NULL"
+                        " OR {col} = current_setting({setting}, true))"
+                    ).format(
+                        psycopg.sql.Identifier(f"{table}{SCOPE_POLICY_SUFFIX}"),
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        col=psycopg.sql.Identifier(SCOPE_COLUMN),
+                        setting=psycopg.sql.Literal(SCOPE_SETTING),
+                    )
+                )
+                if provision == "policy, not enabled":
+                    continue
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY"
+                    ).format(
+                        psycopg.sql.Identifier(schema), psycopg.sql.Identifier(table)
+                    )
+                )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+        reported()
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        printed = reported()
+        assert "not by the server" in printed, (
+            f"a store the server does not enforce was not reported ({provision}): "
+            f"{printed}"
+        )
+        # And it still runs on the application's own predicate.
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+
+    def test_an_unscoped_instance_on_a_half_provisioned_store_says_nothing(
+        self, columnless, backends, reported
+    ):
+        """The column on one scoped table and not the other, with no scope.
+
+        The scoped instance refuses such a store. The unscoped one must run on
+        it, and run as it did before the column existed - naming the column
+        nowhere, because `graph_edges` has not got it. What decides that is
+        that the catalog re-read finds `graph_edges` missing and leaves the
+        flag False for BOTH tables; a version that took the flag from whether
+        the ALTER was attempted would read `graph_nodes` with the predicate
+        and then fail on every edge query with `column scope_id does not
+        exist`.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("ALTER TABLE {}.graph_nodes ADD COLUMN {} text").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(SCOPE_COLUMN),
+                )
+            )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
+        backends.append(backend)
+        backend.exists()
+        self._assert_silent_about_the_seam(reported())
+
+        issued = _statements_issued(
+            lambda: (
+                backend.save_graph_data(
+                    snapshot([node_payload("a")], [edge_payload("e", "a", "a")])
+                ),
+                backend.traverse("a", 2),
+                backend.load_graph_data(),
+            )
+        )
+
+        named = [text for q, _ in issued if SCOPE_COLUMN in (text := _rendered(q))]
+        assert not named, f"a statement named a column graph_edges has not: {named}"
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+        assert _stored(schema, "graph_nodes") == {"a": None}
+
+    def test_a_scope_refuses_a_store_with_the_column_on_only_one_table(
+        self, columnless, backends
+    ):
+        """Half-provisioned is not half-isolated, it is not isolated.
+
+        The provisioning loop is one transaction PER TABLE, so a store really
+        can end with the column on one and not the other - and this repo
+        already treats half-provisioned stores as a live case. A backend that
+        refused only when EVERY scoped table lacked the column would boot here
+        and write edges carrying no scope, readable by every other session, on
+        behalf of an instance that asked to be separated.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("ALTER TABLE {}.graph_nodes ADD COLUMN {} text").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(SCOPE_COLUMN),
+                )
+            )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        with pytest.raises(ScopeIsolationUnavailable) as raised:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        assert "graph_edges" in str(raised.value)
+        assert _stored(schema, "graph_nodes", "id") == {}
+
+    def test_an_empty_scope_is_refused_rather_than_read_as_no_scope(self):
+        """An empty value is what a variable templated out of a deploy command
+        arrives as, and reading it as "no isolation wanted" is how a deployment
+        that asked to be separated silently is not."""
+        for value in ("", "   "):
+            with pytest.raises(ValueError):
+                PostgresGraphPersistenceBackend(DSN, scope=value)
+
+    def test_the_seam_leaves_the_metadata_table_alone(self, schema, backends):
+        """Stated as a test because it is a boundary, not an oversight.
+
+        `graph_metadata`'s primary key is a column that can only hold true, so
+        the table holds one row for the whole store and has nowhere to put a
+        second scope's. Adding a column there would suggest an isolation the
+        shape cannot deliver.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            columns = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_schema = %s AND table_name = 'graph_metadata'",
+                    (schema,),
+                )
+            }
+        assert columns == {"only_row", "doc"}
+
+    def test_the_scope_leaves_no_trace_on_a_pooled_connection(self, schema, backends):
+        """`set_config(..., is_local => true)`, not a session-wide SET.
+
+        One connection in the pool, so the connection taken below is the one
+        the write used. A scope left on it would reach whatever ran next -
+        including, on a host that pools across scopes, a read that then
+        answered with someone else's rows.
+        """
+        backend = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, scope="scope-a", pool_size=1
+        )
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        with backend._pool.connection() as conn:
+            left = conn.execute(
+                "SELECT current_setting(%s, true)", (SCOPE_SETTING,)
+            ).fetchone()[0]
+        # Falsy rather than None: measured on PostgreSQL 16, a placeholder GUC
+        # that has been set locally and reverted reads back as the empty string
+        # rather than as unset, so asserting None would fail for correct code.
+        # What matters is that no scope survives, and the empty string cannot
+        # BE a scope - the constructor refuses one, and so does the
+        # configuration layer - so it cannot match a row this instance wrote.
+        assert not left, f"the scope outlived its transaction: {left!r}"
+
+    # Small enough to seed in a test and large enough that the planner
+    # prefers the expression indexes over reading the table: measured on this
+    # server, a one-id frontier plans a Bitmap Index Scan on both of them at
+    # 1000 edges and a Seq Scan at 200, where the assertions below would hold
+    # for a backend with no indexes at all.
+    PLAN_SEED = 1000
+
+    def _plan_seeded(self, owner, backends, scope, bind=True):
+        """The traversal's plans on a seeded store, as its own role sees them.
+
+        `bind=False` plans the same statements for a session that is subject to
+        no policy, which is how the two costs below are told apart: what the
+        application's own predicate costs, and what a policy costs on top of
+        it.
+        """
+        name, schema, password = owner
+        backend = self._as_owner(owner, backends, scope=scope)
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(self.PLAN_SEED)],
+                [edge_payload(f"e{i}", f"n{i}", "n0") for i in range(self.PLAN_SEED)],
+            )
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            # So the plan asserted is the one a live store gets rather than
+            # the one a never-analysed table happens to get.
+            conn.execute(
+                psycopg.sql.SQL("ANALYZE {}.graph_nodes, {}.graph_edges").format(
+                    psycopg.sql.Identifier(schema), psycopg.sql.Identifier(schema)
+                )
+            )
+        # Depth 1, so there is one level and its frontier is one id. That is
+        # the selective case the indexes were measured on; a later level whose
+        # frontier is most of the graph may legitimately read the table.
+        issued = _statements_issued(lambda: backend.traverse("n5", 1))
+        if bind:
+            return _plans(issued, _dsn_as_role(name, password), scope)
+        return _plans(issued, DSN)
+
+    @staticmethod
+    def _edge_indexes(plans):
+        return {
+            index
+            for text, plan in plans
+            if "graph_edges" in text
+            for index in ("graph_edges_source_idx", "graph_edges_target_idx")
+            if index in plan
+        }
+
+    def test_the_scope_predicate_costs_the_traversal_no_index(
+        self, owner, other_owner, backends
+    ):
+        """The predicate this change adds composes with the expression indexes.
+
+        Both stores planned for a session no policy applies to, so what is
+        compared is the SQL and only the SQL: one store's statements carry the
+        scope predicate and the other's do not, and the planner reaches the
+        same two indexes either way. Those indexes are the difference between
+        a walk that seeks and one that reads every edge at every level, so a
+        predicate that cost them would be paid at every step of every walk.
+        """
+        scoped = self._plan_seeded(owner, backends, "scope-a", bind=False)
+        unscoped = self._plan_seeded(other_owner, backends, None, bind=False)
+
+        assert self._edge_indexes(unscoped) == {
+            "graph_edges_source_idx",
+            "graph_edges_target_idx",
+        }, f"the seed is too small to make the indexes worth using: {unscoped}"
+        assert self._edge_indexes(scoped) == self._edge_indexes(unscoped), (
+            f"the scope predicate changed which indexes the traversal reaches: "
+            f"{self._edge_indexes(scoped)} against {self._edge_indexes(unscoped)}"
+        )
+
+    def test_a_policy_in_force_costs_the_traversal_those_indexes(self, owner, backends):
+        """The price of the second layer, pinned so it cannot move silently.
+
+        A policy reaches a query as a security qual, and PostgreSQL will not
+        evaluate a qual that is not leakproof before one. The traversal's index
+        condition is `doc->>'source' = ...`, and `jsonb_object_field_text` is
+        not leakproof - so a store the policy applies to reads the edge table
+        at every level instead of seeking, whatever this backend writes. That
+        is why the policy is created only for a store that configured a scope,
+        why the document says so in the section an operator reads before
+        turning it on, and why this test asserts the cost rather than its
+        absence: the day PostgreSQL marks that function leakproof, or the day
+        this backend stops filtering on a JSONB expression, this test fails and
+        the document it guards is the thing to fix.
+        """
+        plans = self._plan_seeded(owner, backends, "scope-a")
+
+        assert plans, "the traversal planned nothing against a graph table"
+        assert self._edge_indexes(plans) == set(), (
+            f"the expression indexes are reachable under a policy after all - "
+            f"the document says they are not: {plans}"
+        )
+        assert any("Seq Scan on graph_edges" in plan for _, plan in plans)
+        with psycopg.connect(DSN) as conn:
+            assert conn.execute(
+                "SELECT proleakproof FROM pg_proc WHERE proname = 'texteq'"
+            ).fetchone()[0], (
+                "texteq is not leakproof, so the reason given above is not the reason"
+            )
+            assert not conn.execute(
+                "SELECT proleakproof FROM pg_proc"
+                " WHERE proname = 'jsonb_object_field_text'"
+            ).fetchone()[0], (
+                "jsonb_object_field_text is leakproof on this server, so the "
+                "cost above has some other cause than the one documented"
+            )
+
+    def test_a_store_that_configured_no_scope_gets_no_policy(
+        self, owner, backends, reported
+    ):
+        """The column, and nothing that would cost it its traversal plan.
+
+        Which is the whole reason the policy is not created unconditionally: a
+        store that keeps no scopes apart would be paying the cost above for a
+        guarantee it did not ask for and does not get.
+        """
+        name, schema, password = owner
+        backend = self._as_owner(owner, backends)
+        reported()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                enabled, policy = conn.execute(
+                    "SELECT c.relrowsecurity,"
+                    " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table),
+                ).fetchone()
+                assert not enabled, f"{table} took row-level security unasked"
+                assert not policy, f"{table} took a policy unasked"
+                assert _stored(schema, table, "id") is not None
+        assert reported() == ""
+        # The column is there all the same, which is what lets a host turn the
+        # seam on later without rewriting a table full of rows.
+        assert _stored(schema, "graph_nodes") == {"a": None}
+
+    @pytest.mark.parametrize(
+        "refuse_on", ["ROW LEVEL SECURITY", "CREATE POLICY"], ids=["enable", "policy"]
+    )
+    def test_a_provisioning_step_that_fails_leaves_nothing_half_done(
+        self, schema, backends, monkeypatch, refuse_on
+    ):
+        """Row-level security with no policy admits NOTHING.
+
+        So the step that enables it and the step that creates the policy have
+        to be one transaction: a store that ended up with the first and not
+        the second would answer every query with an empty graph, and look
+        exactly like a store whose data was gone.
+
+        WITH a scope configured, which is the only case that issues those
+        statements at all - the unscoped path returns before them, so the same
+        test without a scope refuses nothing, asserts that a store which never
+        tried is not half-way, and would pass with the two steps in either
+        order. The refusal count below is asserted for exactly that reason.
+
+        Both steps are refused in turn, because one of them is not enough
+        either. Refusing only the ENABLE leaves the ordering itself untested:
+        a version that enabled row-level security BEFORE creating the policy,
+        and failed in between, would end with the table admitting nothing -
+        and would pass a test that only ever refuses the statement it puts
+        second.
+        """
+        real = psycopg.Cursor.execute
+        refused = []
+
+        def refuse(cur, query, params=None, *args, **kwargs):
+            text = query if isinstance(query, str) else _rendered(query)
+            if refuse_on in text.upper():
+                refused.append(text)
+                raise psycopg.errors.InsufficientPrivilege("refused for the test")
+            return real(cur, query, params, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Cursor, "execute", refuse)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+        # The rollback takes the ADD COLUMN with it, so the store ends with no
+        # column - and a scope with nowhere to go is the refusal, not a warning.
+        with pytest.raises(ScopeIsolationUnavailable):
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        monkeypatch.undo()
+
+        assert refused, "no row-level-security statement was issued to refuse"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                enabled, policy = conn.execute(
+                    "SELECT c.relrowsecurity,"
+                    " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table),
+                ).fetchone()
+                assert not enabled, (
+                    f"{table} was left with row-level security enabled by a "
+                    f"step that did not finish"
+                )
+                assert not policy
+        # And an unscoped instance still reads and writes it, because the
+        # rollback left the table exactly as it found it.
+        plain = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(plain)
+        plain.save_graph_data(snapshot([node_payload("a")]))
+        assert [n["id"] for n in plain.load_graph_data()["nodes"]] == ["a"]
+
+
+class TestTheDocumentPublishesTheScopeSeam:
+    """The names an operator provisions from, pinned from both sides.
+
+    A host binds the setting and provisions the column by NAME, from
+    docs/PERSISTENCE_BACKENDS.md. Renaming either in the code and not in the
+    document leaves every test above green and every operator's store
+    unreadable by the instance that is meant to read it.
+    """
+
+    ROOT = pathlib.Path(__file__).resolve().parents[3]
+    DOC = ROOT / "docs" / "PERSISTENCE_BACKENDS.md"
+    # The repo's canonical environment-variable table, which lists every
+    # sibling of this setting. It reads as exhaustive, so a variable missing
+    # from it reads as one that does not exist.
+    ENV_TABLE = ROOT / "backend" / "DEVELOPMENT.md"
+
+    def test_the_document_names_what_the_code_uses(self):
+        published = self.DOC.read_text(encoding="utf-8")
+        for name in (SCOPE_COLUMN, SCOPE_SETTING, "GRAPH_POSTGRES_SCOPE"):
+            assert name in published, (
+                f"{name} is what the code uses and the document does not name it"
+            )
+        for table in SCOPED_TABLES:
+            assert f"{table}{SCOPE_POLICY_SUFFIX}" in published, (
+                f"the policy on {table} is not in the document an operator "
+                f"provisions from"
+            )
+
+    def test_the_environment_table_lists_the_setting_beside_its_siblings(self):
+        """Pinned because the omission is invisible: the table listed the other
+        four `GRAPH_POSTGRES_*` variables and not this one, and nothing else
+        reads that file."""
+        listed = self.ENV_TABLE.read_text(encoding="utf-8")
+        assert "GRAPH_POSTGRES_POOL_SIZE" in listed, (
+            "this test is pinned to the wrong table"
+        )
+        assert "GRAPH_POSTGRES_SCOPE" in listed, (
+            "the setting is missing from the environment table that lists "
+            "every one of its siblings"
         )

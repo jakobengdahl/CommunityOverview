@@ -1,0 +1,3 @@
+# Test-only fixture value (not a credential) in a commit on the JWT key-length
+# warning branch; replaced by a low-entropy value in a later commit.
+5a9fb041d92553103a909d782a2275195c80595a:services/mcp_oauth_gateway/test_oauth_flow.py:generic-api-key:930

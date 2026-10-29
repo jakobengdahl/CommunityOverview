@@ -145,6 +145,77 @@ describe('GraphCanvas undo/redo of node moves', () => {
     expect(nodeById('node-1').position).toEqual({ x: 500, y: 500 });
   });
 
+  // Drags node-1 out of a group that is NOT at the origin, so converting its
+  // parent-relative position back to absolute needs the real parent's offset:
+  // a wrong or empty group lookup at the drag-stop call site lands the node
+  // at its raw relative coordinates instead.
+  function dragMemberOutOfGroup(groups) {
+    const onNodePositionChange = vi.fn();
+    render(
+      <GraphCanvas nodes={inputNodes} edges={[]} onNodePositionChange={onNodePositionChange} />
+    );
+
+    // Starts at relative (10,10) in g1 at (200,200), i.e. absolute (210,210).
+    const startNode = { id: 'node-1', type: 'custom', position: { x: 10, y: 10 }, parentId: 'g1' };
+    act(() => {
+      store.nodes = [...groups, startNode];
+      store.handlers.onNodeDragStart?.({}, startNode, [startNode]);
+      // Released at relative (500,500): absolute (700,700), outside g1's
+      // 400x400 bounds (200..600), so the drag stop takes it out of the group.
+      const endNode = {
+        id: 'node-1',
+        type: 'custom',
+        position: { x: 500, y: 500 },
+        parentId: 'g1',
+        data: {},
+      };
+      store.nodes = [...groups, endNode];
+      store.handlers.onNodeDragStop?.({}, endNode, [endNode]);
+    });
+    return onNodePositionChange;
+  }
+
+  const groupAt = (id, x, y) => ({
+    id,
+    type: 'group',
+    position: { x, y },
+    style: { width: 400, height: 400 },
+    data: { label: id },
+  });
+
+  it('dragging a member out of a non-origin group commits and records its absolute position', () => {
+    const onNodePositionChange = dragMemberOutOfGroup([groupAt('g1', 200, 200)]);
+
+    expect(nodeById('node-1').parentId).toBeUndefined();
+    expect(nodeById('node-1').position).toEqual({ x: 700, y: 700 });
+
+    // Undo returns it to the group at its parent-relative start ...
+    act(() => {
+      fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
+    });
+    expect(nodeById('node-1').parentId).toBe('g1');
+    expect(nodeById('node-1').position).toEqual({ x: 10, y: 10 });
+
+    // ... and redo replays the recorded absolute placement, not the raw
+    // relative coordinates it was released at.
+    onNodePositionChange.mockClear();
+    act(() => {
+      fireEvent.keyDown(document, { key: 'z', ctrlKey: true, shiftKey: true });
+    });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 700, y: 700 }, 'custom');
+    expect(nodeById('node-1').parentId).toBeUndefined();
+    expect(nodeById('node-1').position).toEqual({ x: 700, y: 700 });
+  });
+
+  it('with duplicate group ids, the drag stop resolves the parent to the first one', () => {
+    // A later duplicate of g1 far away: resolving to it would put the node
+    // at (1500,1500) instead of (700,700).
+    dragMemberOutOfGroup([groupAt('g1', 200, 200), groupAt('g1', 1000, 1000)]);
+
+    expect(nodeById('node-1').parentId).toBeUndefined();
+    expect(nodeById('node-1').position).toEqual({ x: 700, y: 700 });
+  });
+
   it('undo of an Alt+drag restores the anchor and its trailing neighbours as one action', () => {
     const onNodePositionChange = vi.fn();
     const twoNodes = [

@@ -3,6 +3,24 @@ import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css'; // Reuse the same styles
 
+// The backend caps an agent name at 185 so "<name> - Subscription" fits the
+// 200-character Node.name limit; a longer name fails the whole create.
+const AGENT_NAME_MAX_LENGTH = 185;
+
+// The dialog names an agent `<prefix>-node` and its subscription
+// `<prefix>-subscription`. Agents saved before the loop guard used the node id
+// stored `agent:<prefix>`, which never matches the `agent:<agent node id>`
+// origin the runtime stamps on the agent's own writes; saving rewrites it.
+function healedIgnoreOrigins(agentId, subscriptionId, origins) {
+  if (!agentId.endsWith('-node') || !Array.isArray(origins)) return {};
+  const prefix = agentId.slice(0, -'-node'.length);
+  if (subscriptionId !== `${prefix}-subscription` || !origins.includes(`agent:${prefix}`)) {
+    return {};
+  }
+  const healed = origins.map((o) => (o === `agent:${prefix}` ? `agent:${agentId}` : o));
+  return { ignore_origins: [...new Set(healed)] };
+}
+
 /**
  * Dialog for creating an Agent node with its associated EventSubscription.
  *
@@ -158,12 +176,17 @@ export default function CreateAgentDialog({
     e.preventDefault();
 
     if (!name.trim()) {
-      alert('Agent name is required');
+      alert(t('agent_dialog.name_required'));
+      return;
+    }
+
+    if (name.trim().length > AGENT_NAME_MAX_LENGTH) {
+      alert(t('agent_dialog.name_too_long', { max: AGENT_NAME_MAX_LENGTH }));
       return;
     }
 
     if (!taskPrompt.trim()) {
-      alert('Task prompt is required');
+      alert(t('agent_dialog.task_prompt_required'));
       return;
     }
 
@@ -202,8 +225,8 @@ export default function CreateAgentDialog({
       let subscriptionUpdates = null;
       if (subscriptionId && initialData.subscription) {
         subscriptionUpdates = {
-          name: `${name} - Subscription`,
-          description: `Event subscription for agent: ${name}`,
+          name: `${name.trim()} - Subscription`,
+          description: `Event subscription for agent: ${name.trim()}`,
           summary: `Listens to ${Object.entries(operations)
             .filter(([_, v]) => v)
             .map(([k]) => k)
@@ -228,6 +251,11 @@ export default function CreateAgentDialog({
             delivery: {
               ...initialData.subscription.metadata.delivery,
               webhook_url: webhookUrl.trim() || `internal://agent/${agentId}`,
+              ...healedIgnoreOrigins(
+                agentId,
+                subscriptionId,
+                initialData.subscription.metadata.delivery?.ignore_origins
+              ),
             },
           },
         };
@@ -248,9 +276,9 @@ export default function CreateAgentDialog({
       // Create the EventSubscription node
       const subscriptionNode = {
         id: subscriptionId,
-        name: `${name} - Subscription`,
+        name: `${name.trim()} - Subscription`,
         type: 'EventSubscription',
-        description: `Event subscription for agent: ${name}`,
+        description: `Event subscription for agent: ${name.trim()}`,
         summary: `Listens to ${Object.entries(operations)
           .filter(([_, v]) => v)
           .map(([k]) => k)
@@ -272,8 +300,10 @@ export default function CreateAgentDialog({
             },
           },
           delivery: {
-            webhook_url: webhookUrl.trim() || `internal://agent/${idPrefix}`,
-            ignore_origins: [`agent:${idPrefix}`], // Prevent loops - ignore events from this agent
+            webhook_url: webhookUrl.trim() || `internal://agent/${agentId}`,
+            // Prevent loops: the runtime stamps the agent's own writes with
+            // `agent:<agent node id>`, and the dispatcher matches it exactly.
+            ignore_origins: [`agent:${agentId}`],
             ignore_session_ids: [],
           },
         },
@@ -284,7 +314,7 @@ export default function CreateAgentDialog({
         id: agentId,
         name: name.trim(),
         type: 'Agent',
-        description: description.trim() || `AI agent: ${name}`,
+        description: description.trim() || `AI agent: ${name.trim()}`,
         summary: `MCP agent with ${selectedIntegrations.length} integration(s)`,
         aliases: aliasList,
         metadata: {
@@ -315,14 +345,12 @@ export default function CreateAgentDialog({
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{initialData ? 'Edit Agent' : 'Create Agent'}</h2>
-        <p className="dialog-description">
-          An agent listens to graph changes and processes events using an LLM with MCP tools.
-        </p>
+        <h2>{initialData ? t('agent_dialog.title_edit') : t('agent_dialog.title')}</h2>
+        <p className="dialog-description">{t('agent_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>
           <div className="form-section">
-            <h3>Agent Configuration</h3>
+            <h3>{t('agent_dialog.section_config')}</h3>
 
             <div className="form-group">
               <label className="checkbox-label" style={{ marginBottom: '0.75rem' }}>
@@ -331,80 +359,73 @@ export default function CreateAgentDialog({
                   checked={enabled}
                   onChange={(e) => setEnabled(e.target.checked)}
                 />
-                <strong>Enabled</strong>
+                <strong>{t('agent_dialog.enabled_label')}</strong>
                 <span style={{ marginLeft: '0.5rem', color: '#888', fontSize: '0.85rem' }}>
-                  (agent will start processing events when enabled)
+                  {t('agent_dialog.enabled_hint')}
                 </span>
               </label>
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-name">Name *</label>
+              <label htmlFor="agent-name">{t('agent_dialog.name_label')}</label>
               <input
                 id="agent-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. 'Content Enrichment Agent'"
+                placeholder={t('agent_dialog.name_placeholder')}
+                maxLength={AGENT_NAME_MAX_LENGTH}
                 required
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-description">Description</label>
+              <label htmlFor="agent-description">{t('agent_dialog.description_label')}</label>
               <textarea
                 id="agent-description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Optional description of the agent's purpose"
+                placeholder={t('agent_dialog.description_placeholder')}
                 rows={2}
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-aliases">Aliases / synonyms (comma-separated)</label>
+              <label htmlFor="agent-aliases">{t('agent_dialog.aliases_label')}</label>
               <input
                 id="agent-aliases"
                 type="text"
                 value={aliases}
                 onChange={(e) => setAliases(e.target.value)}
-                placeholder="alternative name, abbreviation, synonym"
+                placeholder={t('agent_dialog.aliases_placeholder')}
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-task-prompt">Task Prompt *</label>
+              <label htmlFor="agent-task-prompt">{t('agent_dialog.task_prompt_label')}</label>
               <textarea
                 id="agent-task-prompt"
                 value={taskPrompt}
                 onChange={(e) => setTaskPrompt(e.target.value)}
-                placeholder={`Describe what the agent should do when receiving events. Example:
-
-When a new Initiative node is created:
-1. Use web search to find relevant information
-2. Enrich the node description with key facts
-3. Add relevant tags based on the content`}
+                placeholder={t('agent_dialog.task_prompt_placeholder')}
                 rows={8}
                 required
                 style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
               />
-              <small>
-                This prompt tells the agent how to process events. The agent receives the base
-                system prompt plus this task-specific prompt.
-              </small>
+              <small>{t('agent_dialog.task_prompt_help')}</small>
             </div>
           </div>
 
           <div className="form-section">
-            <h3>MCP Integrations</h3>
+            <h3>{t('agent_dialog.section_integrations')}</h3>
             <p style={{ margin: '0 0 0.75rem 0', color: '#888', fontSize: '0.85rem' }}>
-              Select which tool integrations this agent can use
+              {t('agent_dialog.integrations_help')}
             </p>
 
             {loadingIntegrations ? (
-              <p style={{ color: '#888' }}>Loading integrations...</p>
+              <p style={{ color: '#888' }}>{t('agent_dialog.integrations_loading')}</p>
             ) : availableIntegrations.length === 0 ? (
-              <p style={{ color: '#888' }}>No MCP integrations configured on the server</p>
+              <p style={{ color: '#888' }}>{t('agent_dialog.integrations_empty')}</p>
             ) : (
               <div className="checkbox-group">
                 {availableIntegrations.map((integration) => (
@@ -433,10 +454,10 @@ When a new Initiative node is created:
           </div>
 
           <div className="form-section">
-            <h3>Event Trigger (what events the agent listens to)</h3>
+            <h3>{t('agent_dialog.section_trigger')}</h3>
 
             <div className="form-group">
-              <label>Node Types (empty = all)</label>
+              <label>{t('agent_dialog.node_types_label')}</label>
               <div className="checkbox-group node-types-grid">
                 {nodeTypes.map((type) => (
                   <label key={type} className="checkbox-label">
@@ -452,7 +473,7 @@ When a new Initiative node is created:
             </div>
 
             <div className="form-group">
-              <label>Operations</label>
+              <label>{t('agent_dialog.operations_label')}</label>
               <div className="checkbox-group">
                 <label className="checkbox-label">
                   <input
@@ -460,7 +481,7 @@ When a new Initiative node is created:
                     checked={operations.create}
                     onChange={() => handleToggleOperation('create')}
                   />
-                  Create
+                  {t('agent_dialog.op_create')}
                 </label>
                 <label className="checkbox-label">
                   <input
@@ -468,7 +489,7 @@ When a new Initiative node is created:
                     checked={operations.update}
                     onChange={() => handleToggleOperation('update')}
                   />
-                  Update
+                  {t('agent_dialog.op_update')}
                 </label>
                 <label className="checkbox-label">
                   <input
@@ -476,24 +497,21 @@ When a new Initiative node is created:
                     checked={operations.delete}
                     onChange={() => handleToggleOperation('delete')}
                   />
-                  Delete
+                  {t('agent_dialog.op_delete')}
                 </label>
               </div>
             </div>
 
             <div className="form-group">
-              <label htmlFor="agent-keywords">Keywords (comma-separated, optional)</label>
+              <label htmlFor="agent-keywords">{t('agent_dialog.keywords_label')}</label>
               <input
                 id="agent-keywords"
                 type="text"
                 value={keywords}
                 onChange={(e) => setKeywords(e.target.value)}
-                placeholder="Leave empty to match all events"
+                placeholder={t('agent_dialog.keywords_placeholder')}
               />
-              <small>
-                Optional: only trigger for events containing these keywords. Leave empty to match
-                all events matching the node type and operation filters above.
-              </small>
+              <small>{t('agent_dialog.keywords_help')}</small>
             </div>
           </div>
 
@@ -517,10 +535,10 @@ When a new Initiative node is created:
               </button>
             )}
             <button type="button" className="btn-secondary" onClick={onClose}>
-              Cancel
+              {t('agent_dialog.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              {initialData ? 'Save Changes' : 'Create Agent'}
+              {initialData ? t('agent_dialog.submit_edit') : t('agent_dialog.submit')}
             </button>
           </div>
         </form>

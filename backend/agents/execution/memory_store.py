@@ -19,11 +19,15 @@ import threading
 from datetime import timedelta
 from typing import Dict, List, Optional, Sequence
 
+from backend.core.actor_attribution import replace_attribution, validate_erasure
+
 from .models import (
+    ABANDONED_REASON,
     ExecutionJob,
     ExecutionKind,
     ExecutionState,
     RetryPolicy,
+    redact_job,
     utcnow,
 )
 from .store import JobNotFoundError
@@ -42,6 +46,26 @@ class InMemoryExecutionStore:
     # ------------------------------------------------------------------
     # Producer side
     # ------------------------------------------------------------------
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            for job in self._jobs.values():
+                before = {
+                    "payload": job.payload,
+                    "result": job.result,
+                    "origin": job.origin,
+                }
+                after = replace_attribution(
+                    before, actor_id, replacement_token, envelope="run"
+                )
+                if after != before:
+                    job.payload = after["payload"]
+                    job.result = after["result"]
+                    job.origin = after["origin"]
+                    count += 1
+        return count
 
     def enqueue(self, job: ExecutionJob) -> ExecutionJob:
         with self._lock:
@@ -146,13 +170,14 @@ class InMemoryExecutionStore:
                 )
             return job.copy()
 
-    def cancel(self, job_id: str, *, now=None) -> bool:
+    def cancel(self, job_id: str, *, result=None, now=None) -> bool:
         now = now or utcnow()
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.is_terminal:
                 return False
             job.state = ExecutionState.CANCELLED
+            job.result = dict(result) if result is not None else None
             job.lease_owner = None
             job.lease_expiry = None
             job.finished_at = now
@@ -191,6 +216,7 @@ class InMemoryExecutionStore:
         agent_id: Optional[str] = None,
         kind: Optional[ExecutionKind] = None,
         limit: Optional[int] = None,
+        created_after=None,
     ) -> List[ExecutionJob]:
         state_set = set(states) if states else None
         with self._lock:
@@ -200,11 +226,81 @@ class InMemoryExecutionStore:
                 if (state_set is None or job.state in state_set)
                 and (agent_id is None or job.agent_id == agent_id)
                 and (kind is None or job.kind == kind)
+                and (created_after is None or job.created_at > created_after)
             ]
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         if limit is not None:
             jobs = jobs[:limit]
         return jobs
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    def list_terminal_older_than(
+        self, cutoff, *, redacted: Optional[bool] = None
+    ) -> List[ExecutionJob]:
+        with self._lock:
+            jobs = [
+                job.copy()
+                for job in self._jobs.values()
+                if job.is_terminal
+                and job.terminal_at < cutoff
+                and (redacted is None or (job.redacted_at is not None) == redacted)
+            ]
+        jobs.sort(key=lambda j: j.terminal_at)
+        return jobs
+
+    def list_running_older_than(self, cutoff) -> List[ExecutionJob]:
+        with self._lock:
+            jobs = [
+                job.copy()
+                for job in self._jobs.values()
+                if self._abandonable(job, cutoff)
+            ]
+        jobs.sort(key=lambda j: j.updated_at)
+        return jobs
+
+    def abandon(self, job_ids: Sequence[str], *, cutoff, now=None) -> int:
+        now = now or utcnow()
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not self._abandonable(job, cutoff):
+                    continue
+                job.state = ExecutionState.DEAD_LETTER
+                job.dead_letter_reason = ABANDONED_REASON
+                job.lease_owner = None
+                job.lease_expiry = None
+                job.finished_at = job.updated_at
+                job.updated_at = now
+                count += 1
+        return count
+
+    def redact(self, job_ids: Sequence[str], *, now=None) -> int:
+        now = now or utcnow()
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not job.is_terminal or job.redacted_at is not None:
+                    continue
+                redact_job(job, now)
+                count += 1
+        return count
+
+    def purge(self, job_ids: Sequence[str]) -> int:
+        count = 0
+        with self._lock:
+            for job_id in set(job_ids):
+                job = self._jobs.get(job_id)
+                if job is None or not job.is_terminal:
+                    continue
+                del self._jobs[job_id]
+                self._by_key.pop(job.idempotency_key, None)
+                count += 1
+        return count
 
     # ------------------------------------------------------------------
     # Internal helpers (call under self._lock)
@@ -215,6 +311,10 @@ class InMemoryExecutionStore:
         if job is None:
             raise JobNotFoundError(job_id)
         return job
+
+    @staticmethod
+    def _abandonable(job: ExecutionJob, cutoff) -> bool:
+        return job.state == ExecutionState.RUNNING and job.updated_at < cutoff
 
     @staticmethod
     def _lease_expired(job: ExecutionJob, now) -> bool:

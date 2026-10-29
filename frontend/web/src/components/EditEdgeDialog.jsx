@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import StagedEditNotice from './StagedEditNotice';
 import { useI18n } from '../i18n';
 import EntityHistoryView from './EntityHistoryView';
 import './EditNodeDialog.css';
@@ -194,139 +195,142 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
             <EntityHistoryView entityKind="edge" entityId={edge.id} />
           </div>
         ) : (
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label>{t('edit_edge.connection')}</label>
-              <div style={{ color: '#aaa', fontSize: '0.9rem', padding: '8px 0' }}>
-                {sourceName} &rarr; {targetName}
+          <>
+            <StagedEditNotice />
+            <form onSubmit={handleSubmit}>
+              <div className="form-group">
+                <label>{t('edit_edge.connection')}</label>
+                <div style={{ color: '#aaa', fontSize: '0.9rem', padding: '8px 0' }}>
+                  {sourceName} &rarr; {targetName}
+                </div>
               </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="edge-type">{t('edit_edge.type')}</label>
-              <select id="edge-type" name="type" value={formData.type} onChange={handleChange}>
-                <option value="">{t('edit_edge.no_type')}</option>
-                {relationshipTypes.map((rt) => (
-                  <option key={rt.type || rt} value={rt.type || rt}>
-                    {rt.type || rt}
-                    {rt.description ? ` - ${rt.description}` : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="edge-label">{t('edit_edge.label_field')}</label>
-              <input
-                type="text"
-                id="edge-label"
-                name="label"
-                value={formData.label}
-                onChange={handleChange}
-                placeholder={t('edit_edge.label_placeholder')}
-              />
-            </div>
-
-            <div className="form-group">
-              <label>{t('edit_edge.appearance')}</label>
 
               <div className="form-group">
-                <label htmlFor="edge-direction">{t('edit_edge.direction')}</label>
-                <select
-                  id="edge-direction"
-                  name="direction"
-                  value={appearance.direction}
-                  onChange={handleAppearanceChange}
-                >
-                  <option value="none">{t('edit_edge.direction_none')}</option>
-                  <option value="forward">{t('edit_edge.direction_forward')}</option>
-                  <option value="backward">{t('edit_edge.direction_backward')}</option>
-                  <option value="both">{t('edit_edge.direction_both')}</option>
+                <label htmlFor="edge-type">{t('edit_edge.type')}</label>
+                <select id="edge-type" name="type" value={formData.type} onChange={handleChange}>
+                  <option value="">{t('edit_edge.no_type')}</option>
+                  {relationshipTypes.map((rt) => (
+                    <option key={rt.type || rt} value={rt.type || rt}>
+                      {rt.type || rt}
+                      {rt.description ? ` - ${rt.description}` : ''}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div className="form-group">
-                <label htmlFor="edge-arrow">{t('edit_edge.arrow_style')}</label>
-                <select
-                  id="edge-arrow"
-                  name="arrow"
-                  value={appearance.arrow}
-                  onChange={handleAppearanceChange}
-                >
-                  <option value="closed">{t('edit_edge.arrow_closed')}</option>
-                  <option value="open">{t('edit_edge.arrow_open')}</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="edge-thickness">
-                  {t('edit_edge.thickness')} ({appearance.thickness}px)
-                </label>
+                <label htmlFor="edge-label">{t('edit_edge.label_field')}</label>
                 <input
-                  type="range"
-                  id="edge-thickness"
-                  name="thickness"
-                  min="1"
-                  max="12"
-                  step="1"
-                  value={appearance.thickness}
-                  onChange={handleAppearanceChange}
+                  type="text"
+                  id="edge-label"
+                  name="label"
+                  value={formData.label}
+                  onChange={handleChange}
+                  placeholder={t('edit_edge.label_placeholder')}
                 />
               </div>
 
               <div className="form-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    name="useColor"
-                    checked={appearance.useColor}
+                <label>{t('edit_edge.appearance')}</label>
+
+                <div className="form-group">
+                  <label htmlFor="edge-direction">{t('edit_edge.direction')}</label>
+                  <select
+                    id="edge-direction"
+                    name="direction"
+                    value={appearance.direction}
                     onChange={handleAppearanceChange}
-                  />{' '}
-                  {t('edit_edge.custom_color')}
-                </label>
-                {appearance.useColor && (
-                  <input
-                    type="color"
-                    name="color"
-                    value={appearance.color}
+                  >
+                    <option value="none">{t('edit_edge.direction_none')}</option>
+                    <option value="forward">{t('edit_edge.direction_forward')}</option>
+                    <option value="backward">{t('edit_edge.direction_backward')}</option>
+                    <option value="both">{t('edit_edge.direction_both')}</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="edge-arrow">{t('edit_edge.arrow_style')}</label>
+                  <select
+                    id="edge-arrow"
+                    name="arrow"
+                    value={appearance.arrow}
                     onChange={handleAppearanceChange}
-                    aria-label={t('edit_edge.color')}
+                  >
+                    <option value="closed">{t('edit_edge.arrow_closed')}</option>
+                    <option value="open">{t('edit_edge.arrow_open')}</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="edge-thickness">
+                    {t('edit_edge.thickness')} ({appearance.thickness}px)
+                  </label>
+                  <input
+                    type="range"
+                    id="edge-thickness"
+                    name="thickness"
+                    min="1"
+                    max="12"
+                    step="1"
+                    value={appearance.thickness}
+                    onChange={handleAppearanceChange}
                   />
+                </div>
+
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      name="useColor"
+                      checked={appearance.useColor}
+                      onChange={handleAppearanceChange}
+                    />{' '}
+                    {t('edit_edge.custom_color')}
+                  </label>
+                  {appearance.useColor && (
+                    <input
+                      type="color"
+                      name="color"
+                      value={appearance.color}
+                      onChange={handleAppearanceChange}
+                      aria-label={t('edit_edge.color')}
+                    />
+                  )}
+                </div>
+
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      name="animated"
+                      checked={appearance.animated}
+                      onChange={handleAppearanceChange}
+                    />{' '}
+                    {t('edit_edge.animate')}
+                  </label>
+                </div>
+              </div>
+
+              <div className="form-actions">
+                {onDelete && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    style={{ color: '#ef4444', borderColor: '#ef4444', marginRight: 'auto' }}
+                    onClick={handleDelete}
+                  >
+                    {t('context_menu.delete')}
+                  </button>
                 )}
-              </div>
-
-              <div className="form-group">
-                <label>
-                  <input
-                    type="checkbox"
-                    name="animated"
-                    checked={appearance.animated}
-                    onChange={handleAppearanceChange}
-                  />{' '}
-                  {t('edit_edge.animate')}
-                </label>
-              </div>
-            </div>
-
-            <div className="form-actions">
-              {onDelete && (
-                <button
-                  type="button"
-                  className="secondary"
-                  style={{ color: '#ef4444', borderColor: '#ef4444', marginRight: 'auto' }}
-                  onClick={handleDelete}
-                >
-                  {t('context_menu.delete')}
+                <button type="button" className="secondary" onClick={onClose}>
+                  {t('common.cancel')}
                 </button>
-              )}
-              <button type="button" className="secondary" onClick={onClose}>
-                {t('common.cancel')}
-              </button>
-              <button type="submit" className="primary">
-                {t('common.save')}
-              </button>
-            </div>
-          </form>
+                <button type="submit" className="primary">
+                  {t('common.save')}
+                </button>
+              </div>
+            </form>
+          </>
         )}
       </div>
     </div>

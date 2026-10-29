@@ -42,6 +42,9 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core import storage_search  # noqa: E402
+from backend.core.tests.test_traversal_walk_lookup import (  # noqa: E402
+    _VanishingOnLookup,
+)
 from backend.core.postgres_backend import (  # noqa: E402
     PostgresGraphPersistenceBackend,
 )
@@ -1056,59 +1059,50 @@ class TestTheRoutingItselfIsCovered:
             "asked to traverse"
         )
 
-    def test_a_failed_write_closes_the_guard_even_though_the_future_is_done(
-        self, schema
-    ):
-        """A write that raised leaves the Future `done()` while the store is
-        genuinely behind, so `done()` alone is not enough - the resync flag is
-        the only thing holding the freshness guarantee in that window.
+    def test_a_failed_write_leaves_no_gap_for_the_guard_to_cover(self, schema):
+        """A store that enforces revisions waits for every write and resolves
+        a failed one before the call returns (SESSION_OVERLAY_CONTRACT.md
+        §4.4), so the window the resync flag used to guard - a Future done
+        while the store is behind - no longer opens: the write is undone in
+        memory, nothing is owed, and the store's answer and the walk agree.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
+        from backend.core.storage_backends import GraphWriteFailed
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         storage = GraphStorage(persistence_backend=backend)
+        storage.WRITE_RESOLVE_DELAY_SECONDS = 0.0
         try:
             storage.add_nodes(
                 [Node(id="a", type=NodeType.ACTOR, name="a")],
                 [],
             )
-            storage.flush()
 
             def _refuse(*args, **kwargs):
                 raise RuntimeError("write refused")
 
             backend.apply_batch = _refuse
-            storage.add_nodes(
-                [Node(id="b", type=NodeType.ACTOR, name="b")],
-                [
-                    Edge(
-                        id="ab",
-                        source="a",
-                        target="b",
-                        type=RelationshipType.RELATES_TO,
-                    )
-                ],
-            )
-            write = storage._last_write
-            if write is not None:
-                # Drain it; the exception is the point, not a problem here.
-                try:
-                    write.result()
-                except Exception:
-                    pass
-                assert write.done()
+            with pytest.raises(GraphWriteFailed):
+                storage.add_nodes(
+                    [Node(id="b", type=NodeType.ACTOR, name="b")],
+                    [
+                        Edge(
+                            id="ab",
+                            source="a",
+                            target="b",
+                            type=RelationshipType.RELATES_TO,
+                        )
+                    ],
+                )
 
-            assert storage._resync_pending, (
-                "the failed write should have flagged the store as owed the whole graph"
+            assert not storage._resync_pending, (
+                "a failed write to this store is resolved, not left owed"
             )
-            assert storage._store_traversal_is_current() is False, (
-                "the Future is done and the store is still behind; only the "
-                "resync flag can tell these apart"
-            )
+            assert storage._store_traversal_is_current() is True
             result = storage.get_related_nodes("a", depth=1)
-            assert {n.id for n in result["nodes"]} == {"a", "b"}, (
-                "the walk still holds the write the store never got; got "
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                "memory kept a write the store never got; got "
                 f"{sorted(n.id for n in result['nodes'])}"
             )
         finally:
@@ -1383,35 +1377,19 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
-    def test_a_delete_between_the_check_and_the_lookup_does_not_raise(self, schema):
-        """The delete-based test above removes the node BEFORE the call, which
-        a check-then-use survives: the membership test already fails. What
-        that shape cannot reach is the window the comment is actually about -
-        a delete landing between the `in` and the `[]`, which this path is
-        exposed to because it takes no lock while every mutator holds one.
-        A dict whose membership test is true and whose lookup then misses is
-        that window, made deterministic.
+    @staticmethod
+    def _vanishing_lookup_storage(schema, monkeypatch):
+        """A storage whose store has `a -ab-> b` and will answer, with the
+        walk replaced by a spy that fails the test if it is called: these
+        tests are about the store engine's resolution, and a fallback to the
+        walk would pass them without exercising it.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
 
-        class _VanishingOnLookup(dict):
-            """Says yes, then loses the key - exactly one id, exactly once."""
-
-            def __init__(self, *args, victim=None, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.victim = victim
-
-            def __contains__(self, key):
-                present = super().__contains__(key)
-                if key == self.victim:
-                    super().pop(key, None)
-                    self.victim = None
-                return present
-
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        storage = GraphStorage(persistence_backend=backend)
         try:
+            storage = GraphStorage(persistence_backend=backend)
             storage.add_nodes(
                 [
                     Node(id="a", type=NodeType.ACTOR, name="a"),
@@ -1427,13 +1405,52 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
                 ],
             )
             storage.flush()
+        except BaseException:
+            backend.close()
+            raise
 
-            storage.nodes = _VanishingOnLookup(storage.nodes, victim="b")
-            # Must not raise. The answer may come from either engine - what
-            # this pins is that a traversal does not turn into a KeyError out
-            # of the API.
+        def _walk_called(*args, **kwargs):
+            raise AssertionError("the walk answered; the store was meant to")
+
+        monkeypatch.setattr(storage_search, "get_related_nodes", _walk_called)
+        return backend, storage
+
+    def test_a_node_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """A test of the entry point when the store answers. It swaps
+        `storage.nodes` for a dict that loses `b` on its first observation by
+        any instrumented route, so a check-then-use in the store engine's node
+        resolution turns into a KeyError here. It says nothing about the walk:
+        the store answers, its `.get()` of `b` is the fixture's one
+        observation, and the walk is never called. The walk-level tests in
+        `test_traversal_walk_lookup.py` pin the walk.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.nodes, victim="b")
+            storage.nodes = vanishing
             result = storage.get_related_nodes("a", depth=1)
-            assert "a" in {n.id for n in result["nodes"]}
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            backend.close()
+
+    def test_an_edge_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """The edge twin: `storage.edges` loses `ab` on its first observation,
+        so a check-then-use in the store engine's edge resolution raises here.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.edges, victim="ab")
+            storage.edges = vanishing
+            result = storage.get_related_nodes("a", depth=1)
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
         finally:
             backend.close()
 
@@ -1610,7 +1627,12 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
             counted = []
 
             def _counting(self, query, *args, **kwargs):
-                counted.append(query)
+                text = str(query)
+                # The graph-identity guard may run once at the start of the
+                # first traversal in a fresh backend. These tests measure
+                # traversal convergence only, so ignore that guard query.
+                if "graph_metadata" not in text:
+                    counted.append(query)
                 return original(self, query, *args, **kwargs)
 
             # Every depth from the exact one to far beyond it: a bound taken
@@ -1681,7 +1703,12 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         counted = []
 
         def _counting(self, query, *args, **kwargs):
-            counted.append(query)
+            text = str(query)
+            # The graph-identity guard may run once at the start of the first
+            # traversal in a fresh backend. These tests measure traversal
+            # convergence only, so ignore that guard query.
+            if "graph_metadata" not in text:
+                counted.append(query)
             return original(self, query, *args, **kwargs)
 
         try:

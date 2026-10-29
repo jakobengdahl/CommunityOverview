@@ -15,7 +15,7 @@ import uuid
 # Version of the mutation event envelope emitted to subscribers. Bump this when
 # the event payload shape changes so external consumers can negotiate/adapt.
 # Backwards-incompatible changes require a major bump and a migration note.
-EVENT_SCHEMA_VERSION = "1.0"
+EVENT_SCHEMA_VERSION = "1.1"
 
 
 class EventType(str, Enum):
@@ -144,19 +144,37 @@ class EventContext(BaseModel):
     event_correlation_id: Optional[str] = Field(
         None, description="Correlation ID for chaining related events"
     )
+    event_causation_depth: int = Field(
+        0,
+        ge=0,
+        strict=True,
+        description="Number of agent executions causing this event",
+    )
     attribution: Optional[EventAttribution] = Field(
         None,
         description="Generic actor and scope attribution for audit-friendly mutation tracking",
     )
+    staged_by: Optional[str] = Field(
+        None,
+        description=(
+            "For a write a session merge applied: the actor who staged the change "
+            "(the merging actor is in attribution)"
+        ),
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization."""
-        return {
+        data = {
             "event_origin": self.event_origin,
             "event_session_id": self.event_session_id,
             "event_correlation_id": self.event_correlation_id,
+            "event_causation_depth": self.event_causation_depth,
             "attribution": self.attribution.to_dict() if self.attribution else None,
         }
+        if self.staged_by is not None:
+            # Only on a merged write, so every other event reads as before.
+            data["staged_by"] = self.staged_by
+        return data
 
 
 class EntityData(BaseModel):
@@ -259,6 +277,8 @@ class DeliveryResult(BaseModel):
     status_code: Optional[int] = None
     error_message: Optional[str] = None
     delivered_at: Optional[datetime] = None
+    delivery_id: str = ""
+    correlation_id: str = ""
 
 
 # Subscription configuration models (stored in EventSubscription node metadata)

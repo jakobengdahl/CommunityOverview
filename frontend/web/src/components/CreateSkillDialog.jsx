@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
+import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
 
 export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave, initialData }) {
+  const { t } = useI18n();
   const isEditing = !!initialData;
 
   const [name, setName] = useState('');
@@ -44,7 +46,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
       source_url: sourceUrl.trim(),
       allowed_tools: allowedTools
         .split(',')
-        .map((t) => t.trim())
+        .map((tool) => tool.trim())
         .filter(Boolean),
       version: version.trim(),
       effort: effort.trim(),
@@ -78,83 +80,85 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
   return (
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{isEditing ? `Edit ${nodeType}` : `Create ${nodeType}`}</h2>
-        <p className="dialog-description">
-          Defines reusable instructions for an AI agent. Compatible with the SKILL.md format.
-        </p>
+        <h2>
+          {isEditing
+            ? t('skill_dialog.title_edit', { type: nodeType })
+            : t('skill_dialog.title', { type: nodeType })}
+        </h2>
+        <p className="dialog-description">{t('skill_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>
           <div className="form-section">
-            <h3>Basic information</h3>
+            <h3>{t('skill_dialog.section_basic')}</h3>
 
             <div className="form-group">
-              <label htmlFor="skill-name">Name *</label>
+              <label htmlFor="skill-name">{t('skill_dialog.name_label')}</label>
               <input
                 id="skill-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="E.g. 'Graph analysis'"
+                placeholder={t('skill_dialog.name_placeholder')}
                 required
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="skill-description">Description</label>
+              <label htmlFor="skill-description">{t('skill_dialog.description_label')}</label>
               <textarea
                 id="skill-description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Short description of what this skill does"
+                placeholder={t('skill_dialog.description_placeholder')}
                 rows={2}
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="skill-aliases">Aliases / synonyms (comma-separated)</label>
+              <label htmlFor="skill-aliases">{t('skill_dialog.aliases_label')}</label>
               <input
                 id="skill-aliases"
                 type="text"
                 value={aliases}
                 onChange={(e) => setAliases(e.target.value)}
-                placeholder="alternative name, abbreviation, synonym"
+                placeholder={t('skill_dialog.aliases_placeholder')}
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="skill-when">When to use</label>
+              <label htmlFor="skill-when">{t('skill_dialog.when_label')}</label>
               <textarea
                 id="skill-when"
                 value={whenToUse}
                 onChange={(e) => setWhenToUse(e.target.value)}
-                placeholder="Describe the situations where the agent should apply this skill"
+                placeholder={t('skill_dialog.when_placeholder')}
                 rows={3}
               />
             </div>
           </div>
 
           <div className="form-section">
-            <h3>Skill instructions</h3>
+            <h3>{t('skill_dialog.section_instructions')}</h3>
 
             <div className="form-group">
-              <label htmlFor="skill-content">Content (SKILL.md)</label>
+              <label htmlFor="skill-content">{t('skill_dialog.content_label')}</label>
               <textarea
                 id="skill-content"
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
-                placeholder={`## Steps\n1. ...\n2. ...\n\n## Output format\n...`}
+                placeholder={t('skill_dialog.content_placeholder')}
                 rows={10}
                 style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
               />
-              <small>Markdown instructions for the agent. Follows SKILL.md format.</small>
+              <small>{t('skill_dialog.content_help')}</small>
             </div>
           </div>
 
           <div className="form-section">
-            <h3>Metadata</h3>
+            <h3>{t('skill_dialog.section_metadata')}</h3>
 
             <div className="form-group">
-              <label htmlFor="skill-source-url">Source URL</label>
+              <label htmlFor="skill-source-url">{t('skill_dialog.source_url_label')}</label>
               <input
                 id="skill-source-url"
                 type="text"
@@ -162,11 +166,11 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 onChange={(e) => setSourceUrl(e.target.value)}
                 placeholder="https://github.com/org/repo/blob/main/SKILL.md"
               />
-              <small>Optional: URL to the original SKILL.md file or GitHub repo.</small>
+              <small>{t('skill_dialog.source_url_help')}</small>
             </div>
 
             <div className="form-group">
-              <label htmlFor="skill-tools">Allowed tools (comma-separated)</label>
+              <label htmlFor="skill-tools">{t('skill_dialog.allowed_tools_label')}</label>
               <input
                 id="skill-tools"
                 type="text"
@@ -178,7 +182,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
             <div style={{ display: 'flex', gap: '1rem' }}>
               <div className="form-group" style={{ flex: 1 }}>
-                <label htmlFor="skill-version">Version</label>
+                <label htmlFor="skill-version">{t('skill_dialog.version_label')}</label>
                 <input
                   id="skill-version"
                   type="text"
@@ -188,7 +192,7 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                 />
               </div>
               <div className="form-group" style={{ flex: 1 }}>
-                <label htmlFor="skill-effort">Effort</label>
+                <label htmlFor="skill-effort">{t('skill_dialog.effort_label')}</label>
                 <select
                   id="skill-effort"
                   value={effort}
@@ -202,10 +206,10 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
                     color: 'inherit',
                   }}
                 >
-                  <option value="">— unset —</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
+                  <option value="">{t('skill_dialog.effort_unset')}</option>
+                  <option value="low">{t('skill_dialog.effort_low')}</option>
+                  <option value="medium">{t('skill_dialog.effort_medium')}</option>
+                  <option value="high">{t('skill_dialog.effort_high')}</option>
                 </select>
               </div>
             </div>
@@ -213,10 +217,12 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
           <div className="dialog-actions">
             <button type="button" className="btn-secondary" onClick={onClose}>
-              Cancel
+              {t('skill_dialog.cancel')}
             </button>
             <button type="submit" className="btn-primary">
-              {isEditing ? 'Save changes' : `Create ${nodeType}`}
+              {isEditing
+                ? t('skill_dialog.submit_edit')
+                : t('skill_dialog.submit', { type: nodeType })}
             </button>
           </div>
         </form>

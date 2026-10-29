@@ -1,0 +1,1237 @@
+"""
+Whole-graph import orchestration: validate -> backup -> replace -> enqueue
+embeddings.
+
+This module is the sequencing layer described in
+docs/adr/0006-graph-import-replace-mode.md. It owns none of the mechanics
+itself: validation lives in ``graph_import.py``, the atomic swap lives on
+``GraphStorage.replace_all_nodes_and_edges``, and background embedding
+generation lives in ``backend.agents.execution.import_worker``. This module
+just calls them in the right order and reports what happened at each stage.
+
+Sequencing and failure handling (see the PR / ADR for the full guarantee
+list):
+
+  1. Authorize the caller for a graph mutation, and refuse outright if the
+     caller's access is narrowed to a subset of the graph — a REPLACE import
+     acts on the WHOLE graph, and a caller who can only see part of it must
+     never be able to make the part they cannot see disappear.
+  2. Validate the whole document. Any problem: return every problem found,
+     touch nothing.
+  3. Write a pre-import backup of the CURRENT graph. If this fails, refuse to
+     proceed — an import that could not be protected by a backup must not run
+     one.
+  4. Replace the live graph atomically. If the commit fails partway, the
+     storage layer restores the in-memory graph to what it was, so the caller
+     is guaranteed the live graph is either the fully-imported graph or the
+     original graph, never a mix.
+  5. Enqueue a durable background job to (re)generate embeddings for the new
+     graph, and kick a worker thread to start draining it immediately. Return
+     success without waiting for embeddings — they are best-effort and
+     regeneratable, never a precondition for the graph itself being valid.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+from backend.core.storage_backends import (
+    EntityRevisionConflict,
+    GraphWriteFailed,
+    GraphWriteOutcomeUnknown,
+)
+from backend.core.storage_merge import ImportMergeUnsupported
+from backend.runtime.extensions import MutationPolicyDenied
+from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
+
+from . import access, graph_archive, graph_merge_plan
+from .graph_import import validate_import_document
+from .serializers import serialize_edges, serialize_nodes
+
+if TYPE_CHECKING:
+    from backend.agents.execution import ExecutionJob, ExecutionStore
+    from backend.core import GraphStorage
+    from backend.core.events.models import EventContext
+    from backend.core.storage_merge import MergeWrites
+    from backend.runtime.authorization import GraphAuthorizationHook
+
+    from .attachments import AttachmentSettings
+
+logger = logging.getLogger(__name__)
+
+BACKUP_SUBDIR = "import-backups"
+
+_PREVIEW_SLOT = threading.BoundedSemaphore(1)
+_COMMIT_SLOT = threading.BoundedSemaphore(1)
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat().replace("+00:00", "Z") if dt is not None else None
+
+
+def _write_backup(storage: "GraphStorage") -> Optional[str]:
+    """
+    Snapshot the CURRENT graph to a timestamped file before it is replaced.
+
+    Written in the same nodes/edges/metadata shape ``GET /export`` returns
+    (docs/DATA_MANAGEMENT.md "Graph JSON Format"), so it can be re-imported
+    as-is to undo an import after the fact. Returns the path, or None if the
+    backup could not be written (the caller must then refuse to import rather
+    than proceed unprotected).
+    """
+    try:
+        backup_dir = storage.json_path.parent / BACKUP_SUBDIR
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / f"import-backup-{stamp}-{uuid.uuid4().hex[:8]}.json"
+        content = {
+            "version": "1.0",
+            "exportDate": datetime.now(timezone.utc).isoformat(),
+            "nodes": serialize_nodes(storage.get_all_nodes()),
+            "edges": serialize_edges(storage.get_all_edges()),
+        }
+        tmp_path = backup_path.with_suffix(backup_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(content, fh)
+        os.replace(tmp_path, backup_path)
+        return str(backup_path)
+    except OSError as exc:
+        logger.error("Import: could not write pre-import backup: %s", exc)
+        return None
+
+
+def _enqueue_embedding_job(
+    execution_store: "ExecutionStore",
+    *,
+    node_count: int,
+    backup_path: Optional[str],
+    graph_generation: int,
+    correlation_id: Optional[str],
+    session_id: Optional[str],
+    origin: Optional[str],
+    merge_import_id: Optional[str] = None,
+) -> "ExecutionJob":
+    from backend.agents.execution import ExecutionJob, ExecutionKind
+
+    merge = {"mode": "merge", "import_id": merge_import_id} if merge_import_id else {}
+
+    job = ExecutionJob(
+        agent_id="system:graph-import",
+        kind=ExecutionKind.IMPORT,
+        idempotency_key=f"import:{uuid.uuid4()}",
+        payload={
+            "phase": "embeddings",
+            "node_count": node_count,
+            "backup_path": backup_path,
+            # The graph's generation right after THIS import's replace
+            # landed. The worker re-checks this against the live graph
+            # before writing any embedding back, so a job left running past a
+            # later import (a slow encode, or a crash-recovered job) never
+            # overwrites that later import's content — see
+            # GraphStorage.commit_generation_embeddings.
+            "graph_generation": graph_generation,
+            **merge,
+        },
+        correlation_id=correlation_id,
+        session_id=session_id,
+        origin=origin,
+    )
+    return execution_store.enqueue(job)
+
+
+def _start_embedding_drain(
+    execution_store: "ExecutionStore", storage: "GraphStorage"
+) -> None:
+    from backend.agents.execution.import_worker import drain_import_jobs
+
+    def _run() -> None:
+        try:
+            drain_import_jobs(execution_store, storage)
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: never crash the thread silently
+            logger.exception("Import embeddings worker thread failed")
+
+    threading.Thread(target=_run, name="import-embeddings-worker", daemon=True).start()
+
+
+@dataclass(frozen=True)
+class _ReplaceOutcome:
+    """What survived a successful validate -> backup -> replace, carried
+    forward to whichever embeddings path the caller takes next."""
+
+    node_count: int
+    edge_count: int
+    backup_path: str
+    graph_generation: int
+
+
+def _validate_backup_replace(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    document: Any,
+    *,
+    event_context=None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[_ReplaceOutcome]]:
+    """The validate -> backup -> replace half of a whole-graph import.
+
+    Shared by ``import_graph`` (plain ``graph.json``) and
+    ``import_graph_archive`` (the archive's ``graph.json`` member) — see
+    docs/adr/0007-vector-aware-export-archive.md, "Reusing the PR #664
+    pipeline". Only what happens to embeddings afterward differs between the
+    two callers, which is why this stops right after the replace and leaves
+    that decision to them.
+
+    Returns ``(error_result, None)`` on any failure (nothing was written to
+    the live graph in that case, exactly as ``import_graph`` has always
+    guaranteed), or ``(None, outcome)`` once the graph has been durably
+    replaced.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="import_graph"
+    )
+    if not decision.allowed:
+        return (
+            access.build_access_denied_result(
+                action=GRAPH_ACTION_MUTATE, target="import_graph", decision=decision
+            ),
+            None,
+        )
+    if decision.graph_access.enabled:
+        return (
+            {
+                "success": False,
+                "error_code": "import_requires_full_graph_access",
+                "message": (
+                    "Whole-graph import replaces the entire active graph and is "
+                    "refused while the caller's access is narrowed to a subset of "
+                    "it — a full replace could remove content the caller cannot "
+                    "even see."
+                ),
+                "graph_replaced": False,
+            },
+            None,
+        )
+
+    validation = validate_import_document(document)
+    if not validation.valid:
+        return (
+            {
+                "success": False,
+                "error_code": "validation_failed",
+                "message": (
+                    f"{validation.error_count} problem(s) found in the import "
+                    f"document; the graph was not changed."
+                ),
+                "errors": [issue.to_dict() for issue in validation.errors],
+                "graph_replaced": False,
+            },
+            None,
+        )
+
+    backup_path = _write_backup(storage)
+    if backup_path is None:
+        return (
+            {
+                "success": False,
+                "error_code": "backup_failed",
+                "message": (
+                    "Could not write a pre-import backup of the current graph; "
+                    "the import was refused and the graph was not changed."
+                ),
+                "graph_replaced": False,
+            },
+            None,
+        )
+
+    try:
+        storage.replace_all_nodes_and_edges(
+            validation.nodes, validation.edges, event_context=event_context
+        )
+    except Exception as exc:
+        logger.exception("Import failed while committing the new graph")
+        return (
+            {
+                "success": False,
+                "error_code": exc.code
+                if isinstance(exc, MutationPolicyDenied)
+                else "replace_failed",
+                "message": (
+                    "Import failed while committing the new graph; the previous "
+                    "graph is unchanged."
+                ),
+                "graph_replaced": False,
+                "backup_path": backup_path,
+            },
+            None,
+        )
+
+    # Captured right after the replace: this is the generation whatever
+    # happens to embeddings next must still see live when it goes to commit.
+    graph_generation = storage.generation
+
+    return None, _ReplaceOutcome(
+        node_count=len(validation.nodes),
+        edge_count=len(validation.edges),
+        backup_path=backup_path,
+        graph_generation=graph_generation,
+    )
+
+
+def _enqueue_and_start_regeneration(
+    storage: "GraphStorage",
+    execution_store: "ExecutionStore",
+    outcome: _ReplaceOutcome,
+    *,
+    event_origin: Optional[str],
+    event_session_id: Optional[str],
+    event_correlation_id: Optional[str],
+    regeneration_reason: Optional[str] = None,
+    archive_compatible: Optional[bool] = None,
+    embeddings_status: str = "queued",
+    extra_result_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Enqueue and start the async embedding-regeneration job, and build the
+    success response for it. Shared by ``import_graph`` (which always takes
+    this path), ``import_graph_archive``'s fully-incompatible fallback, and
+    ``import_graph_archive``'s *partially*-compatible case (see
+    docs/adr/0007-vector-aware-export-archive.md, "A compatible archive that
+    does not cover every node").
+
+    ``regeneration_reason``, when given, explains WHY embeddings are being
+    regenerated rather than restored (an archive-only concept; plain
+    ``import_graph`` never sets it). ``archive_compatible`` is included in the
+    result only when the caller is the archive path, so a plain
+    ``POST /import`` response keeps its exact pre-existing shape.
+
+    ``embeddings_status`` overrides the default ``"queued"`` label — the
+    partially-compatible archive case uses ``"restored_partial"`` so the
+    caller can tell it apart from a fully-incompatible archive's plain
+    ``"queued"``, since here SOME vectors were already restored directly.
+    ``extra_result_fields`` (e.g. ``embedded_count``, ``pending_node_ids``)
+    is merged into whichever result dict below actually gets returned,
+    including the "job could not even be started" fallback — those vectors
+    were already committed to the live graph regardless of whether the
+    follow-up regeneration job could be started, and the caller should not
+    lose sight of that.
+
+    The regeneration job is deliberately NOT given an explicit list of node
+    ids to scope itself to. ``import_worker._run_one_import_job`` already
+    filters candidate nodes with ``vector_store.has_embedding(node.id)``, and
+    by the time this is called for the partial-restore case, the covered
+    node ids already have their vectors committed
+    (``commit_generation_embeddings`` above) — so that filter alone lands the
+    job on exactly the still-missing node ids, with no worker-side change
+    needed.
+    """
+    try:
+        job = _enqueue_embedding_job(
+            execution_store,
+            node_count=outcome.node_count,
+            backup_path=outcome.backup_path,
+            graph_generation=outcome.graph_generation,
+            correlation_id=event_correlation_id,
+            session_id=event_session_id,
+            origin=event_origin,
+        )
+        _start_embedding_drain(execution_store, storage)
+    except Exception as exc:
+        # The graph itself already replaced durably and successfully — only
+        # starting the embedding side of the import failed. Reporting this as
+        # a failure would invite a retry, and a retry means ANOTHER full
+        # replace, which is unnecessary (the graph is already correct) and
+        # briefly disruptive. Report success instead, with a status distinct
+        # from every other embeddings_status so the caller can tell embedding
+        # generation never even started and act on it (re-run
+        # scripts/generate_embeddings.py, or import again later) without
+        # re-replacing the graph for no reason.
+        logger.error(
+            "Import: graph replaced successfully but background embedding "
+            "generation could not be started: %s",
+            exc,
+        )
+        result = {
+            "success": True,
+            "graph_replaced": True,
+            "node_count": outcome.node_count,
+            "edge_count": outcome.edge_count,
+            "job_id": None,
+            "embeddings_status": "not_started",
+            "embeddings_message": (
+                "The graph was replaced successfully, but background "
+                "embedding generation could not be started. Run "
+                "scripts/generate_embeddings.py, or POST the import again "
+                "later, to generate embeddings for it."
+            ),
+            "backup_path": outcome.backup_path,
+        }
+        if archive_compatible is not None:
+            result["archive_compatible"] = archive_compatible
+        if extra_result_fields:
+            result.update(extra_result_fields)
+        return result
+
+    result = {
+        "success": True,
+        "graph_replaced": True,
+        "node_count": outcome.node_count,
+        "edge_count": outcome.edge_count,
+        "job_id": job.id,
+        "embeddings_status": embeddings_status,
+        "backup_path": outcome.backup_path,
+    }
+    if regeneration_reason is not None:
+        result["embeddings_message"] = f"Regenerating embeddings: {regeneration_reason}"
+    if archive_compatible is not None:
+        result["archive_compatible"] = archive_compatible
+    if extra_result_fields:
+        result.update(extra_result_fields)
+    return result
+
+
+def import_graph(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    document: Any,
+    *,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    error, outcome = _validate_backup_replace(
+        storage,
+        hook,
+        document,
+        event_context=access.build_event_context(
+            target="import_graph",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        ),
+    )
+    if error is not None:
+        return error
+    assert outcome is not None  # for type checkers: exactly one of the pair is set
+
+    return _enqueue_and_start_regeneration(
+        storage,
+        execution_store,
+        outcome,
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
+
+def import_graph_archive(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    archive_bytes: bytes,
+    *,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Whole-graph REPLACE import from a vector-aware export archive.
+
+    Runs the exact same ``_validate_backup_replace`` pipeline as
+    ``import_graph`` for the archive's ``graph.json`` member. What differs is
+    what happens to embeddings afterward:
+
+      * a compatible archive (checksums verified, ``embedding_model`` matches
+        this instance's live model, ``embeddings.bin`` present and non-empty)
+        has its vectors restored directly and synchronously — no async job —
+        PROVIDED ``embeddings.bin`` covers every node id in the imported
+        graph. When it covers only some of them (the exporting instance had
+        its own never-embedded nodes), the covered subset is still restored
+        synchronously, but a scoped async job is also enqueued for the rest:
+        ``embeddings_status: "restored_partial"``, not the same success as a
+        full restore;
+      * anything else (mismatch, missing/unreadable manifest, no
+        ``embeddings.bin`` at all) still imports the graph, and falls back to
+        the same async regeneration job ``import_graph`` always uses, with a
+        message explaining why.
+
+    A corrupt ZIP or a checksum failure on any member the manifest names is
+    caught by ``graph_archive.extract_archive`` and returned as a failure
+    BEFORE ``_validate_backup_replace`` — and therefore before any write to
+    the live graph — ever runs. See docs/adr/0007-vector-aware-export-archive.md.
+    """
+    try:
+        extracted = graph_archive.extract_archive(
+            archive_bytes, live_model_name=storage.vector_store.model_name
+        )
+    except graph_archive.ArchiveIntegrityError as exc:
+        return {
+            "success": False,
+            "error_code": "archive_integrity_failed",
+            "message": str(exc),
+            "graph_replaced": False,
+        }
+
+    error, outcome = _validate_backup_replace(
+        storage,
+        hook,
+        extracted.graph_document,
+        event_context=access.build_event_context(
+            target="import_graph_archive",
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        ),
+    )
+    if error is not None:
+        return error
+    assert outcome is not None
+
+    if extracted.compatible and extracted.embedding_vectors:
+        live_node_ids = {node.id for node in storage.get_all_nodes()}
+        vectors = {
+            node_id: vector
+            for node_id, vector in extracted.embedding_vectors.items()
+            if node_id in live_node_ids
+        }
+        if vectors and storage.commit_generation_embeddings(
+            outcome.graph_generation, vectors
+        ):
+            missing_node_ids = sorted(live_node_ids - vectors.keys())
+            if not missing_node_ids:
+                return {
+                    "success": True,
+                    "graph_replaced": True,
+                    "node_count": outcome.node_count,
+                    "edge_count": outcome.edge_count,
+                    "job_id": None,
+                    "embeddings_status": "restored",
+                    "embedded_count": len(vectors),
+                    "backup_path": outcome.backup_path,
+                    "archive_compatible": True,
+                }
+            # The archive is model-compatible and its embeddings.bin was
+            # restored for every node id it actually covered, but that is
+            # not every node in the imported graph — e.g. the exporting
+            # instance itself had some nodes that were never embedded
+            # (add_nodes's embedding step warns-and-skips on failure rather
+            # than retrying; see backend/agents/execution/import_worker.py's
+            # own has_embedding filter, which already anticipates a graph
+            # with a partially-embedded node set as a normal steady state).
+            # Reporting this as plain "restored" success, with no job ever
+            # queued to fill the gap, would be the worst-served of the three
+            # outcomes: it looks identical to full success while leaving
+            # some nodes permanently unembedded until an operator happens to
+            # notice. Report a status that says so, and enqueue a
+            # regeneration job for the remainder — see
+            # _enqueue_and_start_regeneration's docstring for why that job
+            # needs no explicit node-id scoping: the worker's
+            # has_embedding filter already skips the node ids this call
+            # just committed, so it only ever processes the rest.
+            return _enqueue_and_start_regeneration(
+                storage,
+                execution_store,
+                outcome,
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+                regeneration_reason=(
+                    f"the archive's {graph_archive.EMBEDDINGS_MEMBER} covered "
+                    f"{len(vectors)} of {outcome.node_count} node(s) in the "
+                    f"imported graph; regenerating the remaining "
+                    f"{len(missing_node_ids)}"
+                ),
+                archive_compatible=True,
+                embeddings_status="restored_partial",
+                extra_result_fields={
+                    "embedded_count": len(vectors),
+                    "pending_node_ids": missing_node_ids,
+                    "pending_count": len(missing_node_ids),
+                },
+            )
+        # Either nothing in the archive's vectors actually matched a node id
+        # this import just committed, or (far more rarely — the two calls
+        # below are not atomic with each other) a concurrent import replaced
+        # the graph again in the narrow window between the replace above and
+        # this commit, so `commit_generation_embeddings` refused it as stale.
+        # Either way, fall back the same way an incompatible archive would,
+        # against the graph as it now actually stands.
+        reason = (
+            "the archive's vectors did not match any node in the imported graph"
+            if not vectors
+            else (
+                "a concurrent import replaced the graph again before the "
+                "archive's vectors could be committed"
+            )
+        )
+        return _enqueue_and_start_regeneration(
+            storage,
+            execution_store,
+            outcome,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+            regeneration_reason=reason,
+            archive_compatible=False,
+        )
+
+    return _enqueue_and_start_regeneration(
+        storage,
+        execution_store,
+        outcome,
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+        regeneration_reason=extracted.regeneration_reason
+        or "the archive's embeddings could not be used",
+        archive_compatible=False,
+    )
+
+
+def _authorize_merge(hook: "GraphAuthorizationHook") -> Optional[Dict[str, Any]]:
+    """The refusal for a caller who may not preview or commit a merge, or
+    None (ADR 0013 §10).
+
+    Both need ``GRAPH_ACTION_MUTATE`` and, since a plan reveals which ids
+    exist and the live value of every field an overwrite would change, a
+    whole-graph ``GRAPH_ACTION_READ``; a caller narrowed on either is refused.
+    """
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_MUTATE, target="import_graph_merge"
+    )
+    if not decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE, target="import_graph_merge", decision=decision
+        )
+    # The plan shows live field values, so the caller must also be allowed
+    # to read the whole graph, whatever a hook grants for mutation.
+    read_decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target="import_graph_merge"
+    )
+    if not read_decision.allowed:
+        return access.build_access_denied_result(
+            action=GRAPH_ACTION_READ,
+            target="import_graph_merge",
+            decision=read_decision,
+        )
+    if decision.graph_access.enabled or read_decision.graph_access.enabled:
+        return {
+            "success": False,
+            "error_code": "import_requires_full_graph_access",
+            "message": (
+                "A merge reads the whole live graph and is refused while the "
+                "caller's access is narrowed to a subset of it."
+            ),
+        }
+    return None
+
+
+def preview_merge_import(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    body: Any,
+    *,
+    attachment_settings: Optional["AttachmentSettings"] = None,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Plan a MERGE import without writing anything (ADR 0013, slice 1).
+
+    Authorized as the merge commit will be (``GRAPH_ACTION_MUTATE``) and,
+    since the plan reveals which ids exist and the live value of every field
+    an overwrite would change, as a whole-graph read (``GRAPH_ACTION_READ``);
+    refused when either is denied or narrowed (ADR 0013 §10). No backup, no
+    job, no graph write.
+    """
+    refusal = _authorize_merge(hook)
+    if refusal is not None:
+        return refusal
+
+    # Planning holds the document and a plan in memory for up to tens of
+    # seconds at the caps; one at a time per process keeps a caller from
+    # stacking them. A refused preview is retryable and changed nothing.
+    if not _PREVIEW_SLOT.acquire(blocking=False):
+        return {
+            "success": False,
+            "error_code": "import_preview_busy",
+            "message": "Another merge preview is running; retry shortly.",
+        }
+    try:
+        return _plan_preview(storage, body, attachment_settings, max_nodes, max_edges)
+    finally:
+        _PREVIEW_SLOT.release()
+
+
+def _plan_preview(
+    storage: "GraphStorage",
+    body: Any,
+    attachment_settings: Optional["AttachmentSettings"],
+    max_nodes: Optional[int],
+    max_edges: Optional[int],
+) -> Dict[str, Any]:
+    try:
+        document, parameters = graph_merge_plan.parse_merge_request(body)
+        plan = graph_merge_plan.compute_merge_plan(
+            document,
+            parameters,
+            graph_merge_plan.StorageGraphView(storage, attachment_settings),
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
+    except graph_merge_plan.MergeRequestError as exc:
+        result: Dict[str, Any] = {
+            "success": False,
+            "error_code": exc.error_code,
+            "message": exc.message,
+        }
+        if exc.errors:
+            result["errors"] = [issue.to_dict() for issue in exc.errors]
+        return result
+    except graph_merge_plan.MergePlanUnstable as exc:
+        return {
+            "success": False,
+            "error_code": "import_plan_unstable",
+            "message": f"{exc}; retry the preview.",
+        }
+
+    return {"success": True, "plan": plan.report, "plan_digest": plan.digest}
+
+
+MERGE_EVENT_ORIGIN = "graph-import-merge"
+_MERGE_RESTORE_NOTE = (
+    "The backup holds the whole graph as it was when it was written, just "
+    "before this merge, with every entity the merge overwrote at the version "
+    "the merge replaced. Restoring it with POST /import is a replace: it also "
+    "undoes every write made after the backup was written."
+)
+
+
+class _StalePlan(Exception):
+    """The plan recomputed under the storage lock is not the bound one."""
+
+
+def commit_merge_import(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    body: Any,
+    *,
+    attachment_settings: Optional["AttachmentSettings"] = None,
+    event_origin: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Commit a MERGE import (ADR 0013, slice 2).
+
+    Authorized as the preview is. The plan is recomputed and must match the
+    caller's ``plan_digest`` (optional only when the policy can change no
+    live entity, ADR §3); then the whole graph is backed up as v1 does; then
+    ``GraphStorage.apply_import_merge`` recomputes the plan once more under
+    its lock, refuses the commit if the digest moved, and applies it
+    all-or-nothing. Afterwards, best-effort: an embeddings job for the nodes
+    left without a vector, and an audit record in the import job store.
+    """
+    refusal = _authorize_merge(hook)
+    if refusal is not None:
+        return refusal
+    if not storage.supports_import_merge:
+        return {
+            "success": False,
+            "error_code": ImportMergeUnsupported.code,
+            "message": (
+                "Merge import is not supported on a shared (PostgreSQL) graph "
+                "store yet; nothing was changed."
+            ),
+        }
+    try:
+        document, parameters, digest = graph_merge_plan.parse_merge_commit_request(body)
+    except graph_merge_plan.MergeRequestError as exc:
+        return _merge_request_error(exc)
+    if digest is None and not parameters.digest_optional:
+        return {
+            "success": False,
+            "error_code": "plan_digest_required",
+            "message": (
+                "This merge can overwrite, rename or include system-type nodes, so "
+                "it must name the plan_digest of the preview it applies."
+            ),
+        }
+
+    # One commit at a time: it plans twice and writes a whole-graph backup.
+    if not _COMMIT_SLOT.acquire(blocking=False):
+        return {
+            "success": False,
+            "error_code": "import_merge_busy",
+            "message": "Another merge import is running; retry shortly.",
+        }
+    try:
+        return _commit_merge(
+            storage,
+            execution_store,
+            document,
+            parameters,
+            digest,
+            graph_merge_plan.StorageGraphView(storage, attachment_settings),
+            event_origin=event_origin,
+            event_correlation_id=event_correlation_id,
+        )
+    finally:
+        _COMMIT_SLOT.release()
+
+
+def _merge_request_error(exc: "graph_merge_plan.MergeRequestError") -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "success": False,
+        "error_code": exc.error_code,
+        "message": exc.message,
+    }
+    if exc.errors:
+        result["errors"] = [issue.to_dict() for issue in exc.errors]
+    return result
+
+
+def _plan_or_error(
+    document: Any,
+    parameters: "graph_merge_plan.MergeParameters",
+    view: "graph_merge_plan.StorageGraphView",
+) -> Tuple[Optional["graph_merge_plan.MergePlan"], Optional[Dict[str, Any]]]:
+    try:
+        return graph_merge_plan.compute_merge_plan(document, parameters, view), None
+    except graph_merge_plan.MergeRequestError as exc:
+        return None, _merge_request_error(exc)
+    except graph_merge_plan.MergePlanUnstable as exc:
+        return None, {
+            "success": False,
+            "error_code": "import_plan_unstable",
+            "message": f"{exc}; retry.",
+        }
+
+
+def _stale(plan: "graph_merge_plan.MergePlan") -> Dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": "import_plan_stale",
+        "message": (
+            "The live graph or the request no longer matches the previewed plan; "
+            "nothing was changed. Review the current plan and commit its digest."
+        ),
+        "plan": plan.report,
+        "plan_digest": plan.digest,
+    }
+
+
+def _commit_merge(
+    storage: "GraphStorage",
+    execution_store: "ExecutionStore",
+    document: Any,
+    parameters: "graph_merge_plan.MergeParameters",
+    digest: Optional[str],
+    view: "graph_merge_plan.StorageGraphView",
+    *,
+    event_origin: Optional[str],
+    event_correlation_id: Optional[str],
+) -> Dict[str, Any]:
+    plan, error = _plan_or_error(document, parameters, view)
+    if error is not None:
+        return error
+    assert plan is not None
+    if not plan.committable:
+        return {
+            "success": False,
+            "error_code": "import_merge_blocked",
+            "message": (
+                "The plan has rejected or conflicting entries; nothing was changed."
+            ),
+            "plan": plan.report,
+            "plan_digest": plan.digest,
+        }
+    if digest is not None and digest != plan.digest:
+        return _stale(plan)
+    # Without a caller digest the commit binds to the plan just computed.
+    bound_digest = plan.digest
+
+    if not _plan_writes(plan.report):
+        # Every entry is skipped, unchanged or excluded: no backup, lock or
+        # record, so a repeated no-op commit costs a plan and nothing else.
+        return {
+            "success": True,
+            "import_id": None,
+            "plan": plan.report,
+            "plan_digest": bound_digest,
+            "counts": {key: 0 for key in _COUNT_KEYS},
+            "renamed": {
+                "nodes": graph_merge_plan.capped_renames({}),
+                "edges": graph_merge_plan.capped_renames({}),
+            },
+            "backup_path": None,
+            "job_id": None,
+            "embeddings_status": "not_needed",
+            # None, not False: no record was due, none was lost.
+            "audit_recorded": None,
+            "message": (
+                "This request writes nothing: every entry is skipped, unchanged "
+                "or excluded."
+            ),
+        }
+
+    backup_path = _write_backup(storage)
+    if backup_path is None:
+        return {
+            "success": False,
+            "error_code": "backup_failed",
+            "message": (
+                "Could not write a pre-merge backup of the current graph; the "
+                "merge was refused and the graph was not changed."
+            ),
+        }
+
+    import_id = f"merge-{uuid.uuid4()}"
+    event_context = access.build_event_context(
+        target="import_graph_merge",
+        event_origin=event_origin or MERGE_EVENT_ORIGIN,
+        event_correlation_id=event_correlation_id or import_id,
+    )
+    minted: Dict[str, Any] = {}
+
+    def prepare() -> "MergeWrites":
+        # Under the storage lock: nothing can move between this plan and the
+        # writes it yields, so its digest covers every read the writes rely on.
+        try:
+            locked = graph_merge_plan.compute_merge_plan(
+                document, parameters, view, for_commit=True
+            )
+        except (
+            graph_merge_plan.MergeRequestError,
+            graph_merge_plan.MergePlanUnstable,
+        ) as exc:
+            raise _StalePlan() from exc
+        if locked.digest != bound_digest or locked.writes is None:
+            raise _StalePlan()
+        minted["planned"] = locked.writes
+        minted["result"] = graph_merge_plan.mint_writes(locked.writes)
+        return minted["result"].writes
+
+    try:
+        applied = storage.apply_import_merge(prepare, event_context=event_context)
+    except (_StalePlan, EntityRevisionConflict):
+        fresh, error = _plan_or_error(document, parameters, view)
+        if error is not None:
+            return error
+        assert fresh is not None
+        return _stale(fresh)
+    except ImportMergeUnsupported as exc:
+        return {"success": False, "error_code": exc.code, "message": str(exc)}
+    except (GraphWriteFailed, GraphWriteOutcomeUnknown) as exc:
+        failure: Dict[str, Any] = {
+            "success": False,
+            "error_code": exc.code,
+            "message": str(exc),
+            "backup_path": backup_path,
+        }
+        if isinstance(exc, GraphWriteOutcomeUnknown) and "planned" in minted:
+            # The merge is in memory and the next write may persist it, with
+            # no events: the audit trail is the one record of it.
+            failure["import_id"] = import_id
+            failure["audit_recorded"] = _record_merge(
+                execution_store,
+                import_id=import_id,
+                status="outcome_unknown",
+                digest=bound_digest,
+                parameters=parameters,
+                counts=_counts(minted["planned"], events=0),
+                backup_path=backup_path,
+                embeddings_job_id=None,
+                planned=minted["planned"],
+                minted=minted["result"],
+                revisions={},
+                event_context=event_context,
+                correlation_id=event_correlation_id or import_id,
+                origin=event_origin or MERGE_EVENT_ORIGIN,
+            )
+        return failure
+
+    planned: "graph_merge_plan.PlannedWrites" = minted["planned"]
+    result: "graph_merge_plan.MintedWrites" = minted["result"]
+    counts = _counts(planned, events=applied.events)
+
+    job_id: Optional[str] = None
+    embeddings_status = "not_needed"
+    embeddings_message: Optional[str] = None
+    if planned.nodes_to_embed:
+        try:
+            job = _enqueue_embedding_job(
+                execution_store,
+                node_count=planned.nodes_to_embed,
+                backup_path=backup_path,
+                # Read inside the commit's lock: a replace landing since is
+                # then one this job reports itself superseded by.
+                graph_generation=applied.generation,
+                correlation_id=event_correlation_id or import_id,
+                session_id=None,
+                origin=event_origin or MERGE_EVENT_ORIGIN,
+                merge_import_id=import_id,
+            )
+            _start_embedding_drain(execution_store, storage)
+            job_id, embeddings_status = job.id, "queued"
+        except Exception as exc:
+            # The merge is committed; only its embeddings did not start.
+            logger.error(
+                "Merge import %s committed but its embedding job could not be "
+                "started: %s",
+                import_id,
+                exc,
+            )
+            embeddings_status = "not_started"
+            embeddings_message = (
+                "The merge was committed, but background embedding generation "
+                f"could not be started: {exc}. Run scripts/generate_embeddings.py "
+                "to generate embeddings for the merged nodes."
+            )
+
+    audit_recorded = _record_merge(
+        execution_store,
+        import_id=import_id,
+        status="committed",
+        digest=bound_digest,
+        parameters=parameters,
+        counts=counts,
+        backup_path=backup_path,
+        embeddings_job_id=job_id,
+        planned=planned,
+        minted=result,
+        revisions=applied.revisions,
+        event_context=event_context,
+        correlation_id=event_correlation_id or import_id,
+        origin=event_origin or MERGE_EVENT_ORIGIN,
+    )
+
+    response: Dict[str, Any] = {
+        "success": True,
+        "import_id": import_id,
+        "plan": plan.report,
+        "plan_digest": bound_digest,
+        "counts": counts,
+        "renamed": {
+            "nodes": graph_merge_plan.capped_renames(result.renamed_nodes),
+            "edges": graph_merge_plan.capped_renames(result.renamed_edges),
+        },
+        "backup_path": backup_path,
+        "backup_note": _MERGE_RESTORE_NOTE,
+        "job_id": job_id,
+        "embeddings_status": embeddings_status,
+        "audit_recorded": audit_recorded,
+    }
+    if embeddings_message is not None:
+        response["embeddings_message"] = embeddings_message
+    return response
+
+
+_COUNT_KEYS = (
+    "nodes_created",
+    "nodes_overwritten",
+    "nodes_renamed",
+    "edges_created",
+    "edges_overwritten",
+    "edges_renamed",
+    "events",
+)
+
+
+def _plan_writes(report: Dict[str, Any]) -> int:
+    """How many entities a plan's report says the commit writes."""
+    return sum(
+        report[group][kind]["count"]
+        for group in ("adds", "overwrites", "renames")
+        for kind in ("nodes", "edges")
+    )
+
+
+def _counts(
+    planned: "graph_merge_plan.PlannedWrites", *, events: int
+) -> Dict[str, int]:
+    return dict(
+        zip(
+            _COUNT_KEYS,
+            (
+                len(planned.node_creates),
+                len(planned.node_overwrites),
+                len(planned.node_renames),
+                len(planned.edge_creates),
+                len(planned.edge_overwrites),
+                len(planned.edge_renames),
+                events,
+            ),
+        )
+    )
+
+
+def _record_merge(
+    execution_store: "ExecutionStore",
+    *,
+    import_id: str,
+    status: str,
+    digest: str,
+    parameters: "graph_merge_plan.MergeParameters",
+    counts: Dict[str, int],
+    backup_path: str,
+    embeddings_job_id: Optional[str],
+    planned: "graph_merge_plan.PlannedWrites",
+    minted: "graph_merge_plan.MintedWrites",
+    revisions: Dict[Tuple[str, str], int],
+    event_context: Optional["EventContext"],
+    correlation_id: str,
+    origin: str,
+) -> bool:
+    """Write the merge's audit record: a terminal IMPORT job (ADR §7 (a)).
+
+    ``status`` is ``committed``, or ``outcome_unknown`` for a merge kept in
+    memory whose write could not be confirmed (no revisions then). The
+    request's attribution is recorded as the request context reports it
+    (header-derived in the open core, so as trustworthy as whatever sets
+    those headers). Written after the graph commit, in a separate store, so
+    it is best-effort: a crash or a store failure between the two leaves a
+    merge without a record, reported as ``audit_recorded: false``.
+    """
+    from backend.agents.execution import ExecutionJob, ExecutionKind, ExecutionState
+
+    def outcome(kind: str, ids: List[str]) -> List[List[Any]]:
+        return [[entity_id, revisions.get((kind, entity_id))] for entity_id in ids]
+
+    def renamed(kind: str, mapping: Dict[str, str]) -> List[List[Any]]:
+        return [[old, new, revisions.get((kind, new))] for old, new in mapping.items()]
+
+    now = datetime.now(timezone.utc)
+    try:
+        execution_store.enqueue(
+            ExecutionJob(
+                id=import_id,
+                agent_id="system:graph-import",
+                kind=ExecutionKind.IMPORT,
+                idempotency_key=f"import:{import_id}",
+                state=ExecutionState.SUCCEEDED,
+                payload={
+                    "phase": "merge",
+                    "mode": "merge",
+                    "plan_digest": digest,
+                    "parameters": parameters.canonical(),
+                    "counts": counts,
+                    "backup_path": backup_path,
+                    "embeddings_job_id": embeddings_job_id,
+                    "attribution": (
+                        event_context.attribution.to_dict()
+                        if event_context is not None and event_context.attribution
+                        else None
+                    ),
+                    "outcomes": {
+                        "nodes": {
+                            "created": outcome(
+                                "node", [n.id for n in planned.node_creates]
+                            ),
+                            "overwritten": outcome(
+                                "node", [n.id for n, _, _ in planned.node_overwrites]
+                            ),
+                            "renamed": renamed("node", minted.renamed_nodes),
+                        },
+                        "edges": {
+                            "created": outcome(
+                                "edge", [e.id for e in planned.edge_creates]
+                            ),
+                            "overwritten": outcome(
+                                "edge", [e.id for e, _ in planned.edge_overwrites]
+                            ),
+                            "renamed": renamed("edge", minted.renamed_edges),
+                        },
+                    },
+                },
+                result={"merge_status": status},
+                correlation_id=correlation_id,
+                origin=origin,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "Merge import %s: could not write its audit record: %s", import_id, exc
+        )
+        return False
+
+
+_STATUS_LABELS = None  # populated lazily to avoid importing execution eagerly
+
+
+def _status_labels() -> Dict[Any, str]:
+    global _STATUS_LABELS
+    if _STATUS_LABELS is None:
+        from backend.agents.execution import ExecutionState
+
+        _STATUS_LABELS = {
+            ExecutionState.PENDING: "queued",
+            ExecutionState.RUNNING: "running",
+            ExecutionState.SUCCEEDED: "succeeded",
+            ExecutionState.DEAD_LETTER: "failed",
+            ExecutionState.CANCELLED: "cancelled",
+        }
+    return _STATUS_LABELS
+
+
+def import_job_to_dict(job: "ExecutionJob") -> Dict[str, Any]:
+    """Map a stored import ``ExecutionJob`` to the API's status view."""
+    payload = job.payload or {}
+    result = job.result or {}
+    view = {
+        "id": job.id,
+        "kind": job.kind.value,
+        "mode": payload.get("mode") or "replace",
+        "status": _status_labels().get(job.state, job.state.value),
+        "embeddings_status": result.get("embeddings_status"),
+        "embeddings_message": result.get("message"),
+        "embedded_count": result.get("embedded_count"),
+        "node_count": payload.get("node_count"),
+        "backup_path": payload.get("backup_path"),
+        "attempts": job.attempts,
+        "correlation_id": job.correlation_id,
+        "error": job.last_error or job.dead_letter_reason,
+        "created_at": _iso(job.created_at),
+        "started_at": _iso(job.started_at),
+        "finished_at": _iso(job.finished_at),
+    }
+    if payload.get("phase") == "merge":
+        # A merge's audit record: its embeddings are a separate job's.
+        view.update(
+            merge_status=result.get("merge_status"),
+            plan_digest=payload.get("plan_digest"),
+            counts=payload.get("counts"),
+            embeddings_job_id=payload.get("embeddings_job_id"),
+        )
+    elif view["mode"] == "merge":
+        view["import_id"] = payload.get("import_id")
+    return view
+
+
+def get_import_job(
+    execution_store: "ExecutionStore", job_id: str
+) -> Optional[Dict[str, Any]]:
+    from backend.agents.execution import ExecutionKind
+
+    job = execution_store.get(job_id)
+    if job is None or job.kind != ExecutionKind.IMPORT:
+        return None
+    return import_job_to_dict(job)
+
+
+def list_import_jobs(
+    execution_store: "ExecutionStore", *, limit: int = 100
+) -> List[Dict[str, Any]]:
+    from backend.agents.execution import ExecutionKind
+
+    jobs = execution_store.list_jobs(kind=ExecutionKind.IMPORT, limit=limit)
+    return [import_job_to_dict(job) for job in jobs]

@@ -51,6 +51,8 @@ their default in the open core; the SaaS layer populates them.
 | `updated_at` | iso8601 | Advances on every applied op and on rename. |
 | `revision` | int | The session `seq` — monotonic op revision, for optimistic concurrency. |
 | `node_count` | int | Number of graph nodes currently referenced by the session. |
+| `write_mode` | enum | `direct`, or `staged`: graph writes made in the session are held in it until merged ([`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md) §5). Only ever moves from `direct` to `staged`. |
+| `write_mode_source` | enum | `explicit` (asked for) or `inherited` (the graph default when the session was created). |
 | `capabilities` | string[] | What the caller may do on this session given the active authorization decision (e.g. `["read","rename","delete","layout"]`). In the open core all capabilities are granted; the SaaS layer narrows the list per the authorization decision (§7). |
 | `session_url` | string \| null | Canonical direct link (§5). `null` only when no public base URL is configured. |
 
@@ -106,7 +108,7 @@ path):
 <public-base-url>/?session=<session_id>
 ```
 
-A path-based `/s/<id>` form was evaluated against every SaaS v1 work item and
+A path-based `/s/<id>` form was evaluated against the SaaS layer's needs and
 rejected: URL consumers (the session context-menu "copy/share link" surface and
 the deep-link opener) are shape-agnostic, and SaaS tenant routing is **host-based**
 (`app.<tenant>.<domain>`, `preview.<tenant>.<domain>`), so a per-tenant link is
@@ -182,20 +184,38 @@ letting the SaaS layer reuse the exact same session resource and MCP tools.
 
 ## 8. Error model
 
-Tool results are structured (never a bare exception). At minimum:
+Tool results are structured (never a bare exception). The table is not
+exhaustive (a rejected argument, for example, returns its validation message as
+`error`), but each `error` value it lists is the literal string the open-core
+tools return (`backend/service/mcp_tools.py`); where a row also names a
+`message`, that field carries the human-readable text.
 
 | Condition | Result |
 |---|---|
-| Invalid `session_id` format | `{"success": false, "error": "invalid session id format …"}` |
-| Session not found | `{"success": false, "error": "session '<id>' not found …"}` |
-| Delete without confirmation | `{"success": false, "error": "deletion requires explicit confirmation …"}` |
-| Not authorized (SaaS) | `{"success": false, "error": "not authorized for this session"}` |
-| Session cap reached | `{"success": false, "error": "too many sessions"}` |
-| Rate limited | `{"success": false, "error": "rate limit exceeded"}` |
-| No public base URL configured | success, with `session_url: null` and an explanatory `message` |
+| Invalid `session_id` format | `{"success": false, "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD (the older DDDD-DDDD form is also accepted)"}` |
+| Session not found | `{"success": false, "error": "Session '<id>' not found."}` |
+| Delete without confirmation | `{"success": false, "error": "confirmation_required", "message": "Deleting session '<id>' is permanent …"}` |
+| Not authorized (SaaS) | `{"success": false, "error": "Graph access denied", "error_code": "access_denied", "message": <hook reason, or "Graph access denied.">, "authorization": {…}}` |
+| Session cap reached | `{"success": false, "error": "too_many_sessions", "message": …}` |
+| Another write holds the session | `{"success": false, "error": "busy", "message": …}` — retryable |
+| Rate limited | `{"success": false, "error": "rate_limited", "message": …}` — retryable |
+| No public base URL configured | success, with `session_url: null` |
 
-Results mirror the REST endpoints' existing status semantics (400/404/429/503)
-so the two surfaces stay consistent.
+A rename, and a confirmed delete, each draw one unit per call from a rate budget
+of their own tool; a call refused before that point (invalid id, not authorized,
+delete without confirmation) draws nothing.
+The budget is per tool, not per client: every MCP client on the instance shares
+it, so one agent's writes can spend another's.
+
+Where the REST session endpoints (`/api/sessions`) have a comparable condition,
+it carries the matching status: an invalid id is 400, an unknown session 404, a
+spent rate budget 429 and the session cap 503. The mapping is not one-to-one.
+REST `DELETE` takes no confirmation, has no rate limit and waits for an in-flight
+write instead of reporting `busy`, and REST rename also waits rather than
+reporting `busy`; the open-core REST session endpoints have no access-denied
+status of their own, except where they create a staged session, change a
+write mode or delete a staged session, which ask the authorization hook and
+answer 403 when it refuses (SESSION_OVERLAY_CONTRACT.md §14).
 
 ## 9. Versioning & change policy
 
@@ -204,14 +224,5 @@ so the two surfaces stay consistent.
 - Changing an existing field's meaning, the URL shape, or the delete/confirm
   semantics is a **breaking change** and requires a new contract version plus a
   migration note.
-- The requirement node `req-mcp-session-management-contract` and decision
-  `dec-session-resource-deeplink-contract` in the Corp planning graph govern this
-  document; status and evidence are tracked there, not here.
-
-## 10. Realizing tasks
-
-| Task (Corp graph) | Realizes |
-|---|---|
-| `task-implement-mcp-session-crud` | §2–§4, §6, §8 — the create/list/get/rename/delete MCP tools |
-| `task-implement-session-deeplinks` | §5 — canonical `session_url` generation and the open/not-found/expired path |
-| `task-document-agent-visualization-tools` | Tool docstrings + `backend/DEVELOPMENT.md` wire shapes |
+- Planning status and evidence for this contract are tracked outside this
+  repository, not here.

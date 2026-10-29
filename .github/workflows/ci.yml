@@ -2,8 +2,10 @@
 # CI Pipeline – Test, Build, and Publish Docker Images
 # =============================================================================
 # This workflow:
-#   1. Runs tests on every push and pull request
-#   2. Builds and publishes both application images to GHCR on branch pushes
+#   1. Runs tests on pushes to main, preview and prod (and v* tags) and on
+#      pull requests targeting those branches
+#   2. Builds and publishes both application images to GHCR on pushes to
+#      preview and prod and on v* tags only; a push to main runs no build
 #   3. Emits artifact metadata that the infra repo consumes for deployment
 #
 # Responsibilities of this repo:
@@ -24,7 +26,10 @@
 #   sha-<commit>          immutable, used as the canonical artifact reference
 #   dev                   floating tag, latest successful build from preview branch
 #   latest                floating tag, latest successful build from prod branch
-#   v<semver>             applied only when a version tag is pushed
+#   <major>.<minor>.<patch>, <major>.<minor>
+#                         applied only when a version tag is pushed; the
+#                         leading `v` is stripped (v1.2.3 -> 1.2.3 and 1.2),
+#                         and a pre-release tag gets the full version only
 #
 # Cost control (see detect-changes + the *-tests gate jobs below):
 #   - The heavy test jobs run only when service code actually changed and the
@@ -104,7 +109,7 @@ jobs:
       service_code: ${{ steps.classify.outputs.service_code }}
       python_code: ${{ steps.classify.outputs.python_code }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -216,10 +221,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -228,9 +233,13 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
 
       - name: Run backend test suite
-        run: pytest backend/ -q
+        # One worker per core (pytest-xdist). Every worker collects on its
+        # own, so the postgres contract tests' length seed is pinned once per
+        # run here: identical across workers, still new on every CI run.
+        run: pytest backend/ -q -n auto
         env:
           PYTHONPATH: ${{ github.workspace }}
+          CO_TEST_PG_LENGTH_SEED: ${{ github.run_id }}
           # The tests skip themselves when no server answers, which is right
           # for a contributor and wrong here: CI always sets the DSN, so a
           # service container that failed to start would leave this job green
@@ -302,10 +311,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
@@ -368,10 +377,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -380,7 +389,42 @@ jobs:
         run: pip install -r services/mcp_oauth_gateway/requirements-dev.txt
 
       - name: Run gateway tests
-        run: pytest test_oauth_flow.py -q
+        run: pytest test_oauth_flow.py test_upstream_auth.py test_lockfiles.py -q
+        working-directory: services/mcp_oauth_gateway
+
+      # The Docker image installs the runtime lock with --require-hashes, but
+      # images build only on deploy-branch pushes; install it the same way, on
+      # the image's Python version, so a bad hash or an unresolvable lock fails
+      # at PR time. pip hashes only the wheels it downloads, and several locked
+      # packages ship one wheel per CPython version, so the version must match.
+      - name: Read the image's Python version
+        id: image-python
+        # [[:space:]] follows the locale: the runner's C.UTF-8 counts U+2003 as
+        # space. C keeps it to ASCII, as test_lockfiles.py's parser does.
+        env:
+          LC_ALL: C
+        run: |
+          # The final stage is the one the image runs, so read its (last) FROM line.
+          version=$(awk 'tolower($1) == "from" { line = $0 } END { print line }' Dockerfile \
+            | sed -En 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]*\/)?python:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\3/p')
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the Python version from the last FROM line in Dockerfile"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        working-directory: services/mcp_oauth_gateway
+
+      - name: Set up the image's Python
+        id: runtime-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.image-python.outputs.version }}
+
+      - name: Verify the runtime lock installs with hashes
+        run: |
+          "${{ steps.runtime-python.outputs.python-path }}" -m venv "$RUNNER_TEMP/gw-runtime"
+          "$RUNNER_TEMP/gw-runtime/bin/pip" install --require-hashes -r requirements.txt
+          "$RUNNER_TEMP/gw-runtime/bin/pip" check
         working-directory: services/mcp_oauth_gateway
 
   # Gate carrying the required-check name "Gateway tests". Same semantics as the
@@ -449,10 +493,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -463,7 +507,7 @@ jobs:
         run: pip install -r backend/requirements.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
@@ -486,9 +530,70 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mobile-e2e-report
+          path: frontend/web/playwright-report/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Desktop e2e – the Playwright specs under the `chromium` project (desktop
+  # shell, chat panel with /ui/chat mocked via page.route, two-client shared
+  # session). Selected by project rather than by file so a new desktop spec is
+  # picked up without editing this job; the project's testIgnore keeps the
+  # mobile specs out. Before this job existed these specs ran nowhere and went
+  # stale against the UI unnoticed.
+  #
+  # NON-REQUIRED by design, on the same terms as mobile-e2e above: no gate job,
+  # absent from branch protection and from the build job's `needs`. A sibling
+  # rather than an extra step in mobile-e2e so a desktop failure neither hides
+  # nor is hidden by a mobile one, and each keeps its own report artifact.
+  # ---------------------------------------------------------------------------
+  desktop-e2e:
+    name: Desktop e2e (non-required)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    timeout-minutes: 20
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # No `--with-deps`, for the reason given on mobile-e2e.
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+        working-directory: frontend/web
+
+      - name: Run desktop e2e tests
+        run: npx playwright test --project=chromium
+        working-directory: frontend/web
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-e2e-report
           path: frontend/web/playwright-report/
           retention-days: 7
 
@@ -519,10 +624,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -581,10 +686,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
@@ -628,7 +733,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Determine release channel from the ref that triggered this run. The
       # channel names the deployment environment, not the branch: `main` is the
@@ -662,6 +767,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.CORE_IMAGE }}
+          flavor: latest=false
           tags: |
             # Immutable SHA tag – canonical artifact reference
             type=sha,prefix=sha-
@@ -680,6 +786,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-core.outputs.tags }}
           labels: ${{ steps.meta-core.outputs.labels }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # amd64 only: every consumer (Cloud Run, the SSP Cloud cluster) is
@@ -696,6 +804,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}
+          flavor: latest=false
           tags: |
             type=sha,prefix=sha-
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/preview' }}
@@ -716,6 +825,72 @@ jobs:
           # amd64 only — see the note on the core image build above.
           platforms: linux/amd64
 
+      - name: Set up Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: v1.54.0
+
+      # Scan the actual published images, including installed Python packages
+      # and the core image's retained frontend production package metadata.
+      - name: Generate release SBOMs
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+          CORE_DIGEST: ${{ steps.build-core.outputs.digest }}
+          GATEWAY_DIGEST: ${{ steps.build-gateway.outputs.digest }}
+          SYFT_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          core_image="${REGISTRY}/${CORE_IMAGE}"
+          gateway_image="${REGISTRY}/${GATEWAY_IMAGE}"
+          core_ref="${core_image,,}@${CORE_DIGEST}"
+          gateway_ref="${gateway_image,,}@${GATEWAY_DIGEST}"
+          for artifact in core gateway; do
+            if [ "$artifact" = core ]; then
+              image_ref="$core_ref"
+              digest="$CORE_DIGEST"
+            else
+              image_ref="$gateway_ref"
+              digest="$GATEWAY_DIGEST"
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            prefix="release-evidence/${artifact}-sha-${GITHUB_SHA}"
+            "$SYFT_CMD" scan "registry:$image_ref" \
+              --platform linux/amd64 --parallelism 2 \
+              --source-name "$image_ref" --source-version "$GITHUB_SHA" \
+              -o "spdx-json@2.3=${prefix}.spdx.json" \
+              -o "cyclonedx-json@1.6=${prefix}.cyclonedx.json"
+            test -s "${prefix}.spdx.json"
+            test -s "${prefix}.cyclonedx.json"
+            # Fail if cataloging silently loses either shipped ecosystem.
+            for ecosystem in pypi $(if [ "$artifact" = core ]; then echo npm; fi); do
+              jq -e --arg prefix "pkg:${ecosystem}/" \
+                'any(.packages[].externalRefs[]?;
+                  .referenceType == "purl" and (.referenceLocator | startswith($prefix)))' \
+                "${prefix}.spdx.json" > /dev/null
+            done
+          done
+          jq -n \
+            --arg commit_sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
+            --arg version "sha-$GITHUB_SHA" --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg core "$core_ref" --arg gateway "$gateway_ref" \
+            '{commit_sha: $commit_sha, ref: $ref, version: $version,
+              run_id: $run_id, run_attempt: $run_attempt,
+              images: {core: $core, gateway: $gateway}}' \
+            > release-evidence/release.json
+          (cd release-evidence && sha256sum *.json > SHA256SUMS)
+
+      - name: Retain release evidence
+        id: release-evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 90
+
       # -------------------------------------------------------------------
       # Artifact metadata – written to the workflow summary so infra
       # engineers can inspect the release at a glance.
@@ -734,6 +909,7 @@ jobs:
           echo "| **core_digest** | \`${{ steps.build-core.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **gateway_image** | \`${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **gateway_digest** | \`${{ steps.build-gateway.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **release_evidence** | ${{ steps.release-evidence.outputs.artifact-url }} |" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # Notify Infra – optional repository_dispatch to the infra repo

@@ -1,9 +1,13 @@
 """Targeted tests for the graph authorization seam."""
 
 import json
+from unittest.mock import Mock
+
+import pytest
 
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
+    GRAPH_ACTION_READ,
     DefaultGraphAuthorizationHook,
     GraphAccessNarrowing,
     GraphAuthorizationContext,
@@ -14,6 +18,7 @@ from backend.core import Node, NodeType, GraphStorage
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 from backend.service import GraphService
+from backend.service import queries
 
 
 class DenyMutationsHook:
@@ -389,6 +394,97 @@ class TestGraphAuthorizationSeam:
         assert result["added_edge_ids"] == []
 
 
+class TestSimilarityAuthorization:
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    def test_denied_similarity_reads_never_access_storage(self, batch):
+        """Both query entry points authorize reads before touching graph data."""
+        storage = Mock()
+        hook = Mock()
+        hook.evaluate.return_value = GraphAuthorizationDecision(
+            allowed=False, reason="Reads disabled", mode="custom", source="test"
+        )
+        target = "find_similar_nodes_batch" if batch else "find_similar_nodes"
+
+        result = getattr(queries, target)(
+            storage, hook, ["Candidate"] if batch else "Candidate"
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "access_denied"
+        assert result["message"] == "Reads disabled"
+        assert result["authorization"] == {
+            "action": GRAPH_ACTION_READ,
+            "target": target,
+            "mode": "custom",
+            "source": "test",
+        }
+        hook.evaluate.assert_called_once()
+        context = hook.evaluate.call_args.args[0]
+        assert (context.action, context.target) == (GRAPH_ACTION_READ, target)
+        assert storage.mock_calls == []
+
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    @pytest.mark.parametrize("semantic", [False, True], ids=["name", "semantic"])
+    @pytest.mark.parametrize(
+        "allow_local,graph_ids,expected",
+        [
+            (False, ("graph-alpha",), ["alpha"]),
+            (True, (), ["local"]),
+            (True, ("graph-alpha",), ["local"]),
+            (False, (), []),
+        ],
+        ids=["selected-graph", "local", "local-and-selected", "no-graphs"],
+    )
+    def test_similarity_limits_apply_after_graph_access_narrowing(
+        self,
+        empty_storage,
+        monkeypatch,
+        batch,
+        semantic,
+        allow_local,
+        graph_ids,
+        expected,
+    ):
+        """Hidden name and vector matches cannot leak or displace visible matches."""
+        nodes = [
+            Node(
+                id=node_id,
+                type=NodeType.ACTOR,
+                name="Candidate",
+                metadata={"origin_graph_id": graph_id} if graph_id else {},
+            )
+            for node_id, graph_id in (
+                ("beta", "graph-beta"),
+                ("local", ""),
+                ("alpha", "graph-alpha"),
+            )
+        ]
+        empty_storage.add_nodes(nodes, [])
+
+        def vector_search(*, limit, **kwargs):
+            return [("beta", 0.99), ("local", 0.95), ("alpha", 0.9)][:limit]
+
+        monkeypatch.setattr(empty_storage.vector_store, "search", vector_search)
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=allow_local, include_graph_ids=graph_ids
+            ),
+        )
+        name = "Unrelated query" if semantic else "Candidate"
+
+        if batch:
+            result = service.find_similar_nodes_batch([name], threshold=0.9, limit=1)
+            assert result["total_searched"] == 1
+            result = result["results"][name]
+        else:
+            result = service.find_similar_nodes(name, threshold=0.9, limit=1)
+            assert result["search_name"] == name
+
+        assert [item["node"]["id"] for item in result["similar_nodes"]] == expected
+        assert result["total"] == len(expected)
+
+
 class TestMutationScopeNarrowing:
     """Mutations must honor the same graph-scope narrowing that reads do.
 
@@ -483,6 +579,108 @@ class TestMutationScopeNarrowing:
         assert blocked_source["success"] is False
         assert "not found" in blocked_source["message"]
         assert allowed["success"] is True
+
+    @pytest.mark.parametrize("endpoint", ["local-1", "alpha-1"])
+    def test_add_edge_rechecks_scope_at_storage_insertion(
+        self, tmp_path, monkeypatch, endpoint
+    ):
+        service = self._alpha_scoped_service(tmp_path)
+        storage = service.storage
+        original_add_edge = storage.add_edge
+        original_edges = set(storage.edges)
+
+        def move_endpoint_then_insert(edge, **kwargs):
+            # Interleave a scope change after service validation, before insertion.
+            storage.update_node(
+                endpoint, {"metadata": {"origin_graph_id": "graph-beta"}}
+            )
+            return original_add_edge(edge, **kwargs)
+
+        monkeypatch.setattr(storage, "add_edge", move_endpoint_then_insert)
+        result = service.add_edge("local-1", "alpha-1", type="RELATES_TO")
+
+        assert result == {
+            "success": False,
+            "message": "Could not add edge (source or target not found)",
+        }
+        assert set(storage.edges) == original_edges
+
+    @pytest.mark.parametrize("end", ["source", "target"])
+    @pytest.mark.parametrize("by_name", [False, True])
+    @pytest.mark.parametrize("federated", [False, True])
+    def test_add_nodes_hidden_and_missing_endpoints_get_the_same_refusal(
+        self, empty_storage, end, by_name, federated
+    ):
+        """Hidden endpoints never reveal their existence or leave partial writes."""
+        hidden_id = "federated::graph-beta::hidden" if federated else "hidden"
+        empty_storage.add_nodes(
+            [
+                Node(id="visible", name="Visible", type=NodeType.ACTOR),
+                Node(
+                    id=hidden_id,
+                    name="Hidden",
+                    type=NodeType.ACTOR,
+                    metadata={"origin_graph_id": "graph-beta"},
+                ),
+            ],
+            [],
+        )
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=True, include_graph_ids=("graph-alpha",)
+            ),
+        )
+        results = []
+        for endpoint in ("Hidden" if by_name else hidden_id, "missing"):
+            edge = {"source": "visible", "target": "visible", "type": "RELATES_TO"}
+            edge[end] = endpoint
+            results.append(
+                service.add_nodes(
+                    [{"id": "new", "name": "New", "type": "Actor"}], [edge]
+                )
+            )
+        assert results[0]["success"] is False
+        assert results[0]["message"] == results[1]["message"]
+        assert results[0]["added_node_ids"] == results[0]["added_edge_ids"] == []
+        assert empty_storage.get_node("new") is None
+        assert not empty_storage.edges
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_accepts_visible_and_same_call_endpoints(
+        self, empty_storage, by_name
+    ):
+        """Narrowing permits visible existing nodes and nodes created in this call."""
+        empty_storage.add_nodes(
+            [
+                Node(
+                    id="visible",
+                    name="Visible",
+                    type="Actor",
+                    metadata={"origin_graph_id": "graph-alpha"},
+                )
+            ],
+            [],
+        )
+        service = GraphService(
+            empty_storage,
+            authorization_hook=FixedNarrowingHook(
+                allow_local_graph=False, include_graph_ids=("graph-alpha",)
+            ),
+        )
+        result = service.add_nodes(
+            [{"id": "new", "name": "New", "type": "Actor"}],
+            [
+                {
+                    "source": "New" if by_name else "new",
+                    "target": "Visible" if by_name else "visible",
+                    "type": "RELATES_TO",
+                }
+            ],
+        )
+        assert result["success"] is True
+        edge = empty_storage.edges[result["added_edge_ids"][0]]
+        assert (edge.source, edge.target) == ("new", "visible")
 
     def test_standalone_default_hook_mutates_graph_tagged_entities(self, tmp_path):
         # With the default (permissive, narrowing-disabled) hook, a node/edge

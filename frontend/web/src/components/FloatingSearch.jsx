@@ -1,13 +1,14 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { Search } from 'react-bootstrap-icons';
+import { Search, BoxArrowUpRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
+import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
-function FloatingSearch({ variant = 'floating' }) {
+function FloatingSearch({ variant = 'floating', onTeleport }) {
   const { t, language } = useI18n();
   const {
     nodes: vizNodes,
@@ -28,11 +29,15 @@ function FloatingSearch({ variant = 'floating' }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  // The query whose results are rendered, so tests can wait on the applied outcome.
+  const [resultsQuery, setResultsQuery] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const debounceRef = useRef(null);
+  const activeSearchRef = useRef(0);
+  const selectionRef = useRef(0);
 
   useLayoutEffect(() => {
     const search = containerRef.current;
@@ -54,13 +59,13 @@ function FloatingSearch({ variant = 'floating' }) {
       const edgeGap = 16;
       const chromeGap = 12;
       const maximumWidth = 400;
-      const minimumUsableWidth = 240;
       const leftEdge = safeLeft + edgeGap;
       const rightEdge = viewportWidth - safeRight - edgeGap;
       const centeredLeft = (viewportWidth - maximumWidth) / 2;
       const left = Math.max(leftEdge, centeredLeft, headerRect.right + chromeGap);
-      const width = Math.max(0, Math.min(maximumWidth, rightEdge - left));
-      const stacked = viewportWidth <= 600 || width < minimumUsableWidth;
+      const availableInlineWidth = rightEdge - left;
+      const width = Math.max(0, Math.min(maximumWidth, availableInlineWidth));
+      const stacked = viewportWidth <= 600 || availableInlineWidth < maximumWidth;
 
       const phoneStack = stacked && viewportWidth <= 600;
       const stackedWidth = phoneStack
@@ -79,6 +84,7 @@ function FloatingSearch({ variant = 'floating' }) {
         '--floating-search-width',
         `${Math.round(stacked ? stackedWidth : width)}px`
       );
+      search.style.setProperty('--floating-search-transform', 'translateX(0)');
       search.style.setProperty('--floating-header-bottom', `${Math.ceil(headerRect.bottom)}px`);
     };
     const measure = () => {
@@ -154,46 +160,64 @@ function FloatingSearch({ variant = 'floating' }) {
         return node.name;
       }
 
-      const originGraphId = node.metadata?.origin_graph_id;
-      const originGraphName =
-        node.metadata?.origin_graph_name ||
-        (originGraphId ? graphDisplayNames[originGraphId] : null) ||
-        graphDisplayNames.local ||
-        'Local';
+      // Same reader the canvas context menu uses to decide what is federated,
+      // so one node cannot be labelled by one rule here and acted on by another
+      // there.
+      const graphName = originGraphName(node, {
+        graphDisplayNames,
+        localLabel: t('floating_search.local_graph'),
+      });
 
-      return `${originGraphName}: ${node.name}`;
+      return `${graphName}: ${node.name}`;
     },
-    [graphDisplayNames, showGraphPrefix]
+    [graphDisplayNames, showGraphPrefix, t]
   );
 
   // Debounced search
   useEffect(() => {
     if (query.length < 2) {
+      activeSearchRef.current += 1;
       setResults([]);
+      setResultsQuery(null);
       setShowDropdown(false);
+      setIsLoading(false);
       return;
     }
 
+    // Set when the query or depth changes, so a response that settles afterwards
+    // cannot repopulate results the user has already typed past or cleared.
+    let cancelled = false;
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
+      const searchId = activeSearchRef.current + 1;
+      activeSearchRef.current = searchId;
       setIsLoading(true);
       try {
         const result = await api.searchGraph(query, { limit: 10, federationDepth });
+        if (cancelled || activeSearchRef.current !== searchId) return;
         const nodes = (result.nodes || []).filter(
           (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
         setResults(nodes);
+        setResultsQuery(query);
         setSelectedIndex(0);
         setShowDropdown(nodes.length > 0);
       } catch (err) {
+        if (cancelled || activeSearchRef.current !== searchId) return;
         console.error('Search error:', err);
         setResults([]);
+        setResultsQuery(query);
       } finally {
-        setIsLoading(false);
+        if (!cancelled && activeSearchRef.current === searchId) {
+          setIsLoading(false);
+        }
       }
     }, 300);
 
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
   }, [query, federationDepth]);
 
   // Click outside to close
@@ -244,6 +268,8 @@ function FloatingSearch({ variant = 'floating' }) {
 
   const selectResult = useCallback(
     async (node) => {
+      const selectionId = selectionRef.current + 1;
+      selectionRef.current = selectionId;
       // SavedView: clear canvas and load the saved view's nodes with positions and edges
       if (node.type === 'SavedView') {
         try {
@@ -252,11 +278,14 @@ function FloatingSearch({ variant = 'floating' }) {
           const savedEdges = node.metadata?.edges || [];
           const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
           const savedViewAnnotations = savedViewMetadataToCanvasMetadata(node.metadata || {});
+          const details =
+            nodeIds.length > 0
+              ? await Promise.all(nodeIds.map((id) => api.getNodeDetails(id).catch(() => null)))
+              : [];
+          if (selectionRef.current !== selectionId) return;
+
+          clearVisualization();
           if (nodeIds.length > 0) {
-            clearVisualization();
-            const details = await Promise.all(
-              nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
-            );
             const loadedNodes = details
               .filter((d) => d?.success)
               .map((d) => {
@@ -288,24 +317,26 @@ function FloatingSearch({ variant = 'floating' }) {
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-
-              // Restore groups if any were saved
-              if (savedViewAnnotations.groups.length > 0) {
-                setPendingGroups({
-                  groups: savedViewAnnotations.groups,
-                  parentIds: savedViewAnnotations.parentIds,
-                });
-              }
-              if (savedViewAnnotations.annotations.length > 0) {
-                setPendingAnnotations(savedViewAnnotations.annotations);
-              }
             }
           }
+
+          if (savedViewAnnotations.groups.length > 0) {
+            setPendingGroups({
+              groups: savedViewAnnotations.groups,
+              parentIds: savedViewAnnotations.parentIds,
+            });
+          }
+          if (savedViewAnnotations.annotations.length > 0) {
+            setPendingAnnotations(savedViewAnnotations.annotations);
+          }
         } catch (err) {
+          if (selectionRef.current !== selectionId) return;
           console.error('Error loading saved view:', err);
         }
+        if (selectionRef.current !== selectionId) return;
         setQuery('');
         setResults([]);
+        setResultsQuery(null);
         setShowDropdown(false);
         return;
       }
@@ -324,6 +355,7 @@ function FloatingSearch({ variant = 'floating' }) {
         addNodesToVisualization([node], []);
         try {
           const related = await api.getRelatedNodes(node.id, { depth: 1 });
+          if (selectionRef.current !== selectionId) return;
           if (related.edges && related.edges.length > 0) {
             const vizNodeIds = new Set(vizNodes.map((n) => n.id));
             vizNodeIds.add(node.id);
@@ -335,13 +367,16 @@ function FloatingSearch({ variant = 'floating' }) {
             }
           }
         } catch (err) {
+          if (selectionRef.current !== selectionId) return;
           console.error('Error loading edges for node:', err);
         }
+        if (selectionRef.current !== selectionId) return;
         setTimeout(() => setFocusNodeId(node.id), 100);
       }
 
       setQuery('');
       setResults([]);
+      setResultsQuery(null);
       setShowDropdown(false);
     },
     [
@@ -381,14 +416,16 @@ function FloatingSearch({ variant = 'floating' }) {
       className={`floating-search${variant === 'sheet' ? ' floating-search--sheet' : ''}`}
       id="guide-target-search"
       ref={containerRef}
+      data-results-query={resultsQuery ?? undefined}
     >
       <div className="floating-search-bar">
-        <Search size={18} className="floating-search-icon" />
+        <Search size={18} className="floating-search-icon" aria-hidden="true" />
         <input
           ref={inputRef}
           type="text"
           className="floating-search-input"
-          placeholder="Search graph..."
+          placeholder={t('floating_search.placeholder')}
+          aria-label={t('floating_search.aria_label')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -416,21 +453,43 @@ function FloatingSearch({ variant = 'floating' }) {
             const isInViz =
               vizNodes.some((n) => n.id === node.id) && !hiddenNodeIds.includes(node.id);
 
+            // A result owned by another graph gets a second, explicit action
+            // beside the ordinary one, so selecting the result still brings it
+            // onto this canvas and only the teleport button leaves for the
+            // source graph. The row is a wrapper rather than one button
+            // because a button cannot nest inside another button.
+            const canTeleport = Boolean(onTeleport) && isFederatedNode(node);
+
             return (
-              <button
-                key={node.id}
-                className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
-                onClick={() => selectResult(node)}
-                onMouseEnter={() => setSelectedIndex(index)}
-              >
-                <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
-                {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
-                <span className="floating-search-result-name">{getResultLabel(node)}</span>
-                <span className="floating-search-result-type" style={{ color }}>
-                  {getTypeLabel(node.type)}
-                </span>
-                {isInViz && <span className="floating-search-result-badge">in view</span>}
-              </button>
+              <div key={node.id} className="floating-search-result-row">
+                <button
+                  className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
+                  onClick={() => selectResult(node)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                >
+                  <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
+                  {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
+                  <span className="floating-search-result-name">{getResultLabel(node)}</span>
+                  <span className="floating-search-result-type" style={{ color }}>
+                    {getTypeLabel(node.type)}
+                  </span>
+                  {isInViz && (
+                    <span className="floating-search-result-badge">
+                      {t('floating_search.in_view_badge')}
+                    </span>
+                  )}
+                </button>
+                {canTeleport && (
+                  <button
+                    className="floating-search-result-teleport"
+                    title={t('federation.teleport_action_tooltip')}
+                    aria-label={t('federation.teleport_action')}
+                    onClick={() => onTeleport(node.id, node, { searchQuery: query })}
+                  >
+                    <BoxArrowUpRight size={13} aria-hidden="true" />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>

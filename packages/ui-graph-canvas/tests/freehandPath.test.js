@@ -8,6 +8,7 @@ import {
   smoothAnchors,
   segmentsFromCurvePoints,
 } from '../src/utils/freehandPath';
+import { FREEHAND_WIDTHS } from '../src/utils/freehandOptions';
 
 // A "jittery" hand-drawn line: an L-shaped stroke (roughly horizontal, then
 // roughly vertical) with small perpendicular wobble at every sample — the
@@ -432,5 +433,146 @@ describe('buildPressureSegments', () => {
       { x: 9, y: 1, pressure: 0.4 },
     ];
     expect(buildPressureSegments(points, 0.4, 2)).toEqual(buildPressureSegments(points, 0.4, 2));
+  });
+});
+
+// Mean absolute turn between successive segments' headings, a roughness
+// measure that tremor inflates and relaxation removes.
+function roughness(points) {
+  let total = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const ax = points[i].x - points[i - 1].x;
+    const ay = points[i].y - points[i - 1].y;
+    const bx = points[i + 1].x - points[i].x;
+    const by = points[i + 1].y - points[i].y;
+    total += Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by));
+  }
+  return total / Math.max(1, points.length - 2);
+}
+
+function tremblingStroke() {
+  const points = [];
+  for (let i = 0; i <= 60; i++) {
+    points.push({ x: i * 3, y: Math.sin(i / 8) * 20 + (i % 2 === 0 ? 1.5 : -1.5) });
+  }
+  return points;
+}
+
+describe('smoothing strength (smoothAnchors)', () => {
+  it('leaves the anchors untouched at smoothing=0', () => {
+    const points = tremblingStroke();
+    expect(smoothAnchors(points, 0)).toBe(points);
+  });
+
+  it('makes 100% far smoother than 0% and rises monotonically through the levels', () => {
+    const points = tremblingStroke();
+    const r0 = roughness(smoothAnchors(points, 0));
+    const r30 = roughness(smoothAnchors(points, 0.3));
+    const r60 = roughness(smoothAnchors(points, 0.6));
+    const r100 = roughness(smoothAnchors(points, 1));
+    expect(r30).toBeLessThan(r0);
+    expect(r60).toBeLessThan(r30);
+    expect(r100).toBeLessThan(r60);
+    expect(r100).toBeLessThan(r0 / 5);
+  });
+
+  it('keeps the first and last point exactly where the pen started and ended', () => {
+    const points = tremblingStroke();
+    const smoothed = smoothAnchors(points, 1);
+    expect(smoothed[0]).toEqual(points[0]);
+    expect(smoothed[smoothed.length - 1]).toEqual(points[points.length - 1]);
+  });
+
+  it('does not mutate its input and keeps pressure on every output point', () => {
+    const points = tremblingStroke().map((p, i) => ({ ...p, pressure: i % 2 ? 0.2 : 0.8 }));
+    const snapshot = JSON.parse(JSON.stringify(points));
+    const smoothed = smoothAnchors(points, 1);
+    expect(points).toEqual(snapshot);
+    smoothed.forEach((p) => expect(Number.isFinite(p.pressure)).toBe(true));
+  });
+
+  it('leaves a perfectly straight evenly sampled line straight', () => {
+    const line = [0, 10, 20, 30, 40].map((x) => ({ x, y: 5 }));
+    smoothAnchors(line, 1).forEach((p) => expect(p.y).toBeCloseTo(5, 9));
+  });
+});
+
+describe('pressure width range', () => {
+  const widthAt = (pressure, base = 4) =>
+    buildPressureSegments(
+      [
+        { x: 0, y: 0, pressure },
+        { x: 10, y: 0, pressure },
+      ],
+      0,
+      base
+    )[0].width;
+
+  it.each(FREEHAND_WIDTHS)(
+    'spreads thinnest to thickest by at least 15x at offered width %s, with a nonzero minimum',
+    (base) => {
+      const thin = widthAt(0, base);
+      const thick = widthAt(1, base);
+      expect(thin).toBeGreaterThan(0);
+      expect(thick / thin).toBeGreaterThanOrEqual(15);
+    }
+  );
+
+  it('draws mid pressure (what a mouse reports while pressed) at exactly the base width', () => {
+    expect(widthAt(0.5, 4)).toBeCloseTo(4, 9);
+  });
+
+  it('grows strictly with pressure across a 0..1 sweep when the base is not floor-limited', () => {
+    let prev = widthAt(0, 4);
+    for (let i = 1; i <= 100; i++) {
+      const w = widthAt(i / 100, 4);
+      expect(w).toBeGreaterThan(prev);
+      prev = w;
+    }
+  });
+
+  it.each(FREEHAND_WIDTHS)('never narrows as pressure rises at offered width %s', (base) => {
+    let prev = widthAt(0, base);
+    for (let i = 1; i <= 100; i++) {
+      const w = widthAt(i / 100, base);
+      expect(w).toBeGreaterThanOrEqual(prev);
+      prev = w;
+    }
+  });
+
+  it('never goes below the 0.2px floor even for a hairline base width', () => {
+    expect(widthAt(0, 1)).toBeCloseTo(0.2, 9);
+    expect(widthAt(0, 0.01)).toBeCloseTo(0.2, 9);
+  });
+});
+
+describe('pressure width continuity and clamping', () => {
+  const widthAt = (pressure, base = 4) =>
+    buildPressureSegments(
+      [
+        { x: 0, y: 0, pressure },
+        { x: 10, y: 0, pressure },
+      ],
+      0,
+      base
+    )[0].width;
+
+  it('has no jump across the 0.5 anchor: neighbouring pressures give neighbouring widths', () => {
+    // Steepest slope is (3.5 - 1) / 0.5 = 5 base widths per unit pressure, so
+    // 0.001 of pressure may move the width by at most 0.005 * base.
+    const base = 4;
+    for (const p of [0.4, 0.45, 0.49, 0.499, 0.5, 0.501, 0.51, 0.55, 0.6]) {
+      expect(Math.abs(widthAt(p + 0.001, base) - widthAt(p, base))).toBeLessThan(
+        0.005 * base + 1e-9
+      );
+    }
+    expect(widthAt(0.499, base)).toBeCloseTo(base, 1);
+    expect(widthAt(0.501, base)).toBeCloseTo(base, 1);
+  });
+
+  it('clamps out-of-range pressure to the 0 and 1 widths', () => {
+    expect(widthAt(-1)).toBeCloseTo(widthAt(0), 9);
+    expect(widthAt(2)).toBeCloseTo(widthAt(1), 9);
+    expect(widthAt(1.1)).toBeCloseTo(widthAt(1), 9);
   });
 });

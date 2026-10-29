@@ -14,7 +14,7 @@ import asyncio
 import os
 import tempfile
 from typing import Optional, Dict, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from backend.ui.document_processor import DocumentProcessor
 
@@ -110,6 +110,7 @@ class DocumentService:
             Dict with:
             - success: bool
             - file_path: Path to saved file (if successful)
+            - filename: The uploaded name on success; its display name on failure
             - error: Error message (if failed)
         """
         # Validate extension
@@ -118,6 +119,7 @@ class DocumentService:
             return {
                 "success": False,
                 "error": f"Unsupported file format: {ext}. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}",
+                "filename": self._display_filename(filename),
             }
 
         # Validate size
@@ -125,6 +127,7 @@ class DocumentService:
             return {
                 "success": False,
                 "error": f"File too large. Max size: {self.MAX_FILE_SIZE / 1024 / 1024:.1f} MB",
+                "filename": self._display_filename(filename),
             }
 
         # Create safe filename
@@ -132,13 +135,19 @@ class DocumentService:
 
         # Save to temp directory
         try:
-            file_path = Path(self._upload_dir) / safe_filename
 
             def _write_file():
-                with open(file_path, "wb") as f:
+                # Atomically reserve a distinct path, even for simultaneous same-name uploads.
+                with tempfile.NamedTemporaryFile(
+                    dir=self._upload_dir,
+                    prefix="upload_",
+                    suffix=f"_{safe_filename}",
+                    delete=False,
+                ) as f:
                     f.write(file_content)
+                    return f.name
 
-            await asyncio.to_thread(_write_file)
+            file_path = await asyncio.to_thread(_write_file)
 
             return {
                 "success": True,
@@ -147,7 +156,11 @@ class DocumentService:
                 "size": len(file_content),
             }
         except Exception as e:
-            return {"success": False, "error": f"Error saving file: {str(e)}"}
+            return {
+                "success": False,
+                "error": f"Error saving file: {str(e)}",
+                "filename": self._display_filename(filename),
+            }
 
     async def process_upload(
         self, file_content: bytes, filename: str
@@ -180,7 +193,17 @@ class DocumentService:
         except Exception:
             pass  # Ignore cleanup errors
 
+        # extract_text_from_file names the temporary storage file, but
+        # callers show this name in the chat and send it to the LLM.
+        extract_result["filename"] = self._display_filename(filename)
         return extract_result
+
+    @staticmethod
+    def _display_filename(filename: str) -> str:
+        """The uploaded file's own name, without any client path or control characters."""
+        # Same basename rule as storage, with Windows separators treated as separators.
+        name = PurePosixPath(filename.replace("\\", "/")).name
+        return "".join(ch for ch in name if ch.isprintable())
 
     def _sanitize_filename(self, filename: str) -> str:
         """
@@ -190,21 +213,15 @@ class DocumentService:
             filename: Original filename
 
         Returns:
-            Sanitized filename with timestamp prefix
+            Sanitized filename preserving the extension
         """
-        import time
         import re
 
         # Remove path components
         name = Path(filename).name
 
         # Replace unsafe characters
-        safe_name = re.sub(r"[^\w\-_\.]", "_", name)
-
-        # Add timestamp prefix for uniqueness
-        timestamp = int(time.time() * 1000)
-
-        return f"{timestamp}_{safe_name}"
+        return re.sub(r"[^\w\-_\.]", "_", name)
 
     def cleanup_old_files(self, max_age_hours: int = 24) -> int:
         """

@@ -25,6 +25,7 @@ const CENTER_X = 300;
 const CENTER_Y = 260;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2.5;
+const DRAG_CAPTURE_THRESHOLD_PX = 4;
 
 function getTypeLabel(nodeType, schema, language) {
   const labels = schema?.node_types?.[nodeType]?.labels;
@@ -236,14 +237,6 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     // or a pinch attempt) rather than letting it hijack the single shared
     // drag state — same guard as BottomSheet.jsx's handlePointerDown.
     if (dragState.current) return;
-    // Capturing keeps move/up events targeted here even if the pointer
-    // strays outside the SVG mid-drag; not universally supported (falls
-    // back to plain event delivery when unavailable, e.g. some test DOMs).
-    try {
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-    } catch {
-      // Ignored — see comment above.
-    }
     // CSS-pixel-to-viewBox-unit ratio, measured once per drag: the <svg> is
     // styled to fill a flexible container, so its rendered size rarely
     // matches the viewBox's own 600x520 units — a 1:1 use of clientX/Y deltas
@@ -260,10 +253,29 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
       origY: transform.y,
       ratioX,
       ratioY,
+      captured: false,
     };
   };
   const handlePointerMove = (e) => {
     if (!dragState.current || e.pointerId !== dragState.current.pointerId) return;
+    // Capture only once the pointer has actually moved: capturing on
+    // pointerdown retargets the following click to the <svg>, so a plain click
+    // on a node type would never reach the node's onClick. Capturing after a
+    // real drag keeps move/up events targeted here if the pointer strays
+    // outside the SVG; not universally supported (falls back to plain event
+    // delivery when unavailable, e.g. some test DOMs).
+    if (
+      !dragState.current.captured &&
+      Math.hypot(e.clientX - dragState.current.startX, e.clientY - dragState.current.startY) >
+        DRAG_CAPTURE_THRESHOLD_PX
+    ) {
+      dragState.current.captured = true;
+      try {
+        svgRef.current?.setPointerCapture?.(e.pointerId);
+      } catch {
+        // Ignored — see comment above.
+      }
+    }
     const dx = (e.clientX - dragState.current.startX) * dragState.current.ratioX;
     const dy = (e.clientY - dragState.current.startY) * dragState.current.ratioY;
     setTransform((tr) => ({
@@ -302,7 +314,12 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
           <span id="mme-dialog-title" className="mme-title">
             {t('metamodel.title')}
           </span>
-          <button className="mme-close" onClick={onClose} aria-label={t('metamodel.close')}>
+          <button
+            className="mme-close"
+            onClick={onClose}
+            aria-label={t('metamodel.close')}
+            title={t('metamodel.close')}
+          >
             <XLg size={14} />
           </button>
         </div>
@@ -458,13 +475,25 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
               )}
 
               <div className="mme-zoom-controls">
-                <button onClick={() => zoomBy(0.2)} aria-label={t('metamodel.zoom_in')}>
+                <button
+                  onClick={() => zoomBy(0.2)}
+                  aria-label={t('metamodel.zoom_in')}
+                  title={t('metamodel.zoom_in')}
+                >
                   <ZoomIn size={14} />
                 </button>
-                <button onClick={() => zoomBy(-0.2)} aria-label={t('metamodel.zoom_out')}>
+                <button
+                  onClick={() => zoomBy(-0.2)}
+                  aria-label={t('metamodel.zoom_out')}
+                  title={t('metamodel.zoom_out')}
+                >
                   <ZoomOut size={14} />
                 </button>
-                <button onClick={resetView} aria-label={t('metamodel.reset_view')}>
+                <button
+                  onClick={resetView}
+                  aria-label={t('metamodel.reset_view')}
+                  title={t('metamodel.reset_view')}
+                >
                   <ArrowCounterclockwise size={14} />
                 </button>
               </div>

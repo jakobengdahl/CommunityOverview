@@ -14,7 +14,9 @@ not go through the store's ``claim_next`` queue, the recorder never claims: it
 enqueues the run already in ``RUNNING`` state (so attribution stays with that
 specific job id, even when several workers record concurrently) and finalizes
 it by id. A run whose process dies mid-flight is left ``RUNNING`` — a truthful
-record of what was in flight at the crash.
+record of what was in flight at the crash — until a configured retention
+outlives it: the retention sweep then abandons it (dead-letter, fixed reason)
+and ages it out like any other run (``run_history_retention``).
 
 The store is created with ``RetryPolicy(max_attempts=1)`` so a failed run moves
 straight to a terminal state (surfaced as ``failed``) rather than being
@@ -74,6 +76,7 @@ def agent_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
+        "redacted_at": _iso(job.redacted_at),
     }
 
 
@@ -173,16 +176,27 @@ class AgentRunRecorder:
         kind: Optional[ExecutionKind] = None,
         states: Optional[Sequence[ExecutionState]] = None,
         limit: Optional[int] = None,
+        created_after: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         if self._store is None:
             return []
         jobs = self._store.list_jobs(
-            states=states, agent_id=agent_id, kind=kind, limit=limit
+            states=states,
+            agent_id=agent_id,
+            kind=kind,
+            limit=limit,
+            created_after=created_after,
         )
         return [agent_run_to_dict(job) for job in jobs]
 
-    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_run(
+        self, run_id: str, *, created_after: Optional[datetime] = None
+    ) -> Optional[Dict[str, Any]]:
         if self._store is None:
             return None
         job = self._store.get(run_id)
-        return agent_run_to_dict(job) if job is not None else None
+        if job is None or (
+            created_after is not None and job.created_at <= created_after
+        ):
+            return None
+        return agent_run_to_dict(job)

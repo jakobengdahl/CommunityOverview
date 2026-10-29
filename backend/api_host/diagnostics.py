@@ -24,10 +24,13 @@ PUBLIC_STARTUP_DIAGNOSTICS_PATH = "/diagnostics/startup"
 PUBLIC_READINESS_PATH = "/ready"
 
 
-def count_enabled_capabilities(capabilities: Dict[str, Any]) -> Dict[str, int]:
+def count_enabled_capabilities(
+    capabilities: Dict[str, Any], configured: int
+) -> Dict[str, int]:
     manifest = capabilities.get("capabilities", [])
     return {
-        "configured": len(manifest),
+        "configured": configured,
+        "defaulted": len(manifest) - configured,
         "enabled": sum(1 for capability in manifest if capability.get("enabled", True)),
         "disabled": sum(
             1 for capability in manifest if not capability.get("enabled", True)
@@ -98,7 +101,9 @@ def build_startup_diagnostics(
     request_scope = config_loader.get_request_scope_info()
     request_selection = config_loader.get_request_graph_selection_info()
     capabilities = config_loader.get_capabilities()
-    capability_summary = count_enabled_capabilities(capabilities)
+    capability_summary = count_enabled_capabilities(
+        capabilities, config_loader.get_declared_capability_count()
+    )
     graph_integrity = collect_graph_integrity_diagnostics(graph_storage)
     federation_runtime = federation_manager.get_status()
     agent_status = agent_registry.get_all_status()

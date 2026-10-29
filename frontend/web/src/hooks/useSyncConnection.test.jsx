@@ -181,6 +181,25 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(appOnRemoteOps).not.toHaveBeenCalled();
   });
 
+  it('drops tagged remote ops for a different active session even when the client is still current', () => {
+    const { result } = renderHook(() => useSyncConnection('3333-4444'));
+    const appOnRemoteOps = vi.fn();
+    result.current.syncHandlersRef.current = { onRemoteOps: appOnRemoteOps };
+
+    let staleSessionClient;
+    act(() => {
+      staleSessionClient = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      staleSessionClient.handlers.onRemoteOps([{ op: 'nodes_added', node_ids: ['stale-node'] }], {
+        clientId: 'client-other',
+        sessionId: '1111-2222',
+      });
+    });
+
+    expect(appOnRemoteOps).not.toHaveBeenCalled();
+  });
+
   it('ignores stale ready, presence, and selection callbacks after switching sessions', () => {
     const { result } = renderHook(() => useSyncConnection('1111-2222'));
     const appOnReady = vi.fn();
@@ -230,6 +249,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       onSessionRenamed: vi.fn(),
       onSessionDeleted: vi.fn(),
       onCommand: vi.fn(),
+      onViewportSummoned: vi.fn(),
       onDropped: vi.fn(),
     };
     result.current.syncHandlersRef.current = handlers;
@@ -247,6 +267,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       staleClient.handlers.onSessionRenamed('Stale name');
       staleClient.handlers.onSessionDeleted('stale-user');
       staleClient.handlers.onCommand({ type: 'node_pulse', node_id: 'stale-node' });
+      staleClient.handlers.onViewportSummoned({ bounds: { x: 0 } });
       staleClient.handlers.onDropped([{ op: 'stale' }], 400);
     });
 
@@ -254,6 +275,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(handlers.onSessionRenamed).not.toHaveBeenCalled();
     expect(handlers.onSessionDeleted).not.toHaveBeenCalled();
     expect(handlers.onCommand).not.toHaveBeenCalled();
+    expect(handlers.onViewportSummoned).not.toHaveBeenCalled();
     expect(handlers.onDropped).not.toHaveBeenCalled();
 
     act(() => {
@@ -261,6 +283,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       currentClient.handlers.onSessionRenamed('Current name');
       currentClient.handlers.onSessionDeleted('current-user');
       currentClient.handlers.onCommand({ type: 'node_pulse', node_id: 'current-node' });
+      currentClient.handlers.onViewportSummoned({ bounds: { x: 1 } });
       currentClient.handlers.onDropped([{ op: 'current' }], 413);
     });
 
@@ -272,6 +295,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       node_id: 'current-node',
     });
     expect(handlers.onDropped).toHaveBeenCalledWith([{ op: 'current' }], 413);
+    expect(handlers.onViewportSummoned).toHaveBeenCalledWith({ bounds: { x: 1 } });
   });
 });
 

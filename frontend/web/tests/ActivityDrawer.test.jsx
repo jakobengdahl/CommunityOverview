@@ -26,7 +26,7 @@ function record(overrides = {}) {
     op: 'annotation_created',
     actor: 'client-me',
     occurred_at: new Date().toISOString(),
-    affected: { kind: 'annotation', id: 'note-1', fields: null },
+    affected: { kind: 'annotation', id: 'note-1' },
     before: null,
     after: { id: 'note-1', type: 'note' },
     inverse_op: { op: 'annotation_deleted', annotation_id: 'note-1' },
@@ -217,5 +217,17 @@ describe('ActivityDrawer', () => {
     await screen.findByText('No session activity yet');
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('stops Escape from reaching listeners outside the drawer on desktop too', async () => {
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    const props = renderDrawer();
+    await screen.findByText('No session activity yet');
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', outerListener);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(outerListener).not.toHaveBeenCalled();
   });
 });

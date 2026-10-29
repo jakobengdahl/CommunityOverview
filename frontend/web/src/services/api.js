@@ -4,6 +4,14 @@
  * Calls the backend endpoints exposed by app_host
  */
 
+import {
+  SESSION_ID_HEADER,
+  directSessionNames,
+  mayWriteGraph,
+  needsSessionHeader,
+  pathBelowRoot,
+} from './stagedSessionHeader';
+
 export function getPathRoot() {
   const pathname = window.location.pathname;
   const webIndex = pathname.lastIndexOf('/web/');
@@ -68,33 +76,221 @@ export function getEventOrigin() {
 }
 
 // ============================================================
+// Staged-session binding
+// ============================================================
+
+// The session this browser is working in, and the sessions it knows to be
+// staged. While the active session is one of them, every request
+// needsSessionHeader() picks names it, so graph writes stage and graph reads
+// compose (docs/SESSION_OVERLAY_CONTRACT.md §16.1). Keeping the two apart means
+// switching sessions unbinds at once: a request can never carry the previous
+// session's id into the next one. Only a session the server reports as staged
+// is ever marked: a session that exists only in the browser is always direct
+// (§5.1), and naming one the server does not hold would be refused.
+let _activeSessionId = null;
+const _stagedSessions = new Set();
+// Sessions whose write mode has not been read from the server yet (a deep
+// link before its session loads, or whose load failed). A graph write made
+// from one is refused here rather than sent without the header: if the
+// session is staged, that write would land in the graph.
+const _modeUnknown = new Set();
+// Where the backend can stage, a session the server holds may be switched to
+// staged by another participant at any moment. Naming every such session on
+// the routes that stage or compose lets the server decide each write by the
+// mode it holds then, instead of this browser's possibly stale knowledge; in a
+// direct session the header changes nothing there.
+let _stagingAvailable = false;
+const _serverSessions = new Set();
+
+/** @param {boolean} available - the backend reports staged_sessions */
+export function setStagingAvailable(available) {
+  _stagingAvailable = !!available;
+}
+
+/**
+ * Record that the server holds a session (its payload was read, it was
+ * created, or its stream connected), so naming it cannot be refused as
+ * session_not_found.
+ * @param {string} sessionId
+ */
+export function setSessionOnServer(sessionId) {
+  if (sessionId) _serverSessions.add(sessionId);
+}
+
+/**
+ * Set the session graph requests are made from.
+ * @param {string|null} sessionId
+ */
+export function setActiveSessionForRequests(sessionId) {
+  _activeSessionId = sessionId || null;
+}
+
+/**
+ * Record what the server says a session's write mode is. Staged is final
+ * (§5.2), so only a delete ever unmarks one.
+ * @param {string} sessionId
+ * @param {boolean} staged
+ */
+// Messages this module raises itself, shown wherever an error's message is
+// shown: translated by the app (setMessageTranslator), English until then.
+let _translate = null;
+
+/** @param {(key: string) => string} translator - i18n `t` */
+export function setMessageTranslator(translator) {
+  _translate = translator || null;
+}
+
+function translate(key, english) {
+  const text = _translate?.(key);
+  return text && text !== key ? text : english;
+}
+
+const _stagedListeners = new Set();
+
+/**
+ * Be told whenever a session is newly marked staged here, so a mark made below
+ * the UI (e.g. on a re-read before an approval) shows at once.
+ * @param {(sessionId: string) => void} listener
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeStagedMarks(listener) {
+  _stagedListeners.add(listener);
+  return () => _stagedListeners.delete(listener);
+}
+
+export function setSessionStaged(sessionId, staged) {
+  if (!sessionId) return;
+  _modeUnknown.delete(sessionId);
+  if (staged) {
+    const isNew = !_stagedSessions.has(sessionId);
+    _stagedSessions.add(sessionId);
+    if (isNew) _stagedListeners.forEach((listener) => listener(sessionId));
+  } else {
+    _stagedSessions.delete(sessionId);
+    _serverSessions.delete(sessionId);
+  }
+}
+
+/**
+ * Hold graph writes from a session until the server has said how it writes.
+ * setSessionStaged (with either answer) releases them.
+ * @param {string} sessionId
+ */
+export function setSessionModeUnknown(sessionId) {
+  if (sessionId && !_stagedSessions.has(sessionId)) _modeUnknown.add(sessionId);
+}
+
+/**
+ * The server says the session is direct (or holds no such session, which a
+ * browser-only session is): release writes held by setSessionModeUnknown.
+ * Never turns a staged session direct.
+ * @param {string} sessionId
+ */
+export function setSessionModeDirect(sessionId) {
+  _modeUnknown.delete(sessionId);
+}
+
+/**
+ * Whether content the session stream hands over may be staged content for
+ * this viewer: the active session is staged, or its mode is not known yet.
+ * Such content is re-read through composed, authorized reads, never shown as
+ * delivered.
+ * @returns {boolean}
+ */
+export function isActiveSessionPossiblyStaged() {
+  return (
+    !!_activeSessionId &&
+    (_stagedSessions.has(_activeSessionId) || _modeUnknown.has(_activeSessionId))
+  );
+}
+
+/** @returns {string|null} the active session's id when it is staged */
+export function getStagedSessionBinding() {
+  return _activeSessionId && _stagedSessions.has(_activeSessionId) ? _activeSessionId : null;
+}
+
+function sessionHeaders(url, method) {
+  const path = pathBelowRoot(url, getPathRoot());
+  const staged = getStagedSessionBinding();
+  if (staged) {
+    return needsSessionHeader(method, path) ? { [SESSION_ID_HEADER]: staged } : {};
+  }
+  if (
+    _stagingAvailable &&
+    _activeSessionId &&
+    _serverSessions.has(_activeSessionId) &&
+    directSessionNames(method, path)
+  ) {
+    return { [SESSION_ID_HEADER]: _activeSessionId };
+  }
+  return {};
+}
+
+// ============================================================
 // API Client
 // ============================================================
+
+/**
+ * Build the Error a failed response is thrown as. Most endpoints answer
+ * {"error": "..."}; FastAPI's HTTPException answers {"detail": "..."}, and the
+ * session and staged-change routes answer {"detail": {"error": code,
+ * "message": ..., ...data}}. The message is the human-readable reason; `code`
+ * and `data` carry a structured refusal so callers can act on it.
+ */
+async function responseError(response) {
+  const errorData = await response.json().catch(() => ({}));
+  const detail = errorData.detail;
+  const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : null;
+  const message = structured
+    ? structured.message || structured.error
+    : errorData.error || (typeof detail === 'string' ? detail : null);
+  const error = new Error(message || `HTTP error: ${response.status}`);
+  error.status = response.status;
+  error.code = structured?.error || (typeof errorData.error === 'string' ? errorData.error : null);
+  error.data = structured || errorData;
+  // No reason in the body: the message is the status alone, in English, for
+  // a caller that shows it to say in the UI's own language.
+  error.statusOnly = !message;
+  return error;
+}
+
+// A request that may write the graph from a session whose write mode is not
+// known yet is held: the session may be staged.
+function refuseWhileModeUnknown(url, method) {
+  if (
+    _activeSessionId &&
+    _modeUnknown.has(_activeSessionId) &&
+    mayWriteGraph(method, pathBelowRoot(url, getPathRoot()))
+  ) {
+    const error = new Error(
+      translate(
+        'staged.write_held',
+        "This session's write mode is not known yet, so nothing is written until it has loaded."
+      )
+    );
+    error.code = 'session_mode_unknown';
+    throw error;
+  }
+}
 
 /**
  * Generic fetch helper with error handling
  */
 async function apiFetch(url, options = {}) {
+  refuseWhileModeUnknown(url, options.method);
   const response = await fetch(url, {
+    ...options,
     headers: {
       'Content-Type': 'application/json',
+      // Plain HTTP browsers omit fetch metadata; forms cannot set this header.
+      'X-Requested-With': 'XMLHttpRequest',
+      ...sessionHeaders(url, options.method),
       ...options.headers,
     },
-    ...options,
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    // Most endpoints return {"error": "..."}; a few (e.g. the session
-    // activity/undo routes, which raise a plain FastAPI HTTPException) return
-    // {"detail": "..."} instead — fall back to that so callers branching on
-    // `error.message` (activity/undo conflict feedback) see the real reason
-    // rather than a generic "HTTP error: 409".
-    const error = new Error(
-      errorData.error || errorData.detail || `HTTP error: ${response.status}`
-    );
-    error.status = response.status;
-    throw error;
+    throw await responseError(response);
   }
 
   return response.json();
@@ -115,6 +311,28 @@ export async function searchGraph(query, options = {}) {
       communities: options.communities,
       limit: options.limit || 50,
       federation_depth: options.federationDepth,
+    }),
+  });
+}
+
+/**
+ * Resolve the canonical route from a node to the graph that owns it.
+ *
+ * The server decides, from the caller's graph access, whether a route may be
+ * handed back at all; the response's `status` is one of `ok`, `local`,
+ * `permission_denied`, `graph_unavailable` or `unknown_node`.
+ *
+ * @param {string} nodeId - Local or federated node ID
+ * @param {Object} options - `sessionId` and `searchQuery` to carry along
+ * @returns {Promise<Object>} Resolved teleport target
+ */
+export async function resolveTeleport(nodeId, options = {}) {
+  return apiFetch(`${API_BASE}/federation/teleport`, {
+    method: 'POST',
+    body: JSON.stringify({
+      node_id: nodeId,
+      session_id: options.sessionId,
+      search_query: options.searchQuery,
     }),
   });
 }
@@ -349,6 +567,68 @@ export async function getSchema() {
   return apiFetch(`${API_BASE}/schema`);
 }
 
+// ============================================================
+// Node attachments (ADR 0008)
+// ============================================================
+
+function attachmentsUrl(nodeId) {
+  return `${API_BASE}/nodes/${encodeURIComponent(nodeId)}/attachments`;
+}
+
+/**
+ * The attachment routes answer errors as {detail: {error, message}}, which
+ * apiFetch would flatten to "[object Object]"; keep the code so the UI can
+ * map it to a translated message.
+ */
+async function attachmentFetch(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'X-Requested-With': 'XMLHttpRequest', ...options.headers },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const detail = body && typeof body.detail === 'object' && body.detail ? body.detail : {};
+    const error = new Error(
+      detail.message || (typeof body.detail === 'string' ? body.detail : '') || ''
+    );
+    error.status = response.status;
+    error.code = detail.error || '';
+    throw error;
+  }
+  return response.json();
+}
+
+/**
+ * List a node's attachments.
+ * @returns {Promise<{attachments: Array, limits: Object, uploads_allowed: boolean}>}
+ */
+export async function listNodeAttachments(nodeId) {
+  return attachmentFetch(attachmentsUrl(nodeId));
+}
+
+/**
+ * Attach one file to a node. The body is the raw bytes, not multipart.
+ * @param {string} nodeId
+ * @param {File} file
+ * @returns {Promise<Object>} the stored attachment record
+ */
+export async function uploadNodeAttachment(nodeId, file) {
+  return attachmentFetch(`${attachmentsUrl(nodeId)}?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+}
+
+/** The download route; the server always serves it as an attachment. */
+export function getNodeAttachmentUrl(nodeId, attachmentId) {
+  return `${attachmentsUrl(nodeId)}/${encodeURIComponent(attachmentId)}`;
+}
+
+export async function deleteNodeAttachment(nodeId, attachmentId) {
+  return attachmentFetch(getNodeAttachmentUrl(nodeId, attachmentId), { method: 'DELETE' });
+}
+
 /**
  * Get the presentation configuration
  * @returns {Promise<{title: string, introduction: string, colors: Object, prompt_prefix: string, prompt_suffix: string}>}
@@ -487,17 +767,70 @@ export async function uploadFile(file, analyze = false, options = {}) {
 
   const endpoint = analyze ? `${UI_API_BASE}/upload` : `${UI_API_BASE}/upload/extract`;
 
+  // Analysis runs the assistant, which can write: held and named like any
+  // other write (no JSON content type: the body is a form).
+  refuseWhileModeUnknown(endpoint, 'POST');
   const response = await fetch(endpoint, {
     method: 'POST',
+    headers: { 'X-Requested-With': 'XMLHttpRequest', ...sessionHeaders(endpoint, 'POST') },
     body: formData,
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || `Upload failed: ${response.status}`);
+    // A structured refusal (a staged session's) keeps its code and message.
+    throw await responseError(response);
   }
 
   return response.json();
+}
+
+/**
+ * Approve or reject an agent's held proposal. Through apiFetch, so in a staged
+ * session an approval names the session: the backend then applies it there,
+ * or refuses one made elsewhere, instead of writing it to the graph.
+ * @param {string} proposalId
+ * @param {'approve'|'reject'} action
+ */
+export async function decideAgentProposal(proposalId, action) {
+  if (
+    action === 'approve' &&
+    _stagingAvailable &&
+    _activeSessionId &&
+    _serverSessions.has(_activeSessionId) &&
+    !_stagedSessions.has(_activeSessionId)
+  ) {
+    // A direct session leaves approval to the proposal's own session, but it
+    // may have been switched to staged by someone else a moment ago: read its
+    // mode first, so an approval from a now-staged session names it and one
+    // made elsewhere is refused rather than written to the graph.
+    const id = _activeSessionId;
+    let now;
+    try {
+      now = await getSession(id);
+    } catch (error) {
+      // Unread, the session may be staged: refuse rather than approve
+      // unbound. A 404 means the server holds no such session (it is then
+      // browser-only, so direct).
+      if (error?.status !== 404) throw error;
+      now = null;
+    }
+    // About the session that was read, and only while it is still the one
+    // approving: another session's mode is never inferred from it.
+    if (now?.write_mode === 'staged' && _activeSessionId === id) setSessionStaged(id, true);
+    if (_activeSessionId !== id) {
+      const error = new Error(
+        translate(
+          'staged.approve_session_changed',
+          'The session changed while approving; approve again.'
+        )
+      );
+      error.code = 'session_changed';
+      throw error;
+    }
+  }
+  return apiFetch(`${getPathRoot()}/agents/proposals/${encodeURIComponent(proposalId)}/${action}`, {
+    method: 'POST',
+  });
 }
 
 /**
@@ -671,12 +1004,71 @@ const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 /**
  * Create a new server-side shared session (server-assigned id).
  * @param {string|null} name
- * @returns {Promise<Object>} session payload (meta + state + roster)
+ * @param {{writeMode?: 'direct'|'staged'}} [options] - omitted, the session
+ *   takes the graph default. A staged session is always created this way, on
+ *   the server, before anything acts in it (contract §5.1).
+ * @returns {Promise<Object>} session payload (meta + state + roster), with
+ *   `write_mode` and `write_mode_source`
  */
-export async function createSession(name = null) {
+export async function createSession(name = null, { writeMode } = {}) {
+  const body = { name: name || null };
+  if (writeMode) body.write_mode = writeMode;
   return apiFetch(SESSIONS_BASE(), {
     method: 'POST',
-    body: JSON.stringify({ name: name || null }),
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Switch a session from direct to staged (contract §5.2). Irreversible: the
+ * server refuses staged -> direct with `write_mode_irreversible`.
+ * @param {string} sessionId
+ * @param {'staged'} writeMode
+ * @param {string} [clientId]
+ * @returns {Promise<Object>} the session payload
+ */
+export async function setSessionWriteMode(sessionId, writeMode, clientId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ write_mode: writeMode, client_id: clientId || null }),
+  });
+}
+
+/**
+ * The diff of a staged session's changes (contract §10), as far as the
+ * caller's view covers them.
+ * @param {string} sessionId
+ * @returns {Promise<{items: Array, count: number, write_mode: string}>}
+ */
+export async function getStagedChanges(sessionId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/staged`);
+}
+
+/**
+ * Merge staged changes into the graph as one unit (contract §11). A thrown
+ * error carries `code` (merge_blocked, merge_raced, merge_incomplete,
+ * invalid_merge_request, ...) and `data` (e.g. `items`, `missing`).
+ * @param {string} sessionId
+ * @param {{merge_id: string, entries: Array, resolutions?: Array}} request
+ * @returns {Promise<Object>}
+ */
+export async function mergeStagedChanges(sessionId, request) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/staged/merge`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+/**
+ * Drop staged changes; the graph does not change (contract §12).
+ * @param {string} sessionId
+ * @param {Array<{kind: string, entity_id: string}>} entries
+ * @returns {Promise<{removed_entries: Array}>}
+ */
+export async function discardStagedChanges(sessionId, entries) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/staged/discard`, {
+    method: 'POST',
+    body: JSON.stringify({ entries }),
   });
 }
 
@@ -715,13 +1107,19 @@ export async function renameServerSession(sessionId, name) {
 
 /**
  * Delete a server-side session. The optional client id names the deleter in
- * the broadcast so connected clients can show "deleted by <name>".
+ * the broadcast so connected clients can show "deleted by <name>". A staged
+ * session holding staged changes is refused (`layer_not_empty`) unless
+ * `discardStaged` is set (contract §13).
  * @param {string} sessionId
  * @param {string} [clientId]
+ * @param {{discardStaged?: boolean}} [options]
  * @returns {Promise<{deleted: boolean, id: string}>}
  */
-export async function deleteServerSession(sessionId, clientId) {
-  const suffix = clientId ? `?client_id=${encodeURIComponent(clientId)}` : '';
+export async function deleteServerSession(sessionId, clientId, { discardStaged = false } = {}) {
+  const params = new URLSearchParams();
+  if (clientId) params.set('client_id', clientId);
+  if (discardStaged) params.set('discard_staged', 'true');
+  const suffix = params.toString() ? `?${params.toString()}` : '';
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}${suffix}`, {
     method: 'DELETE',
   });
@@ -773,7 +1171,7 @@ export async function ingestSessionImage(sessionId, image) {
     `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/annotations/image`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({
         client_id: getClientId(),
         x: image.x,
@@ -833,5 +1231,22 @@ export async function undoSessionAction(sessionId, clientId) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/undo`, {
     method: 'POST',
     body: JSON.stringify({ client_id: clientId }),
+  });
+}
+
+/**
+ * Summon every client connected to the session to a model-space region
+ * ("Bring everyone here"). Ephemeral: nothing is stored, and only clients
+ * connected right now move. The server names the summoner by this client's
+ * presence entry. Throws with `status` 400 (invalid bounds), 403, 404 or 429.
+ * @param {string} sessionId
+ * @param {string} clientId
+ * @param {{x: number, y: number, width: number, height: number}} bounds
+ * @returns {Promise<{bounds: Object, connected_clients: number}>}
+ */
+export async function summonSessionViewport(sessionId, clientId, bounds) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/summon`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId, bounds }),
   });
 }

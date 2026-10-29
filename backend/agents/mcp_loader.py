@@ -10,15 +10,89 @@ Handles:
 
 import json
 import logging
+from os import open as _os_open
 import subprocess
 import threading
+from contextlib import ExitStack
 from typing import List, Dict, Any, Optional, Callable
+import urllib.parse
 from dataclasses import dataclass, field
 import httpx2 as httpx
 
-from .config import MCPIntegration, MCPTransport
+from .config import MCPIntegration, MCPTransport, agent_workspace_dir
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    is_safe_url,
+    pinned_transport,
+)
 
 logger = logging.getLogger(__name__)
+
+# Ingest caps for the two redirect walkers below. Neither had one: both read
+# the terminal body whole before anything could reject it, so EVERY server
+# decided how much memory this process spent -- including one honestly
+# advertising 500 MiB, because no advertised length was ever consulted here.
+# That is the difference from skills/loader.py, which checks Content-Length
+# ahead of its incremental read and keeps doing so; these two walkers have no
+# such pre-check and rely on the incremental cap alone. The walk itself is
+# bounded by MAX_REDIRECTS and streams every hop, so these bound the only body
+# that is still read.
+#
+# The two numbers differ because the bodies do:
+# - The info endpoint returns a JSON document listing a server's endpoints and
+#   tools. 1 MiB is far above any real one. Exceeding it is an ERROR rather
+#   than a truncation precisely because a truncated JSON document CAN still
+#   parse: json.loads ignores trailing whitespace, and a cut landing exactly at
+#   the document's end parses too, so truncating here would mean acting on a
+#   partial tool list that looked complete.
+# - The fetch tool returns a web page to an agent, and already truncates to
+#   the caller's max_length. 10 MiB bounds the read while leaving any
+#   reasonable max_length satisfiable; a larger max_length cannot be served in
+#   full, and the truncation marker says so.
+MAX_INFO_BODY_BYTES = 1024 * 1024
+MAX_FETCH_BODY_BYTES = 10 * 1024 * 1024
+
+
+def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
+    """Read a streamed response body incrementally, stopping past *max_bytes*.
+
+    Returns at most ``max_bytes`` bytes, and whether the body was still going
+    when the cap was passed. Peak memory is a small constant multiple of
+    ``max_bytes`` -- the accumulated chunks, plus the joined copy, plus the
+    slice -- and crucially does NOT depend on what the server chooses to send,
+    which is the whole point. It is not ``max_bytes`` flat: joining allocates
+    a second copy and slicing a third, so budget on the multiple rather than
+    on the cap.
+
+    The overshoot past the cap is one decoded chunk, and that chunk is bounded
+    by httpx, not here: ``ZlibDecompressor`` drains a compressed body in
+    ``MAX_DECODE_CHUNK_SIZE`` (1 MiB) pieces, so a gzip bomb cannot arrive as
+    one enormous chunk. Measured: a 200 MiB bomb weighing 204 KB on the wire
+    yields 1 MiB chunks. That is a property of the HTTP library rather than of
+    this loop, so a move to a client without that hardening would need
+    ``iter_bytes(chunk_size=...)`` here to keep the bound.
+
+    Unlike the running-total reads in ``core/image_ingest.py`` and
+    ``skills/loader.py``, this appends each chunk BEFORE testing the total.
+    Those two only ever refuse, so they can drop the chunk that crosses the
+    cap; this one has a truncating caller that needs the bytes inside that
+    chunk, so it must keep it. That is the one respect in which it does not
+    mirror them.
+    """
+    chunks: List[bytes] = []
+    total = 0
+    over_cap = False
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            over_cap = True
+            break
+    raw = b"".join(chunks)
+    # Drop the per-chunk references before slicing, so the chunks and the
+    # slice are not both alive alongside the join.
+    chunks.clear()
+    return (raw[:max_bytes], True) if over_cap else (raw, False)
 
 
 def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
@@ -58,6 +132,35 @@ class MCPConnection:
         if self.integration.transport == MCPTransport.STDIO:
             return self.process is not None and self.process.poll() is None
         return True  # HTTP connections are stateless
+
+
+def _unsafe_workspace_reason(path: str | int) -> Optional[str]:
+    """Why a path or opened directory is unsafe as the workspace root, or None.
+
+    Only the directory's own owner and mode are checked. Auditing every parent
+    would reject ordinary layouts (a home under a root-owned /home), and the
+    containment check in _execute_fs_tool already resolves symlinks on the way
+    in, so the root itself is the surface that decides who controls the tree.
+    """
+    import os
+    import stat as stat_module
+
+    try:
+        info = os.fstat(path) if isinstance(path, int) else os.stat(path)
+    except OSError:
+        return "cannot stat it"
+
+    if not stat_module.S_ISDIR(info.st_mode):
+        return "it is not a directory"
+
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and info.st_uid != geteuid():
+        return f"it is owned by uid {info.st_uid}, not uid {geteuid()}"
+
+    if info.st_mode & (stat_module.S_IWGRP | stat_module.S_IWOTH):
+        return f"mode {stat_module.S_IMODE(info.st_mode):04o} lets others write to it"
+
+    return None
 
 
 class MCPLoader:
@@ -148,24 +251,106 @@ class MCPLoader:
         try:
             # First, try the execute_tool endpoint to get tool info
             # For our own graph MCP, we can query the available tools
-            base_url = integration.url.replace("/sse", "").replace("/mcp", "")
+            parsed_url = urllib.parse.urlsplit(integration.url)
+            base_url = urllib.parse.urlunsplit(
+                parsed_url._replace(
+                    path=parsed_url.path.removesuffix("/sse").removesuffix("/mcp")
+                )
+            )
 
             # Try info endpoint
             info_url = f"{base_url}/info"
-            response = httpx.get(info_url, timeout=5, follow_redirects=True)
-            if response.status_code == 200:
-                info = response.json()
-                # Our graph MCP includes tools in the info endpoint
-                if "endpoints" in info:
-                    # We know our graph MCP tools
-                    tools = self._get_graph_mcp_tools(integration)
+            # info_url is OPERATOR CONFIGURATION, so it is not address-checked:
+            # an MCP server on localhost is the normal deployment, and the
+            # shipped default GRAPH integration is exactly that
+            # (http://localhost:PORT/mcp/sse -- see agents/config.py). What the
+            # operator cannot vouch for is where that server then SENDS this
+            # request, so every redirect hop below is re-validated with
+            # is_safe_url before it is requested. Handing follow_redirects=True
+            # to httpx, as this did before, let one 302 from that server pull
+            # the request to any internal address with nothing checked at all.
+            #
+            # This is the one of the five hop-validating paths whose INITIAL
+            # url is never address-checked, and the only one that differs from
+            # the rest on purpose. The other four all check theirs, though not
+            # all in the same place: image_ingest, the skills loader and
+            # _execute_fetch_tool below each call is_safe_url at the top of the
+            # walker, while the webhook path checks it in _deliver before
+            # calling _post_with_redirect_ssrf_check -- so reading that walker
+            # alone makes it look unchecked, and it is not.
+            #
+            # _execute_fetch_tool checks its initial URL because that URL comes
+            # from the agent rather than from config; the skills loader checks
+            # its own, because a skill URL is meant to name a public host and
+            # it has a trusted_domains allowlist to match. Here the initial
+            # address is the operator's own choice, and refusing it would break
+            # the default install.
+            #
+            # So the first request goes out on a client that connects by name,
+            # as before, and every hop on one whose transport connects only to
+            # an address it has just checked: a hop that passed is_safe_url
+            # cannot then resolve to an internal address at connect time.
+
+            with (
+                httpx.Client(timeout=5, follow_redirects=False) as configured,
+                httpx.Client(
+                    timeout=5, follow_redirects=False, transport=pinned_transport()
+                ) as pinned,
+            ):
+                client = configured
+                current_url = info_url
+                for _ in range(MAX_REDIRECTS):
+                    # Streamed so a redirect's body is never buffered: the walk
+                    # is bounded by MAX_REDIRECTS hops, and client.get() would
+                    # read every one of those bodies into memory to discard it.
+                    with client.stream("GET", current_url) as response:
+                        if response.is_redirect:
+                            location = str(response.headers.get("location", ""))
+                            if not location:
+                                raise ValueError(
+                                    "Redirect without a Location header from "
+                                    f"{current_url}"
+                                )
+                            next_url = urllib.parse.urljoin(current_url, location)
+                            if not is_safe_url(next_url):
+                                raise ValueError(
+                                    f"Redirected to unsafe URL: {next_url}"
+                                )
+                            current_url = next_url
+                            client = pinned
+                            continue
+                        if response.status_code == 200:
+                            raw, over_cap = _read_capped(response, MAX_INFO_BODY_BYTES)
+                            if over_cap:
+                                raise ValueError(
+                                    "Info endpoint body exceeds "
+                                    f"{MAX_INFO_BODY_BYTES} bytes from "
+                                    f"{current_url}"
+                                )
+                            info = json.loads(raw)
+                            # Our graph MCP includes tools in the info endpoint
+                            if "endpoints" in info:
+                                # We know our graph MCP tools
+                                tools = self._get_graph_mcp_tools(integration)
+                        break
+                else:
+                    raise ValueError(f"Too many redirects (limit {MAX_REDIRECTS})")
 
         except (httpx.RequestError, httpx.InvalidURL, ValueError) as e:
             # requests folded both a non-JSON-body decode error and a malformed-URL
             # error into RequestException, so both were swallowed-and-logged here.
             # httpx surfaces them as a plain ValueError (json.JSONDecodeError) and
-            # httpx.InvalidURL respectively — neither is an httpx.RequestError, so
-            # they are listed explicitly to preserve that behaviour.
+            # httpx.InvalidURL respectively -- neither is an httpx.RequestError, so
+            # they are listed explicitly to preserve that behaviour. The SSRF
+            # refusals above are ValueErrors and join that degrade-to-no-tools
+            # path: a server that cannot be reached safely discovers no tools.
+            # InvalidURL stays listed because NOTHING screens the initial URL
+            # any more (see the comment above the walk): whatever httpx cannot
+            # build a request from -- "http://[::1/info", "http://host:abc/info"
+            # -- reaches it and raises here. is_safe_url is not consulted on
+            # that URL at all, so it cannot fail those closed first.
+            # A server-controlled Location httpx cannot parse is NOT InvalidURL:
+            # httpx wraps it as RemoteProtocolError, already an httpx.RequestError.
             logger.warning(f"Could not query {integration.id} info: {e}")
 
         # If no tools discovered, use known tools for GRAPH integration
@@ -761,22 +946,64 @@ class MCPLoader:
             url = input_args.get("url")
             if not url:
                 return {"error": "URL required"}
+            if not is_safe_url(url):
+                return {"error": "URL is not safe to fetch"}
 
             try:
-                response = httpx.get(url, timeout=30, follow_redirects=True)
-                response.raise_for_status()
+                with httpx.Client(
+                    timeout=30,
+                    follow_redirects=False,
+                    transport=pinned_transport(),
+                ) as client:
+                    current_url = url
+                    for _ in range(MAX_REDIRECTS):
+                        # Streamed so a redirect's body is never buffered: the
+                        # walk is bounded by MAX_REDIRECTS hops, and client.get()
+                        # would read every one of those bodies into memory only
+                        # to discard it.
+                        with client.stream("GET", current_url) as response:
+                            if response.is_redirect:
+                                location = str(response.headers.get("location", ""))
+                                if not location:
+                                    # urljoin(current, "") is current -- the
+                                    # arguments in that order, which is what the
+                                    # line below evaluates -- so an empty
+                                    # Location used to re-request the same URL
+                                    # until the cap ran out. Refuse it after one
+                                    # request, as the skills loader does.
+                                    return {
+                                        "error": "Redirect without a Location header"
+                                    }
+                                next_url = urllib.parse.urljoin(current_url, location)
+                                if not is_safe_url(next_url):
+                                    return {"error": "Redirected to unsafe URL"}
+                                current_url = next_url
+                                continue
 
-                # Simple HTML to text conversion
-                content = response.text
-                max_length = input_args.get("max_length", 10000)
-                if len(content) > max_length:
-                    content = content[:max_length] + "... (truncated)"
+                            response.raise_for_status()
+                            raw, over_cap = _read_capped(response, MAX_FETCH_BODY_BYTES)
 
-                return {
-                    "url": url,
-                    "status": response.status_code,
-                    "content": content,
-                }
+                            # Simple HTML to text conversion. Decoded the way
+                            # response.text would have, now that the body is
+                            # read by the cap rather than buffered whole.
+                            content = raw.decode(
+                                response.encoding or "utf-8", errors="replace"
+                            )
+                            max_length = input_args.get("max_length", 10000)
+                            if len(content) > max_length:
+                                content = content[:max_length] + "... (truncated)"
+                            elif over_cap:
+                                # Stopped at the ingest cap below max_length:
+                                # say so rather than passing a silently short
+                                # page off as the whole document.
+                                content += "... (truncated)"
+
+                            return {
+                                "url": url,
+                                "status": response.status_code,
+                                "content": content,
+                            }
+                    return {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
             except Exception as e:
                 return {"error": f"Fetch failed: {e}"}
 
@@ -788,44 +1015,89 @@ class MCPLoader:
         input_args: Dict[str, Any],
     ) -> Any:
         """Execute a FS/Filesystem integration tool."""
-        # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
 
-        base_path = "/tmp/agent-workspace"
-        os.makedirs(base_path, exist_ok=True)
-
-        path = input_args.get("path", "")
-        if not path:
-            return {"error": "Path required"}
-
-        # Security: ensure path is within workspace
-        full_path = os.path.normpath(os.path.join(base_path, path))
-        if os.path.commonpath([base_path, full_path]) != base_path:
-            return {"error": "Path must be within agent workspace"}
-
+        base_path = agent_workspace_dir()
+        # Refuse a symlinked root instead of resolving it: realpath() on the root
+        # itself would make every containment check below compare against the
+        # link's target, so a symlink planted here would widen the workspace to
+        # whatever it points at rather than being caught as an escape.
+        if os.path.islink(base_path):
+            return {"error": "Agent workspace must not be a symlink"}
         try:
-            if tool_name == "read_file":
-                with open(full_path, "r") as f:
+            os.makedirs(base_path, mode=0o700, exist_ok=True)
+        except OSError:
+            return {"error": "Agent workspace unavailable"}
+
+        with ExitStack() as stack:
+            # Pin the root before checking ownership/mode. All I/O stays relative
+            # to this fd so replacing the root pathname cannot redirect a tool.
+            use_directory_fds = (
+                hasattr(os, "O_DIRECTORY")
+                and hasattr(os, "O_NOFOLLOW")
+                and {_os_open, os.mkdir} <= os.supports_dir_fd
+                and os.listdir in os.supports_fd
+            )
+            if not use_directory_fds:
+                return {"error": "Secure agent workspace access is unavailable"}
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                root_fd = os.open(base_path, directory_flags)
+            except OSError:
+                return {"error": "Agent workspace unavailable"}
+            stack.callback(os.close, root_fd)
+            unsafe = _unsafe_workspace_reason(root_fd)
+            if unsafe:
+                return {"error": f"Agent workspace is not private: {unsafe}"}
+            base_path = os.path.realpath(base_path)
+
+            path = input_args.get("path", "")
+            if not path:
+                return {"error": "Path required"}
+
+            full_path = os.path.realpath(os.path.join(base_path, path))
+            if os.path.commonpath([base_path, full_path]) != base_path:
+                return {"error": "Path must be within agent workspace"}
+            relative_path = os.path.relpath(full_path, base_path)
+
+            try:
+                if tool_name not in ("read_file", "write_file", "list_directory"):
+                    return {"error": f"Unknown fs tool: {tool_name}"}
+                # Resolve existing internal symlinks above, then refuse new ones
+                # while walking the relative path, including newly made parents.
+                parts = relative_path.split(os.sep)
+                parent_fd = root_fd
+                for part in parts[:-1]:
+                    if tool_name == "write_file":
+                        try:
+                            os.mkdir(part, dir_fd=parent_fd)
+                        except FileExistsError:
+                            pass
+                    parent_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+                    stack.callback(os.close, parent_fd)
+
+                if tool_name == "list_directory":
+                    directory_fd = os.open(parts[-1], directory_flags, dir_fd=parent_fd)
+                    stack.callback(os.close, directory_fd)
+                    return {"path": path, "entries": os.listdir(directory_fd)}
+
+                writing = tool_name == "write_file"
+                flags = (
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC if writing else os.O_RDONLY
+                )
+                fd = os.open(parts[-1], flags | os.O_NOFOLLOW, 0o666, dir_fd=parent_fd)
+                with os.fdopen(fd, "w" if writing else "r") as f:
+                    if writing:
+                        content = input_args.get("content", "")
+                        f.write(content)
+                        return {"path": path, "written": len(content)}
                     return {"path": path, "content": f.read()}
 
-            elif tool_name == "write_file":
-                content = input_args.get("content", "")
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, "w") as f:
-                    f.write(content)
-                return {"path": path, "written": len(content)}
-
-            elif tool_name == "list_directory":
-                if not os.path.isdir(full_path):
-                    return {"error": "Not a directory"}
-                entries = os.listdir(full_path)
-                return {"path": path, "entries": entries}
-
-            else:
-                return {"error": f"Unknown fs tool: {tool_name}"}
-
-        except Exception as e:
-            return {"error": str(e)}
+            except OSError as e:
+                reason = os.strerror(e.errno) if e.errno else type(e).__name__
+                return {"error": f"{relative_path}: {reason}"}
+            except Exception:
+                return {"error": f"{relative_path}: Filesystem operation failed"}
 
     def _execute_search_tool(
         self,
@@ -852,8 +1124,19 @@ class MCPLoader:
                     params={"q": query, "count": count},
                     headers={"X-Subscription-Token": api_key},
                     timeout=10,
-                    follow_redirects=True,
+                    # httpx strips only Authorization when a redirect leaves the
+                    # origin, so following one would carry the subscription token
+                    # to wherever Location points. A JSON search API has no reason
+                    # to redirect: treat any 3xx as a failed search instead.
+                    follow_redirects=False,
                 )
+                if response.is_redirect:
+                    # Location is chosen by the far end; keep it out of the
+                    # result the model reads.
+                    return {
+                        "error": "Search failed: unexpected redirect "
+                        f"(HTTP {response.status_code}) from the search API"
+                    }
                 response.raise_for_status()
                 data = response.json()
 
@@ -870,6 +1153,12 @@ class MCPLoader:
 
                 return {"query": query, "results": results}
 
+            except httpx.RemoteProtocolError:
+                # Raised among others for an unparseable Location, and its
+                # message quotes that far-end-chosen text; return a fixed one.
+                return {
+                    "error": "Search failed: malformed response from the search API"
+                }
             except Exception as e:
                 return {"error": f"Search failed: {e}"}
 

@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx2 as httpx
 
+from backend.core import storage_search
 from backend.core.models import Node, NodeType
 from backend.federation import manager as manager_module
 from backend.federation.config import FederationFileConfig
@@ -113,8 +114,24 @@ async def test_sync_degrades_when_unreachable_url():
     assert status["graphs"][0]["status"] == "degraded"
 
 
-def test_score_node_match_alias_beats_description():
+def _ranked_ids(nodes, query):
+    """Origin ids in federated search order, with nodes ingested through
+    _build_cache in the order given."""
+    manager = _manager_with_cached_nodes([n.to_dict() for n in nodes])
+    result = manager.search_nodes(
+        query=query, node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+    return _origin_ids(result["nodes"])
+
+
+def test_alias_match_outranks_a_description_match():
     """A federated node matched only via an alias must outrank a description-only match."""
+    desc_node = Node(
+        id="d",
+        type=NodeType.ACTOR,
+        name="Another",
+        description="part of the esam network",
+    )
     alias_node = Node(
         id="a",
         type=NodeType.ACTOR,
@@ -122,31 +139,21 @@ def test_score_node_match_alias_beats_description():
         description="unrelated",
         aliases=["esam"],
     )
-    desc_node = Node(
-        id="d",
-        type=NodeType.ACTOR,
-        name="Another",
-        description="part of the esam network",
-    )
-    alias_score = FederationManager._score_node_match(alias_node, "esam")
-    desc_score = FederationManager._score_node_match(desc_node, "esam")
-    assert alias_score > desc_score
+    assert _ranked_ids([desc_node, alias_node], "esam") == ["a", "d"]
 
 
-def test_score_node_match_real_name_beats_alias():
+def test_real_name_match_outranks_an_alias_match():
     """A real-name match must outrank an alias-only match in federated search too."""
-    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
     alias_node = Node(
         id="a", type=NodeType.ACTOR, name="Unrelated", description="x", aliases=["esam"]
     )
-    assert FederationManager._score_node_match(
-        name_node, "esam"
-    ) > FederationManager._score_node_match(alias_node, "esam")
+    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
+    assert _ranked_ids([alias_node, name_node], "esam") == ["n", "a"]
 
 
-def test_score_node_match_alias_does_not_lift_above_stronger_name():
+def test_alias_does_not_lift_a_node_above_a_stronger_name_match():
     """A federated node matching on both name (contains) and an exact alias must not
-    outscore a node whose name is an exact match — name and alias combine with max()."""
+    outrank a node whose name is an exact match — name and alias combine with max()."""
     name_plus_alias = Node(
         id="x",
         type=NodeType.ACTOR,
@@ -155,9 +162,311 @@ def test_score_node_match_alias_does_not_lift_above_stronger_name():
         aliases=["esam"],
     )
     exact_name = Node(id="y", type=NodeType.ACTOR, name="esam", description="x")
-    assert FederationManager._score_node_match(
-        exact_name, "esam"
-    ) > FederationManager._score_node_match(name_plus_alias, "esam")
+    assert _ranked_ids([name_plus_alias, exact_name], "esam") == ["y", "x"]
+
+
+def test_build_cache_carries_aliases_and_subtypes_over():
+    manager = _manager_with_cached_nodes(
+        [
+            {
+                "id": "full",
+                "type": "Actor",
+                "name": "Office",
+                "description": "A description",
+                "summary": "A summary",
+                "tags": ["Tag"],
+                "aliases": ["eSam", "Second Alias", "eSam"],
+                "subtypes": ["Agency", "Board", "Agency"],
+                "archived": True,
+            },
+            {"id": "bare", "type": "Actor", "name": "Bare"},
+            {
+                "id": "nulls",
+                "type": "Actor",
+                "name": "Nulls",
+                "tags": None,
+                "aliases": None,
+                "subtypes": None,
+            },
+        ]
+    )
+    cached = {
+        n.metadata["origin_node_id"]: n for n in manager._cache["g"].nodes.values()
+    }
+
+    full = cached["full"]
+    assert (full.name, full.description, full.summary) == (
+        "Office",
+        "A description",
+        "A summary",
+    )
+    assert (full.tags, full.aliases, full.subtypes, full.archived) == (
+        ["Tag"],
+        ["eSam", "Second Alias", "eSam"],
+        ["Agency", "Board", "Agency"],
+        True,
+    )
+    assert (cached["bare"].aliases, cached["bare"].subtypes) == ([], [])
+    assert (
+        cached["nulls"].tags,
+        cached["nulls"].aliases,
+        cached["nulls"].subtypes,
+    ) == (
+        [],
+        [],
+        [],
+    )
+
+
+def test_subtype_match_outranks_a_description_match():
+    desc_node = Node(
+        id="d", type=NodeType.ACTOR, name="Another", description="an agency"
+    )
+    subtype_node = Node(id="s", type=NodeType.ACTOR, name="Other", subtypes=["Agency"])
+    assert _ranked_ids([desc_node, subtype_node], "agency") == ["s", "d"]
+
+
+def test_alias_match_outranks_every_secondary_signal_combined():
+    """Secondary signals (type label, tag, subtype, description, summary) must not
+    add up to beat an alias-only match in federated search."""
+    secondary = Node(
+        id="secondary",
+        type=NodeType.ACTOR,
+        name="Office",
+        description="aktör",
+        summary="aktör",
+        tags=["aktör"],
+        subtypes=["aktör"],
+    )
+    alias_node = Node(
+        id="alias", type=NodeType.INITIATIVE, name="Plan", aliases=["aktör"]
+    )
+    assert _ranked_ids([secondary, alias_node], "aktör") == ["alias", "secondary"]
+
+
+_TYPE_TEXT = {
+    "Actor": "actor aktör",
+    "Initiative": "initiative initiativ",
+    "Resource": "resource dokument",
+}
+
+
+def _manager_with_cached_nodes(source_nodes):
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "g",
+                        "display_name": "G",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    manager._cache["g"].nodes, _ = manager._build_cache(
+        config.federation.graphs[0], source_nodes, []
+    )
+    return manager
+
+
+def _origin_ids(nodes):
+    return [n.metadata["origin_node_id"] for n in nodes]
+
+
+def test_search_matches_a_localized_type_label():
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "a", "type": "Actor", "name": "Nordic Office"},
+            {"id": "i", "type": "Initiative", "name": "Nordic Programme"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="Aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["a"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "aktör",
+        "act",
+        "act\t",
+        "nordic",
+        " nordic ",
+        "network",
+        "dokument",
+        "x",
+        "*",
+        "   ",
+    ],
+)
+def test_search_returns_what_local_search_returns_in_the_same_order(query):
+    """Local and federated search must match and rank the same nodes the same
+    way; a divergence between the two paths is what hid type-label matches and
+    alias/subtype matches. The nodes go through ingestion, so a field that
+    _build_cache drops shows up as a divergence."""
+    source_nodes = [
+        {"id": "desc", "type": "Initiative", "name": "Plan", "description": "actor"},
+        {"id": "tag", "type": "Initiative", "name": "Plan B", "tags": ["actor"]},
+        {"id": "label", "type": "Actor", "name": "Nordic Office"},
+        {"id": "alias", "type": "Initiative", "name": "Y", "aliases": ["nordic"]},
+        {"id": "name", "type": "Initiative", "name": "Nordic network x"},
+        {"id": "sub", "type": "Actor", "name": "Z", "subtypes": ["Network"]},
+        {"id": "doc", "type": "Resource", "name": "Handbook"},
+    ]
+    manager = _manager_with_cached_nodes(source_nodes)
+    local_nodes = {n["id"]: Node.from_dict(dict(n)) for n in source_nodes}
+
+    local = storage_search.search_nodes(
+        local_nodes, {}, _TYPE_TEXT, query=query, limit=50
+    )
+    federated = manager.search_nodes(
+        query=query, node_types=None, limit=50, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(federated["nodes"]) == [n.id for n in local]
+
+
+def test_name_match_outranks_a_type_label_match_with_every_secondary_signal():
+    manager = _manager_with_cached_nodes(
+        [
+            {
+                "id": "secondary",
+                "type": "Actor",
+                "name": "Office",
+                "description": "aktör",
+                "tags": ["aktör"],
+                "subtypes": ["aktör"],
+            },
+            {"id": "name", "type": "Initiative", "name": "Aktörsnätverk"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["name", "secondary"]
+
+
+def test_type_label_match_outranks_a_description_match():
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "desc", "type": "Initiative", "name": "P", "description": "aktör"},
+            {"id": "label", "type": "Actor", "name": "Q"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["label", "desc"]
+
+
+@pytest.mark.parametrize("node_types", [None, ["Actor"]])
+@pytest.mark.parametrize("archived_first", [True, False])
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_do_not_take_limit_slots(query, archived_first, node_types):
+    # Both nodes tie, so cache order decides which one a missing filter would
+    # let into the single slot; each order takes a turn.
+    nodes = [
+        {"id": "old", "type": "Actor", "name": "Office old", "archived": True},
+        {"id": "new", "type": "Actor", "name": "Office new"},
+    ]
+    manager = _manager_with_cached_nodes(nodes if archived_first else nodes[::-1])
+
+    hidden = manager.search_nodes(query=query, node_types=node_types, limit=1)
+    shown = manager.search_nodes(
+        query=query, node_types=node_types, limit=2, include_archived=True
+    )
+
+    assert _origin_ids(hidden["nodes"]) == ["new"]
+    assert sorted(_origin_ids(shown["nodes"])) == ["new", "old"]
+
+
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_are_not_returned_when_the_limit_has_room(query):
+    """Sorting archived nodes last and slicing would still return them here;
+    they must be dropped, not demoted."""
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "old", "type": "Actor", "name": "Office", "archived": True},
+            {"id": "new", "type": "Actor", "name": "Office new"},
+        ]
+    )
+
+    result = manager.search_nodes(query=query, node_types=None, limit=10)
+
+    assert _origin_ids(result["nodes"]) == ["new"]
+
+
+def _manager_with_two_caches(first_nodes, second_nodes):
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": graph_id,
+                        "display_name": graph_id.upper(),
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": f"https://example.invalid/{graph_id}.json"
+                        },
+                    }
+                    for graph_id in ("g1", "g2")
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    for graph, nodes in zip(config.federation.graphs, (first_nodes, second_nodes)):
+        manager._cache[graph.graph_id].nodes, _ = manager._build_cache(graph, nodes, [])
+    return manager
+
+
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_in_a_second_cache_do_not_take_limit_slots(query):
+    # The archived node is an exact name match, so ranking would put it first
+    # for "office"; for match-all it precedes the second visible node.
+    manager = _manager_with_two_caches(
+        [{"id": "a", "type": "Actor", "name": "Office a"}],
+        [
+            {"id": "old", "type": "Actor", "name": "Office", "archived": True},
+            {"id": "b", "type": "Actor", "name": "Office b"},
+        ],
+    )
+
+    result = manager.search_nodes(query=query, node_types=None, limit=2)
+
+    assert sorted(_origin_ids(result["nodes"])) == ["a", "b"]
+
+
+def test_ranking_runs_over_every_match_before_the_limit_slice():
+    """The best match sits last in the cache; cutting to the limit in cache
+    order before ranking would return a weaker one."""
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "weak1", "type": "Actor", "name": "Nordic office"},
+            {"id": "weak2", "type": "Actor", "name": "Big office"},
+            {"id": "best", "type": "Actor", "name": "Office"},
+        ]
+    )
+
+    result = manager.search_nodes(query="office", node_types=None, limit=1)
+
+    assert _origin_ids(result["nodes"]) == ["best"]
 
 
 def test_scheduler_starts_for_scheduled_graph():

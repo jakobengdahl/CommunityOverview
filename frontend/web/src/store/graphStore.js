@@ -287,7 +287,6 @@ const useGraphStore = create((set, get) => ({
   detailNode: null, // Node to show in detail dialog (double-click)
   editingEdge: null, // Edge to show in the edge-edit dialog
   deleteDialog: null, // Pending node-delete confirmation ({ nodeId | nodeIds, ... })
-  contextMenu: null,
   // Signal to GraphCanvas to drop its manual groups/annotations. Raised only by
   // clearVisualization (a genuine wholesale replace or session clear) — see the
   // comment above updateVisualization for why that action must not raise it.
@@ -369,12 +368,19 @@ const useGraphStore = create((set, get) => ({
   // the default profile once capabilities are fetched.
   selectedModelProfileId: null,
 
+  // The active session's write mode, for the edit dialogs to say where an
+  // edit lands (docs/SESSION_OVERLAY_CONTRACT.md §17). App owns it.
+  // 'unknown' while the server has not said yet; writes are held meanwhile.
+  sessionWriteMode: 'direct',
+
   // Loading states
   isLoading: false,
   configLoaded: false,
   error: null,
 
   // Actions
+  setSessionWriteMode: (mode) =>
+    set({ sessionWriteMode: mode === 'staged' || mode === 'unknown' ? mode : 'direct' }),
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 
@@ -462,9 +468,7 @@ const useGraphStore = create((set, get) => ({
   // mutate the global graph for something the user can no longer see. Only the
   // esc-esc path is gated on a dialog being open, so an agent driving
   // clear_visualization can pull the canvas out from under an open dialog;
-  // closing them here covers every caller at once. contextMenu is reset for
-  // parity with resetSessionScopedState only — nothing outside this store reads
-  // it today, and the canvas nodes own their own menus as local state.
+  // closing them here covers every caller at once.
   clearVisualization: () => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();
@@ -475,7 +479,6 @@ const useGraphStore = create((set, get) => ({
       editingNode: null,
       editingEdge: null,
       deleteDialog: null,
-      contextMenu: null,
       highlightedNodeIds: [],
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
@@ -797,7 +800,7 @@ const useGraphStore = create((set, get) => ({
   // Reset all session-scoped UI state when switching visualization sessions so
   // nothing leaks across sessions: the assistant conversation, the active expert
   // roster, and the graph-scoped overlays (detail dialog, node and edge edit
-  // dialogs, delete confirmation, context menu, selection) all belong to the
+  // dialogs, delete confirmation, selection) all belong to the
   // session that was active when they opened. Confirming a dialog left open
   // across a switch acts on the old session's graph while the sync client
   // already points at the new one, so the edit would be broadcast into a
@@ -815,17 +818,12 @@ const useGraphStore = create((set, get) => ({
       editingNode: null,
       editingEdge: null,
       deleteDialog: null,
-      contextMenu: null,
       selectedNodeId: null,
       selectedGraphNodes: [],
       navHistory: [],
       sessionEpoch: state.sessionEpoch + 1,
     }));
   },
-
-  // Context menu actions
-  setContextMenu: (menu) => set({ contextMenu: menu }),
-  closeContextMenu: () => set({ contextMenu: null }),
 
   // Node editing
   setEditingNode: (node) => set({ editingNode: node }),

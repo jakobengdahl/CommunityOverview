@@ -86,6 +86,11 @@ hook that narrows per tenant/workspace/graph without forking the core.
 
 ### Event System & Agents
 
+Generic mutation policy, execution admission, runtime observation and external
+delivery hooks are documented in
+[Runtime extension hooks](../docs/RUNTIME_EXTENSION_HOOKS.md), including constructor
+registration, standalone defaults and failure behavior.
+
 The system includes an event-driven architecture for webhooks and AI agents:
 
 - **Event System**: Tracks graph mutations (create, update, delete) and dispatches events to subscribers.
@@ -116,7 +121,9 @@ NetworkX graph, the searchable-text cache and the vector index — without a
 restart, emitting the ordinary events with `event_origin: external-change`.
 A fourth, `store_traversal`, is the backend saying it can answer a
 neighbourhood traversal itself: `get_related_nodes` asks the store instead of
-walking the in-memory graph. The store is used only while it is current —
+walking the in-memory graph. Narrowed reads use the in-memory walk so each
+hop enforces node visibility; hidden nodes cannot connect visible results.
+The store is used only while it is current —
 every write landed, no resync owed — and the in-memory walk remains the
 reference and the fallback, so the graph is still loaded into memory today;
 what this moves is which copy answers a traversal, which is the step a
@@ -126,8 +133,8 @@ mutation is one appended line in `graph.journal.ndjson` beside `graph.json`,
 folded back into it at a checkpoint (every 100 mutations, on flush, at
 shutdown), and one graph file is not a store two instances can share. The
 optional `PostgresGraphPersistenceBackend` declares all four, reporting over
-the server's own LISTEN/NOTIFY and traversing a level at a time; nothing
-selects it yet. See
+the server's own LISTEN/NOTIFY and traversing a level at a time; select it
+with `GRAPH_BACKEND=postgres` (see the environment table below). See
 `docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against
 — executable as `backend/core/tests/persistence_contract.py`, which every
 backend's tests subclass — and `docs/DATA_MANAGEMENT.md` for the journal's
@@ -198,8 +205,26 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
 | `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar; a relative value resolves against the graph file's directory |
-| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` removes the count cap (age trimming, if configured, still applies) |
-| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days; unset keeps them regardless of age |
+| `GRAPH_BACKEND` | `file` | Which backend holds the graph: `file` or `postgres`. An unrecognised value fails at boot rather than falling back |
+| `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required when `GRAPH_BACKEND=postgres` |
+| `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
+| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
+| `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
+| `GRAPH_STAGED_SESSIONS` | `false` | `true` lets the graph backend hold staged sessions' layers (see Staged sessions below); without it no session can be staged and no layer file or table is created. A value that is not a boolean fails at boot. Set it on every instance sharing a store: an instance without it refuses to boot over a store holding staged sessions, and refuses every request naming a session once another instance has staged one (it asks the store at most every 30 seconds) |
+| `SESSION_WRITE_MODE_DEFAULT` | `direct` | Write mode of a session created without one: `direct` or `staged`. The web app preselects it in its new-session choice. With `staged` (and `GRAPH_STAGED_SESSIONS`), the web app opened without `?session=` (nor `?view=`, `?node=`, `?collect=`, `?akc=`) creates its starting session with `POST /api/sessions` and no `write_mode`, so this default and the hook decide its mode, as it does for the session it moves to after a delete; until `/ui/capabilities` answers, the browser-made starting id holds graph writes. A refused or failed create keeps the browser-made session, which materialises `direct`. `staged` without `GRAPH_STAGED_SESSIONS=true`, or any other value, fails at boot |
+| `SESSION_LAYER_MAX_ENTRIES` | `1000` | Most entries one staged session's layer holds; a staging write that would exceed it is refused with `layer_full`. Anything but up to 18 digits (`+5`, `1_000`, `1e3`), or less than 1, fails at boot |
+| `SESSION_MERGE_RECORD_RETENTION_DAYS` | `90` | Days a deleted staged session's merge records are kept before they are purged; while the session exists they are always kept. Purged at start and every 6 hours, at most 10,000 per run, in batches of 500; each purged merge id is logged at INFO, JSON-encoded, with its session id. Anything but up to 18 digits (`+30`, `1_0`, `30.0`), or outside 1 to 36500, fails at boot. Set the same value on every instance sharing a store: each one purges with its own, so the smallest wins |
+| `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
+| `ATTACHMENT_NAMESPACE` | graph file stem, or `pg:<GRAPH_POSTGRES_SCHEMA>` | Separates graphs sharing one attachment root; keep it for the graph's life |
+| `ATTACHMENT_BACKEND` | `file` | Attachment store backend; an unrecognised value fails at boot |
+| `ATTACHMENT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Largest single file; `0` or less fails at boot |
+| `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
+| `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
+| `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
+| `ASSISTANT_ATTACHMENT_ACCESS` | `read` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
+| `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |
@@ -209,6 +234,15 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |
+| `AGENTS_RUN_HISTORY_RETENTION_DAYS` | - (keep forever) | Purge terminal AgentRuns older than this many days (minimum 7); runs left running longer than this are first abandoned (dead-lettered) so they age out too. Decided governance proposals older than this are purged too (pending ones never). See `docs/DURABLE_EXECUTION_CONTRACT.md` §8a |
+| `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns, and the arguments and apply outcome of decided governance proposals, older than this many days (at most the retention) |
+| `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
+| `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
+| `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path: `~` expands only when the service user has a home directory; any path still relative after expansion resolves against the process's working directory. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. With no override, a uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
+
+`GET /agents/integrations` and the `mcp_integrations` field of
+`GET /agents/status` omit integration URLs and subprocess commands. The loader
+uses the configured values directly; they are not part of the client response.
 
 ## Building Frontend
 
@@ -245,8 +279,9 @@ npm run build
 # Run all Python tests
 python -m pytest backend
 
-# Run with coverage
-pytest --cov=backend.core --cov=backend.service --cov=backend.api_host backend
+# The same suite across every CPU core (pytest-xdist, in requirements-dev.txt);
+# what CI runs, and several times faster than the serial run above
+python -m pytest backend -n auto
 
 # Run specific test file
 pytest backend/service/tests/test_integration_rest_vs_mcp.py
@@ -323,8 +358,24 @@ npm run test:e2e
 ```
 
 E2E tests include:
-- `chat.spec.js` - Complete chat workflow testing
+- `smoke.spec.js` - Desktop shell: header, search-to-canvas, toolbar node
+  creation, Settings stats
+- `chat.spec.js` - Desktop chat panel; every `/ui/chat` call is answered by
+  `page.route`, so no request reaches an LLM provider
+- `shared-session.spec.js` - Two browser contexts in one shared session
+  (presence, node and note fan-out, move sync, delete warning)
+- `staged-session.spec.js` - Staged sessions: create, edit, review a conflict,
+  merge, discard; live updates to a second participant; a deleted staged
+  session replaced by a staged one; direct → staged switch. The backend
+  Playwright starts runs with `GRAPH_STAGED_SESSIONS=true` for it
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
+
+The e2e graph file starts empty, so the desktop specs seed the nodes they need
+through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). In CI,
+`mobile-smoke.spec.js` runs in the non-required `mobile-e2e` job and the desktop
+specs (every spec the `chromium` project selects) run in the non-required
+`desktop-e2e` job. Tests marked
+`test.fixme` pin a known product defect and name the tracking item.
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
 block in `playwright.config.js`), so no server needs to be running first. If one
@@ -334,8 +385,8 @@ hand-started dev server keeps its own key and its e2e nodes land in its own
 graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
 makes Playwright refuse to start against an occupied port.
 
-The mobile specs require the backend to report an LLM as available, because the
-chat panel does not mount otherwise. Against a reused backend with no API key
+The mobile and chat specs require the backend to report an LLM as available,
+because the chat panel does not mount otherwise. Against a reused backend with no API key
 configured they fail at startup rather than half-passing.
 
 #### Mobile smoke tests
@@ -390,12 +441,59 @@ npm test
 ./scripts/test-e2e.sh
 ```
 
+### Measuring Coverage
+
+Coverage is measured on demand, not gated: there is no threshold and no CI
+check, and reports (`coverage/`, `.coverage`) are gitignored. For the backend,
+`pytest-cov` comes with `requirements-dev.txt`; point the suite at a scratch
+PostgreSQL database with `CO_REQUIRE_POSTGRES=1` and `CO_TEST_POSTGRES_DSN`
+(as CI does) so the PostgreSQL backend paths count instead of skipping, then
+run `python -m pytest backend -q --cov=backend --cov-branch --cov-report=term-missing`.
+A pytest process that never imports the `--cov` target (a narrow target with a
+test subset, or an xdist worker that drew none of the tests importing it) ends
+with coverage's "No data was collected" warning; there was no data to lose, and
+the full `--cov=backend` run prints none.
+
+Python subprocesses the tests start are measured too (`[tool.coverage.run]
+patch = ["subprocess"]` in `pyproject.toml`), except the two isolated children,
+which coverage cannot reach without loosening the isolation they exist for:
+
+- **`backend/core/attachment_extract.py`** — the extraction worker starts as
+  `python -I` with an empty environment, so coverage's configuration never
+  reaches it, and it sets `RLIMIT_FSIZE` to zero, so it could not write a data
+  file anyway. `_worker_main` and `_apply_resource_limits` run only there.
+  The format extractors run there too whenever a test goes through
+  `extract()`, so their figures show only what tests call in the test process:
+  `_Collector` and `_bounded_join` directly, and `_extract_in_process` with a
+  single DOCX file of paragraphs, which reaches `_extract_docx` but not its
+  table path. The text, PDF, XLSX, PPTX and ODF extractors read as unrun
+  although tests exercise each of them through `extract()`. The parent side
+  (`_run_worker`, `_exchange_posix`, `_from_wire`) runs in the test process
+  and is measured normally; `_exchange_threads` is the non-POSIX path and does
+  not run on Linux at all.
+- **`backend/functions/sandbox.py`** — the supervisor starts as `python -I -S`,
+  so no `.pth` hook runs and coverage is not importable, and its forked child
+  then applies Landlock and seccomp and replaces itself with `execve`. The
+  supervisor tests start their harness the same way, so `main`, `supervise`,
+  `probe` and the code only they reach (`_child`, `_reap_all`, `_read_all`,
+  `_report`, `_redirect_standard_streams`, `apply_rlimits`, `apply_seccomp`)
+  read as unrun. `confine` and `apply_landlock` count only from in-process
+  tests that stub the system calls.
+
+Read those two modules' figures as covering the code that runs in the test
+process or in a measured subprocess, and judge the child code by its tests.
+
+Each JavaScript workspace (`packages/ui-graph-canvas`, `frontend/web`,
+`frontend/widget`, `frontend/xr`) has `npm run test:coverage`, which runs
+vitest with the v8 provider and writes a report to that workspace's
+`coverage/`.
+
 ### Continuous Integration
 
 `.github/workflows/ci.yml` runs three test jobs on every push and pull request,
 kept separate so a failure points at the layer that broke:
 
-- **Backend tests** — `pytest backend/ -q` on the base (ML-free) requirements.
+- **Backend tests** — `pytest backend/ -q -n auto` on the base (ML-free) requirements.
   Semantic search and chat use their mock/fallback paths, so no embedding model
   is downloaded in CI.
 - **Frontend tests** — `npm run test:unit` across the web, widget, canvas, and xr
@@ -406,7 +504,7 @@ kept separate so a failure points at the layer that broke:
   pinned dependencies.
 
 Two lint jobs (`Python lint (ruff)` and `Frontend lint (eslint + prettier)`) run
-alongside them, and one further job is **non-required**:
+alongside them, and two further jobs are **non-required**:
 
 - **Mobile e2e (non-required)** — `mobile-smoke.spec.js` on the `mobile-iphone`
   and `mobile-pixel` projects. It carries no gate job, is not part of branch
@@ -414,6 +512,10 @@ alongside them, and one further job is **non-required**:
   reported without blocking a merge or a release. Like the test jobs it is
   gated on `detect-changes`, so a docs-only PR skips it. On failure the run
   uploads the Playwright HTML report as the `mobile-e2e-report` artifact.
+- **Desktop e2e (non-required)** — every spec the `chromium` project selects
+  (`smoke.spec.js`, `chat.spec.js`, `shared-session.spec.js`), on the same
+  non-required terms and the same `detect-changes`/draft gating as Mobile e2e.
+  On failure it uploads the `desktop-e2e-report` artifact.
 
 The Docker build/publish job runs only on `preview`/`prod` pushes (and version
 tags) and depends on the three test jobs. `main` is the integration branch:
@@ -430,13 +532,17 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/search` | Search nodes |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
-| POST | `/api/nodes` | Add nodes and edges |
-| PATCH | `/api/nodes/{id}` | Update a node |
-| DELETE | `/api/nodes` | Delete nodes |
+| POST | `/api/nodes` | Add nodes and edges (`expect_absent` optional; see *Entity revisions*) |
+| PATCH | `/api/nodes/{id}` | Update a node (`expected_revision` optional) |
+| DELETE | `/api/nodes` | Delete nodes (`expected_revisions` optional) |
 | POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
+| GET | `/api/nodes/{id}/attachments` | List a node's attached files: `{attachments, limits, uploads_allowed}`. A `federated::` node lists empty with `uploads_allowed: false`. See [Node attachments](#node-attachments) |
+| POST | `/api/nodes/{id}/attachments?filename=<name>` | Attach one file; the body is the raw bytes (not multipart). `201` with the new record. Refusals: `413 attachment_too_large`, `409 node_attachment_limit`, `415 unsupported_attachment_type`, `422 attachments_not_allowed`, `422 federated_node`, `409 node_archived` |
+| GET | `/api/nodes/{id}/attachments/{attachment_id}` | Download one file, streamed, always as `Content-Disposition: attachment` with `nosniff`, a sandboxing CSP and `no-store` |
+| DELETE | `/api/nodes/{id}/attachments/{attachment_id}` | Delete one file: `{success: true}` |
 | POST | `/api/edges` | Add edges |
-| PATCH | `/api/edges/{id}` | Update an edge |
-| DELETE | `/api/edges/{id}` | Delete an edge |
+| PATCH | `/api/edges/{id}` | Update an edge (`expected_revision` optional) |
+| DELETE | `/api/edges/{id}` | Delete an edge (`expected_revision` optional) |
 | POST | `/api/edges/archive` | Archive/unarchive edges (`archived` flag) |
 | GET | `/api/history` | Recent graph mutation history (newest first; `limit`, `offset`) |
 | GET | `/api/nodes/{id}/history` | Mutation history for a single node |
@@ -445,22 +551,85 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/similar` | Find similar nodes |
 | POST | `/api/similar/batch` | Batch similarity search |
 | POST | `/api/federation/adopt` | Adopt a federated node into the local graph |
+| POST | `/api/federation/teleport` | Resolve the canonical route from a node to the graph that owns it. Returns a `status` of `ok`, `local`, `permission_denied`, `graph_unavailable` or `unknown_node`; a `route` only for `ok`. Graph visibility comes from the request's existing graph-access narrowing, so a caller who may not see the source graph is told nothing about it. See [FEDERATED_GRAPH_DESIGN.md](../docs/FEDERATED_GRAPH_DESIGN.md#teleport-navigation-contract) |
 | GET | `/api/schema` | Get schema config |
-| GET | `/api/presentation` | Get presentation config |
+| GET | `/api/presentation` | Get presentation config (its `capabilities` field is the `/api/capabilities` manifest) |
 | GET | `/api/capabilities` | Get service capabilities |
 | GET | `/api/export` | Export graph data |
+| GET | `/api/export/archive` | Export the graph as a ZIP archive: `graph.json` (same content as `/api/export`), `embeddings.bin` (the live vector store's embeddings in the sidecar's own binary format, omitted when there are no vectors), and `manifest.json` (schema version, embedding model/dimension, per-member SHA-256 checksums, node/edge counts). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
+| POST | `/api/import` | Replace the ENTIRE active graph with the posted document (same shape as `/api/export`). Requests over 200 MiB return `413` before JSON parsing (declared length and streamed bytes are checked). Validates fully before writing (a `422 validation_failed` lists the first 1,000 problems; its message counts them all); on success normally returns a `job_id` for the background embedding job (`null` in the rare case that starting it itself failed — see `embeddings_status: "not_started"`). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-graph) and [ADR 0006](../docs/adr/0006-graph-import-replace-mode.md) |
+| POST | `/api/import/archive` | Multipart upload of a ZIP produced by `/api/export/archive` (or a plain `graph.json` zipped with no manifest/embeddings at all). Runs the same validate → backup → replace pipeline as `/api/import`; a compatible manifest (checksums verified, `embedding_model` matches this instance's live model) restores vectors directly — fully covered: `embeddings_status: "restored"`, no job; only partially covered (some imported node ids have no vector in `embeddings.bin`): `embeddings_status: "restored_partial"`, covered subset restored synchronously plus a background job scoped to just the uncovered nodes; otherwise (incompatible or missing manifest) the graph still imports and embeddings are (re)generated by the same background job `/api/import` uses. A corrupt ZIP or a checksum failure on any member the manifest names is rejected (`archive_integrity_failed`) before anything is written. See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
+| POST | `/api/import/merge/preview` | Read-only MERGE plan: body `{document, policy?, include_system_types?, stamp_provenance?}`; returns `plan` (adds, overwrites, renames, skips, conflicts, rejected, attachment flags, embeddings and events counts, `committable`) and `plan_digest`. Writes nothing; needs graph mutation and read access, both with unnarrowed graph scope; `stamp_provenance: true` is refused; one preview at a time (503 `import_preview_busy` otherwise). MCP tool `preview_graph_merge` does the same for documents of at most 10,000 nodes / 20,000 edges. See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#previewing-a-merge-import) and [ADR 0013](../docs/adr/0013-graph-import-merge-mode.md) |
+| POST | `/api/import/merge` | Commit a MERGE import: the preview's body plus `plan_digest`. The plan is recomputed and must still have that digest (409 `import_plan_stale` with the current `plan` and `plan_digest` otherwise); a plan with rejected or conflicting entries is refused (422 `import_merge_blocked`). The digest may be omitted only when every policy is `fail`/`skip` and `include_system_types` is false (422 `plan_digest_required` otherwise). Writes the v1 whole-graph backup first (503 `backup_failed`), then applies the plan all-or-nothing under the storage lock, re-checking the digest there; one create/update event per written entity (origin `x-event-origin` or `graph-import-merge`, correlation `x-correlation-id` or the `import_id`). Returns `import_id`, `plan`, `counts`, `renamed` (old → new ids), `backup_path`, `job_id` and `embeddings_status` (`queued`/`not_needed`/`not_started`), `audit_recorded`; a plan that writes nothing returns zero counts, no `import_id` and `audit_recorded: null`, with no backup or record. Same access as the preview; one commit at a time (503 `import_merge_busy`); 502 `write_failed` / 503 `write_outcome_unknown` as for direct writes; refused in PostgreSQL mode (501 `import_merge_not_supported`). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#committing-a-merge-import) and [ADR 0013](../docs/adr/0013-graph-import-merge-mode.md) |
+| GET | `/api/import/{job_id}` | Status of one import's background embedding job (`queued`/`running`/`succeeded`/`failed`/`cancelled`, plus `embeddings_status`), or of a merge's audit record (its `import_id`). Requires whole-graph read access: denied callers receive 403, narrowed callers 409 `import_requires_full_graph_access` |
+| GET | `/api/import` | List import jobs, newest first. Each row has a `mode` (`replace`/`merge`); a merge's audit record also carries `merge_status` (`committed`/`outcome_unknown`), `plan_digest`, `counts` and `embeddings_job_id`, and a merge's embeddings job its `import_id`. Requires the same whole-graph read access as the single-job endpoint |
 | GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
 | POST | `/api/views/save` | Save a named graph view |
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
-| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first |
+| GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first, limited to the retention read window |
+| GET | `/agents/runs/retention-policy` | Effective run-history retention policy and the last sweep's content-free record |
 | GET | `/agents/runs/{run_id}` | Get a single AgentRun by id |
 | GET | `/agents/proposals` | List agent proposals (filter by `agent_id`, `status`, `limit`), newest-first |
 | GET | `/agents/proposals/{proposal_id}` | Get a single proposal by id |
 | POST | `/agents/proposals/{proposal_id}/approve` | Approve a proposal (applies the action for act_after_approval agents) |
 | POST | `/agents/proposals/{proposal_id}/reject` | Reject a proposal |
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
+
+### Node attachments
+
+Files attached to a node live in their own store beside the graph, never in
+the graph document, `GET /export`, mutation history or federation. The design
+is [ADR 0008](../docs/adr/0008-node-attachment-storage.md); the code is
+`backend/core/attachment_store.py` (the store), `backend/core/attachment_types.py`
+(type detection) and `backend/service/attachments.py` (authorization and the
+per-route checks).
+
+- **Uploads need the schema flag.** A node type accepts uploads only with
+  `allows_attachments: true` (see [PROFILES.md](../docs/PROFILES.md)). Files
+  already attached stay listable, downloadable and deletable when the flag is
+  off, and when the node is archived.
+- **Authorization** runs in the service layer on every request: the read
+  routes are `read` on `list_node_attachments` / `get_node_attachment`, upload
+  and delete are `mutate` on `add_node_attachment` / `delete_node_attachment`.
+  A node the caller cannot see answers `404`, exactly like a missing one.
+- **Limits** (the `ATTACHMENT_MAX_*` settings above) are checked from
+  `Content-Length` before the body is read, again while it streams, and once
+  more under the per-node lock at commit. The smaller of the per-file limit
+  and the node's remaining byte budget decides the error: the per-file limit
+  is `413 attachment_too_large`, the node budget `409 node_attachment_limit`.
+- **Types** are detected from the bytes: PDF, PNG, JPEG, WebP, DOCX, XLSX,
+  PPTX, ODT, ODS, ODP, and UTF-8 text (`text/csv` for a `.csv` name, otherwise
+  `text/plain`). Text whose first non-blank character is `<` is refused, as are
+  HTML, SVG, XML, executables, bare archives and archives with an oversized
+  (over 1 MiB) or ZIP64 central directory. The client's `Content-Type` is
+  stored for diagnosis only and never served.
+- **Names** are sanitised (path parts, control and bidi characters removed,
+  255 UTF-8 bytes at most), then made to agree with the detected type:
+  `report.docm` holding a Word document is stored as `report.docm.docx`, and a
+  text file keeps its extension only when it is inert text (`.txt`, `.md`,
+  `.json`, `.log`, `.yaml` and similar) or has none (`README` stays
+  `README`), so `run.bat` is stored as `run.bat.txt`.
+- **Deleting a node** removes its files after the graph delete succeeds.
+  Archiving keeps them. REPLACE import does not touch the store.
+- **Tool permissions** follow [ADR 0010](../docs/adr/0010-attachment-content-access-for-agents-and-assistant.md).
+  `read` permits `list_node_attachments`, `read_node_attachment` and
+  `search_node_attachments`; `read_write` also permits `add_node_attachment`
+  and `delete_node_attachment`. Agent grants default to `none` independently
+  of the tool allowlist; see [Agent configuration](../docs/EVENT_SUBSCRIPTIONS.md#agent-governance-autonomy-levels-and-proposals).
+  Kiosks require a non-empty collection allowlist naming each attachment tool;
+  the assistant setting does not grant kiosks access. Unreadable collection
+  configuration denies attachment tools. Agent and kiosk grants are checked
+  again from storage before each attachment call, so revocation applies mid-run.
+  Every permitted attachment tool also checks the authorization hook: reads use
+  `read_node_attachment_content`, writes use their tool name. Service checks
+  still apply. `/ui/chat`, `/ui/chat/simple` and upload analysis bind the
+  request's authorization context, including its actor.
+- **Tool implementations** are separate from these permission gates. This
+  revision does not register attachment tools in chat or MCP; REST attachment
+  operations remain available under their existing service authorization.
+  The permission settings do not disable REST attachment routes.
 
 ### Generic search filters (`/api/search` and the `search_graph` MCP tool)
 
@@ -496,7 +665,9 @@ same parameters.
 ### Lexical match mode (`match_mode` on `/api/search` and `search_graph`)
 
 The lexical matcher requires the **whole query** in a node's searchable text, so
-a multi-word query returns nothing unless some node contains that phrase.
+a multi-word query that no node contains as a phrase matches nothing lexically;
+the local results then come only from the automatic semantic fallback (see
+below), which finds nothing where no embedding model is available.
 `match_mode` makes the alternative explicit instead of forcing a caller to probe
 term by term:
 
@@ -518,8 +689,8 @@ The requested mode is echoed back as `result["match_mode"]`, but it describes th
 mode that was **requested, not necessarily the matcher that produced the
 results** — see the paragraph on the semantic fallback below. Read
 `result["semantic"]` alongside it: that is the field that says which matcher ran
-locally. (Federated rows come from the federation manager's own substring
-matcher either way — see the boundary note below.)
+locally. (Federated rows are always matched lexically in the requested mode —
+see the note below.)
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -528,21 +699,34 @@ callers should pass the distinctive terms rather than a whole natural-language
 sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
-The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher). It is *superseded* — not ignored —
+The mode applies to the lexical search, local and federated. For local results it
+is ignored when `semantic=true` (that path does not use the lexical matcher);
+federated results are still matched in the requested mode. It is *superseded* — not ignored —
 by the automatic semantic fallback: the lexical attempt still runs in the
 requested mode, and the mode decides whether the fallback fires at all, since it
 only fires when that attempt matched nothing. A non-empty lexical result is never
 discarded. `match_mode` is still echoed in that case while `result["semantic"]`
-flips to true. Federated search stays substring-matched — the same boundary
-semantic ranking has.
+flips to true. Federated search honours `match_mode` too: the federation cache
+splits the query into the same terms and ranks by the same best-term rule and
+tie-break as local search, so a query finds the same nodes locally and remotely
+in either mode. It does not take part in semantic ranking or the semantic
+fallback, which stay local. The federation cache is matched and ranked by the
+same code as local search, over the fields the cache holds — including the
+node type and its localized schema labels, so a query such as `aktör` reaches
+federated Actor nodes as well as local ones. The cache keeps each remote node's
+aliases and subtypes, so those match federated nodes too.
+
+The in-app chat agent's `search_graph` tool exposes `match_mode` and `semantic`
+with the same values and defaults, so the chat and MCP search surfaces offer the
+same modes. (The chat tool does not expose the tag/metadata filters above.)
 
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
 
 The default `query` is matched **lexically** (case-insensitive substring over
 name, description, summary, tags, subtypes, aliases and type label). Multi-word or
-natural-language queries that no node contains verbatim therefore return nothing
-unless `match_mode="any_term"` (above) is used.
+natural-language queries that no node contains verbatim therefore match nothing
+lexically unless `match_mode="any_term"` (above) is used; the local results then
+come only from the automatic fallback described below.
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -551,10 +735,12 @@ unless `match_mode="any_term"` (above) is used.
 Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
 embeddings are built from `name + summary + description + tags` on create/update,
 and the query text is embedded and compared with cosine similarity, keeping hits
-above a similarity threshold ordered by score. No new dependency is involved — in
-the ML-free base install the embedding model is unavailable, so the vector search
-degrades to returning nothing (and, for `semantic=true`, an empty result) rather
-than failing.
+above a similarity threshold ordered by score. No new dependency is required for
+the base install to run, but query-text semantic ranking needs an embedding
+model. On the ML-free base install, a non-match-all query that reaches semantic
+ranking cannot be embedded, so it produces no local semantic hits rather than
+failing. Match-all queries (`""` and `*`) still use the lexical match-all
+behaviour, and federated results remain lexical in the requested `match_mode`.
 
 Two behaviours make this safe and backward compatible:
 
@@ -569,11 +755,11 @@ Two behaviours make this safe and backward compatible:
   no text to rank by meaning, so `semantic=true` falls through to the lexical
   match-all behaviour.
 
-The response includes a top-level `"semantic"` boolean indicating whether semantic
-ranking (explicit or fallback) produced the returned nodes. Semantic ranking
-applies to the local graph; federated search remains lexical. Tag/metadata
-filters, `node_types`, archived exclusion and `limit` all still apply to semantic
-results.
+The response includes a top-level `"semantic"` boolean indicating whether local
+semantic ranking ran for an explicit semantic request, or whether the automatic
+fallback returned local semantic hits. Semantic ranking applies to the local
+graph; federated search remains lexical. Tag/metadata filters, `node_types`,
+archived exclusion and `limit` all still apply to semantic results.
 
 ### Archived lifecycle (`archived` flag on nodes and edges)
 
@@ -602,7 +788,9 @@ this node's id over a live session op, e.g. `nodes_added` from an MCP
 `add_nodes_to_session`, can hydrate its edges to already-visible nodes) does apply
 the default-exclude: an archived edge, or one with an archived endpoint, is
 omitted. Federated nodes/edges preserve the origin graph's `archived` flag, so a
-node archived upstream stays hidden downstream.
+node archived upstream stays hidden downstream. Unless `include_archived` is set,
+the federation cache search drops archived federated nodes before its `limit`, as
+local search does, so they never take a result slot.
 
 **Mutations.** Archiving goes through dedicated operations rather than a generic
 field update (a generic `update_node` cannot set `archived`):
@@ -677,6 +865,197 @@ Example — set one metadata key and remove another, only if the node is unchang
 }
 ```
 
+### Metadata nesting limit
+
+A node's or edge's `metadata` may nest at most 800 levels below the metadata
+object itself (`MAX_METADATA_DEPTH` in `backend/core/models.py`): much deeper
+data could not reliably be written to `graph.json` or read back from it. A write
+past it is refused and changes nothing — `POST /api/nodes` answers `400`,
+`PATCH /api/nodes/{id}` and `PATCH /api/edges/{id}` `422` (a missing node or
+edge stays `404`; both answer only after authorization), `POST /api/import` and
+`/api/import/archive` `422 validation_failed` naming the entity, and a merge
+import lists the entity under the plan's `rejected`. A graph that already holds deeper metadata still
+loads and exports, and its nodes still take updates that leave `metadata`
+alone.
+
+### Entity revisions
+
+Every node and edge a read returns carries `revision`: a server-owned stamp
+from one graph-wide counter, moved by every write and never reused
+([`SESSION_OVERLAY_CONTRACT.md` §4](../docs/SESSION_OVERLAY_CONTRACT.md#4-entity-revisions)).
+A `revision` a caller sends is dropped — never stored, never folded into
+`metadata`. A write may carry an expectation:
+
+| Request | Field | Holds when |
+|---|---|---|
+| `PATCH /api/nodes/{id}`, MCP `update_node` | `expected_revision` | the node's revision still equals it |
+| `PATCH /api/edges/{id}`, `DELETE /api/edges/{id}` | `expected_revision` | the edge's revision still equals it |
+| `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
+| `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
+
+On a shared store (PostgreSQL) every create is checked as if `expect_absent`
+were set, at the store: a create over an id another instance created, but
+this one has not applied yet, answers `entity_revision_conflict` instead of
+replacing that node. The file backend is unaffected.
+
+`expected_updated_at` keeps working; when both it and `expected_revision` are
+given, both must hold. A refused or failed write answers with an `error`
+code and a `message`:
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `entity_revision_conflict` | 409 | the expectation did not hold; carries `entity_kind`, `entity_id`, `current_revision` (null when absent). Nothing was written. |
+| `write_failed` | 502 | the write did not land and nothing changed: refused by the store, confirmed absent on two reads of a shared store, or (file backend) its revisions could not be reserved. |
+| `write_outcome_unknown` | 503 | shared store only: whether it landed could not be told. Re-read before retrying. |
+
+Over MCP the same fields come back with `success: false`. Archive and the
+bulk edge delete accept expectations in `GraphStorage` but not yet over the
+API.
+
+### Staged sessions
+
+A session in **staged** write mode holds the graph writes made in it in a
+layer of its own: nothing reaches the graph, and no graph event fires, until
+the changes are merged
+([`SESSION_OVERLAY_CONTRACT.md`](../docs/SESSION_OVERLAY_CONTRACT.md)). It needs
+`GRAPH_STAGED_SESSIONS=true`. A session gets its mode when it is created and can
+only ever move from `direct` to `staged`; a deleted staged session's id is never
+used again. An instance with staging disabled checks for shared staged-session
+records on every session request until it finds one; it refuses session
+requests when the check fails, and retries the check on the next request.
+
+A request acts in a session through the `x-communityoverview-session-id`
+header; an MCP graph tool through its `visualization_session_id` argument. The
+writes that stage are `POST/DELETE /api/nodes`, `PATCH /api/nodes/{id}`,
+`POST /api/nodes/archive`, `POST /api/edges`, `PATCH/DELETE /api/edges/{id}`,
+`POST /api/edges/archive`, `POST /api/federation/adopt`, their MCP tools, the
+chat assistant's graph tools and an approved agent proposal made in the session.
+A staged write answers with the direct write's shape plus `staged: true`,
+`session_id`, `session_seq`, `entries` (the resulting layer entries, without
+their `base`, the main-graph snapshot) and `removed_entries`. Each one is a
+`graph_change_staged` session op on the session's stream, carrying the entries
+without `base` or `staged_by`: the stream is reachable with the session id alone. In a direct-mode session the header changes nothing. Over
+MCP the header is read per message; an MCP connection opened with the header
+stays in that session, so a later message naming another session, or none, is
+refused with `session_mismatch`.
+
+A read in a staged session answers from the **composed view**: the main graph
+with the session's layer applied. A staged create is there, a staged update
+shows over the main entity as it is now (or over its base, when main has
+deleted it since), a staged delete hides the entity and every edge to it, and
+everything else is the main graph unchanged. Each entity such a read returns
+carries `staged_state`: `created`, `updated`, `orphaned` (an update of an
+entity main no longer holds) or `none`; `revision` is main's, or `0` for
+`created` and `orphaned`. The reads that compose are `POST /api/search`
+(lexical and semantic), `GET /api/nodes/{id}`, `POST /api/nodes/{id}/related`,
+`POST /api/similar` and `/api/similar/batch`, `GET /api/stats`,
+`GET /api/meta/subtypes`, `GET /api/meta/relationship-applicability/audit`,
+`GET /api/views` and `/api/views/{name}`, `GET /api/export` and `/export_graph`,
+the config-driven typed interfaces, their MCP tools (`list_saved_views` and
+`show_graph_widget` included) and the chat assistant's graph tools. A session's
+own canvas resolves its node ids in its composed view too:
+`GET /api/sessions/{id}?resolve=true`, `add_nodes_to_session` (which accepts a
+staged create) and `get_visualization_layout`. History, event subscriptions,
+agents, federation peers and diagnostics never see a layer. Without a session,
+or in a direct one, every read answers as before.
+
+A layer entry is part of a reader's composed view only when the reader's
+graph-access narrowing covers the composed entity, the main entity it stands
+over and its base (for an edge: its endpoints, and the main edge's and the
+base's endpoints): it carries content of all three. Semantic search drops the
+main vector of every entity with an entry and scores staged creates and
+updates by vectors of their own, embedded in the background when staged
+(where the optional ML stack is installed) and on demand at the first semantic
+read that finds one missing; those vectors live in memory on the instance and
+are never written to the main index. `search_graph`, `get_related_nodes` and
+`get_saved_view` still treat a `visualization_session_id` naming no staged
+session as a push target only.
+An id whose session document still says `staged` is bound even if its staged
+record or layer store is missing, so the read returns the session refusal.
+`GET /api/views` and `list_saved_views` summaries include the saved-view node's
+`id`, and in a composing read its `staged_state`.
+
+Any other route or tool refuses the header (or argument) with
+`400 session_not_supported`. A write may carry `expected_session_seq`; it holds
+while the session's sequence number equals it.
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `session_not_found` | 404 | the session does not exist, or was a staged session that has been deleted |
+| `session_not_supported` | 400 | the route or tool neither stages nor composes |
+| `session_mismatch` | 400 | the request names two different sessions (header vs. path, argument or proposal) |
+| `session_seq_conflict` | 409 | `expected_session_seq` did not hold; carries `expected_session_seq` and `session_seq` |
+| `layer_full` | 422 | the write would take the layer past `SESSION_LAYER_MAX_ENTRIES`; carries `limit`. Nothing was staged |
+| `staged_unsupported` | 422 | staged mode asked for where `GRAPH_STAGED_SESSIONS` is off, or a session named on an instance without it whose store holds staged sessions |
+| `write_mode_irreversible` | 409 | a staged session asked to become direct |
+| `layer_not_empty` | 409 | deleting a staged session that holds staged changes, without `discard_staged` |
+| `busy` | 409 | an op batch was being applied to the session; retry |
+
+The authorization hook is asked about a staged write as the same `mutate` it
+would ask a direct one, with `graph_operation="stage"` and `session_id` in the
+context, and about a composing read as the same `read` it would ask without the
+session, with `session_id` in the context.
+
+#### Reviewing, merging and discarding staged changes
+
+docs/SESSION_OVERLAY_CONTRACT.md §10–§12. The three routes name their session
+in the path; a header naming another session is `400 session_mismatch`, and an
+unknown or deleted session is `404`. Each asks the hook first, under the name of
+its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
+`discard_staged_changes` as `mutate`, with `graph_operation` `merge` /
+`discard`), so a refused caller learns nothing about the session.
+
+| Method | Path | MCP tool | Description |
+|---|---|---|---|
+| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `version` (opaque; what a merge or discard names to bind itself to the reviewed entry), `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
+| POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id, version?}], resolutions?: [{kind, entity_id, choice, values?}]}`. `version` is the opaque one the diff gave the entry: an entry restaged since refuses the merge (`merge_raced`), checked in the merge unit. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
+| POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id, version?}]}`. Removes entries from the layer (an entry restaged since its named `version` refuses the discard with `merge_raced`); the graph does not change and no graph event fires. Answers the keys actually removed |
+
+**In the web app** (docs/SESSION_OVERLAY_CONTRACT.md §17): the client marks a
+session staged only from what the server says (a session payload or a
+`write_mode_changed` op), and from then on sends the session header on every
+route above and on every other graph-changing request
+(`frontend/web/src/services/stagedSessionHeader.js`), so a write the backend
+cannot stage is refused rather than applied. Where `/ui/capabilities` reports
+`staged_sessions`, it also names every session the server holds on the routes
+that stage or compose, so a switch to staged by another participant takes
+effect on its next write; and it holds graph writes from a linked session
+until that session's payload has said how it writes. The pending count, the canvas
+markers and the review all come from `GET /api/sessions/{id}/staged`; the
+stream's staged-change ops are only a cue to re-read it and the composed
+entities they name. A merge or discard names the reviewed entries explicitly
+(never `all`), each with the `version` it was reviewed at, so the server
+refuses one restaged since (`merge_raced`; the review then reads again and the
+changed entries need a new tick and decision). It goes only after a fresh read
+shows them unchanged, and reuses its UUID `merge_id` only to retry the same
+request whose outcome is unknown.
+
+Merge and discard fan out on the session stream as `graph_changes_merged`
+(`merge_id`, `removals`) and `graph_changes_discarded` (`removals`) - keys
+only - and record a session activity entry with no inverse. The diff sanitises
+saved-view annotations on each side according to that side's own node type,
+stripping unsafe reference targets and non-embedded image URLs. A reader narrowed
+by the hook sees, selects and discards only the entries its view wholly covers
+(the composed entity, the main entity and the base, for an edge their
+endpoints too) and whose dependencies it covers; a node delete is outside it
+too while main holds an edge to the node the reader cannot see. Any other
+entry is answered as if it were not staged. Every write a merge plans is
+validated as a direct write would be - a `manual` value included; an update of
+a saved view checks the annotations it brings, a create all of them - and an
+edge endpoint outside the caller's view is refused exactly as a missing one. A merge applies every write with an expectation and
+the store re-checks every condition inside the unit, so the graph or the layer
+changing in between fails the merge whole.
+
+| `error` | HTTP | Meaning |
+|---|---|---|
+| `merge_blocked` | 409 | a selected entry is not `clean` and has no resolution its status allows; carries `items`, the current diff of the blocking entries |
+| `merge_raced` | 409 | the graph or the layer changed since the merge was decided, or a selected entry is not (or no longer) staged; read the diff again |
+| `merge_incomplete` | 422 | the selection leaves out entries it depends on; carries `missing` |
+| `merge_id_taken` | 409 | the merge id was used by another session's merge. Merge ids are one namespace per graph, so a client should mint unpredictable ones (a UUID): this answer tells that an id is in use somewhere, and nothing else. A record purged by `SESSION_MERGE_RECORD_RETENTION_DAYS` no longer holds its id |
+| `invalid_merge_request` | 422 | a malformed selection, resolution or merge id |
+| `session_not_staged` | 409 | merge or discard in a direct session |
+| `write_failed` / `write_outcome_unknown` | 502 / 503 | the store failed; the merge did not land, or could not be confirmed (§4.4) |
+
 ### Custom REST Interfaces (config-driven)
 
 A specific node type or edge type can be exposed as its own dedicated read-only
@@ -748,16 +1127,17 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id) |
+| POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id). Optional `write_mode` (`direct`/`staged`; omitted, the graph default). Creating a staged one asks the authorization hook (`mutate`, `create_visualization_session`); `422 staged_unsupported` where staged sessions are not enabled. Every session response carries `write_mode` and `write_mode_source` |
 | GET | `/api/sessions` | List session metadata |
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
-| PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
-| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
+| PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side; a session materialised this way (or by joining its stream) is always `direct`, whatever `SESSION_WRITE_MODE_DEFAULT` says. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8. With `write_mode`: switch an existing session `direct` → `staged` (asks the hook as `set_session_write_mode`; fans out as a `write_mode_changed` op); `staged` → `direct` is `409 write_mode_irreversible` |
+| DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast, which carries the session's `write_mode`, as does the answer `{deleted, id, write_mode}`). A staged session holding staged changes is `409 layer_not_empty` unless `?discard_staged=true`; deleting a staged session retires its id for good (asks the hook under the session lock as `delete_visualization_session`, with `graph_operation=discard` when discarding) |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 | GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
 | POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict), if the annotation the inverse op would touch is held by another client's live edit lease (`LeaseConflict` — undo is a browser write and answers to the same rule as `POST /ops`; actor-scoping does not cover it, since the action is the caller's own but the annotation may have come under another client's lease since — retryable, unlike the state-changed conflict), or the session is mid-write (retry), `429` rate-limited. A mismatched `expected_revision` is a fourth `409` (`expected revision N, session is at M`). All four are distinguished only by their prose `detail`; the web UI branches on it in `classifyUndoError` so the retryable ones do not read as permanent — it never sends `expected_revision`, so it handles three of the four. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
+| POST | `/api/sessions/{id}/summon` | "Bring everyone here" (`{client_id, bounds: {x, y, width, height}}` → `{bounds, connected_clients}`): broadcasts an ephemeral `{"type": "viewport_summoned", client_id, summoned_by, bounds}` stream event asking every client connected to *that* session to fit the model-space region (x/y = top-left, pixels at zoom 1). Never persisted, sequenced or replayed, so a client joining later is not moved. `summoned_by` is the display name the request's `client_id` joined presence with (no free-text name is accepted; like `/ops`, `client_id` is self-asserted, so the name is a label, not an authenticated identity). Asks the hook as a mutate under its MCP twin's name `summon_session_viewport`, draws from the `/ops` token bucket. `400` invalid bounds (each value a finite number within ±1e7, width/height positive), `403`, `404` unknown session (never created), `429` rate-limited |
 
 #### Edit leases vs. selection claims
 
@@ -787,13 +1167,18 @@ bearer token (`AUTH_BEARER_TOKEN`) is configured together with an activation fla
 When auth is **active**, the middleware guards all endpoints except the public
 health/readiness/info routes and the id-protected session SSE streams.
 
+Unsafe requests authenticated with Basic credentials require `Sec-Fetch-Site: same-origin`
+or `Sec-Fetch-Site: none`, or a non-empty `X-Requested-With` header (for example,
+`X-Requested-With: api-client`). This prevents cross-site forms from writing with
+cached browser credentials; it also applies to raw-body routes.
+
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
 
 - The REST graph endpoints, `/execute_tool` (limited to the read-only
   `SAFE_TOOLS` allow-list in `backend/api_host/tool_routes.py`), **and the full
-  graph export** (`GET /api/export` and `GET /export_graph`) are all reachable
-  without credentials.
+  graph export** (`GET /api/export`, `GET /api/export/archive` and
+  `GET /export_graph`) are all reachable without credentials.
 - A full graph export is therefore an **unauthenticated read on an
   auth-disabled instance**, consistent with the other `SAFE_TOOLS` reads. This is
   intentional for open/standalone deployments. If a deployment must keep graph
@@ -832,30 +1217,48 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 
 ### MCP Tools
 
+The six dedicated system-node create tools below are also exposed to the built-in
+assistant. Each takes a typed `config` object, uses the UI's `add_nodes` mutation
+authorization, and returns `created_node_id` on success. They accept
+`visualization_session_id` and `expected_session_seq` for staged sessions; linked
+nodes are staged together and only become active after merge. The existing
+generic mutation tools remain available for editing and legacy configurations.
+
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
+| `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
-| `get_related_nodes` | Get nodes connected to a node |
+| `get_related_nodes` | Get nodes connected through visible nodes only |
+| `list_saved_views` | List saved-view summaries with node IDs and, in staged sessions, staged state |
 | `find_similar_nodes` | Find nodes with similar names |
 | `add_nodes` | Add new nodes and edges |
+| `create_agent` | Create an Agent (enabled by default) plus its internal EventSubscription and relationship |
+| `create_event_subscription` | Create a subscription with validated filters and a public HTTP(S) delivery URL |
+| `create_skill` | Create a Skill with nonempty content and when-to-use instructions |
+| `create_active_knowledge_collection` | Create a collection with a validated, unique kiosk short name |
+| `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
+| `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
-| `save_view` | Save a named view (creates SavedView node) |
+| `save_view` | Ask a connected frontend to capture and save its current canvas |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
-| `get_visualization_session_state` | Read a session's visible and selected node ids |
-| `clear_visualization` | Clear the canvas in the browsers displaying a session (requires a browser holding the legacy push channel open) |
+| `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
+| `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
-| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
-| `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
+| `summon_session_viewport` | Move every client connected to a session to one model-space region — `bounds` `{x, y, width, height}` or the bounding box of `node_ids` on the session's canvas (each must be placed and readable by the caller; in a staged session, the composed view; a group member's parent-relative position is offset by its group's origin). Ephemeral (nothing stored; later joiners are not moved), animated unless the viewer prefers reduced motion; the viewer sees who summoned them (`display_name`, default "AI assistant") with a Return action. Asks the hook as a mutate; draws from its own MCP rate budget; returns `connected_clients` |
+| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
+| `remove_nodes_from_session` | Take a known set of nodes off a session's canvas by id (stored state, no browser needed; skips ids not in the session) |
+| `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted; optional `write_mode`, see Staged sessions) |
+| `set_session_write_mode` | Switch a session `direct` → `staged` (`write_mode_irreversible` the other way) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
-| `rename_visualization_session` | Set or clear a session's display name |
-| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+| `rename_visualization_session` | Set or clear a session's display name (draws one unit from a rate budget of its own; `rate_limited` when spent) |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent). A staged session with staged changes also needs `discard_staged=true` (`layer_not_empty` otherwise) |
 | `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
 | `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |
@@ -866,7 +1269,8 @@ Two independent things can be true of a session id, and
 
 - `has_stored_state` — the session exists in the session store. State is
   server-owned, so the tools that act on it (`add_nodes_to_session`,
-  `get_visualization_layout`, `apply_visualization_layout`) and
+  `remove_nodes_from_session`, `get_visualization_layout`,
+  `apply_visualization_layout`) and
   `get_visualization_session_state` work with no client connected, and a browser
   opening the session later picks up what was put there meanwhile. A store entry
   is created by `create_visualization_session` or lazily by a browser's first
@@ -877,10 +1281,90 @@ Two independent things can be true of a session id, and
   `visualization_session_id` parameter goes to the op-stream hub *and* the
   legacy push registry, so it can still reach a browser that has only the legacy
   stream open and reports no presence; `message` states which case the session is
-  in. `clear_visualization` gates on the legacy registry specifically.
+  in. The legacy channel counts only while something is draining it
+  (`SessionRegistry.has_consumer`), never because a registry entry exists — see
+  "Why an entry in the push registry is not a consumer" below.
+  `clear_visualization` gates on the same two facts: it refuses unless a client
+  is on the op stream or draining the legacy channel.
 
-A session id that is in neither the store nor the registry is reported as not
-found, by both read tools.
+A session id with no stored state and nothing draining its legacy push channel is
+reported as not found, by both read tools.
+
+**A push reports its own delivery.** `search_graph`, `get_related_nodes` and
+`get_saved_view` add a `visualization_delivery` object to their result whenever a
+`visualization_session_id` was given. Nothing is added when it was not, so the
+field is additive and does not bump the session contract version (§9):
+
+| Field | Meaning |
+|---|---|
+| `requested` | Whether a push was attempted at all. |
+| `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it **and** at least one client is on the op stream. Neither half suffices alone. |
+| `status` | `"delivered"`, `"not_delivered"`, `"unknown"`, or `"not_requested"` when no session id was given. `"unknown"` is the one case where `delivered: false` does **not** mean the push failed — see below. |
+| `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
+| `warning` | Present only when undelivered, naming the state that made it so. |
+
+This matters because a push writes no session state when it is sent — of the
+MCP tools only `add_nodes_to_session` and `remove_nodes_from_session` write
+`node_refs` — so reading the session back
+afterwards cannot tell an undelivered push apart from one that never happened.
+Undelivered is not the same as discarded, though: when the session has a legacy
+registry entry with nothing draining it, the command still waits in that
+entry's bounded queue (oldest dropped first), and a browser that opens the
+session before the entry expires drains it and may apply it then. So an
+undelivered push can still change a canvas later; `delivered` reports only
+whether a consumer was attached when it was sent, not whether it is applied later.
+A routine that refreshes a canvas on a schedule has to check `delivered` instead
+of reading a successful search as a refreshed canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
+verdict for that check either: it is read before the push, and a consumer
+present then can be gone by the time the push is sent. It does agree with the
+delivery report on the state that matters most — a registry entry with nothing
+draining it is reported as unreachable by both.
+
+`live_consumers` can be non-zero while `delivered` is false: a client that joined
+a session the store does not hold is genuinely connected, but `push_command`
+publishes only for a stored session, so nothing was sent to it. The `warning`
+names which state applies, and each failure gets its own clause rather than
+borrowing one, because the two hub calls fail independently and do not mean the
+same thing:
+
+- **The publish raised.** Nothing reached the hub at all. Knowable, and reported
+  as such — not as "the session has no stored state", which is a different state
+  with the same two falsy booleans.
+- **The publish succeeded but the presence count could not be read.** The command
+  *did* go to the hub's subscribers; only their number is unknown. This is the one
+  case where `delivered: false` does not mean the push failed, so `status` is
+  `"unknown"` and the warning opens "It is not known whether anything received
+  this push". Calling it a non-delivery would deny a push that may well have
+  landed — the mirror of the false positive this report exists to remove.
+- **The publish returned falsy *and* the presence count could not be read.**
+  Nothing was published (a falsy return establishes that the store does not hold
+  the session), so this is a non-delivery — but the clause says the count was
+  unreadable rather than claiming nobody is connected, which the code never
+  established.
+
+`live_consumers` is a sum across both channels, so one browser can account for
+two during a page load: the frontend holds the legacy `EventSource` until the op
+stream is ready. Read it as "consumer connections that would receive this
+command", not as a count of people watching.
+
+**Why an entry in the push registry is not a consumer.** A registry entry is
+created by `get_or_create`, including by `mint_trigger_token` and the session
+auto-add tools with no browser involved. Nothing removes it when the SSE
+connection closes, and `push_command_sync` refreshes `last_seen` on every push
+while `cleanup_stale` keys on `last_seen` — so a session that is being pushed to
+is *never* TTL-evicted, and an entry outlives the browser that created it
+indefinitely. "The queue accepted the command" therefore cannot support a
+delivery claim on its own: without the consumer ref-count
+(`SessionRegistry.consumer_count` / `has_consumer`, held for as long as
+`stream()` is draining the queue) a nightly push into a session whose tab closed
+months ago would report `delivered: true` forever, and would inflate
+`live_consumers` with a reader that is not there. The pre-push checks
+(`connect_to_visualization_session`, `get_visualization_session_state` and
+`clear_visualization`) use the same consumer count for the same reason.
+
+`delivered` means a consumer was attached when the command was sent, not
+that the canvas has finished applying it. `clear_visualization` has nothing to
+report — it refuses up front instead.
 
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent
@@ -902,10 +1386,22 @@ Whether the connected canvas actually tweens the hint is a *deployment* fact, no
 something a write result can report, so it is published as the `animated_layout`
 capability in `get_capabilities` / `GET /api/capabilities`. A deployment whose
 canvas does not animate says so by declaring that id in its presentation config —
-`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. The
-`name` is required: a capability entry missing it fails validation for the entire
-schema config, which then falls back to defaults and reports the capability as
-enabled — the opposite of what was intended.
+`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. A
+missing `name` defaults to the id. Capability entries are validated one by one,
+like `rest_interfaces`: an invalid entry is skipped with a logged warning and the
+rest of the schema config still loads. If a skipped entry declared
+`animated_layout`, the capability is reported disabled, never as the enabled
+default. The same holds when some *other* part of the schema config is fatally
+invalid and the loader falls back to defaults: the validated capability entries
+are carried into the fallback config, so a valid `"enabled": false` override
+still wins. `get_presentation` / `GET /api/presentation` returns this same
+manifest as its `capabilities` field rather than a second, raw copy of the
+config. The capability summary in `/info` (`operability.capabilities`) and
+`/diagnostics/startup` (`capabilities`) counts `configured` (declared entries
+that passed validation) separately from `defaulted` (server-known capabilities
+the manifest adds because no valid entry declared them — reported disabled when
+the declaring entry failed validation); `enabled` and `disabled` cover the whole
+manifest.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas
@@ -913,12 +1409,42 @@ without having to craft a search that returns exactly that set. It is additive
 and idempotent (ids already in the session are not re-added and leave the
 `revision` untouched), goes through the same authorization gate as the other
 session writes, and skips — reporting in `skipped` — any id that does not resolve
-to a node the caller may read, so a stale id never becomes a phantom session
-reference. Session state is server-owned, so connected browsers receive the
-broadcast op and hydrate the nodes; a browser that connects later picks them up
-from the session state. The returned `revision` threads straight into
+to a node the caller may add, so a stale id never becomes a phantom session
+reference. The ids are resolved under the same mutate decision as the gate, not
+a read one, so a node the caller can see but not change is skipped too. Session
+state is server-owned, so connected browsers receive the broadcast op and
+hydrate the nodes; a browser that connects later picks them up from the session
+state. The returned `revision` threads straight into
 `apply_visualization_layout`'s `expected_revision`, making "create → populate →
 arrange" three deterministic calls.
+
+A repeated id counts once: the tool deduplicates `node_ids` before checking the
+500-id cap, the 256 KiB byte cap and the tool's rate budget. That budget is per
+tool, not per client — every MCP client on the instance draws from the same one —
+and it is charged one unit per distinct id sent (at least one), before any id is
+resolved: resolving costs a node lookup per id, so ids reported in `skipped` are
+charged too, and so is a call that returns `no_resolvable_nodes`. A call with
+more distinct ids than the full budget (200 at default settings) could never be
+admitted by waiting, so it returns `too_large` rather than the retryable
+`rate_limited`, and draws nothing. Both caps are
+checked before any id is resolved and return `too_large`, with a `message` that
+names which cap was hit; a call refused there, or before it (invalid or unknown
+session, not authorized, empty `node_ids`), draws nothing. An unknown session is reported as not found before any
+id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
+returned when the session exists but none of the ids resolve, and it lists them
+in `skipped`.
+
+`remove_nodes_from_session` is the complement: one `nodes_removed` op (the op a
+browser sends when a node is removed) on the stored state, so it works with no
+client connected — unlike `clear_visualization` — and connected browsers drop the
+nodes live. It shares the add tool's caps, `expected_revision` contract and
+`too_large` / `rate_limited` errors, on a rate budget of its own. Ids are not
+resolved against the graph (a ref whose node was deleted stays removable); any id
+not in the session is reported in `skipped`, and a call that removes nothing is a
+success that leaves `revision` untouched. A removed node's position,
+hidden/dimmed state and group-annotation membership go with it, so re-adding it
+with `add_nodes_to_session` brings it back unpositioned and visible; other nodes'
+positions and the annotations themselves are untouched.
 
 ##### `get_visualization_layout` response
 
@@ -963,9 +1489,13 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and additionally draws from a per-client
-rate budget sized to the number of moves, so a very large arrange can hit
-`rate_limited` first — either way, split it across successive writes and thread the
+moves / 256 KiB (`too_large` beyond that), and a write that passes those caps and
+fits the full budget draws from the tool's
+rate budget (per tool, shared by every MCP client on the instance) sized to the
+number of moves, so a very large arrange can hit
+`rate_limited` first, and one with more moves than the full budget (200 at
+default settings) returns `too_large` and draws nothing, since waiting would never
+admit it — either way, split it across successive writes and thread the
 returned `revision` into the next `expected_revision`.
 
 - **Horizontal (left-to-right) DAG.** Rank each node by its longest path from a
@@ -1005,8 +1535,11 @@ returned `revision` into the next `expected_revision`.
   ```python
   s = create_visualization_session(name="Q3 dependency map")
   sid = s["session"]["session_id"]
-  # put the exact node set on the canvas (or push results into it with
-  # search_graph/get_related_nodes and visualization_session_id=sid):
+  # put the exact node set in the session's stored state. Pushing results with
+  # search_graph/get_related_nodes and visualization_session_id=sid stores
+  # nothing unless a canvas receives the push and adds them; check
+  # visualization_delivery (delivered, status) on that result before assuming
+  # the push reached anything:
   added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
   # then arrange with apply_visualization_layout as above, threading
   # expected_revision=added["revision"], then:
@@ -1032,9 +1565,15 @@ host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
 
 #### Sticky note tools
 
+`delete_sticky_note` and `delete_annotation` both act on stored session state;
+neither needs a browser connected. Create the session first with
+`create_visualization_session`, then use the deletion tool for the annotation's
+type. Deletion persists an `annotation_deleted` op and broadcasts it to any
+connected clients, with the same `expected_revision` guard as layout writes.
+
 `list_sticky_notes` / `create_sticky_note` / `update_sticky_note` /
 `delete_sticky_note` let an assistant read and edit `note` annotations
-(docs/ANNOTATION_CONTRACT.md) in an open session — the same annotation
+(docs/ANNOTATION_CONTRACT.md) in a stored session — the same annotation
 document a connected browser renders and edits, so a note an agent creates
 appears on every collaborator's canvas via the same op broadcast the layout
 tools use. Coordinates are model space, matching the layout tools above.
@@ -1081,15 +1620,26 @@ convention for the same fields; `locked` defaults to `False`.
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
 model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
-`shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
-creating one (see the image annotation tool below). They share the
+`shape`, `icon`, `vote_dot`, `freehand`, `heatmap` — plus `image`, for everything
+except creating one (see the image annotation tool below). They share the
 sticky-note tools' session/revision contract — model-space coordinates,
 `revision` / `expected_revision` optimistic concurrency, `revision_conflict`
 on a stale write, `lease_conflict` on a live human edit lease — over the same
 annotation document. `create_group_annotation`/`update_group_members`/
 `delete_group_annotation` and `create_image_annotation` (below) share it too;
-all thirteen MCP tools that can mutate an existing annotation check the same
+all thirteen MCP annotation write tools check the same
 lease at the actual mutation boundary and never acquire one themselves.
+
+A `heatmap` is a soft red heat-map circle whose only payload field is
+`content.intensity`, an integer 0–10 (0 invisible, 10 strongest red).
+`create_annotation`/`update_annotation` return `invalid_content` for anything
+else — a float, a bool, a string, or a value outside the range. A fresh create
+with no intensity stores the default 5; an upsert-replace that omits it keeps
+the stored value. With no `w`/`h` the circle is 160 across, and with only one
+of them the other matches it. The circle is drawn with diameter `min(w, h)`
+centred in its box. Like `shape`, a heat-map circle defaults to `z = -1`,
+behind graph nodes. The full rendering rules are in docs/ANNOTATION_CONTRACT.md
+under "Heat-map circles".
 
 `note` keeps its own dedicated tool set above and `group` (node-membership
 boxes) keeps its own below ("Group annotation tools"); neither is exposed
@@ -1235,6 +1785,20 @@ WebP), and stores the result as an embedded data URI in `content.image.url` —
 never the original remote link — so the annotation keeps rendering after the
 source disappears. Only PNG, JPEG and WebP are accepted.
 
+Inline `image_data` is smaller over MCP than over REST. Both MCP transports
+(`POST /mcp` and `POST /mcp/messages/`) sit behind the mcp SDK's
+`RequestBodyLimitMiddleware`, which answers `413` to any request body over
+4 MiB — by declared `Content-Length` or, for a chunked upload, by counted
+bytes — before the JSON-RPC message is parsed. `backend/requirements.txt`
+pins `mcp>=1.29.1` because that is the first release that guards both
+transports; there is no other body-size guard in front of `/mcp`. Base64
+inflates bytes by 4/3, so the largest source image that fits inline in one
+tool call is roughly 3 MiB, against the 20 MiB
+(`DEFAULT_MAX_SOURCE_IMAGE_BYTES`) the REST endpoint
+`POST /api/sessions/{id}/annotations/image` accepts. `image_url` is not
+affected: the server fetches that image itself, subject only to the ingest
+limits.
+
 Because one embedded image is far bigger than the small generic op-batch cap
 the other annotation writes share, `create_image_annotation` does not apply
 that cap at all; instead `SessionManager.upsert_image_annotation` enforces
@@ -1319,6 +1883,23 @@ own.
 | POST | `/ui/upload/extract` | Extract text only (no LLM analysis) |
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
+| GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
+
+The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
+`/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
+authorization exactly like the REST graph routes, so the service authorization
+hook evaluates the assistant's tool calls as the caller, `find_similar_nodes`,
+`find_similar_nodes_batch` and `get_subtypes` included, which narrow to the
+caller's visible graphs as `search_graph` does. A denied tool call comes back to the model as an
+`access_denied` tool result and nothing is written. A collection-mode chat
+whose collection lookup is denied runs with every write denied; a collection
+outside the caller's visible graphs counts as missing, so the chat runs without
+collection limits, as it would without `collection_short_name`. Collection
+limits restrict the assistant; the hook is what authorizes the caller. When
+auth is active (`AUTH_ENABLED=true` with `AUTH_PASSWORD` or
+`AUTH_BEARER_TOKEN` set), the auth middleware also rejects an unauthenticated
+request to any `/ui/*` route with 401. MCP-only auth (`MCP_BASIC_AUTH`) leaves
+`/ui/*` as open as `/api/*`.
 
 #### Chat Example
 
@@ -1382,11 +1963,23 @@ Click the "Chat" button in the application header to open the panel. The panel d
 - Loading indicators during processing
 - Error messages when something goes wrong
 
-### ChatGPT Widget Integration
+### Interactive widget over MCP (Claude, ChatGPT)
 
-The same chat functionality is available via the embeddable widget (`frontend/widget/`). This widget can be embedded in ChatGPT or other interfaces that support custom widgets.
+`frontend/widget/` is a graph canvas delivered to chat clients as an MCP UI
+resource, following the MCP Apps extension (`io.modelcontextprotocol/ui`, spec
+2026-01-26), which both Claude and ChatGPT implement:
 
-The widget uses the same `/ui/chat` endpoint, ensuring consistent behavior between the web app and external integrations.
+- `backend/service/mcp_widget.py` builds the resource
+  `ui://community-graph/graph-widget.html` (MIME `text/html;profile=mcp-app`)
+  by inlining `frontend/widget/dist` (`npm run build:widget`; `WIDGET_STATIC_PATH`
+  overrides the directory). Without a build the resource is a placeholder page.
+- The `show_graph_widget` tool links to it with `_meta.ui.resourceUri`, plus the
+  deprecated flat `ui/resourceUri` and ChatGPT's `openai/outputTemplate` alias.
+- In the iframe, `frontend/widget/src/mcpClient.js` uses `window.openai` when
+  ChatGPT injects it and otherwise the MCP Apps postMessage JSON-RPC bridge
+  (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`). The widget
+  calls `search_graph` and `get_related_nodes` through the host, never the
+  server directly, so the sandbox needs no network origins.
 
 ### Active Knowledge Collection kiosk
 

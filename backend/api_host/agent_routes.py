@@ -3,7 +3,10 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+
+from backend.runtime.authorization import use_request_authorization
+from backend.runtime.session_context import current_session_id, mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +14,7 @@ logger = logging.getLogger(__name__)
 def register_agent_routes(
     app: FastAPI,
     agent_registry,
-    graph_storage,
+    graph_service,
     federation_manager,
 ) -> None:
     """Register /federation/* and /agents/* status and trigger endpoints."""
@@ -37,12 +40,25 @@ def register_agent_routes(
         return agent_registry.get_available_mcp_integrations()
 
     @app.get("/agents/skills")
-    async def agents_skills():
+    async def agents_skills(request: Request):
         """List Skill nodes from the graph for agent configuration."""
-        nodes = graph_storage.search_nodes("", node_types=["Skill"], limit=200)
+        with use_request_authorization(headers=request.headers):
+            result = graph_service.search_graph(
+                "", node_types=["Skill"], limit=200, federation_depth=0
+            )
+        if result.get("error_code") == "access_denied":
+            raise HTTPException(
+                status_code=403, detail=result.get("message") or result.get("error")
+            )
+        if result.get("success") is False:
+            raise HTTPException(status_code=500, detail="Skill lookup failed")
         return [
-            {"id": n.id, "name": n.name, "description": n.description or ""}
-            for n in nodes
+            {
+                "id": n["id"],
+                "name": n["name"],
+                "description": n.get("description") or "",
+            }
+            for n in result["nodes"]
         ]
 
     @app.get("/agents/schedules")
@@ -72,11 +88,18 @@ def register_agent_routes(
 
         Each run records the trigger, agent, status, timestamps, correlation,
         attempts and terminal outcome, persisted behind the execution-store
-        seam so it survives a restart.
+        seam so it survives a restart. Only runs inside the configured read
+        window (export window, else retention) are returned.
         """
         return agent_registry.list_runs(
             agent_id=agent_id, kind=kind, status=status, limit=limit
         )
+
+    # Registered before /agents/runs/{run_id} so it is not read as a run id.
+    @app.get("/agents/runs/retention-policy")
+    async def agents_runs_retention_policy() -> Dict[str, Any]:
+        """Get the effective run-history retention policy and the last sweep."""
+        return agent_registry.get_run_retention_policy()
 
     @app.get("/agents/runs/{run_id}")
     async def agents_run_detail(run_id: str) -> Dict[str, Any]:
@@ -124,7 +147,20 @@ def register_agent_routes(
         """
         Approve a proposal. For act_after_approval agents this also applies the
         captured action and reports the outcome.
+
+        The action is applied in the session it was made in. A request acting
+        in another session (x-communityoverview-session-id) is refused with
+        session_mismatch, before anything is decided.
         """
+        bound = current_session_id()
+        if bound is not None:
+            proposal = agent_registry.get_proposal(proposal_id)
+            if proposal is not None and proposal.get("session_id") != bound:
+                refusal = mismatch(bound, proposal.get("session_id") or "none")
+                raise HTTPException(
+                    status_code=refusal.status,
+                    detail={"error": refusal.code, "message": refusal.message},
+                )
         result = agent_registry.approve_proposal(proposal_id, decided_by=decided_by)
         if result is None:
             raise HTTPException(

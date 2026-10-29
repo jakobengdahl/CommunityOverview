@@ -6,6 +6,7 @@ import pytest
 import tempfile
 import os
 import json
+import logging
 
 from backend.core import (
     FileGraphPersistenceBackend,
@@ -16,6 +17,7 @@ from backend.core import (
     RelationshipType,
 )
 from backend.core import storage_search
+from backend.core.storage_backends import EntityOperation, ExternalChange
 
 
 @pytest.fixture
@@ -134,6 +136,33 @@ class TestGraphStorageInit:
 
         assert len(new_storage.nodes) == 4
         assert len(new_storage.edges) == 3
+
+    def test_load_skips_edge_with_missing_endpoint(self, storage_log):
+        """A stored dangling edge must not make NetworkX invent a blank node."""
+        existing = Node(id="present", type=NodeType.ACTOR, name="Present")
+        dangling = Edge(
+            id="dangling",
+            source="present",
+            target="absent",
+            type=RelationshipType.RELATES_TO,
+        )
+        backend = InMemoryPersistenceBackend(
+            {
+                "nodes": [existing.to_dict()],
+                "edges": [dangling.to_dict()],
+                "metadata": {"version": "1.0", "graph_name": "test"},
+            }
+        )
+
+        storage = GraphStorage(persistence_backend=backend)
+
+        assert "present" in storage.nodes
+        assert "absent" not in storage.nodes
+        assert "absent" not in storage.graph
+        assert "dangling" not in storage.edges
+        assert any(
+            "ignoring stored edge dangling" in m for m in storage_log()[logging.WARNING]
+        )
 
 
 class TestGraphStorageCRUD:
@@ -287,6 +316,60 @@ class TestGraphStorageCRUD:
         assert result.success is False
         assert "Source node" in result.message
 
+    @pytest.mark.parametrize("end", ["source", "target"])
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_can_refuse_federated_endpoints_atomically(
+        self, temp_storage, monkeypatch, end, by_name
+    ):
+        """A restricted write refuses resolved reference ids before adding anything."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        reference = Node(id="federated::g2::ref", name="Reference", type="Actor")
+        temp_storage.add_nodes([reference], [])
+        edge = Edge(source="new", target="new", type="RELATES_TO")
+        setattr(edge, end, reference.name if by_name else reference.id)
+        result = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")],
+            [edge],
+            allow_federated_endpoints=False,
+        )
+        assert result.success is False
+        assert result.added_node_ids == result.added_edge_ids == []
+        assert set(temp_storage.nodes) == {reference.id}
+        assert not temp_storage.edges
+
+        allowed = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")], [edge]
+        )
+        assert allowed.success is True
+        assert getattr(temp_storage.edges[edge.id], end) == reference.id
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_add_nodes_checks_resolved_endpoint_visibility(
+        self, temp_storage, monkeypatch, by_name
+    ):
+        """Storage gives invisible and missing endpoints the same refusal."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        hidden = Node(
+            id="hidden", name="Hidden", type="Actor", metadata={"origin_graph_id": "g2"}
+        )
+        temp_storage.add_nodes([hidden], [])
+        results = [
+            temp_storage.add_nodes(
+                [Node(id="new", name="New", type="Actor")],
+                [Edge(source="new", target=endpoint, type="RELATES_TO")],
+                node_visible=lambda node: not node.metadata.get("origin_graph_id"),
+            )
+            for endpoint in (hidden.name if by_name else hidden.id, "missing")
+        ]
+        assert results[0].success is False
+        assert results[0].message == results[1].message
+        assert set(temp_storage.nodes) == {hidden.id}
+        assert not temp_storage.edges
+
     def test_get_node(self, storage_with_data):
         """Test getting a node by ID"""
         node = storage_with_data.get_node("actor-1")
@@ -437,6 +520,623 @@ class TestGraphStorageCRUD:
 
         assert result.success is False
         assert "Max 10" in result.message
+
+
+def _without_generation(monkeypatch, storage):
+    """Make embedding generation unavailable, as in an env with no model."""
+
+    def no_generation(nodes):
+        raise RuntimeError("no embedding model")
+
+    monkeypatch.setattr(storage.vector_store, "update_nodes_embeddings", no_generation)
+
+
+class TestRejectedAddNodesLeavesNoInlineVector:
+    """A rejected add_nodes keeps whatever landed before the rejection, and a
+    node that landed must hold its supplied vector in the index, never on the
+    object: every later event builds its payload from that object, and the
+    event path has no by-name filter for `embedding`."""
+
+    @staticmethod
+    def _events(storage):
+        seen = []
+        storage.add_system_listener(seen.append)
+        return seen
+
+    @pytest.mark.parametrize("repeat_existing", [False, True])
+    def test_a_landed_node_carries_no_embedding_into_later_events(
+        self, temp_storage, repeat_existing
+    ):
+        if repeat_existing:
+            temp_storage.add_nodes(
+                [Node(id="old", type=NodeType.ACTOR, name="Old")], []
+            )
+        rejected_id = "old" if repeat_existing else "a"
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id=rejected_id, type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        assert result.success is False
+        assert temp_storage.get_node("a") is not None
+        seen = self._events(temp_storage)
+
+        temp_storage.update_node("a", {"description": "changed"})
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert (event.entity.before or {}).get("embedding") is None
+        assert (event.entity.after or {}).get("embedding") is None
+
+    def test_a_landed_node_keeps_its_supplied_vector(self, temp_storage, monkeypatch):
+        _without_generation(monkeypatch, temp_storage)
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_an_external_upsert_of_a_landed_node_emits_no_embedding(self, temp_storage):
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        temp_storage.flush()
+        seen = self._events(temp_storage)
+        payload = temp_storage.get_node("a").to_dict()
+        payload.update(name="Renamed", updated_at="2999-01-01T00:00:00+00:00")
+
+        temp_storage.apply_external_change(
+            ExternalChange.entities([EntityOperation.upsert_node(payload)])
+        )
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert event.entity.before is not None
+        assert event.entity.before.get("embedding") is None
+
+    @staticmethod
+    def _raise_on_second_node(monkeypatch, storage):
+        build = storage._build_match_fields
+
+        def build_or_raise(node):
+            if node.id == "boom":
+                raise RuntimeError("index build failed")
+            return build(node)
+
+        monkeypatch.setattr(storage, "_build_match_fields", build_or_raise)
+
+    def test_a_raise_mid_batch_settles_the_landed_vector(
+        self, temp_storage, monkeypatch
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        self._raise_on_second_node(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="boom", type=NodeType.ACTOR, name="Boom"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_a_failed_adoption_still_strips_the_landed_node(
+        self, temp_storage, monkeypatch
+    ):
+        def refuse(nodes):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(temp_storage, "_adopt_supplied_vectors", refuse)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        seen = self._events(temp_storage)
+
+        temp_storage.update_node("a", {"description": "changed"})
+
+        [event] = [e for e in seen if e.entity.id == "a"]
+        assert (event.entity.before or {}).get("embedding") is None
+        assert (event.entity.after or {}).get("embedding") is None
+
+    @pytest.mark.parametrize("failure", ["duplicate_id", "raise"])
+    def test_the_settled_vector_survives_a_reload(
+        self, temp_storage, monkeypatch, failure
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        if failure == "raise":
+            self._raise_on_second_node(monkeypatch, temp_storage)
+        second_id = "a" if failure == "duplicate_id" else "boom"
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id=second_id, type=NodeType.ACTOR, name="Second"),
+            ],
+            [],
+        )
+        assert result.success is False
+        temp_storage.flush()
+
+        reloaded = GraphStorage(
+            json_path=str(temp_storage.json_path),
+            embeddings_path=str(temp_storage._embedding_sidecar.path),
+        )
+
+        assert reloaded.get_node("a") is not None
+        assert reloaded.vector_store.get_vector_list("a") == pytest.approx([0.25, 0.5])
+
+    def test_settling_after_a_successful_adoption_keeps_the_vector(
+        self, temp_storage, monkeypatch
+    ):
+        _without_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
+            [Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)],
+        )
+
+        assert result.success is False
+        assert "does not exist" in result.message
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_every_landed_vector_in_a_batch_is_settled(self, temp_storage, monkeypatch):
+        _without_generation(monkeypatch, temp_storage)
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.75, 1.0]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        for node_id, vector in (("a", [0.25, 0.5]), ("b", [0.75, 1.0])):
+            assert temp_storage.get_node(node_id).embedding is None
+            assert temp_storage.vector_store.get_vector_list(node_id) == pytest.approx(
+                vector
+            )
+
+    def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
+        self, temp_storage, monkeypatch
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5]),
+                Node(id="a", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+
+class TestAdoptionKeepsVectorsIfTheIndexRaises:
+    """A supplied vector's only copy is the node object until the index export
+    and load have returned, so a raise there must not take it off the node
+    first - not even one the index would have refused for its width."""
+
+    @pytest.mark.parametrize("failing", ["export_vectors", "load_vectors"])
+    def test_a_raise_in_the_index_leaves_the_vector_on_the_node(
+        self, temp_storage, monkeypatch, failing
+    ):
+        def fail(*args, **kwargs):
+            raise RuntimeError(f"{failing} failed")
+
+        monkeypatch.setattr(temp_storage.vector_store, failing, fail)
+        node = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+
+        with pytest.raises(RuntimeError):
+            temp_storage._adopt_supplied_vectors([node])
+
+        assert node.embedding == pytest.approx([0.25, 0.5])
+
+    def test_a_transient_load_failure_in_add_nodes_does_not_lose_the_vector(
+        self, temp_storage, monkeypatch
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        load = temp_storage.vector_store.load_vectors
+        calls = []
+
+        def fail_once(vectors):
+            calls.append(vectors)
+            if len(calls) == 1:
+                raise RuntimeError("load failed")
+            load(vectors)
+
+        monkeypatch.setattr(temp_storage.vector_store, "load_vectors", fail_once)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
+            [],
+        )
+
+        assert result.success is False
+        assert "load failed" in result.message
+        assert temp_storage.get_node("a") is not None
+        assert len(calls) == 2
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    @pytest.mark.parametrize("failing", ["export_vectors", "load_vectors"])
+    def test_a_raise_in_an_anchored_index_leaves_every_vector_on_its_node(
+        self, temp_storage, monkeypatch, failing
+    ):
+        temp_storage.vector_store.load_vectors({"anchor": [1.0, 0.0]})
+
+        def fail(*args, **kwargs):
+            raise RuntimeError(f"{failing} failed")
+
+        monkeypatch.setattr(temp_storage.vector_store, failing, fail)
+        fits = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+        too_wide = Node(
+            id="b", type=NodeType.ACTOR, name="Beta", embedding=[0.1, 0.2, 0.3]
+        )
+
+        with pytest.raises(RuntimeError):
+            temp_storage._adopt_supplied_vectors([fits, too_wide])
+
+        assert fits.embedding == pytest.approx([0.25, 0.5])
+        assert too_wide.embedding == pytest.approx([0.1, 0.2, 0.3])
+
+
+class TestFailedAddNodesGeneratesLandedVectors:
+    """A node that lands in a failed add_nodes stays and is persisted, so it
+    gets a generated vector exactly as on success - once per call, and never
+    at the cost of the failure result the caller is owed."""
+
+    @staticmethod
+    def _recording_generation(monkeypatch, storage, fail=False):
+        calls = []
+
+        def generate(nodes):
+            calls.append([node.id for node in nodes])
+            if fail:
+                raise RuntimeError("no embedding model")
+            storage.vector_store.absorb_embeddings(
+                {node.id: [1.0, float(len(node.id))] for node in nodes}
+            )
+
+        monkeypatch.setattr(storage.vector_store, "update_nodes_embeddings", generate)
+        return calls
+
+    @staticmethod
+    def _add_existing(storage, monkeypatch):
+        monkeypatch.setattr(
+            storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        assert storage.add_nodes(
+            [Node(id="old", type=NodeType.ACTOR, name="Old")], []
+        ).success
+        monkeypatch.undo()
+
+    @staticmethod
+    def _raise_on_node(monkeypatch, storage, node_id):
+        build = storage._build_match_fields
+
+        def build_or_raise(node):
+            if node.id == node_id:
+                raise RuntimeError("index build failed")
+            return build(node)
+
+        monkeypatch.setattr(storage, "_build_match_fields", build_or_raise)
+
+    @pytest.mark.parametrize("exit_kind", ["failure", "success"])
+    def test_a_generated_vector_wins_over_a_supplied_one(
+        self, temp_storage, monkeypatch, exit_kind
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+        landed = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+        batch = [landed]
+        if exit_kind == "failure":
+            batch.append(Node(id="old", type=NodeType.ACTOR, name="Again"))
+
+        result = temp_storage.add_nodes(batch, [])
+
+        assert result.success is (exit_kind == "success")
+        assert calls == [["a"]]
+        assert landed.embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    def test_a_rejected_duplicate_id_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="bb", type=NodeType.ACTOR, name="Beta"),
+                Node(id="old", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert "already exists" in result.message
+        assert calls == [["a", "bb"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+        assert temp_storage.vector_store.get_vector_list("bb") == pytest.approx(
+            [1.0, 2.0]
+        )
+        assert temp_storage.vector_store.get_vector_list("old") is None
+
+    def test_a_raise_mid_batch_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        calls = self._recording_generation(monkeypatch, temp_storage)
+        self._raise_on_node(monkeypatch, temp_storage, "boom")
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="boom", type=NodeType.ACTOR, name="Boom"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert "index build failed" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    def test_a_raise_in_adoption_still_generates_for_the_landed_nodes(
+        self, temp_storage, monkeypatch
+    ):
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        def refuse(nodes):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(temp_storage, "_adopt_supplied_vectors", refuse)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")], []
+        )
+
+        assert result.success is False
+        assert "index unavailable" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    @pytest.mark.parametrize("edge_failure", ["missing_endpoint", "duplicate_id"])
+    def test_an_edge_failure_does_not_generate_a_second_time(
+        self, temp_storage, monkeypatch, edge_failure
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        existing = Edge(source="old", target="old", type=RelationshipType.RELATES_TO)
+        if edge_failure == "duplicate_id":
+            monkeypatch.setattr(
+                temp_storage.vector_store, "update_nodes_embeddings", lambda n: None
+            )
+            assert temp_storage.add_nodes([], [existing]).success
+            monkeypatch.undo()
+            edge = Edge(
+                id=existing.id,
+                source="a",
+                target="old",
+                type=RelationshipType.RELATES_TO,
+            )
+        else:
+            edge = Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")], [edge]
+        )
+
+        assert result.success is False
+        assert calls == [["a"]]
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [1.0, 1.0]
+        )
+
+    def test_a_failing_generator_is_called_once_across_an_edge_failure(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage, fail=True)
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha")],
+            [Edge(source="a", target="missing", type=RelationshipType.RELATES_TO)],
+        )
+
+        assert result.success is False
+        assert "does not exist" in result.message
+        assert calls == [["a"]]
+        assert temp_storage.get_node("a") is not None
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") is None
+
+    def test_a_generation_failure_on_a_failed_add_keeps_its_result(
+        self, temp_storage, monkeypatch
+    ):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage, fail=True)
+
+        result = temp_storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="old", type=NodeType.ACTOR, name="Again"),
+            ],
+            [],
+        )
+
+        assert result.success is False
+        assert result.message == "Node with ID old already exists"
+        assert calls == [["a"]]
+        assert temp_storage.get_node("a") is not None
+        assert temp_storage.vector_store.get_vector_list("a") is None
+
+    def test_a_first_node_rejected_generates_nothing(self, temp_storage, monkeypatch):
+        self._add_existing(temp_storage, monkeypatch)
+        calls = self._recording_generation(monkeypatch, temp_storage)
+
+        result = temp_storage.add_nodes(
+            [Node(id="old", type=NodeType.ACTOR, name="Again")], []
+        )
+
+        assert result.success is False
+        assert calls == []
+
+
+class TestAdoptionSettlesSuppliedVectors:
+    """On success every supplied vector leaves its node: the index holds the
+    ones it accepts, and the ones it cannot use are cleared rather than left
+    for later events to carry."""
+
+    @pytest.mark.parametrize("unusable", [[0.1, 0.2, 0.3], []])
+    def test_an_unusable_vector_is_cleared_from_the_node(
+        self, temp_storage, monkeypatch, unusable
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        temp_storage.vector_store.load_vectors({"anchor": [1.0, 0.0]})
+
+        result = temp_storage.add_nodes(
+            [Node(id="b", type=NodeType.ACTOR, name="Beta", embedding=unusable)],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.get_node("b").embedding is None
+        assert temp_storage.vector_store.get_vector_list("b") is None
+        assert temp_storage.vector_store.get_vector_list("anchor") == pytest.approx(
+            [1.0, 0.0]
+        )
+
+    @pytest.mark.parametrize("order", [("z", "y", "b"), ("b", "z", "y")])
+    def test_a_zero_length_vector_does_not_block_the_rest_of_the_batch(
+        self, temp_storage, monkeypatch, order
+    ):
+        # Zero-length vectors outnumber the real one, so without the filter
+        # they would set the width whatever the tie-break or node order.
+        _without_generation(monkeypatch, temp_storage)
+        vectors = {"z": [], "y": [], "b": [0.1, 0.2]}
+
+        result = temp_storage.add_nodes(
+            [
+                Node(
+                    id=node_id,
+                    type=NodeType.ACTOR,
+                    name=node_id,
+                    embedding=vectors[node_id],
+                )
+                for node_id in order
+            ],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.vector_store.get_vector_list("b") == pytest.approx(
+            [0.1, 0.2]
+        )
+        for node_id in order:
+            assert temp_storage.get_node(node_id).embedding is None
+        for node_id in ("z", "y"):
+            assert temp_storage.vector_store.get_vector_list(node_id) is None
+
+    @pytest.mark.parametrize("order", [("z", "b"), ("b", "z")])
+    def test_a_zero_length_vector_does_not_win_a_width_tie(
+        self, temp_storage, monkeypatch, order
+    ):
+        # One zero-length vector against one real one ties on count, so without
+        # the filter the width seen first would decide the batch.
+        _without_generation(monkeypatch, temp_storage)
+        vectors = {"z": [], "b": [0.1, 0.2]}
+
+        result = temp_storage.add_nodes(
+            [
+                Node(
+                    id=node_id,
+                    type=NodeType.ACTOR,
+                    name=node_id,
+                    embedding=vectors[node_id],
+                )
+                for node_id in order
+            ],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.vector_store.get_vector_list("b") == pytest.approx(
+            [0.1, 0.2]
+        )
+        assert temp_storage.vector_store.get_vector_list("z") is None
+        for node_id in order:
+            assert temp_storage.get_node(node_id).embedding is None
+
+    def test_a_supplied_vector_replaces_an_orphan_index_vector_for_a_new_id(
+        self, temp_storage, monkeypatch
+    ):
+        _without_generation(monkeypatch, temp_storage)
+        temp_storage.vector_store.load_vectors({"a": [0.75, 1.0]})
+
+        result = temp_storage.add_nodes(
+            [Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])],
+            [],
+        )
+
+        assert result.success is True
+        assert temp_storage.get_node("a").embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
+
+    def test_nodes_passed_as_an_iterator_are_adopted_and_cleared(self, temp_storage):
+        node = Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[0.25, 0.5])
+
+        temp_storage._adopt_supplied_vectors(iter([node]))
+
+        assert node.embedding is None
+        assert temp_storage.vector_store.get_vector_list("a") == pytest.approx(
+            [0.25, 0.5]
+        )
 
 
 class TestGraphStorageSearch:
@@ -651,6 +1351,44 @@ class TestSearchRanking:
         results = temp_storage.search_nodes("actor")
         ids = [n.id for n in results]
         assert ids.index("type-match") < ids.index("desc-match")
+
+    def test_localized_type_label_ranks_between_name_and_description(
+        self, temp_storage
+    ):
+        """The Swedish label of a legacy enum type is a type-tier signal: it
+        must surface the node, above a description-only mention but below a
+        name match on another type."""
+        nodes = [
+            Node(id="type-label", type=NodeType.ACTOR, name="Unrelated"),
+            Node(id="name-match", type=NodeType.THEME, name="Aktör"),
+            Node(
+                id="desc-match",
+                type=NodeType.THEME,
+                name="Other",
+                description="en aktör i nätverket",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        ids = [n.id for n in temp_storage.search_nodes("aktör")]
+        assert ids == ["name-match", "type-label", "desc-match"]
+
+    def test_localized_type_label_stays_below_the_alias_band(self, temp_storage):
+        """The type label is a type-tier signal, not an alternative name: a
+        node whose alias merely contains the term must outrank a node that only
+        matches through its type's localized label."""
+        nodes = [
+            Node(id="type-label", type=NodeType.ACTOR, name="Unrelated"),
+            Node(
+                id="alias-substring",
+                type=NodeType.THEME,
+                name="Other",
+                aliases=["huvudaktör"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        ids = [n.id for n in temp_storage.search_nodes("aktör")]
+        assert ids == ["alias-substring", "type-label"]
+        assert temp_storage._score_node_match(nodes[0], "aktör") < 200_000
 
     def test_ranking_respects_limit(self, ranking_storage):
         """Ranked results still respect the limit parameter."""
@@ -976,6 +1714,46 @@ class TestGraphStorageSubtypes:
         updated = temp_storage.get_node("actor-sub-2")
         assert updated.subtypes == ["Municipality"]
 
+    @pytest.mark.parametrize("endpoint", ["source", "target", "both"])
+    def test_a_subtype_update_cannot_invalidate_incident_edges(
+        self, temp_storage, monkeypatch, endpoint
+    ):
+        """Subtype validation precedes every mutation, including self-loops."""
+        from backend.config import config_loader
+
+        rules = config_loader.RelationshipTypeConfig(
+            source_types=["Agency"] if endpoint != "target" else [],
+            target_types=["Agency"] if endpoint != "source" else [],
+        )
+        monkeypatch.setitem(
+            config_loader._get_loader().config.schema_.relationship_types,
+            "SUBTYPE_LINK",
+            rules,
+        )
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
+                Node(id="b", type="Actor", name="B"),
+            ],
+            [
+                Edge(
+                    id="ab",
+                    source="a" if endpoint != "target" else "b",
+                    target="a" if endpoint != "source" else "b",
+                    type="SUBTYPE_LINK",
+                )
+            ],
+        )
+        temp_storage.flush()
+        before = temp_storage.get_node("a").to_dict()
+        with pytest.raises(ValueError, match="SUBTYPE_LINK"):
+            temp_storage.update_node("a", {"subtypes": [], "name": "Rejected"})
+        assert temp_storage.get_node("a").to_dict() == before
+        assert temp_storage.edges["ab"].type_str == "SUBTYPE_LINK"
+        assert temp_storage.update_node(
+            "a", {"subtypes": ["Agency", "Municipality"]}
+        ).subtypes == ["Agency", "Municipality"]
+
     def test_get_subtypes_by_node_type(self, temp_storage):
         """Test getting subtypes grouped by node type"""
         nodes = [
@@ -1123,7 +1901,7 @@ class TestGraphStoragePersistence:
         assert {"persist-backend-1", "persist-backend-2"}.issubset(persisted_ids)
         assert backend.data["metadata"]["graph_name"] == "in-memory-graph"
 
-    def test_save_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+    def test_save_through_non_file_backend_does_not_claim_graph_json(self, storage_log):
         """The save log line named graph.json even through a backend that
         never wrote a file at all (e.g. PostgreSQL) — see
         smallfix-oc-storage-logs-graph-json-for-every-backend. A backend with
@@ -1133,19 +1911,21 @@ class TestGraphStoragePersistence:
             initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
         )
         storage = GraphStorage(persistence_backend=backend)
-        capsys.readouterr()  # discard the initial load's own log line
+        storage_log()  # discard the initial load's own log line
 
         storage.add_nodes(
             [Node(id="non-file-node", type=NodeType.ACTOR, name="Non-file Node")], []
         )
         storage.flush()
 
-        out = capsys.readouterr().out
-        assert "graph.json" not in out
-        assert "Saved 1 nodes and 0 edges" in out
-        assert "in-memory-graph" in out
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        saved = [m for m in logged[logging.INFO] if "Saved 1 nodes and 0 edges" in m]
+        assert saved and all("in-memory-graph" in m for m in saved), logged
 
-    def test_save_through_file_backend_still_names_its_path(self, temp_storage, capsys):
+    def test_save_through_file_backend_still_names_its_path(
+        self, temp_storage, storage_log
+    ):
         """The fix for the non-file case must not regress the common one:
         the file backend's own whole-graph save still names the real
         json_path. (The file backend is incremental, so add_nodes takes the
@@ -1155,12 +1935,36 @@ class TestGraphStoragePersistence:
             [Node(id="file-backed-node", type=NodeType.ACTOR, name="File Node")], []
         )
         temp_storage.flush()
-        capsys.readouterr()  # discard everything up to here
+        storage_log()  # discard everything up to here
 
         temp_storage.save().result()
 
-        out = capsys.readouterr().out
-        assert f"Saved 1 nodes and 0 edges to {temp_storage.json_path}" in out
+        assert (
+            f"Saved 1 nodes and 0 edges to {temp_storage.json_path}"
+            in storage_log()[logging.INFO]
+        )
+
+    def test_load_through_non_file_backend_does_not_claim_graph_json(self, storage_log):
+        backend = InMemoryPersistenceBackend(
+            initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
+        )
+
+        GraphStorage(persistence_backend=backend)
+
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        loaded = [m for m in logged[logging.INFO] if "Loaded 0 nodes and 0 edges" in m]
+        assert loaded and all("in-memory-graph" in m for m in loaded), logged
+
+    def test_missing_non_file_backend_does_not_claim_graph_json(self, storage_log):
+        backend = InMemoryPersistenceBackend(initial_data=None)
+
+        GraphStorage(persistence_backend=backend)
+
+        logged = storage_log()
+        assert not [m for ms in logged.values() for m in ms if "graph.json" in m]
+        created = [m for m in logged[logging.INFO] if "No graph data found" in m]
+        assert created and all("in-memory-graph" in m for m in created), logged
 
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""

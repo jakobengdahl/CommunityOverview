@@ -460,14 +460,20 @@ describe('annotationModel contract v1', () => {
   // task-annotation-render-direct-manipulation's remaining "semantic default
   // layers" scope: a per-kind default `z` at creation, narrow by design (see
   // docs/ANNOTATION_CONTRACT.md's Layer order section and this file's own
-  // `defaultAnnotationZ` comment) — only `shape` moves off the shared 0.
+  // `defaultAnnotationZ` comment) — only the backdrop kinds, `shape` and
+  // `heatmap`, move off the shared 0.
   describe('semantic default layer at creation', () => {
     it('defaults a freshly created shape to z -1, one layer behind everything else', () => {
       expect(createAnnotation({ type: 'shape' }).z).toBe(-1);
       expect(defaultAnnotationZ('shape')).toBe(-1);
     });
 
-    it.each(ANNOTATION_TYPES.filter((type) => type !== 'shape'))(
+    it('defaults a freshly created heat-map circle to z -1 too, behind graph nodes', () => {
+      expect(createAnnotation({ type: 'heatmap' }).z).toBe(-1);
+      expect(defaultAnnotationZ('heatmap')).toBe(-1);
+    });
+
+    it.each(ANNOTATION_TYPES.filter((type) => type !== 'shape' && type !== 'heatmap'))(
       'still defaults %s to z 0, unchanged',
       (type) => {
         expect(createAnnotation({ type }).z).toBe(0);

@@ -299,6 +299,10 @@ function GroupNode({ id, data, selected }) {
 
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
   const groupBadge = remoteEditBadge(data);
+  // Groups persist rotation for round-trip compatibility, but the current group
+  // renderer is not visually rotated. Keep that stored value out of the size
+  // control, whose resize math intentionally compensates for rendered rotation.
+  const sizeControlData = { ...data, rotation: 0 };
 
   return (
     <>
@@ -449,7 +453,7 @@ function GroupNode({ id, data, selected }) {
                 </div>
                 {/* Non-drag alternative to the NodeResizer handles above —
                     task-annotation-accessible-shared-controls. */}
-                <AnnotationSizeControl id={id} data={data} labels={labels} />
+                <AnnotationSizeControl id={id} data={sizeControlData} labels={labels} />
                 <button className="context-menu-delete" onClick={handleDeleteGroup}>
                   🗑️ Delete Group
                 </button>

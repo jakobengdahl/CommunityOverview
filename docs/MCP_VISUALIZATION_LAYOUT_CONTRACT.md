@@ -28,8 +28,8 @@ arrange a session without colliding nodes or fighting concurrent editors.
 An MCP-connected assistant can populate a visualization session (by pushing
 results into it with `search_graph` / `get_related_nodes` and a
 `visualization_session_id`, or by naming the node ids outright with
-`add_nodes_to_session`) but then
-needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
+`add_nodes_to_session`, and prune it again with `remove_nodes_from_session`)
+but then needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
 swimlanes. To do that safely it must agree with the server and the canvas on a
 single coordinate model, on how a bulk move is applied, and on how concurrent
 edits and animation are handled.
@@ -177,6 +177,32 @@ apply_visualization_layout(
   `seq`. Re-read is unnecessary after a successful write — the returned
   `revision` is the value to pass to the next write.
 
+### 5.1 Stored node membership (`remove_nodes_from_session`)
+
+`remove_nodes_from_session(session_id, node_ids, expected_revision = null)`
+removes node references from a stored session, even when no browser is connected.
+The graph's nodes are unchanged. Create stored state with
+`create_visualization_session` before populating or pruning it.
+
+- **Result.** `{ success: true, session_id, removed, skipped, node_count, revision }`.
+  `removed` and `skipped` contain deduplicated ids; ids absent from the session
+  are skipped, including references that never named a graph node. An existing
+  session reference remains removable even if its graph node has been deleted.
+  `node_count` counts the remaining references, hidden nodes included.
+- **Cleanup.** Removal clears each removed node's position, hidden/dimmed flags
+  and group-annotation membership. Other nodes keep their positions and the
+  annotations remain. Re-adding the id with `add_nodes_to_session` makes it
+  visible and unpositioned (`x`/`y` are `null` in the layout projection).
+- **Concurrency and delivery.** The revision guard in §7 applies. A removal
+  emits one `nodes_removed` op carrying the removed `node_ids`, through the
+  same persistence, sequencing and broadcast path as layout writes. If no id is
+  present, success leaves the revision unchanged and broadcasts nothing.
+- **Limits.** The add tool's limits apply: 500 distinct ids, 256 KiB of ids,
+  and the tool's full rate budget (200 ids at default settings). Removal has its
+  own budget, shared by MCP clients, charged once per distinct id sent, skipped
+  ids included. A batch over a hard cap or the full budget returns `too_large`
+  without charging; an exhausted budget returns `rate_limited` (§11).
+
 ## 6. Atomicity, batching and limits
 
 - **One atomic op.** The whole batch is applied as a **single** `layout_applied`
@@ -187,16 +213,23 @@ apply_visualization_layout(
 - **All-or-nothing rollback.** If persistence fails, in-memory state, `seq`,
   `updated_at` and the op ring buffer are rolled back to their pre-call values;
   the caller sees an error and the session is unchanged.
-- **Maximum batch size.** A single write is bounded by **two** independent caps,
-  either of which triggers a `too_large` error (§11):
-  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`), and
+- **Maximum batch size.** A single write is bounded by **three** independent
+  limits, any of which triggers a `too_large` error (§11):
+  - at most **500** node moves (`_DEFAULT_MAX_OPS_PER_BATCH`),
   - at most **256 KiB** of serialized move payload
-    (`_DEFAULT_MAX_OP_BATCH_BYTES`).
-  An agent laying out a session larger than the node cap must split the work into
+    (`_DEFAULT_MAX_OP_BATCH_BYTES`), and
+  - no more moves than the tool's full rate budget holds (**200** at default
+    settings, `_DEFAULT_BUCKET_CAPACITY`; see Rate limiting below).
+  So at default settings the largest write that can be admitted is 200 moves.
+  An agent laying out a session larger than that must split the work into
   successive writes, threading the returned `revision` into the next call's
   `expected_revision`.
-- **Rate limiting.** Writes consume from a per-client token bucket sized to the
-  number of moves; exhaustion yields a `rate_limited` error (§11). Layout writes
+- **Rate limiting.** Writes consume from this tool's token bucket, sized to the
+  number of moves. The bucket is per tool, not per client: every MCP client on
+  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11); a
+  write with more moves than the full bucket holds (200 at default settings,
+  `_DEFAULT_BUCKET_CAPACITY`) could never be admitted, so it yields `too_large`
+  instead and draws nothing. Layout writes
   are expected to be infrequent (agent-driven), so this bounds abuse without
   affecting normal use.
 - **Serialization against realtime edits.** The synchronous layout write must not
@@ -253,7 +286,7 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   reads as one coherent motion. A human bulk drag arrives *without* an animation
   hint (§10) and is applied instantly.
 - **The seam:** the hint travels intact inside the broadcast op (§10), so the
-  canvas animation (`task-frontend-animated-layout-transitions`) honors it
+  canvas animation honors it
   *without a contract or tool change* — it reads `animation` off the
   `layout_applied` op and tweens from the previous to the new positions.
 - **Reduced motion.** `prefers-reduced-motion` is a **client-side** decision:
@@ -267,9 +300,11 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   `animated_layout` capability whose `enabled` says whether this instance's
   canvas tweens the hint. A deployment running a canvas that does not declares
   the same capability id in its presentation config, as
-  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — the
-  `name` is required, and an entry missing it invalidates the whole schema config
-  and falls back to defaults, reporting the capability as enabled. Reduced motion
+  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — a
+  missing `name` defaults to the id. A capability entry that is otherwise invalid
+  is skipped on its own with a logged warning, leaving the rest of the config in
+  place; if it declared `animated_layout`, the capability is then reported
+  disabled rather than as the enabled default. Reduced motion
   stays out of that flag — it is per-viewer and client-side (see above), so no
   server-side manifest can report it.
 - **Cancellation / replacement.** A subsequent `layout_applied` op supersedes an
@@ -322,7 +357,7 @@ machine-readable `error` and, where useful, a `message` and extra fields:
 | Stale `expected_revision` | `revision_conflict` | `expected_revision`, `current_revision` |
 | Realtime batch mid-flight holds the lock | `busy` | retry guidance |
 | Token bucket exhausted | `rate_limited` | |
-| Over the node or byte cap | `too_large` | split guidance |
+| Over the node or byte cap, or more moves than the full token bucket | `too_large` | split guidance |
 
 A `revision_conflict`, `busy` or `rate_limited` is **retryable**; a validation
 error or `too_large` requires the agent to change the request.
@@ -370,17 +405,12 @@ differ between the open core and the hosted layer.
   itself part of the defect: a field named for nodes that hands back edge ids
   breaks the caller that reads it as its name reads. Widening a field, or
   renaming one, is breaking and needs a new version.
-- The requirement node `req-mcp-layout-contract` and the decision
-  `dec-visualization-layout-contract` in the Corp planning graph govern this
-  document; status and evidence live there, not here.
-
-## 15. Realizing and dependent tasks
-
-| Task (Corp graph) | Relationship to this contract |
-|---|---|
-| `task-implement-mcp-layout-read` | Implements §2–§4 — `get_visualization_layout` (shipped, PR #287). |
-| `task-implement-mcp-layout-write` | Implements §5–§7, §10, §11 — `apply_visualization_layout` / `SessionManager.apply_layout` (shipped, PR #287). |
-| `task-frontend-animated-layout-transitions` | Consumes §9–§10 — tweens the `layout_applied` op and honors reduced motion. |
-| `task-test-agent-layout-workflow` | Verifies §2–§12 end to end — geometry accuracy, collision-free layout, concurrency, limits, reduced motion. |
-| `task-document-agent-visualization-tools` | Publishes §2–§11 into the tool docstrings and `backend/DEVELOPMENT.md`. |
-| `task-mcp-layout-read-semantic-metadata` | Extends §4 additively with the semantic projection (§4.1) and the merged selection (§4.2); no version bump per §14. |
+- Reporting a write with more moves than the full rate budget (§6) as
+  `too_large` instead of `rate_limited` is likewise a **correction, not a
+  version bump**. The two batch caps did not change, and neither did what is
+  admitted: a bucket that holds 200 tokens never admitted a larger write, so the
+  effective limit was always the smaller of the two. Only the classification
+  changed. A `rate_limited` that no amount of waiting could clear contradicted
+  §11's promise that `rate_limited` is retryable.
+- Planning status and evidence for this contract are tracked outside this
+  repository, not here.

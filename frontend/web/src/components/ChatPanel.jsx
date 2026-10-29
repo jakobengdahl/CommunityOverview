@@ -358,7 +358,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       }
     } catch (err) {
       console.error('[ChatPanel] Upload error:', err);
-      setError(t('chat.upload_error', { message: err.message }));
+      const reason = err.statusOnly ? t('chat.upload_status', { status: err.status }) : err.message;
+      setError(t('chat.upload_error', { message: reason }));
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {

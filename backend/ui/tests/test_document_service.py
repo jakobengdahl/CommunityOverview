@@ -64,6 +64,21 @@ class TestDocumentServiceUpload:
         # Cleanup
         os.unlink(result["file_path"])
 
+    def test_save_upload_success_reports_raw_filename_size_and_upload_dir(
+        self, document_service
+    ):
+        """A successful save echoes the raw uploaded name, the byte count and a path inside the upload dir."""
+        import asyncio
+
+        content = b"twelve bytes"
+        result = asyncio.run(document_service.save_upload(content, "dir/a b.txt"))
+
+        assert result["success"]
+        assert result["filename"] == "dir/a b.txt"
+        assert result["size"] == len(content)
+        assert Path(result["file_path"]).parent == Path(document_service._upload_dir)
+        assert Path(result["file_path"]).read_bytes() == content
+
     def test_save_upload_rejects_unsupported_format(self, document_service):
         """save_upload should reject unsupported file formats."""
         import asyncio
@@ -75,6 +90,37 @@ class TestDocumentServiceUpload:
 
         assert not result["success"]
         assert "unsupported" in result["error"].lower()
+
+    def test_save_upload_rejection_names_the_uploaded_file(self, document_service):
+        """Each save_upload error path reports the display name of the rejected file."""
+        import asyncio
+        from unittest.mock import patch
+
+        unsupported = asyncio.run(
+            document_service.save_upload(b"x", "C:\\docs\\bad\u202e.xyz")
+        )
+        too_large = asyncio.run(
+            document_service.save_upload(
+                b"x" * (document_service.MAX_FILE_SIZE + 1), "../big\x85.txt"
+            )
+        )
+        with patch(
+            "backend.ui.document_service.tempfile.NamedTemporaryFile",
+            side_effect=OSError("disk full"),
+        ):
+            write_failed = asyncio.run(
+                document_service.save_upload(b"x", "dir/notes .txt")
+            )
+
+        assert not unsupported["success"]
+        assert "unsupported" in unsupported["error"].lower()
+        assert unsupported["filename"] == "bad.xyz"
+        assert not too_large["success"]
+        assert "too large" in too_large["error"].lower()
+        assert too_large["filename"] == "big.txt"
+        assert not write_failed["success"]
+        assert "disk full" in write_failed["error"]
+        assert write_failed["filename"] == "notes .txt"
 
     def test_save_upload_rejects_large_files(self, document_service):
         """save_upload should reject files exceeding size limit."""
@@ -100,7 +146,145 @@ class TestDocumentServiceUpload:
 
         assert result["success"]
         assert "test content" in result["text"].lower()
-        # Temp file should be cleaned up (can't easily verify, but no error is good)
+        assert os.listdir(document_service._upload_dir) == []
+
+    def test_same_millisecond_uploads_keep_separate_contents(
+        self, tmp_path, monkeypatch
+    ):
+        """Overlapping same-name uploads keep their contents and clean up independently."""
+        import asyncio
+
+        from backend.ui.document_service import DocumentService
+
+        monkeypatch.setattr("time.time", lambda: 1793139048.239)
+        save_upload = DocumentService.save_upload
+        saved_paths = []
+
+        async def upload_together():
+            both_saved = asyncio.Event()
+
+            async def save_before_extracting(service, file_content, filename):
+                result = await save_upload(service, file_content, filename)
+                assert result["success"], result
+                saved_paths.append(result["file_path"])
+                if len(saved_paths) == 2:
+                    both_saved.set()
+                await asyncio.wait_for(both_saved.wait(), timeout=5)
+                return result
+
+            monkeypatch.setattr(DocumentService, "save_upload", save_before_extracting)
+            return await asyncio.gather(
+                DocumentService(upload_dir=str(tmp_path)).process_upload(
+                    b"First upload", "my notes.txt"
+                ),
+                DocumentService(upload_dir=str(tmp_path)).process_upload(
+                    b"Second upload", "my notes.txt"
+                ),
+            )
+
+        results = asyncio.run(upload_together())
+
+        for result, expected in zip(results, ("First upload", "Second upload")):
+            assert result["success"], result
+            assert result["text"] == expected
+            assert result["filename"] == "my notes.txt"
+        assert len(set(saved_paths)) == 2
+        assert list(tmp_path.iterdir()) == []
+
+    def test_process_upload_removes_the_stored_file_when_extraction_fails(
+        self, document_service
+    ):
+        import asyncio
+        from unittest.mock import patch
+
+        with patch(
+            "backend.ui.document_service.DocumentProcessor.extract_text",
+            side_effect=ValueError("broken"),
+        ):
+            result = asyncio.run(document_service.process_upload(b"x", "report.txt"))
+
+        assert not result["success"]
+        assert os.listdir(document_service._upload_dir) == []
+
+    def test_process_upload_stores_under_the_sanitized_name_in_the_upload_dir(
+        self, document_service
+    ):
+        """The file is written inside _upload_dir under a unique, sanitized
+        basename, whatever path or characters the client sent."""
+        import asyncio
+        import re
+        from unittest.mock import patch
+
+        for sent in ("../../x.txt", "Mötes anteckningar (v2).txt", "a\\b c.txt"):
+            seen = []
+
+            def capture(path, _seen=seen):
+                _seen.append(path)
+                assert os.path.isfile(path)
+                return {"success": True, "text": "t", "filename": "ignored"}
+
+            with patch.object(
+                document_service, "extract_text_from_file", side_effect=capture
+            ):
+                result = asyncio.run(document_service.process_upload(b"x", sent))
+
+            assert result["success"], sent
+            (stored,) = seen
+            assert Path(stored).parent == Path(document_service._upload_dir), sent
+            assert re.fullmatch(r"upload_[\w.\-]+", Path(stored).name), sent
+            assert os.listdir(document_service._upload_dir) == [], sent
+
+    def test_process_upload_reports_the_uploaded_name_not_the_storage_name(
+        self, document_service
+    ):
+        """The chat shows this name and sends it to the LLM, so it must not carry
+        the storage prefix or the character replacements of the storage name."""
+        import asyncio
+
+        result = asyncio.run(
+            document_service.process_upload(
+                b"Some text.", "Mötes anteckningar (v2).txt"
+            )
+        )
+
+        assert result["success"]
+        assert result["filename"] == "Mötes anteckningar (v2).txt"
+
+    def test_process_upload_strips_client_path_and_control_characters(
+        self, document_service
+    ):
+        import asyncio
+
+        cases = {
+            "C:\\Users\\me\\notes.txt": "notes.txt",
+            "../../etc/notes.txt": "notes.txt",
+            "no\ntes\x07.txt": "notes.txt",
+            "notes.txt/": "notes.txt",
+            "notes.txt/.": "notes.txt",
+            "notes.txt/./": "notes.txt",
+            "  notes.txt": "  notes.txt",
+            "no\x7ftes\x85\x9b.txt": "notes.txt",
+            "evil\u202etxt.exe.txt": "eviltxt.exe.txt",
+            "a:b.txt": "a:b.txt",
+        }
+        for sent, shown in cases.items():
+            result = asyncio.run(document_service.process_upload(b"Some text.", sent))
+            assert result["success"], sent
+            assert result["filename"] == shown, sent
+
+    def test_process_upload_failure_reports_the_uploaded_name(self, document_service):
+        """An extraction error names the user's file, not the storage file."""
+        import asyncio
+        from unittest.mock import patch
+
+        with patch(
+            "backend.ui.document_service.DocumentProcessor.extract_text",
+            side_effect=ValueError("broken"),
+        ):
+            result = asyncio.run(document_service.process_upload(b"x", "report.txt"))
+
+        assert not result["success"]
+        assert result["filename"] == "report.txt"
 
 
 class TestDocumentServiceFileSanitization:
@@ -119,14 +303,10 @@ class TestDocumentServiceFileSanitization:
         for char in '<>:"|?*':
             assert char not in result
 
-    def test_sanitize_filename_adds_timestamp(self, document_service):
-        """Should add timestamp for uniqueness."""
-        result1 = document_service._sanitize_filename("file.txt")
-        result2 = document_service._sanitize_filename("file.txt")
-        # Results might be different due to timestamp (or same if called fast)
-        # Both should start with digits
-        assert result1[0].isdigit()
-        assert result2[0].isdigit()
+    def test_sanitize_filename_preserves_extension(self, document_service):
+        """Storage names keep the extension used to select the text extractor."""
+        result = document_service._sanitize_filename("my notes.txt")
+        assert Path(result).suffix == ".txt"
 
 
 class TestDocumentServiceCleanup:

@@ -55,8 +55,136 @@ class AppConfig:
         default_factory=lambda: os.getenv("SESSIONS_DIR")
     )
 
+    # Durable store backing graph.json import's background embedding jobs
+    # (see backend/service/import_service.py). Defaults to an
+    # "import_jobs.db" SQLite file next to the graph file, so import jobs are
+    # durable (survive a restart) out of the box, the same way the graph file
+    # itself is.
+    import_jobs_db: Optional[str] = field(
+        default_factory=lambda: os.getenv("IMPORT_JOBS_DB")
+    )
+
+    # Which persistence backend holds the graph. "file" is the default and is
+    # what every deployment has run so far: the JSON file at GRAPH_FILE.
+    # "postgres" selects the shared store that lets several instances write one
+    # graph, and needs GRAPH_POSTGRES_DSN plus the psycopg extra in
+    # backend/requirements-postgres.txt.
+    #
+    # An unrecognised value is an error rather than a fallback to "file". A
+    # deployment that meant to move to PostgreSQL and typed the name wrong
+    # would otherwise boot happily on the file backend and look correct until
+    # the second instance started.
+    #
+    # Empty is not unrecognised, though: `GRAPH_BACKEND=` is how a variable is
+    # templated out of a compose file or a `gcloud run deploy --set-env-vars`,
+    # and it means "unset" to whoever wrote it. `or` rather than a getenv
+    # default, the same way HISTORY_MAX_EVENTS above reads an empty value.
+    graph_backend: str = field(
+        default_factory=lambda: os.getenv("GRAPH_BACKEND", "").strip().lower() or "file"
+    )
+    # libpq connection string for graph_backend="postgres". Carries a password
+    # in most deployments, so it comes from the environment (Secret Manager on
+    # Cloud Run) and is never logged.
+    graph_postgres_dsn: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_DSN")
+    )
+    # One database can hold several independent graphs, one per schema.
+    graph_postgres_schema: str = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCHEMA", "public")
+    )
+    # An opaque identifier tagging every row this instance writes to the
+    # PostgreSQL graph store, and narrowing every row it reads to that value or
+    # to none. Unset - the default - is a store that keeps no scopes apart, and
+    # behaves exactly as it did before this setting existed. What the value
+    # distinguishes is the host's business: nothing here interprets it.
+    #
+    # Read RAW, and this is the one setting here that does not normalise. Empty
+    # does NOT read as unset the way GRAPH_BACKEND and the pool size do above,
+    # and the value is not stripped: both would turn an identifier the operator
+    # got wrong into a store that keeps nothing apart, or into a different
+    # scope than the one they set. `GRAPH_POSTGRES_SCOPE=` is refused at boot by
+    # build_persistence_backend instead - the direction a setting that decides
+    # which rows an instance can see has to be wrong in.
+    graph_postgres_scope: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCOPE")
+    )
+    # Connections this instance may hold, on top of the one LISTEN connection
+    # the backend keeps for change notification. Unset uses the backend's own
+    # default. docs/PERSISTENCE_BACKENDS.md, "Sizing it: what an instance
+    # costs", has the budget an operator has to fit this under.
+    graph_postgres_pool_size: Optional[int] = field(
+        default_factory=lambda: (
+            int(_v)
+            if (_v := os.getenv("GRAPH_POSTGRES_POOL_SIZE", "").strip())
+            else None
+        )
+    )
+
+    # Staged sessions (docs/SESSION_OVERLAY_CONTRACT.md). Read raw and
+    # validated by build_session_settings, which refuses a bad value at boot
+    # with the variable named.
+    #
+    # GRAPH_STAGED_SESSIONS=true lets the graph backend hold session layers -
+    # without it no session can be staged, and the backend creates no layer
+    # file or table. SESSION_WRITE_MODE_DEFAULT is the mode a session created
+    # without one gets: direct (the default, today's behaviour) or staged.
+    # SESSION_LAYER_MAX_ENTRIES caps a layer; unset is 1000.
+    # SESSION_MERGE_RECORD_RETENTION_DAYS is how long a deleted session's merge
+    # records are kept; unset is 90.
+    graph_staged_sessions: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_STAGED_SESSIONS")
+    )
+    session_write_mode_default: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_WRITE_MODE_DEFAULT")
+    )
+    session_layer_max_entries: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_LAYER_MAX_ENTRIES")
+    )
+    session_merge_record_retention_days: Optional[str] = field(
+        default_factory=lambda: os.getenv("SESSION_MERGE_RECORD_RETENTION_DAYS")
+    )
+
+    # Node attachments (docs/adr/0008-node-attachment-storage.md). Read raw and
+    # validated by build_attachment_settings, which refuses a bad value at boot
+    # with the variable named, rather than failing here on the first int().
+    attachment_backend: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_BACKEND")
+    )
+    # Root of the attachment store. Unset puts it beside the graph file
+    # (<stem>.attachments); the PostgreSQL backend has no graph file, so there
+    # attachments stay unavailable until this is set.
+    attachment_dir: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_DIR")
+    )
+    # Separates graphs sharing one attachment root. Unset: the graph file's
+    # stem, or pg:<GRAPH_POSTGRES_SCHEMA>. A graph keeps its namespace for life.
+    attachment_namespace: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_NAMESPACE")
+    )
+    attachment_max_file_bytes: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_FILE_BYTES")
+    )
+    attachment_max_files_per_node: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_FILES_PER_NODE")
+    )
+    attachment_max_bytes_per_node: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_MAX_BYTES_PER_NODE")
+    )
+    attachment_allowed_types: Optional[str] = field(
+        default_factory=lambda: os.getenv("ATTACHMENT_ALLOWED_TYPES")
+    )
+
+    assistant_attachment_access: str = field(
+        default_factory=lambda: os.getenv("ASSISTANT_ATTACHMENT_ACCESS", "read")
+    )
+    mcp_attachment_tools: str = field(
+        default_factory=lambda: os.getenv("MCP_ATTACHMENT_TOOLS", "off")
+    )
+
     # Server configuration
-    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
+    # Container default, matching the Dockerfile; HOST overrides it. The socket
+    # is bound by the uvicorn CLI, not by this field.
+    host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))  # nosec B104
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
 
     # API configuration
@@ -79,8 +207,8 @@ class AppConfig:
     auth_enabled: bool = field(
         default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true"
     )
-    auth_username: str = field(
-        default_factory=lambda: os.getenv("AUTH_USERNAME", "admin")
+    auth_username: Optional[str] = field(
+        default_factory=lambda: os.getenv("AUTH_USERNAME")
     )
     auth_password: Optional[str] = field(
         default_factory=lambda: os.getenv("AUTH_PASSWORD")
@@ -129,6 +257,12 @@ class AppConfig:
 
     def __post_init__(self):
         """Resolve default static paths relative to this package."""
+        from backend.runtime.attachment_access import validate_attachment_setting
+
+        validate_attachment_setting(
+            self.assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
+        )
+        validate_attachment_setting(self.mcp_attachment_tools, "MCP_ATTACHMENT_TOOLS")
         if self.web_static_path is None:
             # Default to frontend/web/dist relative to project root
             project_root = Path(__file__).parent.parent.parent
@@ -172,6 +306,20 @@ class AppConfig:
         if self.sessions_dir:
             return Path(self.sessions_dir)
         return self.get_graph_path().parent / "sessions"
+
+    def get_import_jobs_db_path(self) -> Path:
+        """Resolved path to the import-jobs SQLite database.
+
+        ``IMPORT_JOBS_DB`` when set (relative paths resolve against the graph
+        file's directory, like ``EMBEDDINGS_FILE``); otherwise "import_jobs.db"
+        beside the graph file.
+        """
+        if self.import_jobs_db:
+            path = Path(self.import_jobs_db)
+            if path.is_absolute():
+                return path
+            return self.get_graph_path().parent / path
+        return self.get_graph_path().parent / "import_jobs.db"
 
     def get_embeddings_path(self) -> Optional[Path]:
         """Resolved path to the embedding sidecar, or None to derive it.

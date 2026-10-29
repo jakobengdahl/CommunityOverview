@@ -32,17 +32,19 @@ somewhere this file names.
    holds the other half of criterion 5 below.
 
 4. Restart does not lose acknowledged writes. Proved here for a write that
-   succeeds. The half where a write FAILS and `flush()` has to heal it is
-   proved in `test_file_backend_journal.py` - dropping the heal from
-   `flush()` loses an acknowledged write and passes everything in this file.
+   succeeds, and - on the file backend, with no server - that `flush()`
+   heals a failed write BEFORE it checkpoints, so the snapshot it folds
+   holds that write. That the heal puts a failed write on disk at all -
+   through `flush()`, and through shutdown for one that fails after the last
+   flush - is proved in `test_file_backend_journal.py`.
 
 5. A file-backed installation stays single-instance. Not proved here either:
    `test_persistence_contract_file.py` asserts that the file backend declares
    no change notification and that a storage on it never starts any.
 
 What a green run here therefore does NOT establish: criterion 1, the boot
-gate, the file backend's capabilities, criterion 4's failed-write half
-(`test_file_backend_journal.py`), the announcement's ordering, its
+gate, the file backend's capabilities, that the heal puts a failed write
+on disk at shutdown (`test_file_backend_journal.py`), the announcement's ordering, its
 unreadable-payload fallback and its per-schema channel (all three in
 `test_persistence_contract_postgres.py` - they survive this file AND every
 other module named here), or that the server wires the session
@@ -295,32 +297,23 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
         )
         assert second.nodes[node_id].name == "Survivor"
 
-    def test_a_flushed_write_is_in_the_store_before_the_instance_stops(
+    def test_an_acknowledged_write_is_in_the_store_when_the_call_returns(
         self, instances, schema, monkeypatch
     ):
         """The rollout case: the instance is killed, not stopped politely.
 
-        Reading the store through a fresh backend, while the writer is still
-        running, is not by itself enough. `add_nodes` hands the write to a
-        single background worker and returns, and that worker finishes in
-        about a millisecond - less than it takes this test to open a second
-        connection. So the node is there either way, and the test passes by
-        winning a race rather than by exercising `flush()`.
+        A store that enforces revisions makes every write synchronous
+        (SESSION_OVERLAY_CONTRACT.md §4.4), so the acknowledgement is the
+        write call itself returning - not a later `flush()`. An instance
+        killed straight after `add_nodes` returns has nothing queued to lose.
 
-        Holding the worker removes that race - but a hold measured in seconds
-        only moves it, and in the wrong direction: on a runner slower than the
-        hold, the test would not go red, it would go quietly vacuous. So the
-        hold is paired with a check of the precondition it exists to create.
-        If the write has already landed by the time `flush()` is called, this
-        test cannot tell a working `flush()` from a no-op, and it now says so
-        and fails rather than passing for no reason.
-
-        The other half is `applied`, which records that the real write ran
-        before `flush()` returned. That is what makes a no-op `flush()` fail
-        deterministically instead of racing the reader's connect - and it
-        fails safe if the patch below is ever bypassed (a rename that stops
-        production routing through `_do_apply` leaves `applied` unset, so the
-        test goes red rather than silently testing nothing).
+        Reading the store through a fresh backend proves nothing on its own:
+        a write the worker finishes in a millisecond is there either way, and
+        the test would pass by winning a race. So the worker is held, and
+        `applied` records that the real write ran before the call returned. A
+        call that went back to queueing and returning would leave it unset,
+        and so would a rename that stops production routing through
+        `_do_apply` - the test fails rather than silently testing nothing.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
@@ -340,34 +333,15 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
 
         first.add_nodes([_node(node_id, "Acknowledged")], [])
 
-        assert not applied.is_set(), (
-            "the write landed before flush() was even called, so this test "
-            "cannot distinguish a working flush() from a no-op. Either "
-            "add_nodes() no longer defers the write to the executor - in "
-            "which case this test needs rethinking, not retuning - or the "
-            "worker hold is too short for this machine, in which case raise "
-            "WORKER_HOLD_S. Check which before reaching for the constant; "
-            "the gap being measured is normally microseconds against a "
-            "300 ms budget, so a slow runner is the less likely of the two"
-        )
-
-        first.flush()
-
         assert applied.is_set(), (
-            "flush() returned before the write it acknowledged had run. "
-            "Either flush() does not wait, or production no longer routes "
-            "through _do_apply and the hold above did nothing"
+            "add_nodes() returned before the write it acknowledged had run. "
+            "Either writes to this store went back to being queued, or "
+            "production no longer routes through _do_apply and the hold "
+            "above did nothing"
         )
-
-        # A second, independent statement of the same property: whatever the
-        # worker is doing, flush() must not return with the write still
-        # queued. Not redundant - setting `_last_write = None` satisfies this
-        # one while doing no work, and running the write satisfies the one
-        # above; only together do they pin flush().
         pending = first._last_write
         assert pending is None or pending.done(), (
-            "flush() returned while the write it acknowledged was still "
-            "queued on the executor"
+            "add_nodes() returned while its write was still queued"
         )
 
         reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -375,11 +349,74 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
             stored = reader.load_graph_data()
         finally:
             reader.close()
-
         assert any(n["id"] == node_id for n in stored["nodes"]), (
-            "flush() returned but the write was not in the store, so an "
+            "add_nodes() returned but the write was not in the store, so an "
             "instance killed mid-rollout loses a write it acknowledged"
         )
+
+
+class TestCriterion4FlushHealsBeforeItCheckpoints:
+    """The order inside `flush()`, which no end-state assertion can see.
+
+    A failed entity write leaves the backend's image without the mutation,
+    and `flush()` heals it by re-issuing the whole graph. Healing AFTER the
+    checkpoint still ends with the write on disk, so every test that only
+    reads the final state passes against that order. What it changes is the
+    snapshot the checkpoint folds: an image that lacks the failed write, with
+    the journal truncated behind it, and nothing on disk holding the write
+    until the heal lands. `flush()` states that it heals first "so the
+    checkpoint folds a complete image"; this holds that sentence.
+
+    Needs no server: the file backend is the one that checkpoints.
+    """
+
+    def test_the_checkpoint_folds_the_healed_image(self, tmp_path):
+        import json
+
+        path = tmp_path / "graph.json"
+        storage = GraphStorage(json_path=str(path))
+        try:
+            storage.add_nodes([_node("a", "Before")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+            real_upsert = backend.upsert_node
+            failures = {"left": 1}
+
+            def fails_once(node):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise OSError("transient append failure")
+                return real_upsert(node)
+
+            real_checkpoint = backend.checkpoint
+            folded = []
+
+            def recording_checkpoint():
+                real_checkpoint()
+                nodes = json.loads(path.read_text())["nodes"]
+                folded.append({n["id"]: n["name"] for n in nodes})
+
+            backend.upsert_node = fails_once
+            backend.checkpoint = recording_checkpoint
+
+            storage.update_node("a", {"name": "After"})
+            storage.flush()
+
+            assert failures["left"] == 0, (
+                "the entity write never failed, so there was nothing to heal "
+                "and this test exercised only the ordinary path"
+            )
+            assert folded, (
+                "flush() ran no checkpoint, so the order it is meant to "
+                "respect was never tested"
+            )
+            assert folded[0]["a"] == "After", (
+                "flush() checkpointed an image that lacked the failed write, "
+                "so the heal ran after the checkpoint instead of before it"
+            )
+        finally:
+            storage.shutdown_events()
 
 
 class TestCriterion2SessionsAcrossInstances:

@@ -1,0 +1,30 @@
+.app-install-prompt {
+  position: fixed;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 1000;
+  min-height: 40px;
+  max-width: min(220px, calc(100vw - 32px));
+  padding: 0 14px;
+  color: #f9fafb;
+  background: rgba(31, 41, 55, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.app-install-prompt:hover,
+.app-install-prompt:focus-visible {
+  background: rgba(55, 65, 81, 0.96);
+  outline: 2px solid #aab4ff;
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .app-install-prompt {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+  }
+}

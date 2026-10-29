@@ -26,7 +26,9 @@ import GenericAnnotationNode, {
 } from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
-import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
+import FreehandAnnotationNode from './FreehandAnnotationNode';
+import { DEFAULT_FREEHAND_OPTIONS } from '../utils/freehandOptions';
+import { isFederatedNode } from '../utils/nodeProvenance';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -37,6 +39,7 @@ import {
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
+import { useViewportRequest } from '../hooks/useViewportRequest';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
   applyLayout,
@@ -77,7 +80,14 @@ import {
   NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
-import { defaultAnnotationZ } from '../utils/annotationModel';
+import {
+  defaultAnnotationZ,
+  HEATMAP_DEFAULT_DIAMETER,
+  HEATMAP_DEFAULT_INTENSITY,
+  REFERENCE_DEFAULT_SIZE,
+  isSafeReferenceUrl,
+  trimReferenceTarget,
+} from '../utils/annotationModel';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -96,14 +106,22 @@ const COMPACT_FIT_PADDING = 0.05;
 const FOCUS_CENTER = { x: 0, y: 0 };
 const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
-// Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
-// four are editable afterwards through FreehandAnnotationNode's right-click
-// property editor (docs/ANNOTATION_CONTRACT.md's freehand row). The colour is
-// imported rather than restated: this file used to hold its own copy, and
-// because a GUI-drawn stroke is always written WITH an explicit colour, that
-// copy — not the node's fallback — was the value every drawn stroke actually
-// got. Two constants for one default is what let the invisible near-white
-// survive a fix aimed at the fallback.
+
+// Staged-session markers: English defaults, translated by the host through
+// the `stagedStateLabels` prop.
+const DEFAULT_STAGED_STATE_LABELS = {
+  created: 'Staged: new',
+  updated: 'Staged: changed',
+  orphaned: 'Staged: deleted in graph',
+  deleted: 'Staged: deleted',
+};
+const STAGED_EDGE_COLOR = '#f0b429';
+const NO_STAGED_STATE_LABELS = {};
+// A drawn freehand stroke takes its colour/width/smoothing/opacity from the
+// options chosen in the toolbox's pen fold-out (defaults in
+// utils/freehandOptions.js), and all four stay editable afterwards through
+// FreehandAnnotationNode's right-click property editor
+// (docs/ANNOTATION_CONTRACT.md's freehand row).
 // A stylus's inverted tip. Chromium reports it as its own pointer type; other
 // stacks report a normal `pen` and flag the eraser in the button bits (button
 // 5 / buttons bit 0x20, per the Pointer Events spec). Shared by the erase
@@ -128,9 +146,6 @@ const MIN_ANNOTATION_SIZE = 40;
 // measured rect so a large shape cannot black out the rest of the stroke.
 const ERASE_BLOCK_MAX_PX = 96;
 
-const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
-const DEFAULT_FREEHAND_SMOOTHING = 0.3;
-const DEFAULT_FREEHAND_OPACITY = 1;
 // A stroke shorter than this many sampled points is a stray tap, not a
 // deliberate drawing gesture — mirrors createFreehandStrokeCapture's own
 // `minPoints` default, made explicit here since GraphCanvas passes it in.
@@ -185,18 +200,21 @@ export function reorderNodesForParentChild(nodes) {
  * Compute a dragged graph node's post-drag placement: its final parentId and
  * position, accounting for entering a group (position becomes parent-relative),
  * leaving a group (position becomes absolute), or neither. `currentNodes` is the
- * live ReactFlow node list and `groupNodes` its group nodes. Returns
- * { parentId, position:{x,y} }. Pure, so both the on-screen re-parent and the
- * recorded undo entry derive the same final placement from one source.
+ * live ReactFlow node list, `groupNodes` its group nodes and `groupById` the
+ * lookup built from them by indexGroupsById (built once per drag commit so the
+ * per-node parent lookup is not a scan). Returns { parentId, position:{x,y} }.
+ * Pure, so both the on-screen re-parent and the recorded undo entry derive the
+ * same final placement from one source.
  */
-function computeGroupPlacement(node, currentNodes, groupNodes) {
+export function computeGroupPlacement(node, currentNodes, groupNodes, groupById) {
   const flowNode = currentNodes.find((cn) => cn.id === node.id);
   const pos = flowNode?.position || node.position;
+  const oldParent = node.parentId ? groupById.get(node.parentId) : undefined;
 
   const absPos = node.parentId
     ? {
-        x: pos.x + (groupNodes.find((g) => g.id === node.parentId)?.position.x || 0),
-        y: pos.y + (groupNodes.find((g) => g.id === node.parentId)?.position.y || 0),
+        x: pos.x + (oldParent?.position.x || 0),
+        y: pos.y + (oldParent?.position.y || 0),
       }
     : pos;
 
@@ -229,7 +247,6 @@ function computeGroupPlacement(node, currentNodes, groupNodes) {
 
   if (!targetGroup && node.parentId) {
     // Exit group: position becomes absolute again.
-    const oldParent = groupNodes.find((gn) => gn.id === node.parentId);
     return {
       parentId: undefined,
       position: {
@@ -243,9 +260,113 @@ function computeGroupPlacement(node, currentNodes, groupNodes) {
   return { parentId: node.parentId, position: { x: pos.x, y: pos.y } };
 }
 
+// First occurrence wins on a duplicate id, matching the Array.find it replaces.
+export function indexGroupsById(groupNodes) {
+  const groupById = new Map();
+  for (const g of groupNodes) {
+    if (!groupById.has(g.id)) groupById.set(g.id, g);
+  }
+  return groupById;
+}
+
+// Used by reactFlowArraysEqual below: two closures over the same callback are
+// never `===`, and every render of the `reactFlowNodes` memo mints fresh ones
+// (see its `onExpand`/`onEdit` wiring) even when nothing the closure depends
+// on actually changed. Treating "both functions" as equal is the deliberate
+// looseness that makes the comparison usable at all for that field; it never
+// masks a real content change because non-function fields are compared
+// exactly, and it never affects rendering — GraphCanvas always calls whatever
+// closure ReactFlow currently holds, this check just decides whether to hand
+// it a new one.
+function jsonReplacerIgnoringFunctions(_key, value) {
+  return typeof value === 'function' ? '\u0000fn' : value;
+}
+
+/**
+ * Value-equality for two ReactFlow node or edge arrays, used to decide
+ * whether a freshly-rebuilt array actually differs from what is already
+ * committed. Several effects below recompute a full replacement array on
+ * every run regardless of whether anything changed (a fresh `reactFlowNodes`/
+ * `reactFlowEdges` memo output, a `.map()` over the current nodes, …);
+ * calling `setNodes`/`setEdges` with a *reference-different-but-content-
+ * identical* array still commits a new render, and if the effect that
+ * produced it runs again on that very render (its own dependencies having
+ * changed identity for unrelated reasons — see the default prop values on
+ * `GraphCanvasInner`), the cycle never settles. Comparing structurally and
+ * returning the *previous* array reference when nothing meaningfully changed
+ * lets React's own `Object.is` bailout stop that cascade, without altering
+ * what ends up on screen.
+ */
+function reactFlowArraysEqual(a, b) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === b[i]) continue;
+    if (
+      JSON.stringify(a[i], jsonReplacerIgnoringFunctions) !==
+      JSON.stringify(b[i], jsonReplacerIgnoringFunctions)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Value-equality for a remote selection/edit-lease marker
+ * (`{clientId, color, displayName}` or `null`), used by the two mirror
+ * effects below instead of `===`. `sessionSyncClient.getRemoteSelections()`
+ * and `getRemoteLeases()` unconditionally build a fresh marker object for
+ * every entry on every call (see their doc comments in `sessionSyncClient.js`),
+ * so a reference comparison against the previous marker is always false even
+ * when the underlying claim/lease is unchanged — exactly the reference-vs-
+ * value gap `reactFlowArraysEqual` above exists to close for whole arrays.
+ * Comparing the three fields directly is cheaper than routing a single small
+ * object through JSON.stringify.
+ */
+function remoteMarkerEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.clientId === b.clientId && a.color === b.color && a.displayName === b.displayName;
+}
+
 /**
  * GraphCanvas - Main graph visualization component
  */
+// Whether the image-paste path will actually consume this clipboard — the
+// question the URL-paste handler has to ask before standing down for it.
+//
+// Not "is there an image on the clipboard": the image handler takes a paste
+// only when the host wired `onImageIngest`, an `image/*` item is present, AND
+// that item yields a file. Round 3 of the review loop found the coarser test
+// silently discarding a legitimate URL paste whenever any of the other two
+// were false, because then nothing handled it at all.
+//
+// Every item is scanned, not just the first: `DataTransferItemList` order
+// follows the source application rather than any spec, and reading only
+// `items[0]` puts the double-create back for a clipboard that happens to list
+// its text item first. Exported so that rule is testable on its own, without
+// depending on which of the two document listeners registered first.
+export function clipboardImageWillBeIngested(items, onImageIngest) {
+  if (!onImageIngest || !items) return false;
+  const imageItem = Array.from(items).find((item) => item.type?.startsWith('image/'));
+  return !!imageItem && !!imageItem.getAsFile();
+}
+
+// A `reference` is the one kind whose broken state is not fully visible from
+// its own data: the host answers whether the target still resolves. Shared by
+// every place that builds an accessible name for a node, because round 2 wired
+// this into the node labels and round 3 found the overlap picker still naming
+// the same tile as live — one helper rather than one copy per call site.
+//
+// Only an explicit `false` breaks a tile. `undefined` is "cannot judge", which
+// a host that resolves no targets returns for everything.
+function referenceHostBroken(node, isReferenceTargetAvailable) {
+  if (node?.type !== 'reference') return false;
+  const target = trimReferenceTarget(node.data?.target || '');
+  return isReferenceTargetAvailable?.(node.data?.target_kind, target) === false;
+}
+
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
@@ -296,9 +417,34 @@ function GraphCanvasInner({
   // the annotation once it comes back over the session's realtime channel
   // (see remoteAnnotationOps), never a client-side guess of the result.
   onImageIngest,
+  // Called with ({annotationId, targetKind, target, label}) when a human
+  // activates a `reference` annotation — double-clicking the tile, clicking
+  // its ↗ control, or picking "Open target" from its property editor. The
+  // canvas never navigates or opens a window itself: what "open" means for a
+  // session, an external page or a graph resource is the host's shell's
+  // decision, and routing it through one callback is also what keeps a
+  // reference's target out of any `href` the canvas renders (see the
+  // `reference` branch in GenericAnnotationNode.jsx). A reference the canvas
+  // or the host considers broken never reaches this callback.
+  onReferenceOpen,
+  // Called with (targetKind, target) for each `reference` annotation to ask
+  // the HOST whether its target still resolves. Returns `false` for a target
+  // the host knows is gone (a session no longer in its index), `true` for one
+  // it has confirmed, and `undefined` for one it cannot judge — which is the
+  // honest answer for a target whose existence needs a server round trip, and
+  // leaves the reference judged on structure alone.
+  //
+  // A resolver rather than a list of broken annotation ids: the reference
+  // annotations live in this canvas's own node state, so a host asked for ids
+  // would have to enumerate objects it does not hold. It does hold the
+  // session index this answers from.
+  isReferenceTargetAvailable,
   onShowOnly,
   onSelectionChange,
   onNodeDoubleClick: onNodeDoubleClickCallback,
+  // Teleport a node to the graph that owns it. Offered only for a node whose
+  // provenance names another graph; ordinary double-click is unaffected.
+  onTeleportToSourceGraph,
   focusNodeId = null,
   onFocusComplete,
   createGroupSignal = 0,
@@ -326,6 +472,12 @@ function GraphCanvasInner({
   onRemoteAnnotationsApplied,
   remoteSelections = null,
   remoteLeases = null,
+  // Staged-session markers (docs/SESSION_OVERLAY_CONTRACT.md §8.1, §17):
+  // `{ nodes: {id: state}, edges: {id: state} }`, state one of created,
+  // updated, orphaned or deleted. A staged entity must never look like one the
+  // graph holds, so each one is drawn dashed and badged with its state.
+  stagedStates = null,
+  stagedStateLabels = NO_STAGED_STATE_LABELS,
   onBeginEditing,
   onEndEditing,
   federationDepth = 1,
@@ -342,6 +494,10 @@ function GraphCanvasInner({
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
+  // A host request to move the camera: a fresh `{ bounds }` (model-space
+  // region to fit) or `{ viewport }` (exact camera to restore) object per
+  // request. See useViewportRequest.
+  viewportRequest = null,
   // Identity of the active visualization session. Changing it signals a session
   // switch: the canvas discards the previous session's live node positions (so a
   // node shared between sessions is not left at the old coordinates) and refits
@@ -417,6 +573,9 @@ function GraphCanvasInner({
     organizeHorizontal: 'List horizontally',
     organizeVertical: 'List vertically',
     organizeTree: 'Arrange as tree',
+    organizeDateHorizontal: 'Sort by date – horizontal',
+    organizeDateVertical: 'Sort by date – vertical',
+    organizeDateUnavailable: 'Select two or more nodes with a date value to sort by date',
     organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     align: 'Align',
     alignLeft: 'Align left',
@@ -509,6 +668,8 @@ function GraphCanvasInner({
     ariaKindShape: 'shape',
     ariaKindIcon: 'icon',
     ariaKindVoteDot: 'Vote dot',
+    ariaKindHeatmap: 'Heat-map circle, intensity {level} of {max}',
+    heatmapIntensity: 'Intensity',
     ariaKindImage: 'Image',
     ariaKindArrow: 'Arrow',
     ariaKindFreehand: 'Freehand stroke',
@@ -524,6 +685,26 @@ function GraphCanvasInner({
     annotationAttachToCancel: 'Cancel attaching',
     annotationMultiSelectMode: 'Select multiple',
     annotationOverlapPickerTitle: 'Multiple objects here — choose one',
+    // Reference tiles (docs/ANNOTATION_CONTRACT.md's "Reference tiles").
+    referenceUntitled: 'Reference',
+    referenceOpen: 'Open target',
+    referenceRename: 'Rename',
+    referenceLabel: 'Label',
+    referenceTarget: 'Target',
+    referenceTargetSession: 'Session',
+    referenceTargetUrl: 'Web page',
+    referenceTargetResource: 'Supporting material',
+    referenceTargetUnknown: 'Unknown target',
+    referenceBrokenTarget: 'Target not available',
+    referenceUnsafeTarget: 'Unsafe link — not opened',
+    referencePasteCreated: 'Added a link to the pasted address',
+    ariaKindReference: 'Reference',
+    ariaKindReferenceSession: 'session',
+    ariaKindReferenceUrl: 'web page',
+    ariaKindReferenceResource: 'supporting material',
+    ariaKindReferenceBroken: 'broken target',
+    openInSourceGraph: 'Open in source graph',
+    openInSourceGraphTooltip: 'Open this node in the graph that owns it',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -558,6 +739,12 @@ function GraphCanvasInner({
     eraser: 'Eraser',
     voteDotPickerOpen: 'Choose a vote dot colour',
     voteDotPicker: 'Vote dot colours',
+    freehandPickerOpen: 'Choose pen options',
+    freehandPicker: 'Pen options',
+    freehandColor: cml.freehandColor,
+    freehandWidth: cml.freehandWidth,
+    freehandSmoothing: cml.freehandSmoothing,
+    freehandOpacity: cml.freehandOpacity,
     ...annotationToolboxLabels,
   };
 
@@ -770,6 +957,14 @@ function GraphCanvasInner({
   const freehandCaptureRef = useRef(null);
   const freehandPrimaryPointerIdRef = useRef(null);
   const freehandPreviewPathRef = useRef(null);
+  // The pen's stroke options, chosen BEFORE drawing in the toolbox's pen
+  // fold-out (AnnotationToolbox's onFreehandOptionsChange). A ref because the
+  // pointer effect and the commit callback read it at stroke time and must not
+  // re-subscribe when the user changes an option.
+  const freehandOptionsRef = useRef(DEFAULT_FREEHAND_OPTIONS);
+  const handleFreehandOptionsChange = useCallback((options) => {
+    freehandOptionsRef.current = options;
+  }, []);
   const freehandModelPointsRef = useRef([]);
   const commitFreehandStrokeRef = useRef(null);
   if (!freehandCaptureRef.current) {
@@ -779,6 +974,29 @@ function GraphCanvasInner({
     });
   }
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
+  const spacePressedRef = useRef(false);
+  useEffect(() => {
+    // ReactFlow's Space pan override accepts primary/middle buttons, not right.
+    const handleKeyDown = (event) => {
+      if (event.code !== 'Space') return;
+      if (event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      spacePressedRef.current = true;
+    };
+    const resetSpace = () => {
+      spacePressedRef.current = false;
+    };
+    const handleKeyUp = (event) => {
+      if (event.code === 'Space') resetSpace();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', resetSpace);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', resetSpace);
+    };
+  }, []);
   const mouseDownPos = useRef(null);
   // Tracks whether the primary mouse button is currently held, independent of
   // where the press started — the document-level selection-suppression effect
@@ -801,9 +1019,12 @@ function GraphCanvasInner({
     getNodes: getFlowNodes,
     getViewport,
     fitView,
+    fitBounds,
+    setViewport,
     zoomIn,
     zoomOut,
   } = useReactFlow();
+  useViewportRequest({ viewportRequest, fitBounds, setViewport });
   // Read through refs (updated every render below) inside the freehand
   // pointer-capture effect instead of closing over these directly: some
   // `useReactFlow()` implementations (and this package's own test mocks)
@@ -821,6 +1042,13 @@ function GraphCanvasInner({
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
   const lastSessionKeyRef = useRef(sessionKey);
   const fitOnSessionKeyRef = useRef(sessionKey);
+  // The clear signal as the node-reconciliation effect last saw it.
+  // clearGroupsFlag stays raised for a while after a clear, so a clear is the
+  // flag rising, or — for a second clear inside that window — the host's
+  // canvasBaselineEpoch moving while it is raised. An epoch move on its own is
+  // not a clear (a host may move it only to drop the undo history).
+  const lastCanvasBaselineEpochRef = useRef(canvasBaselineEpoch);
+  const lastClearGroupsFlagRef = useRef(false);
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
   // prior state writes the positions back through the same persistence path a
@@ -935,6 +1163,8 @@ function GraphCanvasInner({
       endEditing,
       attachNearby,
       enterAttachMode,
+      openReference: onReferenceOpen,
+      isReferenceTargetAvailable,
       // task-annotation-responsive-bottom-toolbox's edit-surface half — see
       // AnnotationContext's own doc comment on this field for what each part
       // means. `isCompact` alone (not `isTouchMode`) is the gate, mirroring
@@ -1000,10 +1230,28 @@ function GraphCanvasInner({
         ariaKindShape: cml.ariaKindShape,
         ariaKindIcon: cml.ariaKindIcon,
         ariaKindVoteDot: cml.ariaKindVoteDot,
+        ariaKindHeatmap: cml.ariaKindHeatmap,
+        heatmapIntensity: cml.heatmapIntensity,
         ariaKindImage: cml.ariaKindImage,
         ariaKindArrow: cml.ariaKindArrow,
         ariaKindFreehand: cml.ariaKindFreehand,
         ariaKindGroup: cml.ariaKindGroup,
+        ariaKindReference: cml.ariaKindReference,
+        ariaKindReferenceSession: cml.ariaKindReferenceSession,
+        ariaKindReferenceUrl: cml.ariaKindReferenceUrl,
+        ariaKindReferenceResource: cml.ariaKindReferenceResource,
+        ariaKindReferenceBroken: cml.ariaKindReferenceBroken,
+        referenceUntitled: cml.referenceUntitled,
+        referenceOpen: cml.referenceOpen,
+        referenceRename: cml.referenceRename,
+        referenceLabel: cml.referenceLabel,
+        referenceTarget: cml.referenceTarget,
+        referenceTargetSession: cml.referenceTargetSession,
+        referenceTargetUrl: cml.referenceTargetUrl,
+        referenceTargetResource: cml.referenceTargetResource,
+        referenceTargetUnknown: cml.referenceTargetUnknown,
+        referenceBrokenTarget: cml.referenceBrokenTarget,
+        referenceUnsafeTarget: cml.referenceUnsafeTarget,
         width: cml.annotationWidth,
         height: cml.annotationHeight,
         size: cml.annotationSize,
@@ -1079,10 +1327,30 @@ function GraphCanvasInner({
       cml.ariaKindShape,
       cml.ariaKindIcon,
       cml.ariaKindVoteDot,
+      cml.ariaKindHeatmap,
+      cml.heatmapIntensity,
       cml.ariaKindImage,
       cml.ariaKindArrow,
       cml.ariaKindFreehand,
       cml.ariaKindGroup,
+      cml.ariaKindReference,
+      cml.ariaKindReferenceSession,
+      cml.ariaKindReferenceUrl,
+      cml.ariaKindReferenceResource,
+      cml.ariaKindReferenceBroken,
+      cml.referenceUntitled,
+      cml.referenceOpen,
+      cml.referenceRename,
+      cml.referenceLabel,
+      cml.referenceTarget,
+      cml.referenceTargetSession,
+      cml.referenceTargetUrl,
+      cml.referenceTargetResource,
+      cml.referenceTargetUnknown,
+      cml.referenceBrokenTarget,
+      cml.referenceUnsafeTarget,
+      onReferenceOpen,
+      isReferenceTargetAvailable,
       cml.annotationWidth,
       cml.annotationHeight,
       cml.annotationApplySize,
@@ -1206,16 +1474,21 @@ function GraphCanvasInner({
     return count;
   }, [inputEdges, visibleNodes, nodesToRender, hiddenNodeIds, hiddenEdgeIds]);
 
+  const stagedLabels = useMemo(
+    () => ({ ...DEFAULT_STAGED_STATE_LABELS, ...stagedStateLabels }),
+    [stagedStateLabels]
+  );
+
   // Convert to React Flow edge format
   const reactFlowEdges = useMemo(() => {
     return visibleEdges.map((edge) => {
       const visuals = resolveEdgeVisuals(edge.metadata);
       const opacity = resolveEdgeOpacity(edgeIntensity, dimmedEdgeIds.includes(edge.id));
+      const staged = stagedStates?.edges?.[edge.id] ?? null;
       return {
         id: edge.id,
         source: edge.source,
         target: edge.target,
-        label: edge.type,
         type: 'floating',
         animated: visuals.animated,
         selectable: true,
@@ -1223,16 +1496,29 @@ function GraphCanvasInner({
         // the rf-edge-pulse keyframe (GraphCanvas.css) reads it via calc() so
         // an animated edge's pulse scales relative to this opacity instead of
         // the animation silently overriding it back to a fixed 1/0.35.
-        style: { ...visuals.style, strokeOpacity: opacity, '--edge-opacity': opacity },
+        style: {
+          ...visuals.style,
+          strokeOpacity: opacity,
+          '--edge-opacity': opacity,
+          ...(staged ? { strokeDasharray: '6 4', stroke: STAGED_EDGE_COLOR } : null),
+        },
         markerStart: visuals.markerStart,
         markerEnd: visuals.markerEnd,
-        className: visuals.className,
-        data: { type: edge.type, label: edge.label, metadata: edge.metadata || {} },
-        labelStyle: { fill: '#888', fontSize: 10, fontWeight: 500 },
+        className: staged
+          ? `${visuals.className || ''} staged-edge staged-edge-${staged}`.trim()
+          : visuals.className,
+        data: {
+          type: edge.type,
+          label: edge.label,
+          metadata: edge.metadata || {},
+          stagedState: staged,
+        },
+        label: staged ? `${edge.type || ''} · ${stagedLabels[staged] || staged}` : edge.type,
+        labelStyle: { fill: staged ? STAGED_EDGE_COLOR : '#888', fontSize: 10, fontWeight: 500 },
         labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
       };
     });
-  }, [visibleEdges, dimmedEdgeIds, edgeIntensity]);
+  }, [visibleEdges, dimmedEdgeIds, edgeIntensity, stagedStates, stagedLabels]);
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
@@ -1255,6 +1541,8 @@ function GraphCanvasInner({
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
           remoteSelection: remoteSelections?.[node.id] ?? null,
+          stagedState: stagedStates?.nodes?.[node.id] ?? null,
+          stagedLabel: stagedLabels[stagedStates?.nodes?.[node.id]] ?? null,
           previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
@@ -1299,6 +1587,8 @@ function GraphCanvasInner({
     nodeMarks,
     pulsedNodeIds,
     remoteSelections,
+    stagedStates,
+    stagedLabels,
     nodePreviewEnabled,
   ]);
 
@@ -1331,6 +1621,18 @@ function GraphCanvasInner({
   useEffect(() => {
     const sessionChanged = lastSessionKeyRef.current !== sessionKey;
     lastSessionKeyRef.current = sessionKey;
+    const clearRaised =
+      clearGroupsFlag &&
+      (!lastClearGroupsFlagRef.current ||
+        canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current);
+    // A host that clears and restores the new session's content before it
+    // hands over the new sessionKey (App's switch awaits the load, then sets
+    // the id) has already had its clear handled here; dropping again on the
+    // key change would remove the overlays that restore just added.
+    const clearAlreadyHandled = clearGroupsFlag && !clearRaised;
+    const contentSwapped = clearRaised || (sessionChanged && !clearAlreadyHandled);
+    lastClearGroupsFlagRef.current = clearGroupsFlag;
+    lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
     const enteringFocus = focusChanged && activeFocusRootId !== null;
     const leavingFocus = focusChanged && activeFocusRootId === null;
@@ -1340,18 +1642,22 @@ function GraphCanvasInner({
     // exists. Restoring it would force stale coordinates onto whatever ids the
     // old and new content happen to share, and resurrect groups and overlays the
     // replace deliberately dropped.
-    const contentReplaced = sessionChanged || clearGroupsFlag;
+    const contentReplaced = sessionChanged || clearRaised;
     if (contentReplaced) preFocusRef.current = null;
     const snapshot = contentReplaced ? null : preFocusRef.current;
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:
-      // clearVisualization sets clearGroupsFlag, and the new session's overlays
-      // arrive through the restore path. Outside a switch, keep the live ones —
-      // except while focused, where the ego graph is the whole view and an
-      // overlay parked elsewhere would only drag the fitted frame off it.
+      // clearVisualization signals the clear, and the new session's overlays
+      // arrive through the restore path. Only the run that sees the clear
+      // drops them: clearGroupsFlag stays raised for a while, and dropping on
+      // every run inside that window also removed the overlays the restore had
+      // just added — the next autosave then sent a delete for each of them.
+      // Outside a switch, keep the live ones — except while focused, where the
+      // ego graph is the whole view and an overlay parked elsewhere would only
+      // drag the fitted frame off it.
       let manualNodes;
-      if (clearGroupsFlag || sessionChanged) manualNodes = [];
+      if (contentSwapped) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
       else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);
@@ -1360,7 +1666,9 @@ function GraphCanvasInner({
         prevNodes: nds,
         incomingNodes: reactFlowNodes,
         incomingEdges: reactFlowEdges,
-        sessionChanged,
+        // The swap, not the key: positions and group parents of the previous
+        // content are dropped with it, and kept when the key only catches up.
+        sessionChanged: contentSwapped,
         inLazyMode: unfocusedNodeCount > LAZY_LOAD_THRESHOLD,
       });
 
@@ -1395,7 +1703,19 @@ function GraphCanvasInner({
       // Groups must appear before their children in the array for ReactFlow
       // parent-child relationships to work. This also ensures groups render
       // behind custom nodes so clicks reach the nodes on top.
-      return reorderNodesForParentChild([...positioned, ...manualNodes]);
+      const next = reorderNodesForParentChild([...positioned, ...manualNodes]);
+      // This effect's own dependencies (reactFlowNodes/reactFlowEdges) can
+      // change identity on a render that changed nothing this reconciliation
+      // cares about (e.g. a caller-side default array prop recreated every
+      // render — see GraphCanvasInner's parameter defaults). Without this
+      // check the effect would then commit a content-identical-but-freshly-
+      // built array on every such render; with a real (non-mocked)
+      // useNodesState that commit is itself a state change, which re-renders
+      // the component, which recreates those same unstable defaults, which
+      // changes reactFlowNodes' identity again — an unbroken cycle. Returning
+      // the previous `nds` reference when nothing actually changed lets
+      // React's setState bailout end it.
+      return reactFlowArraysEqual(next, nds) ? nds : next;
     });
   }, [
     reactFlowNodes,
@@ -1403,6 +1723,7 @@ function GraphCanvasInner({
     unfocusedNodeCount,
     setNodes,
     clearGroupsFlag,
+    canvasBaselineEpoch,
     sessionKey,
     activeFocusRootId,
   ]);
@@ -1464,7 +1785,11 @@ function GraphCanvasInner({
 
   // Update edges when input changes
   useEffect(() => {
-    setEdges(reactFlowEdges);
+    // Same unconditional-write hazard as the node-reconciliation effect above
+    // (see reactFlowArraysEqual's doc comment): `reactFlowEdges` can change
+    // identity on a render that changed nothing here, so writing it through
+    // directly would commit a content-identical array on every such render.
+    setEdges((eds) => (reactFlowArraysEqual(reactFlowEdges, eds) ? eds : reactFlowEdges));
   }, [reactFlowEdges, setEdges]);
 
   // Reset loaded count when visible nodes change significantly
@@ -1650,7 +1975,7 @@ function GraphCanvasInner({
   // Re-arrange the currently selected graph nodes into a chosen structure
   // (cluster / horizontal / vertical / tree), centred on where they already are.
   const organizeSelection = useCallback(
-    (mode) => {
+    (mode, options) => {
       const selIds = new Set(
         selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type)).map((n) => n.id)
       );
@@ -1668,7 +1993,7 @@ function GraphCanvasInner({
       const targets = nodes
         .filter((n) => selIds.has(n.id))
         .map((n) => ({ ...n, position: toAbsolute(n) }));
-      const posById = arrangeNodes(targets, edges, mode);
+      const posById = arrangeNodes(targets, edges, mode, options);
       if (posById.size === 0) return;
       // Convert the arranged absolute positions back to the parent-relative form
       // ReactFlow stores for grouped nodes. Compute once and use for both the
@@ -2068,6 +2393,55 @@ function GraphCanvasInner({
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
           },
         };
+      } else if (kind === 'reference') {
+        // A navigational tile. Created with the target it was given and
+        // nothing invented: an empty `label` means the tile shows the target
+        // itself (GenericAnnotationNode's own fallback), which for a pasted
+        // URL is the honest thing to show until the author renames it. No
+        // `zIndex` override — a reference is content to click, not a backdrop
+        // like `shape`/`heatmap`, so it starts at the default 0 every other
+        // kind does.
+        newNode = {
+          id,
+          type: 'reference',
+          position,
+          data: {
+            target_kind: options.targetKind ?? null,
+            target: options.target || '',
+            label: options.label || '',
+            icon: options.icon,
+          },
+          style: options.box || {
+            width: REFERENCE_DEFAULT_SIZE.w,
+            height: REFERENCE_DEFAULT_SIZE.h,
+          },
+        };
+      } else if (kind === 'heatmap') {
+        // A circle, so the box is square: a drag-to-draw sweep sizes it by
+        // its longer side, and a plain click gets the default diameter. The
+        // square keeps the PRESS point (`options.anchor`) as its corner and
+        // grows the way the hand moved: a leftward or upward sweep (the flip
+        // flags) puts the press point on the square's right or bottom edge.
+        const side = options.box
+          ? Math.max(MIN_ANNOTATION_SIZE, options.box.width, options.box.height)
+          : HEATMAP_DEFAULT_DIAMETER;
+        const origin = options.anchor
+          ? {
+              x: options.flipX ? options.anchor.x - side : options.anchor.x,
+              y: options.flipY ? options.anchor.y - side : options.anchor.y,
+            }
+          : position;
+        newNode = {
+          id,
+          type: 'heatmap',
+          position: origin,
+          data: { intensity: HEATMAP_DEFAULT_INTENSITY },
+          style: { width: side, height: side },
+          // Behind graph nodes by default, like `shape`: a heat field is a
+          // backdrop, and on top it would tint the nodes it covers and take
+          // their clicks.
+          zIndex: defaultAnnotationZ(kind),
+        };
       } else {
         newNode = {
           id,
@@ -2300,6 +2674,7 @@ function GraphCanvasInner({
         return point;
       });
       const hasRealPressure = points.some((p) => Number.isFinite(p.pressure));
+      const options = freehandOptionsRef.current;
       const id = `freehand-${Date.now()}`;
       const newNode = {
         id,
@@ -2307,10 +2682,10 @@ function GraphCanvasInner({
         position: { x: anchor.x, y: anchor.y },
         data: {
           points: relativePoints,
-          color: DEFAULT_FREEHAND_COLOR,
-          strokeWidth: DEFAULT_FREEHAND_STROKE_WIDTH,
-          smoothing: DEFAULT_FREEHAND_SMOOTHING,
-          opacity: DEFAULT_FREEHAND_OPACITY,
+          color: options.color,
+          strokeWidth: options.strokeWidth,
+          smoothing: options.smoothing,
+          opacity: options.opacity,
           pointerType: pointerType || undefined,
           pressureSource: hasRealPressure ? 'device' : undefined,
         },
@@ -2402,6 +2777,94 @@ function GraphCanvasInner({
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
   }, [onImageIngest, ingestImageFile, viewportCenterPosition]);
+
+  // Clipboard URL paste (Ctrl/Cmd+V) — the human creation path for a `url`
+  // reference (docs/ANNOTATION_CONTRACT.md's "Reference tiles"), guarded the
+  // same way the image paste above is so pasting into a note's text field is
+  // untouched. A separate effect rather than another branch of that handler
+  // because the two have independent host requirements: a host with no
+  // `onImageIngest` returns early there, and URL paste must still work for it.
+  //
+  // Only a clipboard whose text is, on its own, an http/https URL creates
+  // anything: `isSafeReferenceUrl` is the same renderer-side gate the tile
+  // uses, so a paste can never produce a reference the canvas would then draw
+  // as broken, and pasting ordinary prose (or a `javascript:` string) does
+  // nothing at all rather than silently dropping a dead tile on the canvas.
+  // The event is only consumed when something is actually created, leaving
+  // every other paste to whatever else would have handled it.
+  useEffect(() => {
+    const handleUrlPaste = (event) => {
+      const tag = event.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
+      // A clipboard carrying an image belongs to the image-paste handler, not
+      // to this one. Copying an image out of a web app or a chat client puts
+      // BOTH an `image/*` item and a `text/plain` URL on it, and one paste
+      // must not ingest the image AND drop a reference tile on top of it.
+      //
+      // Decided from the clipboard's own contents rather than from
+      // `event.defaultPrevented`, which is what this first used. Both
+      // listeners are bubble-phase on `document`, so `defaultPrevented` only
+      // works while the image handler is registered first — and it is not
+      // always: the two live in separate effects with different dependency
+      // arrays, so either can re-run alone and have its listener move to the
+      // END of the order. When the image one does, this handler runs first,
+      // sees nothing prevented, and the double-create is back (round 2 of the
+      // review loop). `readImageFileAsDataUrl` or `cml.imageIngestFailed`
+      // changing does exactly that today; round 2's own example,
+      // `onImageIngest` changing on a session switch, no longer does, because
+      // round 3 put it in this effect's array too — so both now re-run
+      // together, in declaration order. Depending on that would be depending
+      // on today's dependency lists. Reading the clipboard needs no
+      // assumption about who runs first.
+      // Mirrors the image handler's OWN three conditions, not just "is there
+      // an image on the clipboard". Round 3 of the review loop found the
+      // coarser test discarding a legitimate paste in two ways, both silent:
+      // a host that wires no `onImageIngest` has no image listener at all
+      // (the effect above returns before registering one), yet the coarse
+      // guard still bailed here — so URL paste did not work on exactly the
+      // host this effect's comment above says it must; and an image item
+      // whose `getAsFile()` returns null is skipped there WITHOUT
+      // `preventDefault`, so neither handler did anything. Asking whether the
+      // image path will actually consume this paste keeps the two mutually
+      // exclusive without either of them going dark.
+      if (clipboardImageWillBeIngested(event.clipboardData?.items, onImageIngest)) return;
+      // Still needed for a paste some OTHER handler on the page has already
+      // consumed: the image path no longer reaches this line, but a host's own
+      // listener calling `preventDefault` does.
+      if (event.defaultPrevented) return;
+      // `?.` only guards `clipboardData` being absent, not `getData` being
+      // missing from it. This handler does not own that object — it comes from
+      // the event, which may be synthesised by another library, a polyfill or
+      // an older browser that exposes `items` without `getData` (the canvas's
+      // own image-paste tests build exactly such an object, which is how this
+      // surfaced). An uncaught throw here is worse than a missed paste: it is
+      // a document-level listener, so it breaks every other paste handler on
+      // the page too.
+      if (typeof event.clipboardData?.getData !== 'function') return;
+      const text = event.clipboardData.getData('text/plain');
+      if (!text) return;
+      // The gate's own trim, not `trim()`: the two differ on U+0085 and
+      // U+FEFF, and storing a string the gate would trim differently from the
+      // one it validated is how the value validated and the value persisted
+      // come apart.
+      const candidate = trimReferenceTarget(text);
+      if (!isSafeReferenceUrl(candidate)) return;
+      event.preventDefault();
+      createAnnotation('reference', viewportCenterPosition(), {
+        targetKind: 'url',
+        target: candidate,
+      });
+      showNotification('success', cml.referencePasteCreated);
+    };
+    document.addEventListener('paste', handleUrlPaste);
+    return () => document.removeEventListener('paste', handleUrlPaste);
+  }, [
+    createAnnotation,
+    viewportCenterPosition,
+    showNotification,
+    cml.referencePasteCreated,
+    onImageIngest,
+  ]);
 
   // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
   // graph node, which handlePaneClick does not cover), matching the annotation
@@ -2540,7 +3003,9 @@ function GraphCanvasInner({
           candidates: candidates.map((n) => ({
             id: n.id,
             label:
-              computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels) || n.id,
+              computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels, {
+                hostBroken: referenceHostBroken(n, isReferenceTargetAvailable),
+              }) || n.id,
           })),
         });
       } else {
@@ -2557,6 +3022,7 @@ function GraphCanvasInner({
       notifyRemoteLockedAttempt,
       screenToFlowPosition,
       annotationContextValue.labels,
+      isReferenceTargetAvailable,
     ]
   );
 
@@ -2744,9 +3210,10 @@ function GraphCanvasInner({
       // groups to enter/leave — a plain drag needs no re-parenting.
       const finalById = new Map();
       if (draggedIds.size > 0 && groupNodes.length > 0) {
+        const groupById = indexGroupsById(groupNodes);
         for (const n of currentNodes) {
           if (!draggedIds.has(n.id) || n.type === 'group') continue;
-          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes));
+          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes, groupById));
         }
       }
 
@@ -2817,6 +3284,24 @@ function GraphCanvasInner({
     [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId, endEditing]
   );
 
+  const panOnDrag = freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2];
+
+  // A right-drag pans (panOnDrag includes button 2) and the browser still fires
+  // `contextmenu` on release. True when the pointer moved beyond the click
+  // tolerance since the right button went down; resets the tracker either way.
+  // Only a real button-2 `contextmenu` is gated: synthetic touch long-press
+  // events carry no `type`, and a Ctrl+click or keyboard menu key reports
+  // another button, so none of them may read a stale right-press position.
+  const consumeRightDrag = useCallback((event) => {
+    if (event.type !== 'contextmenu' || event.button !== 2) return false;
+    const start = rightDragStart.current;
+    rightDragStart.current = { x: 0, y: 0, time: null };
+    return (
+      start.time != null &&
+      (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5)
+    );
+  }, []);
+
   // Right-click on empty background. A plain right-click opens the annotation
   // creation menu (add note/label/arrow); a right-drag is a pan (panOnDrag
   // includes button 2), so in that case keep the legacy clear-only behaviour.
@@ -2831,11 +3316,7 @@ function GraphCanvasInner({
         closeAllMenus();
         return;
       }
-      const start = rightDragStart.current;
-      const movedFar =
-        start.time != null &&
-        (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5);
-      rightDragStart.current = { x: 0, y: 0, time: null };
+      const movedFar = consumeRightDrag(event);
       if (movedFar) {
         closeAllMenus();
         clearSelection();
@@ -2847,7 +3328,7 @@ function GraphCanvasInner({
       const flowPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       setPaneContextMenu({ x: event.clientX, y: event.clientY, flowPosition });
     },
-    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId]
+    [closeAllMenus, clearSelection, screenToFlowPosition, activeFocusRootId, consumeRightDrag]
   );
 
   // Right-click on the selection box (multi-node selection)
@@ -2855,6 +3336,7 @@ function GraphCanvasInner({
     (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
 
       if (selectedNodes.length > 0) {
         const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
@@ -2868,7 +3350,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   const handleAddGroup = useCallback(() => {
@@ -2939,6 +3421,7 @@ function GraphCanvasInner({
           // flag revert on the next autosave, whatever the translators did.
           z: g.data.z ?? 0,
           locked: Boolean(g.data.locked),
+          rotation: g.data.rotation ?? 0,
           // Same envelope treatment as z/locked above, for the same reason:
           // server-owned same-field-conflict bookkeeping
           // (dec-annotation-field-patches-and-conflicts) that must survive
@@ -2966,6 +3449,7 @@ function GraphCanvasInner({
 
       // Annotation overlays render their own context menu (colour/delete).
       if (OVERLAY_TYPES.has(node.type)) return;
+      if (consumeRightDrag(event)) return;
 
       const isNodeSelected = selectedNodes.some((n) => n.id === node.id);
       const hasMultipleSelected = selectedNodes.length > 1;
@@ -2990,7 +3474,7 @@ function GraphCanvasInner({
         });
       }
     },
-    [selectedNodes]
+    [selectedNodes, consumeRightDrag]
   );
 
   // Double-click on node handler
@@ -3015,6 +3499,7 @@ function GraphCanvasInner({
     (event, edge) => {
       event.preventDefault();
       event.stopPropagation();
+      if (consumeRightDrag(event)) return;
       setNodeContextMenu(null);
       setMultiNodeContextMenu(null);
       const isMultiSelected =
@@ -3026,7 +3511,7 @@ function GraphCanvasInner({
         edgeIds: isMultiSelected ? selectedEdges.map((e) => e.id) : [edge.id],
       });
     },
-    [selectedEdges]
+    [selectedEdges, consumeRightDrag]
   );
 
   // Reuses the same context-menu handlers a desktop right-click calls,
@@ -3231,9 +3716,11 @@ function GraphCanvasInner({
       });
 
       const ns = 'http://www.w3.org/2000/svg';
+      const options = freehandOptionsRef.current;
+      groupEl.setAttribute('opacity', String(options.opacity));
       const paint = (el, d, width) => {
         el.setAttribute('d', d);
-        el.setAttribute('stroke', DEFAULT_FREEHAND_COLOR);
+        el.setAttribute('stroke', options.color);
         el.setAttribute('stroke-width', String(width));
         el.setAttribute('fill', 'none');
         el.setAttribute('stroke-linecap', 'round');
@@ -3243,7 +3730,7 @@ function GraphCanvasInner({
       if (!hasPressureData(screenPoints)) {
         // Zoom scales the on-screen width the same way the committed stroke's
         // own transform does, so the preview matches what lands.
-        const width = DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom;
+        const width = options.strokeWidth * viewport.zoom;
         let pathEl = groupEl.firstElementChild;
         if (!pathEl || groupEl.childElementCount !== 1) {
           groupEl.replaceChildren();
@@ -3256,8 +3743,8 @@ function GraphCanvasInner({
 
       const segments = buildPressureSegments(
         screenPoints,
-        DEFAULT_FREEHAND_SMOOTHING,
-        DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom
+        options.smoothing,
+        options.strokeWidth * viewport.zoom
       );
       // Reuse the existing path elements and only add/remove the difference,
       // rather than replacing the whole subtree on every pointermove.
@@ -3583,7 +4070,7 @@ function GraphCanvasInner({
     // icon, a label and a text annotation have a fixed or content-driven size
     // (RESIZABLE_KINDS/SIZED_GENERIC_KINDS exclude them), so a drag would have
     // nothing to apply; those place at the press point and ignore the rest.
-    const SIZABLE = new Set(['shape', 'note']);
+    const SIZABLE = new Set(['shape', 'note', 'heatmap']);
     const MIN_DRAG_PX = 6;
     // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
     // be smaller than the resizer would allow it to be dragged to.
@@ -3715,10 +4202,29 @@ function GraphCanvasInner({
       const placement = placementRef.current;
       const previewEl = placementPreviewRef.current;
       if (!placement || !previewEl) return;
-      const left = Math.min(placement.startX, event.clientX);
-      const top = Math.min(placement.startY, event.clientY);
-      const width = Math.abs(event.clientX - placement.startX);
-      const height = Math.abs(event.clientY - placement.startY);
+      let left = Math.min(placement.startX, event.clientX);
+      let top = Math.min(placement.startY, event.clientY);
+      let width = Math.abs(event.clientX - placement.startX);
+      let height = Math.abs(event.clientY - placement.startY);
+      // A heat-map circle is created as a square anchored at the press point
+      // (see createAnnotation), so the outline shows exactly that square — and
+      // uses the same thresholded direction test as the flip flags it gets.
+      const circle = placement.tool.kind === 'heatmap';
+      if (circle) {
+        // Floored at the same minimum createAnnotation applies, in screen px.
+        const side = Math.max(width, height, MIN_DRAWN_SIZE * getViewportRef.current().zoom);
+        left =
+          event.clientX - placement.startX < -MIN_DRAG_PX
+            ? placement.startX - side
+            : placement.startX;
+        top =
+          event.clientY - placement.startY < -MIN_DRAG_PX
+            ? placement.startY - side
+            : placement.startY;
+        width = side;
+        height = side;
+      }
+      previewEl.style.borderRadius = circle ? '50%' : '';
       const rect = wrapper.getBoundingClientRect();
       previewEl.style.display = 'block';
       previewEl.style.left = `${left - rect.left}px`;
@@ -3787,6 +4293,10 @@ function GraphCanvasInner({
         {
           ...tool.options,
           box,
+          // The press point in flow space. A heat-map circle is anchored on it
+          // directly: recovering it from `position` + the floored `box` is off
+          // by the floor whenever a flipped axis moved less than the minimum.
+          anchor: a,
           // Thresholded, not a raw sign test: a long downward drag with a
           // couple of pixels of leftward jitter would otherwise silently
           // mirror the shape and aim a process arrow the wrong way.
@@ -4294,6 +4804,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },
@@ -4478,14 +4989,25 @@ function GraphCanvasInner({
   // Purely cosmetic (task-annotation-exclusive-edit-leases): selection never
   // blocks local dragging — see the remote-lease effect right below for that.
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((n) => {
+    setNodes((nds) => {
+      // `.map` always returns a fresh array, even when every branch below took
+      // the `return n` no-op — that alone is enough to commit a new (if
+      // content-identical) node array on every run of this effect. Tracking
+      // whether anything actually changed and returning `nds` itself when it
+      // didn't keeps a no-op run of this effect from being a state change at
+      // all, matching the idiom `useRemotePositions`'s second effect uses for
+      // the same reason.
+      let changed = false;
+      const next = nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteSelections?.[n.id] ?? null;
-        if (!marker && !n.data?.remoteSelection) return n;
+        const prevMarker = n.data?.remoteSelection ?? null;
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
+        changed = true;
         return { ...n, data: { ...n.data, remoteSelection: marker } };
-      })
-    );
+      });
+      return changed ? next : nds;
+    });
   }, [remoteSelections, setNodes]);
 
   // Mirror live remote *edit leases* onto annotation nodes
@@ -4497,11 +5019,21 @@ function GraphCanvasInner({
   // ReactFlow's own node state, not the host's `inputNodes` prop, so pushing
   // a live map onto them needs an effect rather than a render-time memo.
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((n) => {
+    setNodes((nds) => {
+      // Same no-op-map issue as the remote-selection effect above, and the
+      // same fix: track whether anything actually changed and return `nds`
+      // itself when it didn't, so a no-op run isn't a state change.
+      let changed = false;
+      const next = nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteLeases?.[n.id] ?? null;
-        if (!marker && !n.data?.remoteLease) return n;
+        const prevMarker = n.data?.remoteLease ?? null;
+        // `draggable` and the rest of `nextData` are a pure function of `n`
+        // plus this one field, so an unchanged marker means an unchanged
+        // result — the cheap check that lets this stay a no-op run. Compared
+        // by value (see `remoteMarkerEqual`'s doc comment): `getRemoteLeases()`
+        // mints a fresh object per call, so `===` was always false here.
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
         const nextData = { ...n.data, remoteLease: marker };
         const draggable = isAnnotationDraggable({ ...n, data: nextData });
         // A group that may be dragged resolves `draggable` to `undefined`, so
@@ -4511,13 +5043,15 @@ function GraphCanvasInner({
         // time a collaborator's lease on the group cleared, leaving it
         // draggable during a freehand stroke. Overlays keep the explicit
         // boolean they are hydrated with.
+        changed = true;
         return {
           ...n,
           data: nextData,
           draggable: n.type === 'group' && draggable ? undefined : draggable,
         };
-      })
-    );
+      });
+      return changed ? next : nds;
+    });
   }, [remoteLeases, setNodes]);
 
   // Apply node positions arriving from another client (design step 6), holding
@@ -4562,6 +5096,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },
@@ -4755,6 +5290,8 @@ function GraphCanvasInner({
       shape: guard(GenericAnnotationNode, 'shape'),
       icon: guard(GenericAnnotationNode, 'icon'),
       vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
+      heatmap: guard(GenericAnnotationNode, 'heatmap'),
+      reference: guard(GenericAnnotationNode, 'reference'),
       image: guard(GenericAnnotationNode, 'image'),
       freehand: guard(FreehandAnnotationNode, 'freehand'),
     };
@@ -4779,11 +5316,20 @@ function GraphCanvasInner({
   const nodesWithAriaLabels = useMemo(
     () =>
       nodes.map((n) => {
-        const ariaLabel = computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels);
+        // The host's answer has to reach the name here, because ReactFlow
+        // reads `node.ariaLabel` and it OVERRIDES the tile's own text — so a
+        // host-reported broken tile would otherwise be announced as live.
+        const hostBroken = referenceHostBroken(n, isReferenceTargetAvailable);
+        const ariaLabel = computeAnnotationAriaLabel(
+          n.type,
+          n.data,
+          annotationContextValue.labels,
+          { hostBroken }
+        );
         if (!ariaLabel || n.ariaLabel === ariaLabel) return n;
         return { ...n, ariaLabel };
       }),
-    [nodes, annotationContextValue.labels]
+    [nodes, annotationContextValue.labels, isReferenceTargetAvailable]
   );
 
   const marksLegend = useMemo(() => {
@@ -4831,6 +5377,24 @@ function GraphCanvasInner({
 
         <div
           ref={reactFlowWrapper}
+          // Capture phase: d3-zoom stops mousedown propagation for button 2, so a
+          // bubbling listener would never see the press.
+          onMouseDownCapture={(event) => {
+            // Only a press that can start a pan arms the tracker: the right
+            // button must be a pan button, and nodes, edges and the selection
+            // box carry `nopan`, so a right-press there never pans. ReactFlow
+            // also blocks right-button panning with Shift, Ctrl or Space held.
+            rightDragStart.current =
+              Array.isArray(panOnDrag) &&
+              panOnDrag.includes(2) &&
+              event.button === 2 &&
+              !event.shiftKey &&
+              !event.ctrlKey &&
+              !spacePressedRef.current &&
+              !event.target.closest?.('.nopan')
+                ? { x: event.clientX, y: event.clientY, time: Date.now() }
+                : { x: 0, y: 0, time: null };
+          }}
           style={{
             width: '100%',
             height: '100%',
@@ -4866,15 +5430,6 @@ function GraphCanvasInner({
             onPaneClick={handlePaneClick}
             onDragOver={onDragOver}
             onDrop={onDrop}
-            onPaneMouseDown={(event) => {
-              if (event.button === 2) {
-                rightDragStart.current = {
-                  x: event.clientX,
-                  y: event.clientY,
-                  time: Date.now(),
-                };
-              }
-            }}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView
@@ -4897,7 +5452,7 @@ function GraphCanvasInner({
             // abandons as soon as a second one arrives, which leaves pinch to
             // ReactFlow. Marquee selection IS suppressed: it is what swallowed
             // the press before this gesture existed.
-            panOnDrag={freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2]}
+            panOnDrag={panOnDrag}
             selectionOnDrag={
               freehandActive || eraserActive || placementArmed ? false : !isTouchMode
             }
@@ -5081,6 +5636,7 @@ function GraphCanvasInner({
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               onSelectTool={handleSelectTool}
               onDragCreate={handleAnnotationDragCreate}
+              onFreehandOptionsChange={handleFreehandOptionsChange}
               labels={atl}
               compact={isCompact}
               // Distinct from `compact`, which is a viewport-WIDTH signal
@@ -5101,6 +5657,7 @@ function GraphCanvasInner({
                 onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
                 onSelectTool={handleSelectTool}
                 onDragCreate={handleAnnotationDragCreate}
+                onFreehandOptionsChange={handleFreehandOptionsChange}
                 labels={atl}
                 variant="sheet"
                 touch={isTouchMode}
@@ -5221,6 +5778,11 @@ function GraphCanvasInner({
           onDimEdges={onDimEdges}
           onRestoreEdges={onRestoreEdges}
           onAttachNearby={attachNearbyAnnotation}
+          onTeleport={
+            onTeleportToSourceGraph && isFederatedNode(nodeContextMenu?.node?.data)
+              ? onTeleportToSourceGraph
+              : undefined
+          }
           onClose={() => setNodeContextMenu(null)}
         />
 

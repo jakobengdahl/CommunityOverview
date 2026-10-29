@@ -11,10 +11,12 @@ import base64
 import io
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.requests import Request
 
+from backend.core.session_manager import RateLimited
 from backend.service import rest_api as rest_api_module
 from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
@@ -289,6 +291,26 @@ class TestSessionOps:
         assert state["node_refs"] == ["node-1", "node-2"]
         assert state["positions"]["node-1"] == {"x": 5.0, "y": 6.0}
 
+    def test_a_batch_over_the_rate_burst_is_413_not_a_retryable_429(
+        self, test_app: TestClient
+    ):
+        """201-500 ops pass the op-count and byte caps but exceed the 200-token
+        bucket, so no backoff could admit them; the refusal draws nothing, so
+        a batch at the full burst still goes through afterwards."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        ops = [{"op": "nodes_added", "node_ids": [f"n{i}"]} for i in range(201)]
+
+        over = test_app.post(
+            f"/api/sessions/{sid}/ops", json={"client_id": "c1", "ops": ops}
+        )
+        at_burst = test_app.post(
+            f"/api/sessions/{sid}/ops", json={"client_id": "c1", "ops": ops[:200]}
+        )
+
+        assert over.status_code == 413
+        assert over.json()["detail"] == "op batch too large"
+        assert at_burst.status_code == 200
+
     def test_ops_unknown_session_404(self, test_app: TestClient):
         resp = test_app.post(
             "/api/sessions/9999-9999/ops",
@@ -348,6 +370,65 @@ class TestSessionOps:
         assert "note-1" in resp.json()["detail"]
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"][0].get("text") != "hijacked"
+
+    def test_posting_client_id_mcp_agent_does_not_drain_the_mcp_bucket(
+        self, test_app: TestClient
+    ):
+        """`client_id` on this endpoint is unauthenticated and caller-chosen, so
+        a browser can post the exact marker (`mcp-agent`) every MCP write tool
+        attributes its ops to. That must not spend the reserved MCP budget —
+        `/ops` always draws from `session_manager._bucket`, never
+        `_mcp_bucket`, regardless of the `client_id` value posted
+        (smallfix-ops-client-id-can-collide-with-mcp-agent-marker)."""
+        from backend.core.session_manager import _TokenBucket
+
+        session_manager = test_app.app.state.session_manager
+        # A tiny, otherwise-untouched stand-in for the reserved MCP budget.
+        session_manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        # Far more ops traffic than the MCP-reserved bucket could survive —
+        # if this were drawing from _mcp_bucket, the second call would 429.
+        for _ in range(5):
+            resp = test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={"client_id": "mcp-agent", "ops": []},
+            )
+            assert resp.status_code == 200
+
+        # The MCP-reserved bucket must still hold its one untouched token.
+        session_manager.apply_layout(
+            sid, "mcp-agent", positions={"n1": {"x": 1, "y": 1}}
+        )
+        with pytest.raises(RateLimited):
+            session_manager.apply_layout(
+                sid, "mcp-agent", positions={"n1": {"x": 2, "y": 2}}
+            )
+
+    def test_legitimate_mcp_write_unaffected_by_ordinary_ops_traffic(
+        self, test_app: TestClient
+    ):
+        """Ordinary browser traffic on `/ops` — including plenty of it — must
+        not throttle the MCP write path, because the two no longer share a
+        bucket."""
+        from backend.core.session_manager import _TokenBucket
+
+        session_manager = test_app.app.state.session_manager
+        session_manager._bucket = _TokenBucket(1.0, 0.0)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        assert (
+            test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={"client_id": "some-browser", "ops": []},
+            ).status_code
+            == 200
+        )
+        # The browser bucket is now spent, but the MCP write still succeeds.
+        result = session_manager.apply_layout(
+            sid, "mcp-agent", positions={"n1": {"x": 3, "y": 4}}
+        )
+        assert result["moved"] == 1
 
 
 class TestSessionActivityAndUndo:
@@ -611,7 +692,7 @@ class TestSessionOpsImageIngestGuard:
     """This endpoint is the widest of the image-ingest bypasses: no MCP layer is
     involved, so anything holding a session id can post an annotation op
     directly. The guard is unit-tested in
-    ``backend/core/tests/test_session_annotations_image_guard.py``; these assert
+    ``backend/core/tests/test_session_annotations_guards.py``; these assert
     it is actually reachable over HTTP and reported as a 400."""
 
     _EMBEDDED = (
@@ -804,10 +885,22 @@ class TestSessionImageIngestEndpoint:
                 self._transport = transport
 
             def Client(self, **kwargs):
+                # The mock replaces image_ingest's own (address-pinning) transport.
+                kwargs.pop("transport", None)
                 return httpx.Client(transport=self._transport, **kwargs)
 
         monkeypatch.setattr(
             image_ingest, "httpx", _StubHttpxModule(httpx.MockTransport(handler))
+        )
+        # The pipeline validates the URL's resolved addresses before fetching;
+        # resolve the stub host to a public address so a sandbox without DNS
+        # exercises the same path CI does instead of failing in is_safe_url.
+        from backend.core.events import delivery
+
+        monkeypatch.setattr(
+            delivery.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [(None, None, None, None, ("93.184.216.34", 0))],
         )
 
         sid = test_app.post("/api/sessions", json={}).json()["id"]

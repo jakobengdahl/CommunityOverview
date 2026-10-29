@@ -12,10 +12,19 @@ Security:
 - Content is sanitized against prompt injection patterns
 - Dangerous HTML elements stripped; safe markup preserved
 - Domain allowlist configurable via SkillsConfig
+- SSRF address guard on every URL fetched, INCLUDING the first: a URL whose
+  hostname resolves to a private, loopback, link-local, CGNAT or reserved
+  address is refused even when its domain is in trusted_domains, and there is
+  no config override. A SKILL.md served from an internal host is therefore not
+  a supported configuration.
+- Redirects are not auto-followed; every hop is re-checked against both the
+  allowlist and the address guard before it is requested, and credentials are
+  dropped when a hop leaves the origin they were sent to
 - Maximum content size enforced
 - Failed fetches are logged and skipped without crashing
 """
 
+import asyncio
 import html
 import re
 import json
@@ -25,10 +34,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import httpx2 as httpx
 from pydantic import BaseModel, Field
+
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    async_pinned_transport,
+    is_safe_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +75,44 @@ _DANGEROUS_TAG_RE = re.compile(
 
 DEFAULT_MAX_CONTENT_BYTES = 50_000
 DEFAULT_MAX_BODY_CHARS = 8_000
+
+
+def _origin(url: str) -> tuple:
+    """(scheme, host, port) with the default port made explicit."""
+    parsed = urlparse(url)
+    # `or` would collapse an explicitly written port 0 to the scheme default
+    # and call it the same origin; httpx compares it as 0 and drops.
+    port = (
+        parsed.port
+        if parsed.port is not None
+        else (443 if parsed.scheme == "https" else 80)
+    )
+    return (parsed.scheme, parsed.hostname, port)
+
+
+def _leaves_origin(current_url: str, next_url: str) -> bool:
+    """True when a redirect leaves the origin credentials were sent to.
+
+    Mirrors httpx's own rule, including its single exception: an http->https
+    upgrade on the same host is not a departure, so the credential survives it.
+    """
+    current, following = _origin(current_url), _origin(next_url)
+    if current == following:
+        return False
+    upgraded = (
+        current[0] == "http"
+        and following[0] == "https"
+        and current[1] == following[1]
+        and current[2] == 80
+        and following[2] == 443
+    )
+    return not upgraded
+
+
+def _drop_authorization(headers: Dict[str, str]) -> None:
+    """Remove the Authorization header whatever casing the caller used."""
+    for name in [name for name in headers if name.lower() == "authorization"]:
+        del headers[name]
 
 
 class SkillsConfig(BaseModel):
@@ -569,12 +622,38 @@ class SkillsLoader:
     ) -> str:
         """Fetch URL and return text, with size guard and raw-text caching.
 
-        Checks Content-Length before buffering to avoid receiving a large
-        response body from a trusted domain before detecting the oversize.
+        Every hop is streamed: a redirect's body is never read at all, and the
+        advertised-length check runs before the final body is read. Without
+        that the size guard bounded only the last response, while the walk
+        could still pull ``MAX_REDIRECTS`` full-size bodies through memory on
+        the way there. The terminal body is read incrementally against the
+        same cap, so a response with no Content-Length, or one advertising
+        less than it sends, is refused as soon as it passes
+        ``max_skill_content_bytes`` rather than after it has all arrived. The
+        advertised-length check is kept ahead of it because it refuses an
+        honest oversized body without reading any of it.
         Caches the raw text so Stage 2 (full-skill load) can re-parse from
         cache without making a second HTTP request.
+
+        A skill URL is operator-supplied input that triggers an outbound
+        request, so redirects are not auto-followed: each hop is fetched with
+        ``follow_redirects=False`` and its target re-validated before it is
+        requested, the same way ``backend/core/image_ingest.py`` and
+        ``backend/agents/mcp_loader.py`` walk their redirect chains. Both of
+        this loader's controls are re-applied per hop — ``_validate_domain``
+        (the ``trusted_domains`` allowlist) and ``is_safe_url`` (the SSRF
+        address guard ``delivery.py`` uses) — because validating only the
+        first URL leaves a trusted domain, or an open redirect on one, able to
+        send the fetch to an internal address or off the allowlist entirely.
+
+        ``is_safe_url`` also gates the **initial** URL, which ``trusted_domains``
+        alone previously did not: an allowlisted host that resolves to an
+        internal address is now refused before any request, with no override.
+        That check resolves DNS, so it runs on cache hits too.
         """
         self._validate_domain(url)
+        if not await asyncio.to_thread(is_safe_url, url):
+            raise ValueError(f"URL resolves to a disallowed address: {url}")
         # Return cached text if still within TTL
         cached = self._text_cache.get(url)
         if cached:
@@ -583,20 +662,97 @@ class SkillsLoader:
             if age < self._config.cache_ttl_seconds:
                 return text
         max_bytes = self._config.max_skill_content_bytes
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            response = await client.get(url, headers=headers or {})
-            response.raise_for_status()
-            # Reject early if the server advertises a content length that is too big
-            cl = response.headers.get("content-length")
-            if cl and int(cl) > max_bytes:
-                raise ValueError(
-                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                )
-            content = response.text
-            if len(content.encode()) > max_bytes:
-                raise ValueError(
-                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                )
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=15, transport=async_pinned_transport()
+        ) as client:
+            current_url = url
+            hop_headers = dict(headers or {})
+            for _ in range(MAX_REDIRECTS):
+                # Streamed so a redirect's body is never buffered, and so the
+                # Content-Length check below runs before the final body is
+                # read rather than after client.get() has already held it in
+                # memory. The walk is bounded by MAX_REDIRECTS hops, each of
+                # which could otherwise carry a full-size body.
+                async with client.stream(
+                    "GET", current_url, headers=hop_headers
+                ) as response:
+                    if response.is_redirect:
+                        location = str(response.headers.get("location", ""))
+                        if not location:
+                            raise ValueError(
+                                f"Redirect without a Location header from {current_url}"
+                            )
+                        next_url = urljoin(current_url, location)
+                        self._validate_domain(next_url)
+                        if not await asyncio.to_thread(is_safe_url, next_url):
+                            raise ValueError(
+                                f"Redirect to a disallowed address: {next_url}"
+                            )
+                        # httpx drops credentials when a redirect leaves the
+                        # ORIGIN -- scheme, host and port, not host alone --
+                        # with one exception: a plain http->https upgrade on
+                        # the same host keeps them. This walk must match that,
+                        # or the GitHub token in _github_headers() would be
+                        # replayed to a sibling subdomain (_validate_domain
+                        # admits any subdomain of a trusted domain), to another
+                        # port, or over cleartext after an https->http
+                        # downgrade.
+                        if _leaves_origin(current_url, next_url):
+                            _drop_authorization(hop_headers)
+                        current_url = next_url
+                        continue
+                    response.raise_for_status()
+                    # Reject early if the server advertises a content length
+                    # that is too big
+                    cl = response.headers.get("content-length")
+                    if cl:
+                        try:
+                            advertised = int(cl)
+                        except ValueError:
+                            advertised = -1
+                        if advertised < 0:
+                            raise ValueError(
+                                f"Malformed Content-Length from {url}: {cl!r}"
+                            )
+                        if advertised > max_bytes:
+                            raise ValueError(
+                                f"Content from {url} exceeds max size "
+                                f"({max_bytes} bytes)"
+                            )
+                    # Accumulated with a running total so the cap is
+                    # enforced as the body arrives. The previous read pulled
+                    # the whole body in first and only then measured it, which
+                    # left the advertised length as the only thing standing
+                    # between a hostile server and this process's memory.
+                    chunks = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError(
+                                f"Content from {url} exceeds max size "
+                                f"({max_bytes} bytes)"
+                            )
+                        chunks.append(chunk)
+                    # Decoded exactly as response.text would have: httpx's
+                    # TextDecoder is an incremental codec with
+                    # errors="replace", which for a complete body is the same
+                    # as decoding it in one pass.
+                    content = b"".join(chunks).decode(
+                        response.encoding or "utf-8", errors="replace"
+                    )
+                    # The running total counts bytes as RECEIVED, which for a
+                    # non-utf-8 charset is not the same number as the decoded
+                    # text re-encoded. This is the cap this function has always
+                    # applied, kept so the incremental bound above only ever
+                    # refuses MORE than before, never less.
+                    if len(content.encode()) > max_bytes:
+                        raise ValueError(
+                            f"Content from {url} exceeds max size ({max_bytes} bytes)"
+                        )
+                    break
+            else:
+                raise ValueError(f"Exceeded {MAX_REDIRECTS} redirects for {url}")
         self._text_cache[url] = (content, datetime.now(timezone.utc))
         return content
 

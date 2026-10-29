@@ -400,3 +400,36 @@ body.graph-menu-open .graph-node-tooltip {
     animation: none;
   }
 }
+
+/* Staged-session markers (docs/SESSION_OVERLAY_CONTRACT.md §17): a staged
+   entity must never look like one the graph holds. */
+.graph-custom-node.staged {
+  border-style: dashed;
+  border-width: 2px;
+  border-color: #f0b429 !important;
+}
+
+.graph-custom-node.staged-deleted,
+.graph-custom-node.staged-orphaned {
+  opacity: 0.7;
+}
+
+.graph-custom-node.staged-deleted .graph-node-label {
+  text-decoration: line-through;
+}
+
+.graph-node-staged-badge {
+  position: absolute;
+  bottom: -10px;
+  right: -2px;
+  padding: 1px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #2a1d00;
+  background: #f0b429;
+  border-radius: 6px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  z-index: 6;
+}

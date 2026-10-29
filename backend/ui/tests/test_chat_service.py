@@ -7,9 +7,30 @@ Verifies that:
 - Graph mutations go through GraphService (not direct storage access)
 """
 
+import json
 import os
 import pytest
 from unittest.mock import patch
+
+
+def _tool_result_payloads(mock_llm):
+    """Decode each distinct tool_result block the LLM received, in order.
+
+    Every provider call re-sends the growing history, so a block is keyed by its
+    tool_use_id to count it once.
+    """
+    payloads = {}
+    for messages in mock_llm.received_messages:
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    payloads.setdefault(
+                        block["tool_use_id"], json.loads(block["content"])
+                    )
+    return list(payloads.values())
 
 
 class TestChatServiceInit:
@@ -58,6 +79,36 @@ class TestChatServiceInit:
 class TestChatServiceToolExecution:
     """Tests for ChatService tool execution via GraphService."""
 
+    def test_assistant_executes_dedicated_create_with_nested_config(
+        self, chat_service, graph_storage
+    ):
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "create_agent",
+                "input": {
+                    "config": {"name": "Reviewer", "task_prompt": "Review initiatives"}
+                },
+            }
+        ]
+        result = service.process_message(
+            [{"role": "user", "content": "Create the reviewer agent as configured"}]
+        )
+        assert result["toolUsed"] == "create_agent"
+        agent = next(n for n in graph_storage.nodes.values() if n.type_str == "Agent")
+        assert agent.metadata["enabled"] is True
+        subscription = graph_storage.get_node(agent.metadata["subscription_id"])
+        assert (
+            subscription.metadata["delivery"]["webhook_url"]
+            == f"internal://agent/{agent.id}"
+        )
+        offered = {t["name"] for t in mock_llm.received_tools[0]}
+        assert {
+            "create_agent",
+            "create_collection_response",
+            "create_saved_view",
+        } <= offered
+
     def test_search_graph_tool_uses_graph_service(self, chat_service, sample_nodes):
         """search_graph tool should use GraphService.search_graph."""
         service, mock_llm = chat_service
@@ -77,6 +128,161 @@ class TestChatServiceToolExecution:
             result.get("toolResult", {})
         )
         assert result["toolUsed"] == "search_graph"
+
+    def test_search_graph_tool_schema_offers_every_match_mode_and_semantic(
+        self, chat_service
+    ):
+        """The schema sent to the LLM must offer the same search modes as MCP."""
+        from backend.core.storage_search import MATCH_MODES
+
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "ok"
+        service.process_message([{"role": "user", "content": "hi"}])
+
+        search_def = next(
+            t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
+        )
+        schema = search_def["input_schema"]
+        props = schema["properties"]
+        assert schema["required"] == ["query"]
+        assert props["match_mode"]["type"] == "string"
+        assert props["match_mode"]["enum"] == list(MATCH_MODES)
+        assert props["match_mode"]["default"] == "substring"
+        assert props["semantic"]["type"] == "boolean"
+        assert props["semantic"]["default"] is False
+        # The fallback trigger as queries.search_graph gates it.
+        assert (
+            "A query other than '' or '*' that matches no local node of the "
+            "requested types (archived nodes count only with include_archived) "
+            "falls back to semantic ranking for local results. The check runs "
+            "before tag, metadata and access filters, so a match those filters "
+            "remove gets no fallback."
+        ) in props["semantic"]["description"]
+        assert "matches nothing" not in props["semantic"]["description"]
+        assert props["include_archived"]["type"] == "boolean"
+        assert props["include_archived"]["default"] is False
+
+    def test_search_graph_tool_description_matches_lexical_fields_and_fallback(
+        self, chat_service
+    ):
+        """The description must not tell the LLM an unmatched query returns nothing.
+
+        An unmatched lexical query falls back to semantic ranking, and the lexical
+        matcher covers more fields than name/description/summary.
+        """
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "ok"
+        service.process_message([{"role": "user", "content": "hi"}])
+
+        description = next(
+            t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
+        )["description"]
+        for field in (
+            "name",
+            "description",
+            "summary",
+            "tags",
+            "subtypes",
+            "aliases",
+            "type label",
+        ):
+            assert field in description
+        assert "local and federated nodes alike" in description
+        assert "subset" not in description
+        assert "semantic-fallback" in description
+        assert "returns nothing" not in description
+        # Exact sentences, so a changed field list, scope or fallback clause fails.
+        assert (
+            "Matches a node's name, description, summary, tags, subtypes, "
+            "aliases and type label, for local and federated nodes alike."
+        ) in description
+        assert (
+            "By default the whole query must occur verbatim, so a multi-word query "
+            "that no node contains matches nothing lexically and at best returns "
+            "semantic-fallback results; use match_mode='any_term' or semantic=true "
+            "for such queries."
+        ) in description
+
+    def test_search_graph_any_term_matches_multi_word_query(
+        self, chat_service, sample_nodes
+    ):
+        """A multi-word query no node contains verbatim matches in any_term mode."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {"query": "Agency Project", "match_mode": "any_term"},
+            }
+        ]
+        mock_llm.mock_text_response = "Found them."
+
+        result = service.process_message(
+            [{"role": "user", "content": "Find agency or project"}]
+        )
+
+        found = {n["id"] for n in result["toolResult"]["nodes"]}
+        assert {"test-actor-1", "test-initiative-1"} <= found
+        # Substring mode also surfaces both nodes here, via the automatic
+        # semantic fallback; only the lexical any_term match leaves it off.
+        (tool_result,) = _tool_result_payloads(mock_llm)
+        assert tool_result["match_mode"] == "any_term"
+        assert tool_result["semantic"] is False
+
+    def test_search_graph_invalid_match_mode_surfaces_as_tool_error(
+        self, chat_service, sample_nodes
+    ):
+        """An unsupported match_mode reaches the LLM as an error, not as results."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {"query": "Agency", "match_mode": "fuzzy"},
+            }
+        ]
+        mock_llm.mock_text_response = "That failed."
+
+        service.process_message([{"role": "user", "content": "Find agency"}])
+
+        (tool_result,) = _tool_result_payloads(mock_llm)
+        assert "fuzzy" in tool_result["error"]
+        assert "nodes" not in tool_result
+
+    def test_search_graph_tool_forwards_match_mode_and_semantic(self, chat_service):
+        """The chat wrapper passes both modes through to GraphService unchanged."""
+        from unittest.mock import MagicMock
+
+        service, _ = chat_service
+        service._graph_service.search_graph = MagicMock(return_value={"nodes": []})
+
+        service._search_graph_tool(query="x", match_mode="any_term", semantic=True)
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["match_mode"] == "any_term"
+        assert kwargs["semantic"] is True
+
+        service._search_graph_tool(query="x")
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["match_mode"] == "substring"
+        assert kwargs["semantic"] is False
+
+    def test_search_graph_tool_forwards_federation_depth_and_include_archived(
+        self, chat_service
+    ):
+        """An omitted depth falls back to the request's; an explicit 0 is kept."""
+        from unittest.mock import MagicMock
+
+        service, _ = chat_service
+        service._graph_service.search_graph = MagicMock(return_value={"nodes": []})
+        service._current_federation_depth = 3
+
+        service._search_graph_tool(query="x")
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["federation_depth"] == 3
+        assert kwargs["include_archived"] is False
+
+        service._search_graph_tool(query="x", federation_depth=0, include_archived=True)
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["federation_depth"] == 0
+        assert kwargs["include_archived"] is True
 
     def test_add_nodes_tool_uses_graph_service(self, chat_service):
         """add_nodes tool should use GraphService.add_nodes."""
@@ -245,6 +451,125 @@ class TestChatServiceConversation:
         assert result["proposed_nodes"][0]["name"] == "Agency X"
         create_from_profile.assert_called_once()
         assert create_from_profile.call_args.args[0].id == "extractor"
+
+    def test_an_explicit_llm_provider_is_used_verbatim(self, chat_service):
+        """
+        The evaluation harness hands in one exact provider and must get it.
+
+        See ChatProcessor.process_message's llm_provider parameter: the harness
+        measures one named model at one named endpoint, so provider resolution
+        has to be bypassed rather than merely influenced.
+        """
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_text_response = "answered by the injected provider"
+
+        result = service.process_message(
+            [{"role": "user", "content": "hello"}], llm_provider=injected
+        )
+
+        assert result["content"] == "answered by the injected provider"
+        assert injected.call_count == 1
+        assert default_llm.call_count == 0
+
+    def test_an_explicit_llm_provider_wins_over_configured_model_profiles(
+        self, chat_service
+    ):
+        """
+        The hazard the parameter exists for.
+
+        Model profiles normally take precedence over everything, so on a host
+        that has them configured the harness would silently measure the host's
+        default model and report the result under the model it was asked to
+        test.
+        """
+        from backend.config.model_profiles import ModelProfile
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        service, _ = chat_service
+        injected = MockLLMProvider()
+        injected.mock_text_response = "from the injected provider"
+
+        host_profile = ModelProfile(
+            id="host-default",
+            name="Host default",
+            provider="openai",
+            model="some-other-model",
+            default=True,
+            credential_ref="HOST_API_KEY",
+        )
+
+        with (
+            patch(
+                "backend.config.config_loader.get_model_profiles",
+                return_value=[host_profile],
+            ),
+            patch(
+                "backend.ui.chat_logic.create_provider_from_profile"
+            ) as create_from_profile,
+        ):
+            result = service.process_message(
+                [{"role": "user", "content": "hello"}], llm_provider=injected
+            )
+
+        assert result["content"] == "from the injected provider"
+        create_from_profile.assert_not_called()
+
+    def test_an_explicit_llm_provider_wins_over_an_api_key_argument(self, chat_service):
+        """
+        api_key must not pull resolution back into play.
+
+        The harness pins one provider; a caller that also passed a key would
+        otherwise silently get a different one built from it, and the run would
+        be reported under the model it was asked to measure.
+        """
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_text_response = "from the injected provider"
+
+        result = service.process_message(
+            [{"role": "user", "content": "hello"}],
+            api_key="not-the-key-that-should-be-used",
+            provider="openai",
+            llm_provider=injected,
+        )
+
+        assert result["content"] == "from the injected provider"
+        assert injected.call_count == 1
+        assert default_llm.call_count == 0
+
+    def test_omitting_llm_provider_leaves_resolution_unchanged(self, chat_service):
+        """The default path must behave exactly as before the parameter existed."""
+        service, default_llm = chat_service
+        default_llm.mock_text_response = "from the resolved provider"
+
+        result = service.process_message([{"role": "user", "content": "hello"}])
+
+        assert result["content"] == "from the resolved provider"
+        assert default_llm.call_count == 1
+
+    def test_an_injected_provider_still_drives_the_tool_loop(self, chat_service):
+        """Injection replaces the provider, not the assistant's tool execution."""
+        service, default_llm = chat_service
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        injected = MockLLMProvider()
+        injected.mock_tool_calls = [
+            {"name": "list_node_types", "input": {}},
+        ]
+        injected.mock_text_response = "listed the types"
+
+        result = service.process_message(
+            [{"role": "user", "content": "what types exist?"}], llm_provider=injected
+        )
+
+        assert result["toolUsed"] == "list_node_types"
+        assert injected.call_count == 2
+        assert default_llm.call_count == 0
 
     def test_get_system_info(self, chat_service):
         """get_system_info should return provider and tools info."""
@@ -486,6 +811,24 @@ ACTOR_ONLY_PERMS = {
 class TestResolveCollection:
     """Tests for ChatService._resolve_collection."""
 
+    def test_successful_collection_resolution_is_cached(
+        self, chat_service, graph_service
+    ):
+        """Two permitted resolutions share one collection search."""
+        service, _ = chat_service
+        node = _make_akc_node("cached", ACTOR_ONLY_PERMS)
+        graph_service.add_nodes(nodes=[node], edges=[])
+        with patch.object(
+            graph_service, "search_graph", wraps=graph_service.search_graph
+        ) as search:
+            first = service._resolve_collection("cached")
+            second = service._resolve_collection("cached")
+        assert first == second
+        assert "Collect test data." in first[0]
+        search.assert_called_once_with(
+            query="", node_types=["ActiveKnowledgeCollection"], limit=500
+        )
+
     def test_finds_matching_collection(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 
@@ -566,6 +909,41 @@ class TestResolveCollection:
         assert "PERMITTED OPERATIONS: none" in prefix
         assert perms == all_false_perms
         assert collect_responses is True
+
+    def test_exception_rechecking_cached_collection_fails_closed(
+        self, graph_service, mock_llm_provider
+    ):
+        from backend.ui import ChatService
+
+        with (
+            patch(
+                "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+        ):
+            service = ChatService(graph_service)
+
+        akc_node = _make_akc_node("cached-coll", ACTOR_ONLY_PERMS)
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service._resolve_collection("cached-coll")
+
+        with (
+            patch.object(
+                service._graph_service,
+                "get_node_details",
+                side_effect=RuntimeError("hook failed"),
+            ),
+            patch.object(
+                service._graph_service,
+                "search_graph",
+                side_effect=RuntimeError("hook failed"),
+            ),
+        ):
+            assert service._resolve_collection("cached-coll") == ("", {}, True)
 
     def test_exception_during_resolution_fails_closed(
         self, graph_service, mock_llm_provider
@@ -920,6 +1298,34 @@ class TestToolAllowlist:
         # Every LLM turn saw only the filtered tool set.
         for advertised in mock_llm.received_tools:
             assert {t["name"] for t in advertised} == {"search_graph"}
+
+    def test_allowlist_refusal_wins_over_non_object_input(self, chat_service):
+        """A disallowed tool with non-object arguments is refused by the allowlist,
+        not reported as a malformed call: the allowlist gate runs first, so the
+        LLM is never told how to fix the arguments of a tool it may not use."""
+        service, mock_llm = chat_service
+        akc_node = _make_akc_node(
+            "coll", ACTOR_ONLY_PERMS, tool_allowlist=["search_graph"]
+        )
+        mock_llm.mock_tool_calls = [{"name": "add_nodes", "input": []}]
+
+        with patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [akc_node], "edges": [], "total": 1},
+        ):
+            service.process_message(
+                messages=[{"role": "user", "content": "go"}],
+                collection_short_name="coll",
+            )
+
+        (tool_result,) = _tool_result_payloads(mock_llm)
+        assert tool_result == {
+            "error": (
+                "Tool 'add_nodes' is not in this collection's tool allowlist "
+                "and was blocked."
+            )
+        }
 
     def test_allowlist_ignored_outside_collection_mode(self, chat_service):
         """Without a collection_short_name the assistant is unrestricted (all tools)."""
@@ -2016,3 +2422,168 @@ class TestVisualizationActionSemantics:
         tr = result["toolResult"]
         assert tr["action"] == "update_in_visualization"
         assert any(n.get("id") == node_id for n in tr.get("nodes", []))
+
+
+class TestNonObjectToolInput:
+    """A tool call whose arguments are valid JSON but not an object fails alone.
+
+    Providers can hand back "[]", "5", "false" or '"x"' as arguments. The
+    special-case branches used to call tool_input.get() and crash the whole
+    request; the generic path surfaced an AttributeError string. Each such call
+    must yield a clear tool error while the rest of the turn still runs.
+    """
+
+    @pytest.mark.parametrize(
+        "tool_name", ["propose_new_node", "mark_nodes", "present_form", "search_graph"]
+    )
+    @pytest.mark.parametrize(
+        "tool_input, json_type",
+        [
+            ([], "array"),
+            (5, "number"),
+            (False, "boolean"),
+            ("x", "string"),
+            (None, "null"),
+        ],
+    )
+    def test_non_object_input_is_a_tool_error_and_the_turn_continues(
+        self, chat_service, tool_name, tool_input, json_type
+    ):
+        service, mock_llm = chat_service
+        service.graph_service.add_nodes(
+            nodes=[{"type": "Actor", "name": "Findable Agency"}], edges=[]
+        )
+        mock_llm.mock_tool_calls = [
+            {"name": tool_name, "input": tool_input},
+            {"name": "search_graph", "input": {"query": "Findable Agency"}},
+        ]
+
+        result = service.process_message([{"role": "user", "content": "go"}])
+
+        tool_result_ids = [
+            block["tool_use_id"]
+            for block in mock_llm.received_messages[1][-1]["content"]
+        ]
+        assert tool_result_ids == ["mock_tool_0", "mock_tool_1"]
+        bad, good = _tool_result_payloads(mock_llm)
+        assert bad == {
+            "error": (
+                f"Tool '{tool_name}' was not run: its arguments must be a JSON "
+                f"object, got {json_type}."
+            )
+        }
+        assert any(n.get("name") == "Findable Agency" for n in good["nodes"])
+        assert any(
+            n.get("name") == "Findable Agency" for n in result["toolResult"]["nodes"]
+        )
+        assert result["content"] == mock_llm.mock_text_response
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "list_node_attachments",
+        "read_node_attachment",
+        "search_node_attachments",
+        "add_node_attachment",
+        "delete_node_attachment",
+    ],
+)
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "assistant",
+        "kiosk",
+        "kiosk_granted",
+        "kiosk_failed",
+        "kiosk_unresolved",
+        "override",
+        "deny_hook",
+    ],
+)
+def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode):
+    """Hidden tools stay blocked even when the model calls them anyway."""
+    from unittest.mock import MagicMock
+    from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
+    from backend.runtime.authorization import GraphAuthorizationDecision
+
+    service, llm = chat_service
+    if mode == "kiosk_unresolved":
+        service._assistant_attachment_access = "read_write"
+    raw = MagicMock(return_value={"success": True})
+    service._processor.tools_map[name] = raw
+    service._processor.tool_definitions.append(
+        {"name": name, "input_schema": {"type": "object"}}
+    )
+    llm.mock_tool_calls = [{"name": name, "input": {}}]
+    if mode == "deny_hook":
+        service._assistant_attachment_access = "read_write"
+        service._processor._authorization_hook = MagicMock()
+        service._processor._authorization_hook.evaluate.return_value = (
+            GraphAuthorizationDecision(allowed=False)
+        )
+    kiosk = mode.startswith("kiosk")
+    node = _make_akc_node(
+        "coll",
+        ACTOR_ONLY_PERMS,
+        tool_allowlist=[name] if mode == "kiosk_granted" else [],
+    )
+    with (
+        patch.object(
+            service._graph_service,
+            "search_graph",
+            return_value={"nodes": [] if mode == "kiosk_unresolved" else [node]},
+        ),
+        patch.object(
+            service._graph_service, "get_node_details", return_value={"node": node}
+        ),
+    ):
+        if mode == "kiosk_failed":
+            service._resolve_collection = lambda _: ("", {}, False)
+        service.process_message(
+            messages=[{"role": "user", "content": "read files"}],
+            collection_short_name="coll" if kiosk else None,
+            api_key="override-key" if mode == "override" else None,
+        )
+    allowed = mode == "kiosk_granted" or (
+        mode == "assistant" and name in ATTACHMENT_READ_TOOLS
+    )
+    advertised = {t["name"] for t in llm.received_tools[0]}
+    assert (name in advertised) == (allowed or mode == "deny_hook")
+    if allowed:
+        raw.assert_called_once()
+    else:
+        raw.assert_not_called()
+        result = _tool_result_payloads(llm)[0]
+        assert result.get("error_code") == "access_denied"
+
+
+def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
+    from unittest.mock import MagicMock
+
+    service, llm = chat_service
+    name = "read_node_attachment"
+    node = _make_akc_node("coll", ACTOR_ONLY_PERMS, tool_allowlist=[name])
+
+    def read():
+        node["metadata"]["tool_allowlist"] = []
+        return {"success": True}
+
+    raw = MagicMock(side_effect=read)
+    service._processor.tools_map[name] = raw
+    service._processor.tool_definitions.append({"name": name})
+    llm.mock_tool_call_sequence = [[{"name": name, "input": {}}]] * 2
+    with (
+        patch.object(
+            service._graph_service, "search_graph", return_value={"nodes": [node]}
+        ),
+        patch.object(
+            service._graph_service, "get_node_details", return_value={"node": node}
+        ),
+    ):
+        service.process_message(
+            messages=[{"role": "user", "content": "read twice"}],
+            collection_short_name="coll",
+        )
+    raw.assert_called_once()
+    assert "access_denied" in json.dumps(llm.received_messages[-1])

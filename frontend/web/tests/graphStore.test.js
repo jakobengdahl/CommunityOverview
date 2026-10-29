@@ -15,7 +15,6 @@ describe('graphStore', () => {
       hiddenNodeIds: [],
       selectedNodeId: null,
       editingNode: null,
-      contextMenu: null,
       clearGroupsFlag: false,
       searchQuery: '',
       searchResults: null,

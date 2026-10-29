@@ -32,18 +32,20 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Protocol
+from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
 
+from .actor_attribution import replace_attribution, validate_erasure
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
+    RECORDED_ONLY_OPS,
     UNDOABLE_OPS,
     build_activity_record,
     find_latest_undoable as _find_latest_undoable,
     prune_activity_log,
     undo_conflict_reason as _undo_conflict_reason,
 )
-from .session_annotations import image_annotation_error
+from .session_annotations import image_annotation_error, reference_annotation_error
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -62,6 +64,8 @@ _ANNOTATION_TYPES = {
     "vote_dot",
     "image",
     "freehand",
+    "heatmap",
+    "reference",
 }
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
@@ -107,11 +111,27 @@ STATE_OPS = {
     "group_membership_changed",
     "session_renamed",
     "layout_applied",
+    # docs/SESSION_OVERLAY_CONTRACT.md §15. Sequenced and fanned out like any
+    # other op, but emitted only by the server, after the layer store or the
+    # staged-session record has changed - never accepted from a client.
+    "graph_change_staged",
+    "graph_changes_discarded",
+    "graph_changes_merged",
+    "write_mode_changed",
 }
+
+SERVER_ONLY_OPS = frozenset(
+    {
+        "graph_change_staged",
+        "graph_changes_discarded",
+        "graph_changes_merged",
+        "write_mode_changed",
+    }
+)
 
 
 def is_valid_session_id(session_id: str) -> bool:
-    return bool(isinstance(session_id, str) and SESSION_ID_RE.match(session_id))
+    return bool(isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id))
 
 
 def _now_iso() -> str:
@@ -141,6 +161,19 @@ def _empty_state() -> Dict[str, Any]:
 
 class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
+
+
+class SessionRetired(OpError):
+    """The id belonged to a staged session that was deleted.
+
+    A retired id is never created again, explicitly or implicitly
+    (docs/SESSION_OVERLAY_CONTRACT.md §5.3): not by a stream reconnect, a
+    rename or a share link.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(f"session {session_id!r} was deleted")
 
 
 class AnnotationFieldConflict(Exception):
@@ -208,6 +241,11 @@ class Session:
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
     state: Dict[str, Any] = field(default_factory=_empty_state)
+    # A mirror, for display, of the write mode the staged-session record
+    # decides (docs/SESSION_OVERLAY_CONTRACT.md §5.3). Neither graph content
+    # nor layout; a document written before the field existed is direct.
+    write_mode: str = "direct"
+    write_mode_source: str = "inherited"
     # Persistent per-session activity log (annotation/canvas ops with an
     # inverse), see session_activity.py. Newest entries last; bounded by
     # retention applied on every append.
@@ -220,6 +258,13 @@ class Session:
     _deleted_annotation_ids: Deque[str] = field(
         default_factory=lambda: deque(maxlen=200)
     )
+    # Ephemeral: each activity record's encoded length, for the document-size
+    # budget (session_manager._document_bytes). Rebuilt from the live log on
+    # every use; between uses it can still hold records since pruned or rolled
+    # back, so it stays bounded by the log cap plus one batch.
+    _activity_record_bytes: Dict[int, Any] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -228,6 +273,8 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
+            "write_mode": self.write_mode,
+            "write_mode_source": self.write_mode_source,
             "state": self.state,
             "activity_log": self.activity_log,
         }
@@ -239,6 +286,8 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
+            "write_mode": self.write_mode,
+            "write_mode_source": self.write_mode_source,
         }
 
     @classmethod
@@ -254,6 +303,12 @@ class Session:
             updated_at=data.get("updated_at") or _now_iso(),
             seq=int(data.get("seq") or 0),
             state=merged,
+            write_mode="staged" if data.get("write_mode") == "staged" else "direct",
+            write_mode_source=(
+                "explicit"
+                if data.get("write_mode_source") == "explicit"
+                else "inherited"
+            ),
             activity_log=list(activity_log) if isinstance(activity_log, list) else [],
         )
 
@@ -271,6 +326,8 @@ class SessionPersistenceBackend(Protocol):
     def delete(self, session_id: str) -> None: ...
 
     def list_meta(self) -> List[Dict[str, Any]]: ...
+
+    def list_ids(self) -> List[str]: ...
 
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
@@ -351,6 +408,17 @@ class FileSessionPersistenceBackend:
         if path.exists():
             os.unlink(path)
 
+    def list_ids(self) -> List[str]:
+        # Enumerate without decoding so erasure cannot silently skip a damaged
+        # session that the ordinary metadata listing tolerates.
+        if not self.directory.exists():
+            return []
+        return [
+            p.stem
+            for p in self.directory.iterdir()
+            if p.suffix == ".json" and is_valid_session_id(p.stem)
+        ]
+
     def list_meta(self) -> List[Dict[str, Any]]:
         if not self.directory.exists():
             return []
@@ -388,6 +456,9 @@ class InMemorySessionPersistenceBackend:
 
     def delete(self, session_id: str) -> None:
         self._data.pop(session_id, None)
+
+    def list_ids(self) -> List[str]:
+        return list(self._data)
 
     def list_meta(self) -> List[Dict[str, Any]]:
         metas = [Session.from_dict(d).meta() for d in self._data.values()]
@@ -442,6 +513,18 @@ def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
         raise OpError("annotation update/delete requires a string 'id'")
     if "position" in annotation and annotation["position"] is not None:
         _validate_position(annotation["position"])
+    # The unconditional floor for a `reference`'s payload: applied here, to
+    # every annotation op, rather than alongside the image guard below,
+    # because that guard is skipped for an undo's `trusted_replay` and this
+    # one must not be. A replay carries a whole stored annotation, which is
+    # therefore judged in full — and nothing unsafe can have been stored, so
+    # an unconditional check can never refuse a legitimate replay. No
+    # `existing` is available at this point, so a sparse patch that sets only
+    # `target` is not resolvable against its stored target kind here; that
+    # case is caught by `_require_safe_reference_target` below, which has it.
+    reference_error = reference_annotation_error(annotation)
+    if reference_error:
+        raise OpError(reference_error)
     return annotation
 
 
@@ -469,6 +552,33 @@ def _require_ingested_image(
     image_error = image_annotation_error(annotation, existing)
     if image_error:
         raise OpError(image_error)
+
+
+def _require_safe_reference_target(
+    annotation: Dict[str, Any], existing: Optional[Dict[str, Any]]
+) -> None:
+    """Refuse a write that would point a `reference` annotation at an unsafe
+    URL, in the cases `_validate_annotation`'s unconditional check cannot
+    decide on its own.
+
+    Two of them, both needing the annotation already stored under this id:
+    a sparse patch that sets only `target` (its target kind is on the stored
+    annotation, not in the patch), and a genuine create, which must carry a
+    complete payload rather than a half one whose missing target kind would
+    skip the scheme gate.
+
+    *existing* is never an exemption — unlike `_require_ingested_image`,
+    where re-sending an already-stored URL is deliberately allowed. Nothing
+    unsafe can ever have been persisted as a reference, so admitting a value
+    because it matches a stored one could only ever admit something that got
+    in by a path this gate does not cover. See
+    `session_annotations.reference_url_error`.
+    """
+    error = reference_annotation_error(
+        annotation, existing, require_complete=existing is None
+    )
+    if error:
+        raise OpError(error)
 
 
 def _union(existing: List[str], incoming: List[str]) -> List[str]:
@@ -503,8 +613,13 @@ class SessionStore:
         ring_size: int = _DEFAULT_RING_SIZE,
         max_activity_records: int = DEFAULT_MAX_ACTIVITY_RECORDS,
         activity_max_age_days: float = DEFAULT_ACTIVITY_MAX_AGE_DAYS,
+        staged_status: Optional[Callable[[str], str]] = None,
     ) -> None:
         self._backend = backend
+        # The staged-session status of an id (`active`, `retired`, `none`),
+        # read from the graph backend's layer store (write_modes.py). None:
+        # no session can ever have been staged, so no id is ever retired.
+        self._staged_status = staged_status
         self._max_annotations = max_annotations
         self._ring_size = ring_size
         self._max_activity_records = max_activity_records
@@ -529,35 +644,84 @@ class SessionStore:
             if (
                 candidate not in self._sessions
                 and self._backend.load(candidate) is None
+                # A staged-session record, active or retired, is an id taken
+                # on the graph whether or not a document exists for it.
+                and (
+                    self._staged_status is None
+                    or self._staged_status(candidate) == "none"
+                )
             ):
                 return candidate
         raise RuntimeError("could not allocate a free session id")
 
-    def create(self, name: Optional[str] = None) -> Session:
+    def _refuse_retired(self, session_id: str) -> None:
+        if self._staged_status is not None and self._staged_status(session_id) == (
+            "retired"
+        ):
+            raise SessionRetired(session_id)
+
+    def create(
+        self,
+        name: Optional[str] = None,
+        *,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+    ) -> Session:
+        """Create a session under a fresh id.
+
+        ``on_allocate`` runs with the id before the document is saved - the
+        staged-session record is written there, so a document never names a
+        staged session the graph backend has no record of. If it raises,
+        nothing is saved.
+        """
         with self._lock:
-            session = Session(id=self._new_id(), name=name)
+            session = Session(
+                id=self._new_id(),
+                name=name,
+                write_mode=write_mode,
+                write_mode_source=write_mode_source,
+            )
+            if on_allocate is not None:
+                on_allocate(session.id)
             self._sessions[session.id] = session
             self._rings[session.id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
             self._meta_cache = None
             return session
 
-    def get_or_create(self, session_id: str) -> "tuple[Session, bool]":
+    def get_or_create(
+        self,
+        session_id: str,
+        *,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+    ) -> "tuple[Session, bool]":
         """Return ``(session, created)``, creating it with the given id if absent.
 
         Supports the connect-by-ID / share-URL flow where a client joins a
         specific session id that may not exist server-side yet (design 3.6).
+        A session created here takes ``write_mode``; ``on_allocate`` runs
+        before its document is saved, as in ``create``.
         """
         if not is_valid_session_id(session_id):
             raise OpError(f"invalid session id: {session_id!r}")
         existing = self.get(session_id)
         if existing is not None:
             return existing, False
+        self._refuse_retired(session_id)
         with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 return existing, False
-            session = Session(id=session_id)
+            session = Session(
+                id=session_id,
+                write_mode=write_mode,
+                write_mode_source=write_mode_source,
+            )
+            if on_allocate is not None:
+                on_allocate(session_id)
             self._sessions[session_id] = session
             self._rings[session_id] = deque(maxlen=self._ring_size)
             self._backend.save(session.to_dict())
@@ -891,6 +1055,7 @@ class SessionStore:
             )
             if not trusted_replay:
                 _require_ingested_image(annotation, existing)
+                _require_safe_reference_target(annotation, existing)
             if existing is not None:
                 # A retried create (lost response, resent batch) carries the same
                 # client-assigned id as the one already applied: upsert so the
@@ -932,7 +1097,6 @@ class SessionStore:
                     "affected": {
                         "kind": "annotation",
                         "id": incoming_id,
-                        "fields": sorted(annotation.keys()),
                     },
                     "before": prior,
                     "after": existing,
@@ -956,7 +1120,6 @@ class SessionStore:
                     "affected": {
                         "kind": "annotation",
                         "id": annotation["id"],
-                        "fields": None,
                     },
                     "before": None,
                     "after": annotation,
@@ -979,6 +1142,7 @@ class SessionStore:
                 )
             if not trusted_replay:
                 _require_ingested_image(incoming, target)
+                _require_safe_reference_target(incoming, target)
 
             # Field-level version check (dec-annotation-field-patches-and-
             # conflicts): computed by *value*, not by key presence, so a
@@ -994,6 +1158,27 @@ class SessionStore:
                 for k in incoming
                 if k not in _ANNOTATION_META_FIELDS and incoming[k] != target.get(k)
             ]
+            # An undo replay carries the pre-update annotation *wholesale*
+            # (only ``undo_last_action`` ever sets trusted_replay=True — see
+            # apply_state_op's docstring): a sparse update (e.g. the MCP patch
+            # path) that ADDED a content field has no counterpart key in that
+            # prior snapshot, so a plain merge could restore/overwrite keys
+            # the snapshot has but could never remove one it lacks — undoing
+            # such an update would leave the added field in place
+            # (smallfix-undo-of-a-field-adding-update-leaves-the-field).
+            # Only the trusted undo-replay path replaces content wholesale; a
+            # normal client update stays a merge, since a browser client
+            # already sends the full annotation on every write (see
+            # ``sessionSyncClient.js``'s ``computeOps``) and so never depended
+            # on the merge to add a key back.
+            removed_fields: List[str] = []
+            if trusted_replay:
+                removed_fields = [
+                    k
+                    for k in target
+                    if k not in _ANNOTATION_META_FIELDS and k not in incoming
+                ]
+                changed_fields = list(changed_fields) + removed_fields
             base_version = op.get("base_version")
             if not trusted_replay and base_version is not None:
                 if not isinstance(base_version, int) or isinstance(base_version, bool):
@@ -1011,6 +1196,8 @@ class SessionStore:
                     )
 
             prior = copy.deepcopy(target)
+            for key in removed_fields:
+                del target[key]
             target.update(incoming)
             new_version = int(prior.get("version") or _INITIAL_ANNOTATION_VERSION) + 1
             target["version"] = new_version
@@ -1023,7 +1210,6 @@ class SessionStore:
                 "affected": {
                     "kind": "annotation",
                     "id": target["id"],
-                    "fields": sorted(incoming.keys()),
                 },
                 "before": prior,
                 "after": target,
@@ -1043,7 +1229,7 @@ class SessionStore:
             applied["annotation_id"] = ann_id
             if removed is not None:
                 activity_kwargs = {
-                    "affected": {"kind": "annotation", "id": ann_id, "fields": None},
+                    "affected": {"kind": "annotation", "id": ann_id},
                     "before": removed,
                     "after": None,
                     "inverse_op": {"op": "annotation_created", "annotation": removed},
@@ -1071,6 +1257,32 @@ class SessionStore:
             if name is not None and not isinstance(name, str):
                 raise OpError("session_renamed 'name' must be a string or null")
             session.name = name
+        elif op_type == "graph_change_staged":
+            # The layer itself lives in the graph backend; the op carries
+            # what changed in it, for every participant's composed view.
+            if not isinstance(op.get("entries"), list) or not isinstance(
+                op.get("removals"), list
+            ):
+                raise OpError("graph_change_staged carries entries and removals")
+        elif op_type in ("graph_changes_discarded", "graph_changes_merged"):
+            removals = op.get("removals")
+            if not isinstance(removals, list):
+                raise OpError(f"{op_type} carries the removed keys")
+            if op_type == "graph_changes_merged" and not isinstance(
+                op.get("merge_id"), str
+            ):
+                raise OpError("graph_changes_merged carries its merge id")
+            activity_kwargs = {
+                "affected": {"kind": "layer", "keys": copy.deepcopy(removals)},
+                "before": None,
+                "after": None,
+                "inverse_op": None,
+            }
+        elif op_type == "write_mode_changed":
+            if op.get("write_mode") != "staged":
+                raise OpError("write_mode_changed only ever moves to staged")
+            session.write_mode = "staged"
+            session.write_mode_source = "explicit"
         elif op_type == "layout_applied":
             positions = op.get("positions")
             if not isinstance(positions, dict):
@@ -1111,7 +1323,7 @@ class SessionStore:
         if (
             record_activity
             and activity_kwargs is not None
-            and op_type in UNDOABLE_OPS
+            and (op_type in UNDOABLE_OPS or op_type in RECORDED_ONLY_OPS)
             and isinstance(actor, str)
             and actor
         ):
@@ -1136,6 +1348,24 @@ class SessionStore:
         """Return the per-session op ring buffer (or None), for batch rollback."""
         return self._rings.get(session_id)
 
+    def restore_ring(
+        self, session_id: str, saved: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Roll the ring back to ``saved``, a ``list(ring)`` taken before an op.
+
+        ``None`` means no ring existed then; ``apply_state_op`` creates one on
+        demand, so the rollback drops it rather than leaving an entry for an op
+        that never committed.
+        """
+        with self._lock:
+            if saved is None:
+                self._rings.pop(session_id, None)
+                return
+            ring = self._rings.get(session_id)
+            if ring is not None:
+                ring.clear()
+                ring.extend(saved)
+
     def ops_since(
         self, session_id: str, since_seq: int
     ) -> Optional[List[Dict[str, Any]]]:
@@ -1159,6 +1389,48 @@ class SessionStore:
         return [op for op in ring if op["seq"] > since_seq]
 
     # ---------------- activity log / undo ----------------
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        """Replace activity attribution in loaded and persisted sessions."""
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            ids = set(self._backend.list_ids())
+            ids.update(self._sessions)
+            for session_id in ids:
+                session = self._sessions.get(session_id)
+                raw = self._backend.load(session_id)
+                # Persisted and loaded copies can differ; scrub both without
+                # saving unrelated in-memory state or normalising old documents.
+                changed_ids = set()
+                if raw is not None:
+                    activity = raw.get("activity_log", [])
+                    cleaned = replace_attribution(
+                        activity, actor_id, replacement_token, envelope="activity"
+                    )
+                    changed_ids.update(
+                        a.get("id", i)
+                        for i, (a, b) in enumerate(zip(activity, cleaned))
+                        if a != b
+                    )
+                    if changed_ids:
+                        raw["activity_log"] = cleaned
+                        self._backend.save(raw)
+                if session is not None:
+                    cleaned = replace_attribution(
+                        session.activity_log,
+                        actor_id,
+                        replacement_token,
+                        envelope="activity",
+                    )
+                    changed_ids.update(
+                        a.get("id", i)
+                        for i, (a, b) in enumerate(zip(session.activity_log, cleaned))
+                        if a != b
+                    )
+                    session.activity_log[:] = cleaned
+                count += len(changed_ids)
+        return count
 
     def list_activity(
         self, session: Session, actor: Optional[str] = None, limit: int = 50

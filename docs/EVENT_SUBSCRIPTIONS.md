@@ -2,6 +2,10 @@
 
 This document describes the event system for graph mutation webhooks.
 
+Embedding code can replace external delivery and observe policy/loop-guard
+diagnostics through the [runtime extension hooks](RUNTIME_EXTENSION_HOOKS.md).
+Internal agent routing and default HTTP URL checks continue to apply.
+
 ## Overview
 
 The event system allows external services to receive notifications when the graph is modified. This enables:
@@ -33,6 +37,15 @@ Every mutation can include context for tracking and loop prevention:
   it as somebody else's work, or the change bounces between instances.
 - `event_session_id`: Unique session identifier
 - `event_correlation_id`: For chaining related events
+- `event_causation_depth`: Server-owned agent hop count, starting at zero
+
+A write that a staged session's merge applies to the graph
+(docs/SESSION_OVERLAY_CONTRACT.md §11.5) fires the same event a direct write
+of it would, once the merge has committed, with `event_origin`
+`session-merge`, `event_correlation_id` set to the merge id, `attribution` of
+the merging actor, and one more key in `origin`: `staged_by`, the actor who
+staged the change. No other event carries `staged_by`. Staging and discarding
+fire no graph event.
 
 ## Event Types
 
@@ -44,7 +57,15 @@ The system generates events for:
 | `node.update` | An existing node was modified |
 | `node.delete` | A node was removed |
 | `edge.create` | A new edge was added |
+| `edge.update` | An existing edge was modified |
 | `edge.delete` | An edge was removed |
+
+A merge import (`POST /api/import/merge`, see
+[DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#committing-a-merge-import)) fires these
+same events, one per entity it writes, with the caller's `x-event-origin` (or
+`graph-import-merge`) as origin — so an agent that lists its own origin in
+`ignore_origins` is not woken by its own merge. A whole-graph replace
+(`POST /api/import`) fires none.
 
 ## Subscription Configuration
 
@@ -102,13 +123,14 @@ Events are delivered as JSON POST requests:
 ```json
 {
   "event_id": "550e8400-e29b-41d4-a716-446655440000",
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "event_type": "node.create",
   "occurred_at": "2024-01-15T10:30:00.000000Z",
   "origin": {
     "event_origin": "web-ui",
     "event_session_id": "session-abc123",
-    "event_correlation_id": null
+    "event_correlation_id": null,
+    "event_causation_depth": 0
   },
   "entity": {
     "kind": "node",
@@ -130,6 +152,14 @@ Events are delivered as JSON POST requests:
   }
 }
 ```
+
+Where an event carries attribution, its `origin.attribution.scope.graph_id`
+is what the request declared, or the process's configured default when it
+declared none (`origin.attribution.scope.source` says where the scope inputs
+as a whole came from). It is not checked against the
+store the write landed in, so read it as "the graph the caller said it was
+addressing", not as proof of which graph changed
+([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)).
 
 The top-level `schema_version` identifies the shape of the event envelope.
 Subscribers should treat it as a contract version: additive changes keep the
@@ -163,11 +193,38 @@ For `node.update` events, both `before` and `after` states are included:
 
 ## Loop Prevention
 
-To prevent infinite loops when agents modify the graph:
+Built-in agents have a default-on guard independent of subscription exclusions:
+
+- Every agent execution increments `origin.event_causation_depth` on its graph
+  writes and preserves the initiating event's correlation ID (or event ID).
+  At depth **8**, the receiving agent pauses before calling the LLM. This bounds
+  both self-retriggering agents and chains across multiple agents.
+- An agent receiving more than **30 events in 60 seconds** pauses. Paused agents
+  reject new events and skip queued work. Their tools stop executing additional
+  actions if the guard trips during a run.
+- `GET /agents/status` exposes `paused` and `pause_reason` in each worker's status. The
+  trip also appears as a failed run with its reason in agent run history. Edit
+  the agent configuration (or disable and enable the agent) to resume. Guard
+  counters and pauses are local to the running process; durable run history
+  retains the trip when a persistent history store is configured.
+
+The depth and origin are set by the server around built-in agent tool calls;
+model-supplied arguments cannot reset the chain. Existing external webhook
+clients can continue using origin and session exclusions:
 
 1. **Set `ignore_origins`**: Configure subscriptions to ignore events from specific sources
 2. **Use unique session IDs**: Each client should use a consistent session ID
 3. **Agent self-exclusion**: Agents should set their origin to `agent:<id>` and exclude themselves
+
+Built-in agents write with the origin `agent:<Agent node id>`, and origins are
+matched exactly, so an agent subscription excludes itself with that exact
+value. Agents created in the web UI before this was fixed stored
+`agent:<prefix>` and `internal://agent/<prefix>` instead (their nodes are
+`<prefix>-node` and `<prefix>-subscription`). The dispatcher repairs that pair
+when it reads the subscription, adding `agent:<prefix>-node` and using
+`internal://agent/<prefix>-node`, without rewriting the stored node; saving
+the agent from its edit dialog stores the node-id form. Other subscriptions,
+and external webhook URLs, are not changed.
 
 Example: An agent subscription that ignores its own changes:
 ```json
@@ -182,6 +239,12 @@ Example: An agent subscription that ignores its own changes:
 ## Retry Policy
 
 Failed webhook deliveries are retried with exponential backoff:
+
+Any 2xx response confirms delivery; its body is closed without reading it, so body
+handling cannot cause a retry of an accepted POST. Requests send
+`Accept-Encoding: identity` on every redirect hop. Compressed non-2xx responses
+are retried without reading or decompressing their bodies; uncompressed error
+bodies are capped at 256 KiB for diagnostics.
 
 | Attempt | Wait Before Retry |
 |---------|-------------------|
@@ -235,7 +298,27 @@ curl -X POST http://localhost:8000/api/nodes \
 
 ### MCP Tools
 
-MCP tools automatically set `event_origin` to "mcp" and accept optional session/correlation IDs.
+Generic MCP mutation tools set `event_origin` to "mcp" and accept optional
+session/correlation IDs. Dedicated create tools also attribute writes to "mcp".
+
+`create_agent(config={"name": "Reviewer", "task_prompt": "Review new initiatives"})`
+creates an enabled Agent, its EventSubscription, and their relationship in one
+write. The server sets `subscription_id`, `internal://agent/<agent-id>`, and the
+matching `ignore_origins` entry using the exact Agent ID. Set `enabled` to false
+in `config` to create it disabled. Agent execution still requires the runtime
+and chosen integrations to be configured, as for agents created in the UI.
+
+The agent status and integration endpoints omit configured integration URLs and
+subprocess commands, which can contain credentials or private host paths. Built-in
+filesystem tools validate the opened workspace directory and keep operations
+relative to it; filesystem errors identify workspace-relative targets without
+exposing the absolute workspace path.
+
+`create_event_subscription` accepts a `config` with `name`, a public HTTP(S)
+`webhook_url`, and optional `filters`, `ignore_origins`, and `ignore_session_ids`.
+It validates operations and delivery before saving; internal subscriptions are
+assembled by `create_agent`. Both tools are also available to the built-in
+assistant and authorize through the same create path as the UI.
 
 ## Web UI
 
@@ -295,14 +378,35 @@ Each agent has an **autonomy level** (`metadata.autonomy_level`) that bounds wha
 its runs may do, enforced at the tool-execution boundary together with the
 agent's optional `tool_allowlist`:
 
-| Level | Mutating tools (add/update/delete nodes/edges, write_file) |
+| Level | Mutating tools (add/update/delete nodes/edges, write_file, attachment writes) |
 |-------|-----------------------------------------------------------|
 | `observe` | Blocked — read-only |
 | `assist` | Blocked — read-only |
 | `propose` | Recorded as a durable **Proposal**; approving does not apply it (a human applies) |
 | `act_after_approval` | Recorded as a durable Proposal; approving **applies** the captured action |
 
-Read-only tools always run (subject to the allowlist). A mutating call under
+Attachment tools additionally require `metadata.attachment_access`:
+
+| Value | Permitted attachment tools |
+|-------|----------------------------|
+| `none` (default) | None, even with an empty allowlist |
+| `read` | `list_node_attachments`, `read_node_attachment`, `search_node_attachments` |
+| `read_write` | Read tools plus `add_node_attachment`, `delete_node_attachment` |
+
+Unknown values log a warning and grant nothing. Federated Agent IDs grant
+nothing. A non-empty `tool_allowlist` must also name each permitted tool using
+its namespaced MCP name; naming a tool alone never grants attachment access.
+The worker reads the current grant from storage before offering tools and again
+before each attachment call. Revoking it therefore blocks the next call, even
+in a running run. Attachment permission checks also apply to workers without
+a proposal store; those workers refuse attachment writes entirely.
+
+Attachment writes follow the autonomy table above: blocked under `observe` and
+`assist`, proposals under `propose` and `act_after_approval`. Every attachment
+call also requires the authorization hook to allow it. These gates do not add
+attachment tool implementations; see [Node attachments](../backend/DEVELOPMENT.md#node-attachments).
+
+Other read-only tools always run (subject to the allowlist). A mutating call under
 `propose` / `act_after_approval` is **not executed** — it becomes a durable
 `Proposal` (tool, arguments, agent, autonomy level, run correlation) with a
 persistent approve/reject decision and attribution. Advanced multi-approver /

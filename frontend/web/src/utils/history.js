@@ -96,8 +96,9 @@ function valuesEqual(a, b) {
  * Compute a compact list of field-level changes for an update entry.
  *
  * The backend supplies a `patch` map ({ changedField: afterValue }) for node
- * updates; before-values are read from the `before` snapshot. Edge updates
- * carry no patch, so we fall back to diffing the before/after snapshots.
+ * and edge updates; before-values are read from the `before` snapshot. A
+ * record without one (written before edge updates carried a patch) falls back
+ * to diffing the before/after snapshots.
  *
  * @param {Object} entry - A history record
  * @returns {Array<{ field: string, before: *, after: * }>}

@@ -6,6 +6,15 @@
  * logic, so they are tracked apart from these overlays.
  */
 
+import {
+  HEATMAP_DEFAULT_DIAMETER,
+  HEATMAP_MAX_INTENSITY,
+  REFERENCE_DEFAULT_SIZE,
+  normalizeHeatmapIntensity,
+  normalizeReferenceTargetKind,
+  referenceTargetProblem,
+} from './annotationModel';
+
 // text/shape/icon/vote_dot/image/freehand are the rest of the v1
 // annotation model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/
 // arrow/group. text/shape/icon/vote_dot/image render through
@@ -31,6 +40,8 @@ export const GENERIC_OVERLAY_TYPES = new Set([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
+  'reference',
 ]);
 export const OVERLAY_TYPES = new Set(['note', 'label', 'arrow', ...GENERIC_OVERLAY_TYPES]);
 export const ANNOTATION_TYPES = new Set([
@@ -44,6 +55,8 @@ export const ANNOTATION_TYPES = new Set([
 // Default box size (px) for a generic overlay that carries explicit
 // dimensions (frame/shape/image) but wasn't given a size.
 const DEFAULT_GENERIC_SIZE = { w: 160, h: 96 };
+
+const HEATMAP_DEFAULT_BOX = { w: HEATMAP_DEFAULT_DIAMETER, h: HEATMAP_DEFAULT_DIAMETER };
 
 // Natural on-canvas size (px) of the two fixed-intrinsic-size kinds that a
 // one-click toolbox creation can usefully default to — matches the CSS box
@@ -72,6 +85,21 @@ export const VOTE_DOT_INTRINSIC_SIZE = { w: 24, h: 24 };
 // callers) is keyed on membership here, not on whether the field happens to
 // be present.
 export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
+
+// Per-target-kind words for a reference's accessible name. Props with
+// English defaults, following this package's own i18n rule (see
+// AnnotationContext.js): the host passes translated values, and the
+// fallbacks here are what a host that passes none gets.
+export const REFERENCE_ARIA_TARGET_LABEL_KEYS = Object.freeze({
+  session: 'ariaKindReferenceSession',
+  url: 'ariaKindReferenceUrl',
+  resource: 'ariaKindReferenceResource',
+});
+export const REFERENCE_ARIA_TARGET_FALLBACKS = Object.freeze({
+  session: 'session',
+  url: 'web page',
+  resource: 'supporting material',
+});
 
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
@@ -133,6 +161,16 @@ const GENERIC_OVERLAY_FIELDS = {
   // migration, to make old data render correctly.
   vote_dot: ['color', 'opacity'],
   image: ['image', 'alt', 'color', 'opacity'],
+  // A heat-map circle's only payload is its whole-number intensity. It has no
+  // colour or opacity of its own: both are derived from the intensity
+  // (heatmapFillStyle below), so the level is the single thing a user sets.
+  heatmap: ['intensity'],
+  // A reference tile's whole payload: what it points at (`target_kind` +
+  // `target`), what it shows (`label`, `icon`, an optional text-only
+  // `preview`) and the shared `opacity`. It has no `color` of its own — the
+  // tile is drawn from its target kind, so a per-tile colour would make two
+  // references to different kinds of thing look alike.
+  reference: ['target_kind', 'target', 'label', 'icon', 'preview', 'opacity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -153,7 +191,7 @@ const GENERIC_OVERLAY_FIELDS = {
 
 // Generic overlay kinds that carry an explicit box size (shape/image);
 // icon/vote_dot/text render at a fixed intrinsic size instead.
-const SIZED_GENERIC_KINDS = new Set(['shape', 'image']);
+const SIZED_GENERIC_KINDS = new Set(['shape', 'image', 'heatmap', 'reference']);
 
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
@@ -257,6 +295,35 @@ export const GENERIC_ANNOTATION_COLORS = Object.freeze([
   '#a855f7',
   '#0f172a',
 ]);
+
+// How a heat-map circle is painted (docs/ANNOTATION_CONTRACT.md's "Heat-map
+// circles"). Every circle is the same red with a radial alpha falloff to fully
+// transparent at its rim, peaking at HEATMAP_PEAK_ALPHA * level / 10 in the
+// centre. Because every circle is the SAME colour, ordinary source-over
+// compositing of two of them is commutative: the combined alpha at a point is
+// 1 - (1 - a1)(1 - a2) whichever is on top. So overlapping circles build one
+// continuous field that only grows denser where they overlap, never an opaque
+// disk, and the picture does not depend on z order or on which client drew
+// which circle first. Level 0 has alpha 0 everywhere: invisible. The peak stays
+// below 1 so graph content under even a level-10 circle remains readable.
+export const HEATMAP_RGB = '220, 38, 38';
+export const HEATMAP_PEAK_ALPHA = 0.85;
+
+export function heatmapPeakAlpha(intensity) {
+  return (HEATMAP_PEAK_ALPHA * normalizeHeatmapIntensity(intensity)) / HEATMAP_MAX_INTENSITY;
+}
+
+// `closest-side` makes the gradient a circle of radius min(w, h) / 2 centred in
+// the box, so a box that is not square still draws a circle, never an ellipse.
+export function heatmapFillStyle(intensity) {
+  const peak = heatmapPeakAlpha(intensity);
+  const mid = Number((peak * 0.55).toFixed(4));
+  return {
+    backgroundImage:
+      `radial-gradient(circle closest-side, rgba(${HEATMAP_RGB}, ${Number(peak.toFixed(4))}) 0%, ` +
+      `rgba(${HEATMAP_RGB}, ${mid}) 50%, rgba(${HEATMAP_RGB}, 0) 100%)`,
+  };
+}
 
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
@@ -416,6 +483,10 @@ export function isAnnotationDraggable(node) {
   return true;
 }
 
+export function withAnnotationDraggability(node, data = node?.data) {
+  return { ...node, data, draggable: isAnnotationDraggable({ ...node, data }) };
+}
+
 // Build a ReactFlow node for a note/label/arrow overlay from the host's
 // canvas-shape annotation ({id, kind, position, ...payload}).
 export function overlayToFlowNode(overlay) {
@@ -469,31 +540,42 @@ export function overlayToFlowNode(overlay) {
     };
   }
   if (overlay.kind === 'label') {
-    return {
-      ...base,
-      data: {
-        text: overlay.text || '',
-        color: overlay.color,
-        fontSize: overlay.fontSize,
-        attachment: overlay.attachment,
-        opacity: overlay.opacity,
-        locked,
-        rotation,
-        version,
-        field_versions: fieldVersions,
-      },
-      draggable: !locked,
-      zIndex,
+    const data = {
+      text: overlay.text || '',
+      color: overlay.color,
+      fontSize: overlay.fontSize,
+      attachment: overlay.attachment,
+      opacity: overlay.opacity,
+      locked,
+      rotation,
+      version,
+      field_versions: fieldVersions,
     };
+    // geometry.w/h passthrough only — same `data.size` slot and same reason
+    // as the unsized GENERIC_OVERLAY_TYPES kinds below
+    // (smallfix-annotation-unsized-generic-geometry-clobber): a label has no
+    // `style` box or resize handles (it draws at its own text size), but the
+    // stored value must still survive a hydrate -> autosave round trip.
+    if (overlay.size) data.size = overlay.size;
+    // Style keys the canvas has no control for, passthrough only — see
+    // extraStyleOf in the host's sessionAnnotations.js.
+    if (overlay.extraStyle) data.extraStyle = overlay.extraStyle;
+    return { ...base, data, draggable: !locked, zIndex };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
     const data = { locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
+      const fallback =
+        overlay.kind === 'heatmap'
+          ? HEATMAP_DEFAULT_BOX
+          : overlay.kind === 'reference'
+            ? REFERENCE_DEFAULT_SIZE
+            : DEFAULT_GENERIC_SIZE;
       node.style = overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
-        : { width: DEFAULT_GENERIC_SIZE.w, height: DEFAULT_GENERIC_SIZE.h };
+        : { width: fallback.w, height: fallback.h };
     } else if (overlay.size) {
       // icon/vote_dot/text draw at a fixed intrinsic size (no `style` box, no
       // NodeResizer — RESIZABLE_KINDS in GenericAnnotationNode.jsx), but
@@ -537,6 +619,12 @@ export function overlayToFlowNode(overlay) {
   // spurious `start`/`end` field.
   if (overlay.start?.attachment) data.start = overlay.start;
   if (overlay.end?.attachment) data.end = overlay.end;
+  // geometry.w/h passthrough only — same reasoning as label's `data.size`
+  // above: an arrow/line's shape is entirely dx/dy, never this field, but
+  // the stored value must still survive the hydrate -> autosave round trip.
+  if (overlay.size) data.size = overlay.size;
+  // Same extraStyle passthrough as label above.
+  if (overlay.extraStyle) data.extraStyle = overlay.extraStyle;
   return { ...base, data, draggable: !locked && !isArrowAnchored(data), zIndex };
 }
 
@@ -571,7 +659,7 @@ export function flowNodeToOverlay(node) {
     };
   }
   if (node.type === 'label') {
-    return {
+    const out = {
       ...base,
       text: node.data?.text || '',
       color: node.data?.color,
@@ -584,6 +672,10 @@ export function flowNodeToOverlay(node) {
       version,
       field_versions: fieldVersions,
     };
+    // Mirrors overlayToFlowNode's `data.size` slot for label above.
+    if (node.data?.size) out.size = node.data.size;
+    if (node.data?.extraStyle) out.extraStyle = node.data.extraStyle;
+    return out;
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
     const out = { ...base, z, locked, rotation, version, field_versions: fieldVersions };
@@ -617,6 +709,9 @@ export function flowNodeToOverlay(node) {
   // Mirrors overlayToFlowNode's start/end passthrough above; see its comment.
   if (node.data?.start?.attachment) out.start = node.data.start;
   if (node.data?.end?.attachment) out.end = node.data.end;
+  // Mirrors overlayToFlowNode's `data.size` slot for arrow/line above.
+  if (node.data?.size) out.size = node.data.size;
+  if (node.data?.extraStyle) out.extraStyle = node.data.extraStyle;
   return out;
 }
 
@@ -806,7 +901,7 @@ export function isEligibleAttachTarget(node, selfId) {
 // precedent of GenericAnnotationNode.jsx's own shape/icon picker buttons
 // (`aria-label={name}`) — this file adds no new translation surface for
 // vocabulary that was already untranslated elsewhere in the same menu.
-export function computeAnnotationAriaLabel(kind, data, labels = {}) {
+export function computeAnnotationAriaLabel(kind, data, labels = {}, options = {}) {
   const d = data || {};
   const withDetail = (kindWord, detail) => (detail ? `${kindWord}, ${detail}` : kindWord);
   const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
@@ -828,6 +923,40 @@ export function computeAnnotationAriaLabel(kind, data, labels = {}) {
     }
     case 'vote_dot':
       return labels.ariaKindVoteDot || 'Vote dot';
+    case 'heatmap': {
+      // The level is part of the name, not a detail behind a hover: it is the
+      // only thing a heat-map circle says, and a screen-reader user or anyone
+      // who cannot tell the shades of red apart must get it without the colour.
+      const level = normalizeHeatmapIntensity(d.intensity);
+      const template = labels.ariaKindHeatmap || 'Heat-map circle, intensity {level} of {max}';
+      return template.replace('{level}', level).replace('{max}', HEATMAP_MAX_INTENSITY);
+    }
+    case 'reference': {
+      // The accessible name must say three things a sighted user reads off
+      // the tile at a glance: that it is a link, what kind of thing it
+      // points at, and — when it cannot be followed — that it is broken.
+      // Leaving the broken state out of the name would make a dead tile
+      // indistinguishable from a live one without the colour.
+      const kindWord = labels.ariaKindReference || 'Reference';
+      const targetKind = normalizeReferenceTargetKind(d.target_kind);
+      const targetWord =
+        (targetKind && labels[REFERENCE_ARIA_TARGET_LABEL_KEYS[targetKind]]) ||
+        (targetKind ? REFERENCE_ARIA_TARGET_FALLBACKS[targetKind] : '');
+      const name = targetWord ? `${kindWord}, ${targetWord}` : kindWord;
+      const detail = text(d.label) || text(d.target);
+      const named = withDetail(name, detail);
+      // `hostBroken` is the fourth broken condition in
+      // docs/ANNOTATION_CONTRACT.md's "Broken targets" list — the one only the
+      // host can answer. Without it the name said "broken" for the three
+      // structural cases and stayed silent for the host-reported one, so a
+      // screen reader announced a live reference for a tile drawn dashed with
+      // no open control: exactly the colour-only signal the name exists to
+      // avoid, and contrary to what the contract and the user guide both
+      // promise (round 2 of the review loop).
+      return referenceTargetProblem(d) || options.hostBroken
+        ? `${named}, ${labels.ariaKindReferenceBroken || 'broken target'}`
+        : named;
+    }
     case 'image':
       return withDetail(labels.ariaKindImage || 'Image', text(d.alt));
     case 'arrow':

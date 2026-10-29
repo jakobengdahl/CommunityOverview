@@ -16,7 +16,14 @@ import re
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from backend.runtime.config_context import (
     resolve_federation_config_path_info,
@@ -136,6 +143,10 @@ class NodeTypeConfig(BaseModel):
     context_menu: List[Dict[str, Any]] = Field(
         default_factory=list
     )  # Extra right-click menu items
+    # Gates attachment uploads only; listing, download and delete stay
+    # available so turning it off never strands files already attached
+    # (ADR 0008 section 7).
+    allows_attachments: bool = False
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -266,6 +277,15 @@ class CapabilityConfig(BaseModel):
     name: str
     description: str = ""
     enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_name_to_id(cls, data: Any) -> Any:
+        # `name` is display text; an override written as just
+        # {"id": ..., "enabled": false} must still take effect.
+        if isinstance(data, dict) and not data.get("name") and "id" in data:
+            return {**data, "name": data["id"]}
+        return data
 
 
 class RuntimeMetadataConfig(BaseModel):
@@ -431,12 +451,17 @@ class ConfigLoader:
     def _load_config(self) -> None:
         """Load and validate the configuration file."""
         self._config_path = self._get_config_path()
+        self._dropped_capability_ids = set()
+        raw_config = None
 
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self._sanitize_node_types(raw_config)
+            self._sanitize_relationship_types(raw_config)
             self._sanitize_rest_interfaces(raw_config)
+            self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
             self._config = SchemaFileConfig(**raw_config)
             logger.info(f"Loaded schema configuration from: {self._config_path}")
 
@@ -453,11 +478,97 @@ class ConfigLoader:
         except Exception as e:
             logger.warning(f"Error loading config: {e}, using defaults")
             self._config = SchemaFileConfig()
+            self._keep_capabilities_through_fallback(raw_config)
 
         # Strip system node types that may be defined in the config file (backward compat).
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
         self._strip_system_types_from_config()
         self._apply_system_types()
+
+    @staticmethod
+    def _sanitize_node_types(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``schema.node_types`` entries in place before validation.
+
+        ``SchemaConfig.convert_node_types`` builds each ``NodeTypeConfig`` itself,
+        so one wrong-typed field (``"allows_attachments": "ture"``) would fail the
+        whole file and revert every declared node *and* relationship type to the
+        defaults — and pydantic's error would not even say which type was bad.
+        Validating each entry here drops only that type and names it.
+        """
+        schema = raw_config.get("schema")
+        if not isinstance(schema, dict):
+            return
+        if "node_types" not in schema:
+            return
+        raw = schema["node_types"]
+        if not isinstance(raw, dict):
+            logger.warning(
+                "schema.node_types must be an object, got %s — ignoring",
+                type(raw).__name__,
+            )
+            schema["node_types"] = {}
+            return
+        valid: Dict[str, Any] = {}
+        for type_name, entry in raw.items():
+            try:
+                NodeTypeConfig.model_validate(entry)
+            except ValidationError as exc:
+                logger.warning(
+                    "Skipping invalid schema.node_types[%r]%s: %s",
+                    type_name,
+                    (
+                        " (system node types are managed by code — remove it "
+                        "from your config file)"
+                        if type_name in SYSTEM_NODE_TYPES
+                        else ""
+                    ),
+                    exc,
+                )
+                continue
+            valid[type_name] = entry
+        schema["node_types"] = valid
+
+    @staticmethod
+    def _sanitize_relationship_types(raw_config: Dict[str, Any]) -> None:
+        """Drop malformed ``schema.relationship_types`` entries in place.
+
+        Same hazard as ``_sanitize_node_types``: one wrong-typed field or a
+        non-object entry would fail ``SchemaFileConfig`` as a unit and revert
+        every declared node and relationship type to the defaults.
+        """
+        schema = raw_config.get("schema")
+        if not isinstance(schema, dict):
+            return
+        if "relationship_types" not in schema:
+            return
+        raw = schema["relationship_types"]
+        if not isinstance(raw, dict):
+            logger.warning(
+                "schema.relationship_types must be an object, got %s — ignoring",
+                type(raw).__name__,
+            )
+            schema["relationship_types"] = {}
+            return
+        valid: Dict[str, Any] = {}
+        for type_name, entry in raw.items():
+            try:
+                RelationshipTypeConfig.model_validate(entry)
+            except ValidationError as exc:
+                fields = sorted(
+                    {
+                        ".".join(str(p) for p in err["loc"]) or "<entry>"
+                        for err in exc.errors()
+                    }
+                )
+                logger.warning(
+                    "Skipping invalid schema.relationship_types[%r] (field(s) %s): %s",
+                    type_name,
+                    ", ".join(fields),
+                    exc,
+                )
+                continue
+            valid[type_name] = entry
+        schema["relationship_types"] = valid
 
     @staticmethod
     def _sanitize_rest_interfaces(raw_config: Dict[str, Any]) -> None:
@@ -471,9 +582,9 @@ class ConfigLoader:
         ones keeps one typo from nuking the entire config, matching the per-entry
         graceful skipping the router already does for missing node_type/edge_type.
         """
-        raw = raw_config.get("rest_interfaces")
-        if raw is None:
+        if "rest_interfaces" not in raw_config:
             return
+        raw = raw_config["rest_interfaces"]
         if not isinstance(raw, list):
             logger.warning(
                 "rest_interfaces must be a list, got %s — ignoring", type(raw).__name__
@@ -491,6 +602,70 @@ class ConfigLoader:
                 continue
             valid.append(entry)
         raw_config["rest_interfaces"] = valid
+
+    @staticmethod
+    def _sanitize_capabilities(raw_config: Dict[str, Any]) -> set:
+        """Drop malformed ``presentation.capabilities`` entries in place.
+
+        Same hazard as ``_sanitize_rest_interfaces``: one bad entry would
+        otherwise fail the whole config and revert it to defaults. Returns the
+        string ids of dropped entries so a server-default capability the
+        deployment tried to override is not reported as enabled regardless.
+        """
+        presentation = raw_config.get("presentation")
+        if not isinstance(presentation, dict):
+            return set()
+        raw = presentation.get("capabilities")
+        if raw is None:
+            return set()
+        if not isinstance(raw, list):
+            logger.warning(
+                "presentation.capabilities must be a list, got %s — ignoring",
+                type(raw).__name__,
+            )
+            presentation["capabilities"] = []
+            if not isinstance(raw, dict):
+                return set()
+            # Either a single entry or an id-keyed mapping; both declare ids.
+            if isinstance(raw.get("id"), str):
+                return {raw["id"]}
+            return {key for key in raw if isinstance(key, str)}
+        valid: List[Any] = []
+        dropped_ids = set()
+        for index, entry in enumerate(raw):
+            try:
+                CapabilityConfig.model_validate(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid presentation.capabilities[%d] (%r): %s",
+                    index,
+                    entry,
+                    exc,
+                )
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                    dropped_ids.add(entry["id"])
+                continue
+            valid.append(entry)
+        presentation["capabilities"] = valid
+        return dropped_ids
+
+    def _keep_capabilities_through_fallback(self, raw_config: Any) -> None:
+        """Carry the deployment's capability entries into the default config.
+
+        An unrelated fatal error must not turn a valid override such as
+        ``{"id": "animated_layout", "enabled": false}`` back into the enabled
+        server default.
+        """
+        if not isinstance(raw_config, dict):
+            return
+        self._dropped_capability_ids |= self._sanitize_capabilities(raw_config)
+        presentation = raw_config.get("presentation")
+        if not isinstance(presentation, dict):
+            return
+        self._config.presentation.capabilities = [
+            CapabilityConfig.model_validate(entry)
+            for entry in presentation.get("capabilities") or []
+        ]
 
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
@@ -537,6 +712,16 @@ class ConfigLoader:
         return self._config
 
     @property
+    def dropped_capability_ids(self) -> set:
+        """Ids of capability entries the config declared but that failed validation."""
+        return self._dropped_capability_ids
+
+    @property
+    def declared_capabilities(self) -> List[CapabilityConfig]:
+        """Capability entries the deployment's config declared and that validated."""
+        return self._config.presentation.capabilities
+
+    @property
     def config_path(self) -> str:
         """Get the path to the loaded config file."""
         return self._config_path
@@ -577,6 +762,7 @@ def get_schema() -> Dict[str, Any]:
                 "ui_form": cfg.ui_form,
                 "labels": cfg.labels,
                 "context_menu": cfg.context_menu,
+                "allows_attachments": cfg.allows_attachments,
             }
             for name, cfg in schema.node_types.items()
         },
@@ -592,12 +778,18 @@ def get_schema() -> Dict[str, Any]:
 
 
 def relationship_type_allows_node_types(
-    relationship_type: str, source_type: str, target_type: str
+    relationship_type: str,
+    source_type: str,
+    target_type: str,
+    source_subtypes: list[str] | None = None,
+    target_subtypes: list[str] | None = None,
 ) -> Dict[str, Any]:
     """Validate relationship type applicability for a directed source->target pair.
 
     Missing source_types/target_types rules are intentionally permissive for
     backward compatibility. A "*" entry on either side also permits any node type.
+    Profile rules may name either a concrete node type or one of that node's
+    subtypes.
     """
     schema = _get_loader().config.schema_
     config = schema.relationship_types.get(relationship_type)
@@ -612,11 +804,17 @@ def relationship_type_allows_node_types(
     if not source_rules and not target_rules:
         return {"allowed": True, "message": ""}
 
+    source_candidates = {source_type, *(source_subtypes or [])}
+    target_candidates = {target_type, *(target_subtypes or [])}
     source_allowed = (
-        not source_rules or "*" in source_rules or source_type in source_rules
+        not source_rules
+        or "*" in source_rules
+        or bool(source_candidates.intersection(source_rules))
     )
     target_allowed = (
-        not target_rules or "*" in target_rules or target_type in target_rules
+        not target_rules
+        or "*" in target_rules
+        or bool(target_candidates.intersection(target_rules))
     )
 
     if source_allowed and target_allowed:
@@ -677,7 +875,7 @@ def get_presentation() -> Dict[str, Any]:
         "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
-        "capabilities": [capability.model_dump() for capability in pres.capabilities],
+        "capabilities": get_capabilities()["capabilities"],
         "guides": [guide.model_dump() for guide in pres.guides],
         "ui": loader.config.ui.model_dump(),
     }
@@ -691,10 +889,9 @@ def get_presentation() -> Dict[str, Any]:
 #
 #     {"id": "animated_layout", "name": "Animated layout", "enabled": false}
 #
-# `name` is required by CapabilityConfig — omitting it fails validation for the
-# whole schema config, not just this entry, and the deployment then falls back to
-# defaults (including this capability reporting enabled) with nothing but a
-# logged warning to say so.
+# `name` may be omitted and then defaults to the id. An entry for this id that is
+# otherwise invalid is dropped on its own, and the capability is then reported
+# disabled rather than falling back to this default.
 _ANIMATED_LAYOUT_CAPABILITY = CapabilityConfig(
     id="animated_layout",
     name="Animated layout",
@@ -715,17 +912,26 @@ def get_capabilities() -> Dict[str, Any]:
     Deployment-declared capabilities come first, in config order; a server-known
     default (see ``_ANIMATED_LAYOUT_CAPABILITY``) is appended only when the
     config does not already declare that id, so a deployment always keeps the
-    last word on its own capabilities.
+    last word on its own capabilities. A default whose id the config declared
+    in an entry that failed validation is reported disabled, so a broken
+    override never reads as the enabled default.
     """
     loader = _get_loader()
     capabilities = [
-        capability.model_dump()
-        for capability in loader.config.presentation.capabilities
+        capability.model_dump() for capability in loader.declared_capabilities
     ]
     declared_ids = {capability.get("id") for capability in capabilities}
     if _ANIMATED_LAYOUT_CAPABILITY.id not in declared_ids:
-        capabilities.append(_ANIMATED_LAYOUT_CAPABILITY.model_dump())
+        default = _ANIMATED_LAYOUT_CAPABILITY.model_dump()
+        if _ANIMATED_LAYOUT_CAPABILITY.id in loader.dropped_capability_ids:
+            default["enabled"] = False
+        capabilities.append(default)
     return {"capabilities": capabilities}
+
+
+def get_declared_capability_count() -> int:
+    """Number of capabilities the deployment's config declared, defaults excluded."""
+    return len(_get_loader().declared_capabilities)
 
 
 def _normalize_runtime_mode(runtime_mode: Optional[str]) -> str:

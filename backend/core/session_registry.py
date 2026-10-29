@@ -1,16 +1,20 @@
 """
 Visualization Session Registry.
 
-Manages short-lived browser sessions that external AI clients can push
-visualization commands to via MCP.  Each session is identified by a
-short ID generated in the browser (e.g. "8244-1742") and backed by an
-asyncio.Queue.  The browser holds an SSE connection open; when an MCP
-tool pushes a command to the queue the browser receives it immediately.
+Manages browser sessions that external AI clients can push visualization
+commands to via MCP.  Each session is identified by a short ID generated in
+the browser (e.g. "8244-1742") and backed by a bounded asyncio.Queue.  While
+a browser holds the session's SSE connection open it receives a pushed
+command immediately.  While nothing holds it, the command waits in the queue
+(oldest dropped first once full), and a browser that opens the session before
+the entry is evicted drains it and may apply it then.
 
 This registry is the MCP *push* channel only.  Session *state* (what the
 browser is showing) is owned by the shared-session store
 (``core.session_store``); MCP query tools read it from there.  A registry
-entry simply signals that a browser is connected to receive pushes.
+entry holds a session's push queue; it does not mean a browser is connected.
+Whether anything is draining that queue is ``has_consumer`` (see "Entries vs.
+consumers" below).
 
 Thread-safety notes
 -------------------
@@ -23,6 +27,18 @@ The call_soon_threadsafe fallback path exists as a safety net for
 callers that genuinely run in a separate thread (e.g. background workers
 or future framework changes).  In that case the loop reference injected
 at startup via set_event_loop() is used instead.
+
+Entries vs. consumers
+---------------------
+A session entry says only that some id has been registered: ``get_or_create``
+creates one, and callers that merely want the session to survive the periodic
+prune (``mint_trigger_token``, the session auto-add tools) create one with no
+browser anywhere.  Nothing removes an entry when the SSE connection closes, and
+every push refreshes ``last_seen`` so TTL eviction never reclaims a session that
+is being pushed to.  So an entry outlives its browser indefinitely and cannot
+support a claim that a push will be read.  ``has_consumer`` answers that
+question instead, ref-counted by ``stream`` for as long as something is actually
+draining the queue.
 
 Single-consumer design (V1 known limitation)
 --------------------------------------------
@@ -51,19 +67,29 @@ _SESSION_TTL = 3600  # seconds — sessions not updated for this long are evicte
 # drains that session's queue; every subsequent MCP-tool or pulse push would grow
 # an unbounded queue for the session's lifetime (and each push refreshes
 # last_seen, so TTL eviction never reclaims it). Bounding the queue with
-# drop-oldest keeps memory finite while preserving the legacy→op handover window:
-# a legacy consumer that (re)connects within the window still receives the most
-# recent commands. The window is sub-second (design §8.1 R5), so this bound is far
-# larger than any legitimate pre-connect buffer.
+# drop-oldest keeps memory finite while still replaying the most recent commands
+# to a legacy consumer that connects later — whether within the sub-second
+# legacy→op handover (design §8.1 R5) or up to _SESSION_TTL after the last push,
+# when a browser opens a session that was pushed to while nothing was draining it.
 _MAX_QUEUE_SIZE = 1000
 
 
 class SessionRegistry:
-    """In-memory registry of active browser visualization sessions."""
+    """In-memory registry of visualization-session push queues.
+
+    An entry is a queue that may hold commands for a browser that has not opened
+    the session yet; it does not mean a browser is connected (see
+    ``has_consumer``).
+    """
 
     def __init__(self) -> None:
         self._sessions: Dict[str, dict] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # How many consumers are currently draining each session's queue.
+        # Deliberately not stored in the session entry: TTL eviction can drop
+        # and re-create that entry under a consumer that never left, which would
+        # reset the count while the consumer is still there.
+        self._consumers: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Event-loop injection
@@ -79,7 +105,7 @@ class SessionRegistry:
 
     @staticmethod
     def is_valid_session_id(session_id: str) -> bool:
-        return bool(SESSION_ID_RE.match(session_id))
+        return bool(SESSION_ID_RE.fullmatch(session_id))
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -124,6 +150,24 @@ class SessionRegistry:
 
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
+
+    def consumer_count(self, session_id: str) -> int:
+        """How many consumers are currently draining this session's queue.
+
+        A registry *entry* answers a different question and must not be read as
+        this one. An entry is created by ``get_or_create`` — including from
+        ``mint_trigger_token`` and the session auto-add tools, with no browser
+        involved — nothing removes it when the SSE connection closes, and every
+        push refreshes ``last_seen``, so ``cleanup_stale`` never reclaims a
+        session that is being pushed to. An entry therefore outlives the browser
+        that created it indefinitely, which is why "a command was enqueued" is
+        not evidence that anything will read it.
+        """
+        return self._consumers.get(session_id, 0)
+
+    def has_consumer(self, session_id: str) -> bool:
+        """True while something is draining this session's queue."""
+        return self.consumer_count(session_id) > 0
 
     # ------------------------------------------------------------------
     # Pulse-trigger tokens
@@ -222,21 +266,32 @@ class SessionRegistry:
         blocked on an orphaned queue.
         """
         self.get_or_create(session_id)
-        while True:
-            # Re-anchor to the current session entry in case it was evicted and
-            # re-created since the previous iteration.
-            if session_id not in self._sessions:
-                self.get_or_create(session_id)
-            queue = self._sessions[session_id]["queue"]
-            try:
-                command = await asyncio.wait_for(queue.get(), timeout=25.0)
-                self._touch(session_id)
-                yield command
-            except asyncio.TimeoutError:
-                # Keep the session alive while the SSE connection is open,
-                # even when the canvas hasn't changed (no state uploads).
-                self._touch(session_id)
-                yield {"type": "ping"}
+        # Registering the consumer is what makes a push to this session
+        # verifiable as delivered; the ``finally`` releases it when the caller
+        # stops iterating, which for the SSE route is the connection closing.
+        self._consumers[session_id] = self._consumers.get(session_id, 0) + 1
+        try:
+            while True:
+                # Re-anchor to the current session entry in case it was evicted
+                # and re-created since the previous iteration.
+                if session_id not in self._sessions:
+                    self.get_or_create(session_id)
+                queue = self._sessions[session_id]["queue"]
+                try:
+                    command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    self._touch(session_id)
+                    yield command
+                except asyncio.TimeoutError:
+                    # Keep the session alive while the SSE connection is open,
+                    # even when the canvas hasn't changed (no state uploads).
+                    self._touch(session_id)
+                    yield {"type": "ping"}
+        finally:
+            remaining = self._consumers.get(session_id, 0) - 1
+            if remaining > 0:
+                self._consumers[session_id] = remaining
+            else:
+                self._consumers.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Maintenance

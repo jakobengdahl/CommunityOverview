@@ -6,7 +6,7 @@ import {
   DEFAULT_NOTE_FONT_SIZE,
   rotationStyle,
   isRemoteLocked,
-  isAnnotationDraggable,
+  withAnnotationDraggability,
   remoteEditBadge,
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
@@ -150,7 +150,7 @@ function NoteNode({ id, data = {}, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, locked: false };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        return withAnnotationDraggability(n, nextData);
       })
     );
     setContextMenu(null);

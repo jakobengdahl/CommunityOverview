@@ -23,7 +23,11 @@ Usage:
     app = create_app(config)
 """
 
+import contextlib
 import logging
+import threading
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -39,16 +43,28 @@ from backend.core.session_auto_add import (
     SessionAutoAddRegistry,
     build_node_create_listener,
 )
+from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.session_manager import SessionManager
+from backend.core.write_modes import WriteModes
 
 from backend.core import GraphStorage
+from backend.runtime.authorization import GraphAuthorizationHook
+from backend.runtime.extensions import (
+    RuntimeExtensions,
+    bind_runtime_extensions,
+    get_runtime_extensions,
+)
 from backend.service import GraphService, create_rest_router, register_mcp_tools
+from backend.service.json_response import install_error_handlers
 from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
+from backend.agents.execution import SqliteExecutionStore
+from backend.agents.execution.import_worker import recover_import_jobs
 from backend.federation import (
+    FederationFileConfig,
     FederationManager,
     load_federation_config,
     summarize_federation_config,
@@ -57,8 +73,20 @@ from backend.federation import (
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
 from .logging_config import configure_root_logging
-from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
+from .middleware import (
+    RuntimeExtensionsMiddleware,
+    add_auth_middleware,
+    add_cors_middleware,
+    compute_auth_active,
+)
 from .mcp_mount import build_mcp_instructions, mount_mcp
+from .attachments import build_attachment_settings
+from .persistence import (
+    PersistenceConfigurationError,
+    build_persistence_backend,
+    build_session_settings,
+)
+from .session_binding import add_session_binding_middleware
 from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
@@ -67,38 +95,79 @@ from .agent_routes import register_agent_routes
 logger = logging.getLogger(__name__)
 
 
-def create_app(
-    config: Optional[AppConfig] = None,
-    graph_storage: Optional[GraphStorage] = None,
-) -> FastAPI:
+@dataclass(frozen=True)
+class AppRuntime:
+    """Started graph collaborators shared by HTTP and worker-only applications.
+
+    Composition is fixed at construction. The caller owns shutdown via stop().
     """
-    Create and configure the FastAPI application.
 
-    Args:
-        config: Optional configuration object. If None, uses defaults from environment.
-        graph_storage: Optional pre-configured GraphStorage instance.
-                      If None, creates one based on config.
+    config: AppConfig
+    graph_storage: GraphStorage
+    graph_service: GraphService
+    runtime_extensions: RuntimeExtensions
+    federation_config: FederationFileConfig
+    federation_summary: dict
+    federation_manager: FederationManager
+    agent_registry: AgentRegistry
 
-    Returns:
-        Configured FastAPI application with REST API, MCP tools, and static file serving.
-    """
-    if config is None:
-        config = AppConfig.from_env()
+    def stop(self) -> None:
+        """Stop background work and flush storage."""
+        self.federation_manager.stop()
+        self.agent_registry.stop()
+        self.graph_storage.shutdown_events()
 
-    configure_root_logging(config.log_format)
+    def run_function(self, runner, spec, broker, envelope, **kwargs):
+        """Run a user function with this runtime's fixed extensions."""
+        from backend.functions.runner import run_function
 
-    app = FastAPI(
-        title="Community Knowledge Graph",
-        description="REST API and MCP server for community knowledge graph operations",
-        version="1.0.0",
+        return run_function(
+            runner,
+            spec,
+            broker,
+            envelope,
+            runtime_extensions=self.runtime_extensions,
+            **kwargs,
+        )
+
+
+def _select_extensions(graph_storage, runtime_extensions):
+    if graph_storage is not None:
+        configured = graph_storage.runtime_extensions
+        if runtime_extensions is not None and configured is not runtime_extensions:
+            raise ValueError(
+                "Pre-built storage must already use the supplied runtime_extensions; "
+                "extensions cannot be replaced after construction"
+            )
+        return configured
+    return (
+        runtime_extensions
+        if runtime_extensions is not None
+        else get_runtime_extensions()
     )
 
-    # Middleware order matters: auth is installed first so CORS (added next)
-    # wraps it as the outermost layer, letting preflight requests through.
-    _auth_active = compute_auth_active(config)
-    add_auth_middleware(app, config)
-    add_cors_middleware(app, config)
 
+def create_worker_runtime(
+    config: Optional[AppConfig] = None,
+    graph_storage: Optional[GraphStorage] = None,
+    *,
+    authorization_hook: Optional[GraphAuthorizationHook] = None,
+    runtime_extensions: Optional[RuntimeExtensions] = None,
+) -> AppRuntime:
+    """Start graph, federation, events and agents without constructing HTTP routes.
+
+    Accepts the same collaborators as create_app(). Call stop() on shutdown.
+    """
+    config = config if config is not None else AppConfig.from_env()
+    extensions = _select_extensions(graph_storage, runtime_extensions)
+    configure_root_logging(config.log_format)
+    with bind_runtime_extensions(extensions):
+        return _build_runtime(config, graph_storage, authorization_hook, extensions)
+
+
+def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions):
+    # Extensions are bound before any store, delivery worker or registry is built.
+    # Storage receives them explicitly; dispatchers and agent workers inherit them.
     federation_config = load_federation_config()
     federation_summary = summarize_federation_config(federation_config)
 
@@ -111,6 +180,8 @@ def create_app(
             embeddings_path=str(embeddings_path) if embeddings_path else None,
             history_max_events=config.history_max_events,
             history_max_age_days=config.history_max_age_days,
+            persistence_backend=build_persistence_backend(config),
+            runtime_extensions=runtime_extensions,
         )
 
     def _on_federated_node_event(operation, before_node, after_node):
@@ -139,7 +210,12 @@ def create_app(
     graph_storage.setup_events(enabled=True)
 
     # Initialize GraphService
-    graph_service = GraphService(graph_storage, federation_manager=federation_manager)
+    graph_service = GraphService(
+        graph_storage,
+        federation_manager=federation_manager,
+        authorization_hook=authorization_hook,
+        attachment_settings=build_attachment_settings(config, graph_storage),
+    )
 
     # Run federation startup sync (best effort, never blocks startup on failures)
     federation_manager.sync_on_startup()
@@ -185,6 +261,105 @@ def create_app(
 
     graph_storage.add_system_listener(agent_lifecycle_listener)
 
+    return AppRuntime(
+        config=config,
+        graph_storage=graph_storage,
+        graph_service=graph_service,
+        runtime_extensions=runtime_extensions,
+        federation_config=federation_config,
+        federation_summary=federation_summary,
+        federation_manager=federation_manager,
+        agent_registry=agent_registry,
+    )
+
+
+def create_app(
+    config: Optional[AppConfig] = None,
+    graph_storage: Optional[GraphStorage] = None,
+    *,
+    authorization_hook: Optional[GraphAuthorizationHook] = None,
+    runtime_extensions: Optional[RuntimeExtensions] = None,
+) -> FastAPI:
+    """
+    Create and configure the FastAPI application.
+
+    Args:
+        config: Optional configuration object. If None, uses defaults from environment.
+        graph_storage: Optional pre-configured GraphStorage instance.
+                      If None, creates one based on config. Pre-built storage must
+                      already carry runtime_extensions when both are supplied.
+        authorization_hook: Graph access decisions for the constructed GraphService.
+        runtime_extensions: Fixed collaborators selected before any construction.
+
+    Returns:
+        Configured FastAPI application with REST API, MCP tools, and static file serving.
+    """
+    config = config if config is not None else AppConfig.from_env()
+    if config.mcp_attachment_tools != "off" and (
+        not compute_auth_active(config) or config.mcp_auth_enabled is False
+    ):
+        raise ValueError("MCP_ATTACHMENT_TOOLS requires authenticated MCP paths")
+    extensions = _select_extensions(graph_storage, runtime_extensions)
+    configure_root_logging(config.log_format)
+    # Bind only for construction; do not change the process default. Background
+    # work retains the explicit instance via storage or AppRuntime.run_function().
+    with bind_runtime_extensions(extensions):
+        return _create_app(config, graph_storage, authorization_hook, extensions)
+
+
+def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
+    # The hooks it runs are bound further down, once their services exist.
+    # Startup failing before the try skips shutdown, as with on_startup hooks.
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        await start_session_registry()
+        try:
+            async with streamable_session_lifecycle():
+                yield
+        finally:
+            await shutdown()
+
+    app = FastAPI(
+        title="Community Knowledge Graph",
+        description="REST API and MCP server for community knowledge graph operations",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        RuntimeExtensionsMiddleware, runtime_extensions=runtime_extensions
+    )
+    install_error_handlers(app)
+
+    session_settings = build_session_settings(config)
+
+    # Middleware order matters: the session binding is innermost, so a
+    # request is authenticated before anything about the session it names is
+    # looked at; auth is installed next so CORS (added last) wraps it as the
+    # outermost layer, letting preflight requests through.
+    add_session_binding_middleware(
+        app,
+        api_prefix=config.api_prefix,
+        is_retired=lambda session_id: app.state.write_modes.is_retired(session_id),
+        sessions_unreadable=lambda: (
+            app.state.write_modes.store_holds_unreadable_records()
+        ),
+    )
+    _auth_active = compute_auth_active(config)
+    add_auth_middleware(app, config)
+    add_cors_middleware(app, config)
+
+    runtime = _build_runtime(
+        config, graph_storage, authorization_hook, runtime_extensions
+    )
+    graph_storage = runtime.graph_storage
+    graph_service = runtime.graph_service
+    federation_manager = runtime.federation_manager
+    federation_config = runtime.federation_config
+    federation_summary = runtime.federation_summary
+    agent_registry = runtime.agent_registry
+    app.state.runtime = runtime
+
     # Store service on app state for access in routes
     app.state.graph_service = graph_service
     app.state.graph_storage = graph_storage
@@ -209,18 +384,79 @@ def create_app(
     # channel below is kept only to deliver MCP visualization pushes to the browser
     # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
     # from this store.
+    #
+    # Which sessions stage is decided by the staged-session records the graph
+    # backend keeps (docs/SESSION_OVERLAY_CONTRACT.md §5.3), so the write modes
+    # are built from the graph storage, and the session store asks them before
+    # it hands out or recreates an id.
+    try:
+        write_modes = WriteModes(
+            graph_storage.layer_store,
+            default_mode=session_settings.default_write_mode,
+            max_entries=session_settings.layer_max_entries,
+            unreadable_records=graph_storage.staged_records_check,
+        )
+    except ValueError as exc:
+        raise PersistenceConfigurationError(
+            f"staged sessions cannot be configured: {exc}"
+        ) from exc
+    app.state.write_modes = write_modes
+    # Merge records of deleted sessions are purged once the retention has
+    # passed (docs/SESSION_OVERLAY_CONTRACT.md §11.5): at start, then
+    # periodically, on a thread of its own, never inside a merge.
+    merge_record_retention = None
+    if graph_storage.layer_store is not None:
+        merge_record_retention = MergeRecordRetention(
+            graph_storage.layer_store,
+            timedelta(days=session_settings.merge_record_retention_days),
+        )
+        merge_record_retention.start()
     sessions_dir = str(config.resolve_sessions_dir())
-    session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
-    session_manager = SessionManager(session_store)
+    session_store = SessionStore(
+        FileSessionPersistenceBackend(sessions_dir),
+        staged_status=write_modes.staged_status,
+    )
+    session_manager = SessionManager(session_store, write_modes=write_modes)
     app.state.session_store = session_store
     app.state.session_manager = session_manager
 
+    # Durable store backing graph.json import's background embedding jobs.
+    # Recovery (reclaiming a job left RUNNING by a crashed process, per
+    # backend/service/import_service.py and
+    # docs/adr/0006-graph-import-replace-mode.md) runs in a background thread
+    # so a large re-embedding pass never delays startup, matching the "import
+    # never blocks on embeddings" guarantee the feature makes for a live
+    # request.
+    import_job_store = SqliteExecutionStore(config.get_import_jobs_db_path())
+    app.state.import_job_store = import_job_store
+
+    def _recover_import_jobs() -> None:
+        try:
+            recover_import_jobs(import_job_store, graph_storage)
+        except Exception:
+            logger.exception("Import job recovery at startup failed (non-fatal)")
+
+    threading.Thread(
+        target=_recover_import_jobs, name="import-startup-recovery", daemon=True
+    ).start()
+
     # Create and mount REST API router
-    rest_router = create_rest_router(graph_service, session_manager=session_manager)
+    rest_router = create_rest_router(
+        graph_service,
+        session_manager=session_manager,
+        import_job_store=import_job_store,
+    )
     app.include_router(rest_router, prefix=config.api_prefix)
 
     # Create UI Backend services (ChatService and DocumentService)
-    chat_service = ChatService(graph_service)
+    logger.info(
+        "Attachment tool access: assistant=%s, MCP=%s, Agents=none unless granted",
+        config.assistant_attachment_access,
+        config.mcp_attachment_tools,
+    )
+    chat_service = ChatService(
+        graph_service, assistant_attachment_access=config.assistant_attachment_access
+    )
     document_service = DocumentService()
 
     # Load skills for expert agents that have skills_urls configured.
@@ -255,6 +491,12 @@ def create_app(
     # (registered below) so that sync MCP tools can push commands thread-safely.
     session_registry = SessionRegistry()
     app.state.session_registry = session_registry
+    # A session id resolves when its session is stored, or - for a browser
+    # whose session exists only as a live legacy push channel - when that
+    # channel exists (§16.1).
+    graph_service.attach_sessions(
+        session_manager, push_target_known=session_registry.session_exists
+    )
 
     # Session-scoped auto-add agents: react to node.create events and push each
     # matching new node additively into the bound session's live view (reusing
@@ -277,7 +519,7 @@ def create_app(
         build_node_create_listener(auto_add_registry, _auto_add_push)
     )
 
-    register_session_stream(
+    start_session_registry = register_session_stream(
         app,
         session_registry,
         session_manager=session_manager,
@@ -294,7 +536,9 @@ def create_app(
         # In production (Cloud Run) the Host header is the public URL, so
         # requests get a 421 "Invalid Host header". Authentication is handled
         # by the gateway / Cloud Run IAP, so this check is not needed.
-        host="0.0.0.0",
+        # FastMCP only reads this to decide DNS rebinding protection; the app
+        # is mounted into the host ASGI app, so no socket is bound here.
+        host="0.0.0.0",  # nosec B104
     )
     tools_map = register_mcp_tools(
         mcp,
@@ -302,13 +546,15 @@ def create_app(
         session_registry=session_registry,
         session_manager=session_manager,
         auto_add_registry=auto_add_registry,
+        widget_dist_path=config.widget_static_path,
+        attachment_access=config.mcp_attachment_tools,
     )
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp
     app.state.tools_map = tools_map
 
-    mount_mcp(app, mcp, tools_map)
+    streamable_session_lifecycle = mount_mcp(app, mcp, tools_map)
 
     # Direct tool-execution and export endpoints
     register_tool_routes(app, graph_service, tools_map, _auth_active)
@@ -329,17 +575,15 @@ def create_app(
     _mount_static_files(app, config)
 
     # Federation + agent-system status endpoints
-    register_agent_routes(app, agent_registry, graph_storage, federation_manager)
+    register_agent_routes(app, agent_registry, graph_service, federation_manager)
 
-    # Shutdown handler for graceful cleanup
-    @app.on_event("shutdown")
-    async def shutdown_event():
+    async def shutdown():
         """Gracefully shutdown agent registry and event system."""
         if hasattr(app.state, "session_cleanup_task"):
             app.state.session_cleanup_task.cancel()
-        federation_manager.stop()
-        agent_registry.stop()
-        graph_storage.shutdown_events()
+        if merge_record_retention is not None:
+            merge_record_retention.stop()
+        runtime.stop()
 
     return app
 

@@ -25,6 +25,9 @@ const labels = {
   organizeHorizontal: 'List horizontally',
   organizeVertical: 'List vertically',
   organizeTree: 'Arrange as tree',
+  organizeDateHorizontal: 'Sort by date – horizontal',
+  organizeDateVertical: 'Sort by date – vertical',
+  organizeDateUnavailable: 'Select nodes with dates',
   align: 'Align',
   alignLeft: 'Align left',
   alignCenterHorizontal: 'Align horizontal centers',
@@ -54,6 +57,8 @@ const labels = {
   annotationNearbyLabel: 'Label',
   annotationNearbyIcon: 'Icon',
   annotationNearbyText: 'Text',
+  openInSourceGraph: 'Open in source graph',
+  openInSourceGraphTooltip: 'Open this node in the graph that owns it',
 };
 
 describe('buildContextMenuUrl', () => {
@@ -452,6 +457,98 @@ describe('NodeContextMenu', () => {
   });
 });
 
+describe('NodeContextMenu teleport action (task-federated-graph-teleport)', () => {
+  const localNode = { id: 'n1', data: { nodeType: 'Actor', label: 'Alice', metadata: {} } };
+  const federatedNode = {
+    id: 'federated::esam-main::remote-1',
+    data: {
+      nodeType: 'Actor',
+      label: 'External Node',
+      metadata: { origin_graph_id: 'esam-main', origin_graph_name: 'eSam' },
+    },
+  };
+
+  it('offers the action when the host supplies a teleport handler', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /open in source graph/i })).toBeTruthy();
+  });
+
+  it('omits the action when no teleport handler is supplied', () => {
+    // GraphCanvas withholds the handler for a node this graph owns, so the
+    // absence of a handler is how a local node gets no teleport item.
+    render(
+      <NodeContextMenu menu={{ x: 0, y: 0, node: localNode }} labels={labels} onClose={vi.fn()} />
+    );
+    expect(screen.queryByRole('button', { name: /open in source graph/i })).toBeNull();
+  });
+
+  it('passes the node id and data to the handler, then closes', () => {
+    const onTeleport = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={onTeleport}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /open in source graph/i }));
+    expect(onTeleport).toHaveBeenCalledWith(federatedNode.id, federatedNode.data);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('carries the tooltip label', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(
+      screen.getByRole('button', { name: /open in source graph/i }).getAttribute('title')
+    ).toBe('Open this node in the graph that owns it');
+  });
+
+  it('is a top-level roving-focus item like the other menu actions', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(
+      screen.getByRole('button', { name: /open in source graph/i }).getAttribute('data-menu-item')
+    ).toBe('root');
+  });
+
+  it('leaves the ordinary actions in place alongside it', () => {
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node: federatedNode }}
+        labels={labels}
+        onEdit={vi.fn()}
+        onExpand={vi.fn()}
+        onTeleport={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: /find related nodes/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /open in source graph/i })).toBeTruthy();
+  });
+});
+
 describe('MultiNodeContextMenu', () => {
   const nodes = [
     { id: 'a', data: { nodeType: 'Actor' } },
@@ -529,6 +626,95 @@ describe('MultiNodeContextMenu', () => {
     openOrganize();
     fireEvent.click(screen.getByRole('button', { name: /arrange as tree/i }));
     expect(onOrganize).toHaveBeenNthCalledWith(5, 'tree');
+  });
+
+  it('offers sort-by-date for the shared date field and disables it without two dated nodes', () => {
+    const onOrganize = vi.fn();
+    const dated = [
+      { id: 'a', data: { name: 'A', start_date: '2026-01-01' } },
+      { id: 'b', data: { name: 'B', start_date: '2026-02-01' } },
+    ];
+    const { unmount } = render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: dated }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – horizontal' }));
+    expect(onOrganize).toHaveBeenNthCalledWith(1, 'dateHorizontal', { dateField: 'start_date' });
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by date – vertical' }));
+    expect(onOrganize).toHaveBeenNthCalledWith(2, 'dateVertical', { dateField: 'start_date' });
+    unmount();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: [dated[0], { id: 'c', data: { name: 'C' } }] }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    const btn = screen.getByRole('button', { name: /sort by date – horizontal/i });
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toBe('Select nodes with dates');
+  });
+
+  it('offers one pair per shared date field, labelled without the metadata prefix', () => {
+    const onOrganize = vi.fn();
+    const dated = [
+      { id: 'a', data: { name: 'A', start_date: '2026-01-01', metadata: { due: '2026-03-01' } } },
+      { id: 'b', data: { name: 'B', start_date: '2026-02-01', metadata: { due: '2026-04-01' } } },
+    ];
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes: dated }}
+        labels={labels}
+        onOrganize={onOrganize}
+        onClose={vi.fn()}
+      />
+    );
+    for (const [suffix, dateField] of [
+      ['due', 'metadata.due'],
+      ['start_date', 'start_date'],
+    ]) {
+      for (const [axis, mode] of [
+        ['horizontal', 'dateHorizontal'],
+        ['vertical', 'dateVertical'],
+      ]) {
+        fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+        expect(screen.getAllByRole('button', { name: /^Sort by date/ })).toHaveLength(4);
+        fireEvent.click(screen.getByRole('button', { name: `Sort by date – ${axis} (${suffix})` }));
+        expect(onOrganize).toHaveBeenLastCalledWith(mode, { dateField });
+      }
+    }
+  });
+
+  it('disables both date entries, with the explanation, when fewer than two nodes are dated', () => {
+    render(
+      <MultiNodeContextMenu
+        menu={{
+          x: 0,
+          y: 0,
+          nodes: [
+            { id: 'a', data: { name: 'A' } },
+            { id: 'b', data: { name: 'B' } },
+          ],
+        }}
+        labels={labels}
+        onOrganize={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^organize$/i }));
+    for (const re of [/sort by date – horizontal/i, /sort by date – vertical/i]) {
+      const btn = screen.getByRole('button', { name: re });
+      expect(btn.getAttribute('aria-disabled')).toBe('true');
+      expect(btn.getAttribute('title')).toBe('Select nodes with dates');
+    }
   });
 
   it('returns focus to the Organize trigger after picking an action, instead of stranding it on <body>', () => {

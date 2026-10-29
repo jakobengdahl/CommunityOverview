@@ -91,7 +91,7 @@ def request_has_valid_session(request: Request, config: AppConfig) -> bool:
 
 def credentials_valid(config: AppConfig, username: str, password: str) -> bool:
     """Constant-time check of a submitted username/password against config."""
-    if not config.auth_password:
+    if not config.auth_username or not config.auth_password:
         return False
     ok_user = hmac.compare_digest(username or "", config.auth_username)
     ok_pass = hmac.compare_digest(password or "", config.auth_password)

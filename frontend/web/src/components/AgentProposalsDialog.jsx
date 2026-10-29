@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
+import * as api from '../services/api';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
 import './AgentRunsDialog.css';
@@ -57,10 +58,7 @@ export default function AgentProposalsDialog({ agentId = null, onClose }) {
       setBusyId(proposalId);
       setError(null);
       try {
-        const res = await fetch(`/agents/proposals/${proposalId}/${action}`, {
-          method: 'POST',
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await api.decideAgentProposal(proposalId, action);
         await load();
       } catch (e) {
         setError(e.message || String(e));

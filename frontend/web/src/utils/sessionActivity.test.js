@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { createAnnotation } from '@community-graph/ui-graph-canvas';
+import { describe, it, expect, vi } from 'vitest';
+import { createAnnotation, ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import {
   annotationsToGroups,
   annotationsToOverlays,
@@ -20,7 +20,7 @@ function record(overrides = {}) {
     id: 'act-1',
     op: 'annotation_created',
     actor: 'client-a',
-    affected: { kind: 'annotation', id: 'note-1', fields: null },
+    affected: { kind: 'annotation', id: 'note-1' },
     before: null,
     after: { id: 'note-1', type: 'note' },
     inverse_op: { op: 'annotation_deleted', annotation_id: 'note-1' },
@@ -55,11 +55,28 @@ describe('describeActivity', () => {
     expect(describeActivity(r).params.type).toBe('history.annotation_type.unknown');
   });
 
+  // Driven off the canvas package's own type list rather than a hand-copied
+  // one, so adding an annotation kind without an activity string fails here
+  // instead of silently reading as "an annotation" in the session panel. That
+  // is exactly what happened to `reference`: every other kind had a key, the
+  // new one fell through to `unknown`, and nothing noticed because the
+  // spot-checks above only name four kinds. A key-parity test cannot catch it
+  // either — a key absent from BOTH locales is consistent.
+  it.each(ANNOTATION_TYPES)('names the %s kind rather than falling back to unknown', (type) => {
+    const r = record({ op: 'annotation_created', after: { type } });
+    expect(describeActivity(r).params.type).toBe(`history.annotation_type.${type}`);
+  });
+
+  it.each(ANNOTATION_TYPES)('has an en and sv activity string for %s', (type) => {
+    expect(en.history.annotation_type[type]).toBeTruthy();
+    expect(sv.history.annotation_type[type]).toBeTruthy();
+  });
+
   describe('annotation_updated classification', () => {
     it('reads a shape-subtype change as "shape" even when geometry also moved', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'shape-1', fields: ['shape', 'geometry'] },
+        affected: { kind: 'annotation', id: 'shape-1' },
         before: {
           type: 'shape',
           shape: 'rectangle',
@@ -77,7 +94,7 @@ describe('describeActivity', () => {
     it('reads a rotation-only geometry change as "rotated"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['geometry'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
         after: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 15 } },
       });
@@ -87,7 +104,7 @@ describe('describeActivity', () => {
     it('reads a size change as "resized"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['geometry'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
         after: { type: 'note', geometry: { x: 0, y: 0, w: 40, h: 10, rotation: 0 } },
       });
@@ -97,7 +114,7 @@ describe('describeActivity', () => {
     it('reads a plain position change as "moved"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['position'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', position: { x: 0, y: 0 } },
         after: { type: 'note', position: { x: 50, y: 0 } },
       });
@@ -107,7 +124,7 @@ describe('describeActivity', () => {
     it('reads a style-only change as "style"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['style'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', style: { color: 'blue' } },
         after: { type: 'note', style: { color: 'red' } },
       });
@@ -117,7 +134,7 @@ describe('describeActivity', () => {
     it('reads a text field change as "text"', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['text'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', text: 'old' },
         after: { type: 'note', text: 'new' },
       });
@@ -127,7 +144,7 @@ describe('describeActivity', () => {
     it('reads a locked flip as "locked" / "unlocked"', () => {
       const locking = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['locked'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', locked: false },
         after: { type: 'note', locked: true },
       });
@@ -135,7 +152,7 @@ describe('describeActivity', () => {
 
       const unlocking = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['locked'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note', locked: true },
         after: { type: 'note', locked: false },
       });
@@ -145,7 +162,7 @@ describe('describeActivity', () => {
     it('reads an attachment field change as "attached" / "detached"', () => {
       const attaching = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['attachment'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'label' },
         after: { type: 'label', attachment: { target_id: 'node-1' } },
       });
@@ -153,7 +170,7 @@ describe('describeActivity', () => {
 
       const detaching = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['attachment'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'label', attachment: { target_id: 'node-1' } },
         after: { type: 'label' },
       });
@@ -163,7 +180,7 @@ describe('describeActivity', () => {
     it('falls back to "generic" for an unrecognised field set', () => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['some_future_field'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { type: 'note' },
         after: { type: 'note', some_future_field: 'x' },
       });
@@ -171,6 +188,8 @@ describe('describeActivity', () => {
     });
 
     it('falls back to "generic" rather than guessing when there is no before snapshot', () => {
+      // A record persisted before PR #627, which still carries
+      // `affected.fields`: even a key set naming `locked` is not read as one.
       const r = record({
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'a1', fields: ['locked', 'z', 'geometry'] },
@@ -184,22 +203,22 @@ describe('describeActivity', () => {
   // The regression suite for the defect these records are shaped after: the
   // browser's computeOps (services/sessionSyncClient.js) puts the WHOLE
   // annotation in every annotation_updated op, so `affected.fields` — which
-  // session_store.py fills with the incoming payload's key set — is the
-  // annotation's entire key set no matter what the user actually did. Every
+  // session_store.py filled with the incoming payload's key set until PR #627
+  // — is the annotation's entire key set no matter what the user actually
+  // did. Records persisted before that still carry it. Every
   // annotation carries `locked` and `z` as mandatory envelope fields
   // (createAnnotation), so a classifier reading `fields` as a change set
   // announced "Unlocked" for a note/label/icon that had merely been moved or
   // relayered, and "Changed the shape of" for every edit of a shape.
   //
-  // The pre-existing cases above all feed SPARSE fields, which is the shape
-  // the MCP patch path produces — the producer the classifier happened to be
-  // correct for. These feed the browser's shape, built through the real
-  // createAnnotation so the payload is the one the canvas actually ships.
+  // These feed the browser's shape, built through the real createAnnotation
+  // so the payload is the one the canvas actually ships.
   describe('annotation_updated classification, browser-shaped full payloads', () => {
     function browserEdit(base, changes) {
-      // What the store records for a browser-originated edit: `before` is the
-      // stored annotation, `after` is the whole incoming annotation merged
-      // over it, and `fields` is that payload's entire key set.
+      // What the store recorded for a browser-originated edit before PR #627:
+      // `before` is the stored annotation, `after` is the whole incoming
+      // annotation merged over it, and `fields` is that payload's entire key
+      // set. Kept in that legacy shape so old persisted records stay covered.
       const incoming = createAnnotation({ ...base, ...changes });
       const before = { ...createAnnotation(base), updated_at: '2026-08-26T09:00:00Z' };
       return record({
@@ -293,7 +312,7 @@ describe('describeActivity', () => {
       // the move is what gets reported.
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1', fields: ['id', 'locked', 'position', 'z'] },
+        affected: { kind: 'annotation', id: 'a1' },
         before: { id: 'a1', type: 'note', position: { x: 0, y: 0 } },
         after: { id: 'a1', type: 'note', position: { x: 40, y: 0 }, z: 0, locked: false, text: '' },
       });
@@ -339,7 +358,7 @@ describe('describeActivity', () => {
       const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(moved)[0]));
       return record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        affected: { kind: 'annotation', id: stored.id },
         before: stored,
         after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
       });
@@ -372,12 +391,15 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
 
-    it('does not read the browser filling in a default size as a resize', () => {
-      // label/line/freehand carry no size through the overlay translators, so
-      // normalizeGeometry fills 160x96 over the server's 0.
+    it('no longer materializes a default size on an unsized label (smallfix-browser-clobbers-unsized-annotation-geometry)', () => {
+      // label/line/freehand used to carry no size through the overlay
+      // translators, so normalizeGeometry filled 160x96 over the server's 0
+      // on the very first browser touch. The translators now carry
+      // geometry.w/h through unconditionally (including an explicit 0), so
+      // this write-back changes nothing about the size.
       const r = browserMove(serverAnnotation('label', { text: 'hi' }));
       expect(r.before.geometry.w).toBe(0);
-      expect(r.after.geometry.w).toBeGreaterThan(0);
+      expect(r.after.geometry.w).toBe(0);
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
 
@@ -401,18 +423,6 @@ describe('describeActivity', () => {
 
     it.each([
       {
-        name: 'freehand whose stored position disagrees with its first point',
-        ann: () =>
-          serverAnnotation('freehand', {
-            x: 0,
-            y: 0,
-            points: [
-              { x: 120, y: 340 },
-              { x: 130, y: 350 },
-            ],
-          }),
-      },
-      {
         name: 'line whose stored position disagrees with its from-endpoint',
         ann: () =>
           serverAnnotation('line', {
@@ -423,13 +433,31 @@ describe('describeActivity', () => {
           }),
       },
     ])('does not read the browser rebuilding $name as a move', ({ ann }) => {
-      // The translators derive these kinds' position from their own content,
-      // so an untouched round trip rewrites position without the user having
-      // dragged anything. Nothing else changed either, so there is nothing to
-      // report.
+      // This translator derives position from endpoint content, so an
+      // untouched round trip rewrites position without the user having
+      // dragged anything. Nothing else changed either, so there is nothing
+      // to report.
       const stored = ann();
       const r = browserMove(stored, 0);
       expect(r.before.position).not.toEqual(r.after.position);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('does not rewrite a freehand position that disagrees with its first point', () => {
+      const stored = serverAnnotation('freehand', {
+        x: 0,
+        y: 0,
+        points: [
+          { x: 120, y: 340 },
+          { x: 130, y: 350 },
+        ],
+      });
+      const r = browserMove(stored, 0);
+      expect(r.after.position).toEqual(r.before.position);
+      expect(r.after.geometry).toMatchObject({
+        x: r.before.geometry.x,
+        y: r.before.geometry.y,
+      });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
     });
 
@@ -500,17 +528,33 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_moved');
     });
 
-    it('does not claim a move when only the size was materialised', () => {
-      // A recolour of an agent-created label: geometry differs only by the
-      // default size the browser filled in, so the recolour is what happened.
+    it('does not claim a resize when only the style changed on an unsized label', () => {
+      // A recolour of an agent-created label whose geometry the browser never
+      // touches (smallfix-browser-clobbers-unsized-annotation-geometry: the
+      // translators now carry the server's w/h=0 through faithfully instead
+      // of materializing 160x96) must report as the recolour it is, not a
+      // resize.
       const before = serverAnnotation('label', { text: 'hi' });
       const after = {
         ...before,
-        geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 },
         style: { color: 'crimson' },
       };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_style'
+      );
+    });
+
+    it('now reports a genuine resize to exactly 160x96 on a previously-unsized label', () => {
+      // Before the geometry fix, the browser's own no-op write-back produced
+      // 160x96 for an unsized label, so this exact transition was
+      // indistinguishable from that artifact and had to be suppressed (the
+      // test above, before this fix, asserted the opposite of this). Now
+      // that the write-back carries the server's real 0 through, this is a
+      // real, reportable resize.
+      const before = serverAnnotation('label', { text: 'hi' });
+      const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
       );
     });
   });
@@ -523,9 +567,9 @@ describe('describeActivity', () => {
   // announced "Unlocked" — the literal string this whole change exists to
   // eliminate. PR #483 made it carry `locked` and `z`, and this module
   // followed for free: it reports whatever the round trip preserves, so the
-  // assertions below now pin that the lock and the layer survive where they
-  // once pinned the clobber. `rotation` is still dropped, and `label` is
-  // still defaulted, so those two keep the asymmetry.
+  // assertions below now pin that lock, layer, and rotation survive where they
+  // once pinned the clobber. `label` is still defaulted, so it keeps the
+  // asymmetry.
   describe('annotation_updated classification, groups', () => {
     // build_group_annotation's output shape (backend/core/session_annotations.py).
     function serverGroup({ x = 10, y = 20, w = 320, h = 200, ...rest } = {}) {
@@ -553,7 +597,7 @@ describe('describeActivity', () => {
       const incoming = JSON.parse(JSON.stringify(groupsToAnnotations(edited, parentIds)[0]));
       return record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        affected: { kind: 'annotation', id: stored.id },
         before: stored,
         after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
       });
@@ -642,28 +686,22 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_text');
     });
 
-    it('still under-reports unrotating a group, the one field still dropped', () => {
-      // Latent rather than live: no shipped producer sets a group's rotation
-      // (build_group_annotation hardcodes 0 and takes no parameter, and the
-      // generic rotation tools refuse group ids), so this guards the invariant
-      // ahead of a group rotation control shipping rather than a path in use.
-      // Rotation is the remaining asymmetry: the group translators carry
-      // `locked` and `z` but not rotation, so the write-back always says 0. A
-      // change away from 0 is visible; a change back to it is not
-      // distinguishable from the drop, so it reads as a plain update. Safe
-      // direction, and the same shape the other two had before PR #483.
+    it('reports rotating and unrotating a group once the translators preserve rotation', () => {
+      // Group translators now carry `locked`, `z`, and `rotation`, so this
+      // reports rotation changes in both directions instead of treating an
+      // unrotate as a no-op browser write-back.
       const at = (v) => serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(0), after: at(45) })).key
       ).toBe('history.desc.annotation_updated_rotated');
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(45), after: at(0) })).key
-      ).toBe('history.desc.annotation_updated_generic');
+      ).toBe('history.desc.annotation_updated_rotated');
     });
 
     it('does not report renaming a rotated group as a rotation change', () => {
-      // Rotation is still dropped, so a rename of a rotated group must not
-      // surface as an unrotate.
+      // Rotation is preserved, so a rename of a rotated group must still not
+      // surface as a rotation change.
       const rotated = serverGroup({ label: 'Team' });
       rotated.geometry = { ...rotated.geometry, rotation: 45 };
       expect(describeActivity(groupEdit(rotated, (g) => ({ ...g, label: 'B' }))).key).toBe(
@@ -879,6 +917,172 @@ describe('describeActivity', () => {
     });
   });
 
+  describe('label/line style keys beyond the ones the canvas controls', () => {
+    // smallfix-label-overlay-drops-nonvisual-style-keys: the translators now
+    // carry every style key, where builds before it dropped all but these.
+    const label = {
+      id: 'l1',
+      type: 'label',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 0, h: 0, rotation: 0 },
+      text: 'hi',
+      z: 0,
+      locked: false,
+      style: { color: 'red', fontSize: 18, opacity: 0.5, dash: 'dotted' },
+    };
+    const line = {
+      id: 'a1',
+      type: 'line',
+      kind: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 160, y: 0 },
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      style: { color: 'red', opacity: 0.5, dash: 'dotted' },
+    };
+
+    function browserEdit(stored, edit) {
+      const overlays = annotationsToOverlays([stored]).map(edit);
+      const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(overlays)[0]));
+      return record({
+        op: 'annotation_updated',
+        before: stored,
+        after: { ...stored, ...incoming },
+      });
+    }
+
+    it('reports a text edit from this build as a text edit', () => {
+      const r = browserEdit(label, (o) => ({ ...o, text: 'bye' }));
+      expect(r.after.style).toEqual(label.style);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it('still reports a restyle from this build as a restyle', () => {
+      const r = browserEdit(label, (o) => ({ ...o, color: 'blue' }));
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+      const lineRestyle = browserEdit(line, (o) => ({ ...o, opacity: 0.9 }));
+      expect(describeActivity(lineRestyle).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it("does not report an older build's dropped keys as a restyle", () => {
+      // What a pre-fix build wrote for a text edit: the extra key gone.
+      const olderText = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+      const olderArrowhead = record({
+        op: 'annotation_updated',
+        before: line,
+        after: { ...line, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('still reports a restyle an older build wrote', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { color: 'blue', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a style key drop on a kind outside label/line as a restyle', () => {
+      // Only the label/line translators changed between builds; whatever
+      // note/shape drop is the same in every build and already shows in
+      // `browserWriteBack`, so a style narrowed to {color, opacity} there is
+      // a real edit.
+      for (const type of ['note', 'shape']) {
+        const stored = {
+          id: 's1',
+          type,
+          position: { x: 0, y: 0 },
+          z: 0,
+          locked: false,
+          style: { color: 'red', opacity: 0.5, dash: 'dotted' },
+        };
+        const r = record({
+          op: 'annotation_updated',
+          before: stored,
+          after: { ...stored, style: { color: 'red', opacity: 0.5 } },
+        });
+        expect(describeActivity(r).key, type).toBe('history.desc.annotation_updated_style');
+      }
+    });
+
+    it('reports a label that also lost a named key as a restyle', () => {
+      // An older build kept fontSize, so its write-back never drops it.
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a change to an uncontrolled style key alone as a restyle', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { ...label.style, dash: 'dashed' } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a partial drop of uncontrolled style keys as a restyle', () => {
+      // An older build dropped every key beyond the named ones, never some.
+      const twoExtra = { ...label, style: { ...label.style, width: 2 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: twoExtra,
+        after: { ...twoExtra, style: label.style },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it("treats a line's fontSize as a key older builds dropped", () => {
+      const withFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: withFontSize,
+        after: { ...withFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it("recognises an older build's drop on records that carry only type", () => {
+      const { kind: _kind, ...labelByType } = label;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByType,
+        after: { ...labelByType, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it("recognises an older build's drop on records that carry only kind", () => {
+      const { type: _labelType, ...labelByKind } = label;
+      const { type: _lineType, ...lineByKind } = line;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByKind,
+        after: { ...labelByKind, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+      const olderArrowhead = record({
+        op: 'annotation_updated',
+        before: lineByKind,
+        after: { ...lineByKind, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    });
+  });
+
   describe('shape spelling', () => {
     it('does not report an agent respelling a shape it already is as a shape change', () => {
       // The server stores content.shape verbatim, so an agent may write
@@ -958,6 +1162,38 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_generic');
     });
 
+    it('leaves the stored image on the record it classifies', () => {
+      const image = { url: 'data:image/webp;base64,AAAA' };
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'image', image },
+        after: { type: 'image', image, z: 2 },
+      });
+      describeActivity(r);
+      expect(r.before.image).toBe(image);
+    });
+
+    it('logs the skipped annotation without an image field it never had', () => {
+      // browserWriteBack holds `image` out of its round trip; doing that by
+      // spreading `image: undefined` put a phantom key on the object the
+      // skipped-annotation warning prints.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        describeActivity(
+          record({ op: 'annotation_updated', before: stored, after: { ...stored, z: 9 } })
+        );
+        const logged = warn.mock.calls
+          .filter(([message]) => String(message).startsWith('Skipping an annotation'))
+          .map(([, annotation]) => annotation);
+        expect(logged.length).toBeGreaterThan(0);
+        for (const annotation of logged) {
+          expect(Object.prototype.hasOwnProperty.call(annotation, 'image')).toBe(false);
+        }
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('still describes the record rather than failing', () => {
       const r = record({ op: 'annotation_updated', before: stored, after: { ...stored, z: 9 } });
       expect(describeActivity(r)).toEqual({
@@ -997,6 +1233,75 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
 
+    it.each([
+      { name: '0 to null', before: { value: 0 }, after: { value: null } },
+      { name: '0 to cleared', before: { value: 0 }, after: {} },
+      { name: 'null to 0', before: { value: null }, after: { value: 0 } },
+      { name: 'cleared to 0', before: {}, after: { value: 0 } },
+    ])('reports a vote_dot value change from $name', ({ before, after }) => {
+      expect(
+        describeActivity(
+          record({
+            op: 'annotation_updated',
+            before: { type: 'vote_dot', ...before },
+            after: { type: 'vote_dot', ...after },
+          })
+        ).key
+      ).toBe('history.desc.annotation_updated_text');
+    });
+
+    it.each([
+      { name: '5 to 3', before: { intensity: 5 }, after: { intensity: 3 } },
+      { name: '5 to 0', before: { intensity: 5 }, after: { intensity: 0 } },
+      { name: 'unset to 0', before: {}, after: { intensity: 0 } },
+      { name: '0 to 10', before: { intensity: 0 }, after: { intensity: 10 } },
+    ])('reports a heat-map intensity change from $name', ({ before, after }) => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      expect(
+        describeActivity(
+          record({
+            op: 'annotation_updated',
+            before: { ...base, type: 'heatmap', ...before },
+            after: { ...base, type: 'heatmap', ...after },
+          })
+        ).key
+      ).toBe('history.desc.annotation_updated_intensity');
+    });
+
+    it('does not report the browser clamping a stored out-of-range intensity to 0 as an edit', () => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: { ...base, type: 'heatmap', intensity: -3 },
+        after: { ...base, type: 'heatmap', intensity: 0 },
+      });
+      expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
+    });
+
+    it('does not report the browser filling in a heat-map default intensity as an edit', () => {
+      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: { ...base, type: 'heatmap' },
+        after: { ...base, type: 'heatmap', intensity: 5 },
+      });
+      expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
+    });
+
+    it('names a heat-map circle in a created record', () => {
+      const r = record({ op: 'annotation_created', after: { id: 'h1', type: 'heatmap' } });
+      expect(describeActivity(r).params.type).toBe('history.annotation_type.heatmap');
+    });
+
+    it('keeps 0 equivalent to unset for non-vote_dot materialized defaults', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'note', z: 1, style: { opacity: null } },
+        after: { type: 'note', z: 1, style: { opacity: 0 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
     it('compares nested objects and arrays by value, not identity', () => {
       const same = record({
         op: 'annotation_updated',
@@ -1017,12 +1322,11 @@ describe('describeActivity', () => {
   describe('annotation_updated classification, browser-shaped full payloads (continued)', () => {
     it('reports an agent-only sparse patch from the same before/after diff', () => {
       // The MCP path sends a sparse patch, but the store still snapshots the
-      // whole annotation either side, so the diff serves both producers and
-      // `affected.fields` is not consulted for either.
+      // whole annotation either side, so the diff serves both producers.
       const before = createAnnotation({ id: 'n1', type: 'note', text: 'before' });
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'n1', fields: ['id', 'text'] },
+        affected: { kind: 'annotation', id: 'n1' },
         before,
         after: { ...before, text: 'after' },
       });

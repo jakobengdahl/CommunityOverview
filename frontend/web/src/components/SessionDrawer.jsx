@@ -17,19 +17,10 @@ import {
 } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import { useViewportMode } from '../hooks/useViewportMode';
+import { useModalFocusTrap } from '../hooks/useModalFocusTrap';
+import { useAppInstallPrompt } from '../pwa/useAppInstallPrompt';
 import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
-
-// Mirrors BottomSheet.jsx's focus-trap contract, applied here only for the
-// mobile full-screen variant (see the isMobile-gated effect below) — the
-// desktop docked panel keeps its pre-existing, untrapped focus behavior.
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusableElements(container) {
-  if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
-}
 
 /**
  * SessionDrawer — full-height panel opened from the hamburger button (desktop)
@@ -61,13 +52,14 @@ function SessionDrawer({
 }) {
   const { t } = useI18n();
   const { isMobile } = useViewportMode();
+  const { canInstall, promptInstall, showIosInstallHint, dismissIosInstallHint } =
+    useAppInstallPrompt();
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
   const [wasOpen, setWasOpen] = useState(open);
   const searchInputRef = useRef(null);
   const drawerRef = useRef(null);
-  const lastFocusedRef = useRef(null);
 
   // Closing while a descendant still holds focus would commit aria-hidden on
   // an ancestor of the active element in the same render that flips `open`
@@ -105,6 +97,19 @@ function SessionDrawer({
     if (!open) setOpenMenuId(null);
   }
 
+  // Modal focus management and body scroll lock for the mobile overlay only
+  // — the same contract BottomSheet.jsx uses for the sibling search/create
+  // sheets; the desktop docked panel keeps its untrapped focus behavior.
+  // Without the scroll lock, a touch-scroll gesture reaching an ancestor of
+  // #root would scroll the page behind the full-screen drawer. isMobile is a
+  // plain input here (not specially excluded): App.jsx renders either
+  // <MobileShell/> or <DesktopShell/> based on the identical isMobile value,
+  // so any instance of this component only ever exists inside one of those
+  // two mutually-exclusive subtrees — a real crossing of the breakpoint
+  // unmounts this instance and mounts a fresh one in the other shell, rather
+  // than flipping isMobile under a still-mounted SessionDrawer.
+  const trapTabKey = useModalFocusTrap(drawerRef, open && isMobile);
+
   // Escape closes the drawer — except while a dialog is stacked on top of it
   // (settings, connect, rename), where Escape belongs to that dialog. An open
   // per-session menu is peeled off first, keeping the drawer in place. In
@@ -125,70 +130,11 @@ function SessionDrawer({
         closeDrawer();
         return;
       }
-      if (!isMobile || e.key !== 'Tab') return;
-
-      const focusables = getFocusableElements(drawerRef.current);
-      if (focusables.length === 0) {
-        e.preventDefault();
-        return;
-      }
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      } else if (!focusables.includes(active)) {
-        e.preventDefault();
-        first.focus();
-      }
+      if (isMobile) trapTabKey(e);
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [open, suspendEscape, openMenuId, closeDrawer, isMobile]);
-
-  // Modal focus management for the mobile overlay only: move focus in on
-  // open, restore it to whatever had focus beforehand on close — the same
-  // contract BottomSheet.jsx uses for the sibling search/create sheets.
-  // isMobile is a plain dependency here (not specially excluded): App.jsx
-  // renders either <MobileShell/> or <DesktopShell/> based on the identical
-  // isMobile value, so any instance of this component only ever exists
-  // inside one of those two mutually-exclusive subtrees — a real crossing of
-  // the breakpoint unmounts this instance (with whatever pending cleanup
-  // React runs for that) and mounts a fresh one in the other shell, rather
-  // than flipping isMobile under a still-mounted SessionDrawer.
-  useEffect(() => {
-    if (!open || !isMobile) return undefined;
-    lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
-
-    const focusable = getFocusableElements(drawerRef.current);
-    (focusable[0] || drawerRef.current)?.focus();
-
-    return () => {
-      const toRestore = lastFocusedRef.current;
-      if (toRestore && typeof toRestore.focus === 'function' && document.contains(toRestore)) {
-        toRestore.focus();
-      }
-    };
-  }, [open, isMobile]);
-
-  // Body scroll lock for the mobile overlay only, mirroring BottomSheet.jsx's
-  // contract for the sibling search/create sheets — without it, a touch-scroll
-  // gesture reaching an ancestor of #root would scroll the page behind the
-  // full-screen drawer. Safe to depend on both flags (unlike the effect
-  // above): restoring and re-hiding overflow on a breakpoint crossing has no
-  // visible side effect while the drawer stays open.
-  useEffect(() => {
-    if (!isMobile || !open || typeof document === 'undefined') return undefined;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [isMobile, open]);
+  }, [open, suspendEscape, openMenuId, closeDrawer, isMobile, trapTabKey]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -220,9 +166,9 @@ function SessionDrawer({
         aria-modal={isMobile ? open : undefined}
         aria-label={t('sessions.title')}
         // Matches BottomSheet.jsx's sheetRef: makes the container itself a
-        // valid focus target so the `focusable[0] || drawerRef.current`
-        // fallback below can actually move focus into an (unreachable today,
-        // but defensively handled) drawer with no focusable descendants.
+        // valid focus target so useModalFocusTrap's first-focusable-else-
+        // container fallback can actually move focus into an (unreachable
+        // today, but defensively handled) drawer with no focusable descendants.
         tabIndex={-1}
       >
         <div className="session-drawer-header">
@@ -334,6 +280,26 @@ function SessionDrawer({
         </div>
 
         <div className="session-drawer-footer">
+          {canInstall && (
+            <button className="session-drawer-item" onClick={promptInstall}>
+              <PlusCircle size={15} />
+              <span>{t('app_install.install')}</span>
+            </button>
+          )}
+          {isMobile && showIosInstallHint && (
+            <div className="session-drawer-install-hint" role="status">
+              <span>{t('app_install.ios_hint')}</span>
+              <button
+                type="button"
+                className="session-drawer-install-hint-dismiss"
+                onClick={dismissIosInstallHint}
+                aria-label={t('app_install.dismiss_hint')}
+                title={t('app_install.dismiss_hint')}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <button className="session-drawer-item" onClick={() => onEnterFullscreen?.()}>
             <ArrowsFullscreen size={15} />
             <span>{t('fullscreen.enter')}</span>

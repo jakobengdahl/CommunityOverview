@@ -32,7 +32,19 @@ const ANNOTATION_TYPE_KEYS = new Set([
   'vote_dot',
   'image',
   'freehand',
+  'heatmap',
+  'reference',
 ]);
+
+// Top-level fields where 0 is a real value rather than "unset":
+// `vote_dot.value` (a vote count) and `heatmap.intensity` (level 0 is a
+// deliberate, invisible circle, and a stored absent intensity reads as the
+// default 5 — so 0 and absent are different pictures).
+const ZERO_IS_VALUE_FIELDS = Object.freeze({ vote_dot: 'value', heatmap: 'intensity' });
+
+function zeroIsValue(path, annotationType) {
+  return path.length === 1 && ZERO_IS_VALUE_FIELDS[annotationType] === path[0];
+}
 
 /** i18n key for an annotation's "a sticky note" / "a shape" phrase. */
 function annotationTypeKey(annotation) {
@@ -51,23 +63,42 @@ function geometryOf(annotation) {
  * anything has been set on it. Every spelling of "unset" reads as one value,
  * so a producer writing `0` where another wrote nothing is not a change.
  */
-function isEmptyValue(value) {
-  if (value === undefined || value === null || value === false || value === '' || value === 0) {
+function isEmptyValue(value, { zeroIsEmpty = true } = {}) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === false ||
+    value === '' ||
+    (zeroIsEmpty && value === 0)
+  ) {
     return true;
   }
   if (Array.isArray(value)) return value.length === 0;
   return typeof value === 'object' && Object.keys(value).length === 0;
 }
 
-/** Deep value equality, with every "unset" spelling treated as one value. */
-function sameValue(a, b) {
+function sameValueOptions(path, annotationType) {
+  return {
+    zeroIsEmpty: !zeroIsValue(path, annotationType),
+  };
+}
+
+/**
+ * Deep value equality, with every "unset" spelling treated as one value.
+ * ZERO_IS_VALUE_FIELDS are the exception: 0 is a real value there, not an
+ * omitted default.
+ */
+function sameValue(a, b, path = [], annotationType) {
+  const options = sameValueOptions(path, annotationType);
   if (a === b) return true;
-  if (isEmptyValue(a) || isEmptyValue(b)) return isEmptyValue(a) && isEmptyValue(b);
+  if (isEmptyValue(a, options) || isEmptyValue(b, options)) {
+    return isEmptyValue(a, options) && isEmptyValue(b, options);
+  }
   if (typeof a !== 'object' || typeof b !== 'object') return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const key of keys) {
-    if (!sameValue(a[key], b[key])) return false;
+    if (!sameValue(a[key], b[key], path.concat(key), annotationType)) return false;
   }
   return true;
 }
@@ -103,11 +134,9 @@ function sameValue(a, b) {
  * not "the field is ignored", and a follow-up scoped from that misreading
  * would be scoped wrong.
  *
- * Two fields are in that position today, by the two different routes:
- * `rotation`, which the pair simply does not carry, so a group rotated off 0
- * reports it and one rotated back to 0 does not; and `label`, which
- * `annotationsToGroups` substitutes `'Group'` for when it is empty, so
- * naming an unlabelled group literally "Group" reads as a plain update.
+ * One field is in that position today: `label`, which `annotationsToGroups`
+ * substitutes `'Group'` for when it is empty, so naming an unlabelled group
+ * literally "Group" reads as a plain update.
  *
  * Holding `label` to this rule is not a wart to be fixed — but the exposure
  * is narrower than it first looks, and worth stating precisely so a
@@ -118,18 +147,13 @@ function sameValue(a, b) {
  * of an unlabelled group in which nothing higher-priority changed being
  * reported as a rename the user never made.
  *
- * `rotation`'s asymmetry is latent rather than live: no shipped producer can
- * set a group's rotation — `build_group_annotation` hardcodes 0 and exposes
- * no parameter, and the rotation-carrying generic tools refuse group ids — so
- * it is guarded here ahead of a group rotation control existing, not because
- * something writes it today.
- *
- * `locked` and `z` were there too until the translators were fixed to carry
- * them, at which point this module started reporting a group's lock and layer
- * correctly in both directions with no change of its own. That is the point
- * of reconstructing the write-back rather than enumerating known rewrites:
- * what the round trip preserves is what gets reported, so the classifier
- * tracks the translators instead of drifting from them.
+ * `locked`, `z`, and `rotation` were there too until the translators were
+ * fixed to carry them, at which point this module started reporting a group's
+ * lock, layer, and rotation correctly in both directions with no change of
+ * its own. That is the point of reconstructing the write-back rather than
+ * enumerating known rewrites: what the round trip preserves is what gets
+ * reported, so the classifier tracks the translators instead of drifting from
+ * them.
  *
  * Returns null when the annotation cannot be round-tripped — reachable by a
  * `before` snapshot written by an older build, carrying a kind this one
@@ -171,7 +195,10 @@ function browserWriteBack(annotation) {
     // lands in it is not observable in the result at all. The translators
     // also do not normalise the payload, only clone it, so there is nothing
     // about it the write-back could have told us.
-    const withoutImage = { ...annotation, image: undefined };
+    // Deleted from a shallow copy rather than spread as `image: undefined`,
+    // so a skipped-annotation warning logs the stored object's own fields.
+    const withoutImage = { ...annotation };
+    delete withoutImage.image;
     return overlaysToAnnotations(annotationsToOverlays([withoutImage]))[0] || null;
   } catch {
     return null;
@@ -189,9 +216,21 @@ function browserWriteBack(annotation) {
  * fails the second test precisely because it lands somewhere the round trip
  * would not have.
  */
-function userChanged(before, after, normalised) {
-  if (sameValue(before, after)) return false;
-  return !sameValue(after, normalised);
+function userChanged(before, after, normalised, path = [], annotationType) {
+  if (sameValue(before, after, path, annotationType)) return false;
+  // vote_dot's translators drop `value`, so its write-back holds nothing to
+  // compare a 0 against and the change has to be asserted here. A heat-map's
+  // write-back always holds a whole level (normalizeHeatmapIntensity), so the
+  // comparison below already tells a user's 0 from the browser clamping a
+  // stored -3 to 0 — which this shortcut would misreport as an edit.
+  if (
+    annotationType === 'vote_dot' &&
+    zeroIsValue(path, annotationType) &&
+    (before === 0 || after === 0)
+  ) {
+    return true;
+  }
+  return !sameValue(after, normalised, path, annotationType);
 }
 
 /**
@@ -219,18 +258,45 @@ function shapeChanged(before, after) {
 // counted them would report every update as a change to them.
 const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
 
+// The only style keys the label/line translators carried before
+// smallfix-label-overlay-drops-nonvisual-style-keys.
+const OLDER_BUILD_STYLE_KEYS = {
+  label: ['color', 'fontSize', 'opacity'],
+  line: ['color', 'opacity'],
+};
+
+/**
+ * Whether `after.style` is exactly what a build from before
+ * smallfix-label-overlay-drops-nonvisual-style-keys wrote back for `before`:
+ * its label/line translators carried only OLDER_BUILD_STYLE_KEYS and
+ * dropped the rest.
+ * The log keeps 7 days, so it holds such records — and a browser tab still
+ * on that build — and without this their dropped keys would read as a
+ * restyle the user never made. A change to exactly that projection is then
+ * indistinguishable from the drop, so it reads as a plain update instead:
+ * the same safe-direction asymmetry `browserWriteBack` describes.
+ */
+function olderBuildStyleWriteBack(before, after) {
+  const annotationType = before.type || before.kind;
+  const keys = OLDER_BUILD_STYLE_KEYS[annotationType];
+  if (!keys) return false;
+  const written = {};
+  for (const key of keys) written[key] = before.style?.[key];
+  return sameValue(after.style, written, ['style'], annotationType);
+}
+
 /**
  * The annotation fields this update actually changed, from the record's own
  * before/after snapshots.
  *
- * Deliberately not `affected.fields`: that is the *incoming payload's* key
- * set, not a change set (session_store.py's `annotation_updated` branch
- * records `sorted(incoming.keys())`), and the browser sends the whole
- * annotation in every op. For any browser-originated edit `fields` is
- * therefore the annotation's entire key set and is identical whatever the
- * user did — reading it as a change set made a move, a recolour or a text
- * edit all render as "Unlocked", asserting a security-relevant state change
- * that never happened. before/after are populated for every producer, because
+ * Deliberately not `affected.fields`: the store no longer writes it (PR
+ * #627), and on records persisted before that it is the *incoming payload's*
+ * key set, not a change set, while the browser sends the whole annotation in
+ * every op. For any browser-originated edit it is therefore the annotation's
+ * entire key set and is identical whatever the user did — reading it as a
+ * change set made a move, a recolour or a text edit all render as "Unlocked",
+ * asserting a security-relevant state change that never happened. before/after
+ * are populated for every producer, because
  * `apply_state_op` is the single choke point both the browser batch and the
  * MCP write path go through, so the diff is authoritative for both.
  *
@@ -241,9 +307,12 @@ function changedFields(before, after, normalised) {
   if (!before || typeof before !== 'object') return null;
   if (!after || typeof after !== 'object') return null;
   const changed = new Set();
+  const annotationType = before.type || before.kind || after.type || after.kind;
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (BOOKKEEPING_FIELDS.has(key)) continue;
-    if (userChanged(before[key], after[key], normalised[key])) changed.add(key);
+    if (userChanged(before[key], after[key], normalised[key], [key], annotationType)) {
+      changed.add(key);
+    }
   }
   return changed;
 }
@@ -316,7 +385,10 @@ function computeAnnotationUpdateKind(record) {
     const raised = (record.after.z || 0) > (record.before.z || 0);
     return raised ? 'raised' : 'lowered';
   }
-  if (changed.has('style')) return 'style';
+  if (changed.has('intensity')) return 'intensity';
+  if (changed.has('style') && !olderBuildStyleWriteBack(record.before, record.after)) {
+    return 'style';
+  }
   if (changed.has('text') || changed.has('label') || changed.has('value')) return 'text';
   return 'generic';
 }

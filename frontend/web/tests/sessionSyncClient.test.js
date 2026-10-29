@@ -383,7 +383,82 @@ describe('SessionSyncClient', () => {
     expect(onResync).not.toHaveBeenCalled();
     es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
     expect(onResync).toHaveBeenCalledTimes(1);
+    // Without a session id: a reconnect resyncs whatever session the host is on.
+    expect(onResync).toHaveBeenLastCalledWith();
     expect(client.seq).toBe(5);
+  });
+
+  it('resyncs without a session id on a catch_up that carries ops, and not on an empty one', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'catch_up', seq: 4, ops: [] });
+    expect(onResync).not.toHaveBeenCalled();
+    es.emit({ type: 'catch_up', seq: 6, ops: [{ op: 'nodes_added', node_ids: ['x'] }] });
+    expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onResync).toHaveBeenLastCalledWith();
+  });
+
+  // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
+  // only adopts its seq, so ops that landed between the host's initial load
+  // and the stream subscribe must be recovered through onResync.
+  it.each([
+    ['a loaded session', { node_refs: ['a'] }, 2],
+    ['a 404 load (session created by the stream)', {}, 0],
+  ])('resyncs on a first snapshot newer than %s', async (_label, baseline, loadedSeq) => {
+    const onReady = vi.fn();
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onReady, onResync } });
+    client.connect();
+    client.setBaseline(baseline, { seq: loadedSeq });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onReady).toHaveBeenCalledWith(5);
+    expect(onResync).toHaveBeenCalledTimes(1);
+    // Its own session, not whatever the host's handler is still bound to.
+    expect(onResync).toHaveBeenCalledWith('1234-5678');
+  });
+
+  it('does not resync on a first snapshot at the seq the load already reflected', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 5 });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+  });
+
+  it('does not resync on a first snapshot when the baseline carries no load seq', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+  });
+
+  it('checks the load seq only on the first snapshot, not on a later one', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 5 });
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+    // A later snapshot resyncs as it always did, even at or below the load seq.
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onResync).toHaveBeenLastCalledWith();
+  });
+
+  it('keeps the load seq when a later setBaseline carries none', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 2 });
+    client.setBaseline({ node_refs: ['a', 'b'] });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).toHaveBeenCalledTimes(1);
   });
 
   it('forwards command events (MCP pushes broadcast via the hub, design R5)', async () => {
@@ -398,6 +473,22 @@ describe('SessionSyncClient', () => {
     };
     es.emit({ type: 'command', command });
     expect(onCommand).toHaveBeenCalledWith(command);
+  });
+
+  it('forwards a summon from another client and skips its own echo', () => {
+    const onViewportSummoned = vi.fn();
+    const { client } = makeClient({ handlers: { onViewportSummoned } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const bounds = { x: 1, y: 2, width: 300, height: 200 };
+    es.emit({ type: 'viewport_summoned', client_id: 'client-me', summoned_by: 'Me', bounds });
+    expect(onViewportSummoned).not.toHaveBeenCalled();
+    es.emit({ type: 'viewport_summoned', client_id: 'client-other', summoned_by: 'Ada', bounds });
+    expect(onViewportSummoned).toHaveBeenCalledWith({
+      bounds,
+      summonedBy: 'Ada',
+      sessionId: '1234-5678',
+    });
   });
 
   it('forwards remote ops but suppresses echoes of its own client', async () => {
@@ -415,6 +506,7 @@ describe('SessionSyncClient', () => {
     });
     expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'node_moved', node_id: 'a' }], {
       clientId: 'client-other',
+      sessionId: '1234-5678',
     });
     expect(client.seq).toBe(2);
   });
@@ -442,7 +534,10 @@ describe('SessionSyncClient', () => {
     // the ingest endpoint — but the broadcast is attributed to the server's
     // marker, not to 'client-me'.
     es.emit({ type: 'op', client_id: 'human-image-ingest', op: imageOp, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([imageOp], { clientId: 'human-image-ingest' });
+    expect(onRemoteOps).toHaveBeenCalledWith([imageOp], {
+      clientId: 'human-image-ingest',
+      sessionId: '1234-5678',
+    });
   });
 
   // Regression for the undo self-echo-drop fix
@@ -467,7 +562,10 @@ describe('SessionSyncClient', () => {
     // the undo endpoint — but the broadcast is attributed to the server's
     // marker, not to 'client-me'.
     es.emit({ type: 'op', client_id: 'undo-replay', op: inverseOp, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([inverseOp], { clientId: 'undo-replay' });
+    expect(onRemoteOps).toHaveBeenCalledWith([inverseOp], {
+      clientId: 'undo-replay',
+      sessionId: '1234-5678',
+    });
   });
 
   // foldLocalOp is App.jsx's other half of the image-ingest fix: applied
@@ -683,6 +781,7 @@ describe('SessionSyncClient', () => {
     client.sendEdgesAdded([edge]);
     await flush();
     const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(fetchImpl.mock.calls.at(-1)[1].headers['X-Requested-With']).toBe('XMLHttpRequest');
     expect(posted).toContainEqual({ op: 'edges_added', edges: [edge] });
   });
 
@@ -703,7 +802,10 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'snapshot', seq: 0, session: { state: { node_refs: ['a', 'b'] } } });
     const op = { op: 'edges_added', edges: [{ id: 'e1', source: 'a', target: 'b' }] };
     es.emit({ type: 'op', client_id: 'client-other', op, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'client-other' });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
     // Edges are graph-derived, not mirror state: re-syncing the same node set
     // must emit nothing (the edge op left no residue that could echo back out).
     client.setBaseline({ node_refs: ['a', 'b'] });
@@ -770,8 +872,14 @@ describe('SessionSyncClient', () => {
     const updated = { op: 'edges_updated', edges: [{ id: 'e1', type: 'DEPENDS_ON' }] };
     es.emit({ type: 'op', client_id: 'client-other', op: removed, seq: 1 });
     es.emit({ type: 'op', client_id: 'client-other', op: updated, seq: 2 });
-    expect(onRemoteOps).toHaveBeenCalledWith([removed], { clientId: 'client-other' });
-    expect(onRemoteOps).toHaveBeenCalledWith([updated], { clientId: 'client-other' });
+    expect(onRemoteOps).toHaveBeenCalledWith([removed], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
+    expect(onRemoteOps).toHaveBeenCalledWith([updated], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
     // Edges are graph-derived, not mirror state: re-syncing the same node set
     // must emit nothing (neither op left residue that could echo back out).
     client.setBaseline({ node_refs: ['a', 'b'] });
@@ -803,7 +911,10 @@ describe('SessionSyncClient', () => {
       seq: 3,
     };
     FakeEventSource.instances[0].emit({ type: 'op', client_id: 'mcp-agent', op, seq: 3 });
-    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'mcp-agent' });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], {
+      clientId: 'mcp-agent',
+      sessionId: '1234-5678',
+    });
     expect(onRemoteOps.mock.calls[0][0][0].animation).toEqual({
       animate: true,
       duration_ms: 400,
@@ -834,27 +945,34 @@ describe('SessionSyncClient', () => {
   });
 
   it('requeues ops on a 500 and drops them on a 400', async () => {
-    const fetchImpl = makeFetch([
-      { ok: false, status: 500 },
-      { ok: true, status: 200, json: async () => ({ seq: 1 }) },
-    ]);
-    const { client } = makeClient({ fetchImpl });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 30)); // let retry fire
-    expect(fetchImpl.calls.length).toBeGreaterThanOrEqual(2);
-    expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: false, status: 500 },
+        { ok: true, status: 200, json: async () => ({ seq: 1 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(fetchImpl.calls).toHaveLength(1); // requeued, waiting out the backoff
+      await vi.advanceTimersByTimeAsync(500); // _scheduleRetry's 500ms floor elapses
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
 
-    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
-    const onDropped = vi.fn();
-    const { client: c2 } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
-    c2.connect();
-    FakeEventSource.instances[1].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    c2.syncState({ node_refs: ['x'] });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(onDropped).toHaveBeenCalled();
-    expect(dropFetch.calls).toHaveLength(1); // not retried
+      const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+      const onDropped = vi.fn();
+      const { client: c2 } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+      c2.connect();
+      FakeEventSource.instances[1].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      c2.syncState({ node_refs: ['x'] });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(onDropped).toHaveBeenCalled();
+      expect(dropFetch.calls).toHaveLength(1); // not retried
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Review round 9 (PR #496 / task fbd32fc9): onDropped is invoked
@@ -865,19 +983,24 @@ describe('SessionSyncClient', () => {
   // server truth) must see the dropped op already gone — otherwise the very
   // resync meant to drop it would instead resurrect it.
   it('a dropped op is already gone from getPendingOps by the time onDropped fires', async () => {
-    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
-    let pendingDuringDrop = null;
-    const onDropped = vi.fn(() => {
-      pendingDuringDrop = client.getPendingOps();
-    });
-    const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['x'] });
-    await new Promise((r) => setTimeout(r, 30));
+    vi.useFakeTimers();
+    try {
+      const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+      let pendingDuringDrop = null;
+      const onDropped = vi.fn(() => {
+        pendingDuringDrop = client.getPendingOps();
+      });
+      const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['x'] });
+      await vi.advanceTimersByTimeAsync(30);
 
-    expect(onDropped).toHaveBeenCalled();
-    expect(pendingDuringDrop).toEqual([]);
+      expect(onDropped).toHaveBeenCalled();
+      expect(pendingDuringDrop).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Regression for the review finding on PR #527 (task-annotation-exclusive-
@@ -889,85 +1012,357 @@ describe('SessionSyncClient', () => {
   // that stale content would then replay unconditionally against whatever the
   // annotation's current state had become, silently overwriting real work.
   it('drops a 409/LeaseConflict op instead of retrying it forever, and never replays it once the conflict clears', async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
-    const onDropped = vi.fn();
-    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
+      const onDropped = vi.fn();
+      const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 30)); // let the first flush's fetch settle
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(30); // let the first flush's fetch settle
 
-    // Terminal handling: onDropped fires with the 409 status so the UI can
-    // tell the user their edit didn't apply, and the op is gone from the
-    // queue rather than sitting there to be resent.
-    expect(onDropped).toHaveBeenCalledTimes(1);
-    expect(onDropped.mock.calls[0][1]).toBe(409);
-    expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
-    expect(client.getPendingOps()).toEqual([]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // Terminal handling: onDropped fires with the 409 status so the UI can
+      // tell the user their edit didn't apply, and the op is gone from the
+      // queue rather than sitting there to be resent.
+      expect(onDropped).toHaveBeenCalledTimes(1);
+      expect(onDropped.mock.calls[0][1]).toBe(409);
+      expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
+      expect(client.getPendingOps()).toEqual([]);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
 
-    // Wait well past the retry-backoff window (500ms floor). If the silent-
-    // infinite-retry bug were still present, the op would be resent here with
-    // its original, now-stale content — exactly the replay this fix rules out.
-    await new Promise((r) => setTimeout(r, 700));
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(onDropped).toHaveBeenCalledTimes(1);
-  }, 10_000);
+      // Wait well past the retry-backoff window (500ms floor). If the silent-
+      // infinite-retry bug were still present, the op would be resent here with
+      // its original, now-stale content — exactly the replay this fix rules out.
+      await vi.advanceTimersByTimeAsync(700);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(onDropped).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
-    // Regression for the shared-session "moves silently stop persisting over
-    // time" data-loss bug: a single hung POST (a half-open request held by a
-    // proxy) used to leave `_flushing` stuck true forever, so every later op —
-    // moves, node adds, everything — silently never reached the server, the
-    // batch in flight was lost, and a reload showed none of it stored. The
-    // request timeout must abort the stuck POST so delivery resumes.
-    const bodies = [];
-    let hang = true;
-    const fetchImpl = vi.fn((url, opts) => {
-      bodies.push(JSON.parse(opts.body));
-      if (hang) {
-        hang = false;
-        return new Promise(() => {}); // first POST never settles
-      }
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => ({ applied: [], seq: bodies.length }),
+    vi.useFakeTimers();
+    try {
+      // Regression for the shared-session "moves silently stop persisting over
+      // time" data-loss bug: a single hung POST (a half-open request held by a
+      // proxy) used to leave `_flushing` stuck true forever, so every later op —
+      // moves, node adds, everything — silently never reached the server, the
+      // batch in flight was lost, and a reload showed none of it stored. The
+      // request timeout must abort the stuck POST so delivery resumes.
+      const bodies = [];
+      let hang = true;
+      const fetchImpl = vi.fn((url, opts) => {
+        bodies.push(JSON.parse(opts.body));
+        if (hang) {
+          hang = false;
+          return new Promise(() => {}); // first POST never settles
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ applied: [], seq: bodies.length }),
+        });
       });
-    });
-    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-    // First move → its POST hangs.
-    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 1, y: 1 } } });
-    await new Promise((r) => setTimeout(r, 10));
-    // A later move made while the first request is still hung must still get out.
-    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
-    await new Promise((r) => setTimeout(r, 150)); // past the timeout + retry backoff
+      // First move → its POST hangs.
+      client.syncState({ node_refs: ['n0'], positions: { n0: { x: 1, y: 1 } } });
+      await vi.advanceTimersByTimeAsync(10);
+      // A later move made while the first request is still hung must still get out.
+      client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
+      await vi.advanceTimersByTimeAsync(600); // past the 20ms timeout + the 500ms retry backoff
 
-    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
-    const allOps = bodies.flatMap((b) => b.ops || []);
-    // Neither move is lost: the hung batch's op is requeued, the later one sent.
-    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
-    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
+      const allOps = bodies.flatMap((b) => b.ops || []);
+      // Neither move is lost: the hung batch's op is requeued, the later one sent.
+      expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
+      expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A failing server must not be re-hit on the flush debounce: after a
+  // 429/5xx/network error the requeued batch — and any op enqueued meanwhile —
+  // waits for _scheduleRetry's backoff (max(500, 4 * flushIntervalMs)).
+  it.each([
+    ['429', { ok: false, status: 429 }],
+    ['503', { ok: false, status: 503 }],
+    ['network error', new Error('network down')],
+  ])('waits out the retry backoff before resending after a %s', async (_label, failure) => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([failure]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      client.syncState({ node_refs: ['a', 'b'] }); // enqueued during the backoff
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[1].body.ops).toEqual([
+        { op: 'nodes_added', node_ids: ['a'] },
+        { op: 'nodes_added', node_ids: ['b'] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a flush debounced while the failing request was in flight does not pre-empt the backoff', async () => {
+    vi.useFakeTimers();
+    try {
+      let failFirst;
+      const firstSettled = new Promise((r) => {
+        failFirst = r;
+      });
+      const fetchImpl = vi.fn(async () => {
+        if (fetchImpl.mock.calls.length === 1) {
+          await firstSettled;
+          return { ok: false, status: 500 };
+        }
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      // Backoff is max(500, 4 * 100) = 500ms; the debounce is 100ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 100 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
+
+      client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+      await vi.advanceTimersByTimeAsync(10);
+      failFirst();
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('releases the flush guard and retries after a hung ops request times out', async () => {
-    // The heart of the wedge fix: a request that never settles must not leave
-    // `_flushing` stuck true (which permanently blocks every later flush). After
-    // the timeout it is released and the op is retried on a fresh request.
-    const fetchImpl = vi.fn(() => new Promise(() => {})); // every POST hangs
-    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 120));
-    // Each hung POST times out and releases `_flushing`, so the client keeps
-    // reattempting instead of freezing on the first hung request forever. If the
-    // guard were never released, exactly one attempt would ever be made.
-    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
+    vi.useFakeTimers();
+    try {
+      // The heart of the wedge fix: a request that never settles must not leave
+      // `_flushing` stuck true (which permanently blocks every later flush). After
+      // the timeout it is released and the op is retried on a fresh request.
+      const fetchImpl = vi.fn(() => new Promise(() => {})); // every POST hangs
+      const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(1200); // two 20ms timeouts, each followed by a 500ms backoff
+      // Each hung POST times out and releases `_flushing`, so the client keeps
+      // reattempting instead of freezing on the first hung request forever. If the
+      // guard were never released, exactly one attempt would ever be made.
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // smallfix-sessionsync-backoff-residue-20260924: the catch path (network
+  // error, request timeout) must cancel an in-flight debounce just like 5xx.
+  it.each([
+    ['network error', {}],
+    ['request timeout', { requestTimeoutMs: 50 }],
+  ])(
+    'a flush debounced while a request failing with a %s was in flight does not pre-empt the backoff',
+    async (label, overrides) => {
+      vi.useFakeTimers();
+      try {
+        let failFirst;
+        const firstSettled = new Promise((r) => {
+          failFirst = r;
+        });
+        const fetchImpl = vi.fn(async () => {
+          if (fetchImpl.mock.calls.length === 1) {
+            if (label === 'request timeout') return new Promise(() => {});
+            await firstSettled;
+            throw new Error('network down');
+          }
+          return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+        });
+        // Backoff is max(500, 4 * 100) = 500ms; the debounce is 100ms.
+        const { client } = makeClient({ fetchImpl, flushIntervalMs: 100, ...overrides });
+        client.connect();
+        FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+        client.syncState({ node_refs: ['a'] });
+        await vi.advanceTimersByTimeAsync(100);
+        expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
+
+        client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+        await vi.advanceTimersByTimeAsync(10);
+        failFirst(); // the timeout variant fails at +50ms on its own
+        await vi.advanceTimersByTimeAsync(480);
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(80);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('scales the retry backoff with flushIntervalMs above the 500ms floor', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      // Backoff is max(500, 4 * 200) = 800ms after the failure at +200ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 200 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(780);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends a new op on the normal debounce once a retry has succeeded', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(500); // the retry resends and succeeds
+      expect(fetchImpl.calls).toHaveLength(2);
+
+      client.syncState({ node_refs: ['a', 'b'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(3);
+      expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an op enqueued while the retry POST is in flight is sent once that POST settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseRetry;
+      const retrySettled = new Promise((r) => {
+        releaseRetry = r;
+      });
+      const bodies = [];
+      const fetchImpl = vi.fn(async (_url, opts) => {
+        bodies.push(JSON.parse(opts.body));
+        if (bodies.length === 1) return { ok: false, status: 503 };
+        if (bodies.length === 2) await retrySettled;
+        return { ok: true, status: 200, json: async () => ({ seq: bodies.length }) };
+      });
+      // Backoff is max(500, 4 * 20) = 500ms; the debounce is 20ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(bodies).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(500); // the retry POST starts and hangs
+      expect(bodies).toHaveLength(2);
+
+      client.syncState({ node_refs: ['a', 'b'] });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(bodies).toHaveLength(2);
+
+      releaseRetry();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2].ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a snapshot arriving during the backoff does not pre-empt it', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      es.emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a retry that fires while the stream is down keeps the op and sends it once the stream is back', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      es.error(false); // transient drop: not ready until the stream catches up
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fetchImpl.calls).toHaveLength(1);
+      expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+
+      es.emit({ type: 'catch_up', seq: 0, ops: [] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('close() during an armed backoff sends nothing more', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      client.close();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(fetchImpl.calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('folds a remote op into the baseline so re-syncing the same state emits nothing (echo-safe)', async () => {
@@ -1008,81 +1403,127 @@ describe('SessionSyncClient', () => {
   });
 
   it('isolates a poison-pill op: a rejected multi-op batch resends singly, dropping only the bad op', async () => {
-    const onDropped = vi.fn();
-    // The server rejects any batch containing the annotation op; valid ops pass.
-    const fetchImpl = vi.fn(async (url, opts) => {
-      const ops = JSON.parse(opts.body).ops;
-      if (ops.some((o) => o.op === 'annotation_created')) return { ok: false, status: 400 };
-      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
-    });
-    fetchImpl.calls = () => fetchImpl.mock.calls.map(([, o]) => JSON.parse(o.body).ops);
-    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
-    await new Promise((r) => setTimeout(r, 60));
-    // The valid nodes_added was delivered in its own batch; the annotation was dropped.
-    const sent = fetchImpl.calls();
-    expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
-    expect(onDropped).toHaveBeenCalled();
-    expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
+    vi.useFakeTimers();
+    try {
+      const onDropped = vi.fn();
+      // The server rejects any batch containing the annotation op; valid ops pass.
+      const fetchImpl = vi.fn(async (url, opts) => {
+        const ops = JSON.parse(opts.body).ops;
+        if (ops.some((o) => o.op === 'annotation_created')) return { ok: false, status: 400 };
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      fetchImpl.calls = () => fetchImpl.mock.calls.map(([, o]) => JSON.parse(o.body).ops);
+      const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
+      await vi.advanceTimersByTimeAsync(60);
+      // The valid nodes_added was delivered in its own batch; the annotation was dropped.
+      const sent = fetchImpl.calls();
+      expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
+      expect(onDropped).toHaveBeenCalled();
+      expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('teardown flush drains every queued op in force-single mode (close() loses none)', async () => {
-    // First POST (the multi-op batch) is terminally rejected, flipping the client
-    // into force-single recovery with the whole batch requeued.
-    const fetchImpl = makeFetch([{ ok: false, status: 400 }]);
-    // Long debounce so no automatic re-flush races the explicit teardown flush.
+    vi.useFakeTimers();
+    try {
+      // First POST (the multi-op batch) is terminally rejected, flipping the client
+      // into force-single recovery with the whole batch requeued.
+      const fetchImpl = makeFetch([{ ok: false, status: 400 }]);
+      // Long debounce so no automatic re-flush races the explicit teardown flush.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
+      await client.flush();
+      expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
+
+      client.flush();
+      client.close();
+      await vi.advanceTimersByTimeAsync(10);
+      // Both requeued ops left as their own single-op batches despite close().
+      const singles = fetchImpl.calls.slice(1).map((c) => c.body.ops);
+      expect(singles).toEqual([
+        [{ op: 'nodes_added', node_ids: ['a'] }],
+        [{ op: 'nodes_hidden', node_ids: ['h'] }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('teardown force-single flush reports the current single-op POST as pending', async () => {
+    let releasePost;
+    const postGate = new Promise((resolve) => {
+      releasePost = resolve;
+    });
+    let call = 0;
+    const fetchImpl = vi.fn(async (url, opts) => {
+      fetchImpl.calls.push({ url, body: JSON.parse(opts.body) });
+      call += 1;
+      if (call === 1) return { ok: false, status: 400 };
+      if (call === 2) await postGate;
+      return { ok: true, status: 200, json: async () => ({ applied: [], seq: call }) };
+    });
+    fetchImpl.calls = [];
     const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
     client.connect();
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
-    await client.flush();
-    expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
+    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] });
+    await client.flush(); // batch rejected -> force-single, both ops requeued
 
-    client.flush();
-    client.close();
-    await new Promise((r) => setTimeout(r, 10));
-    // Both requeued ops left as their own single-op batches despite close().
-    const singles = fetchImpl.calls.slice(1).map((c) => c.body.ops);
-    expect(singles).toEqual([
-      [{ op: 'nodes_added', node_ids: ['a'] }],
-      [{ op: 'nodes_hidden', node_ids: ['h'] }],
-    ]);
+    const flushPromise = client.flush();
+    expect(fetchImpl.calls).toHaveLength(2);
+    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+    expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+
+    releasePost();
+    await flushPromise;
+    expect(client.getPendingOps()).toEqual([]);
+    expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['h'] }]);
   });
 
   it('teardown flush drains the remainder even while a force-single op is in flight', async () => {
-    let release;
-    const gate = new Promise((r) => {
-      release = r;
-    });
-    let call = 0;
-    // Call 1: the multi-op batch, terminally rejected (enters force-single).
-    // Call 2: the debounced single-op resend, held in flight across teardown.
-    const fetchImpl = vi.fn(async (url, opts) => {
-      fetchImpl.sent.push(JSON.parse(opts.body).ops);
-      call += 1;
-      if (call === 1) return { ok: false, status: 400 };
-      if (call === 2) await gate;
-      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
-    });
-    fetchImpl.sent = [];
-    const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
-    await client.flush(); // batch rejected → force-single, all 3 requeued
-    await new Promise((r) => setTimeout(r, 10)); // debounce resends op 1, which now hangs
-    expect(fetchImpl.sent).toHaveLength(2);
+    vi.useFakeTimers();
+    try {
+      let release;
+      const gate = new Promise((r) => {
+        release = r;
+      });
+      let call = 0;
+      // Call 1: the multi-op batch, terminally rejected (enters force-single).
+      // Call 2: the debounced single-op resend, held in flight across teardown.
+      const fetchImpl = vi.fn(async (url, opts) => {
+        fetchImpl.sent.push(JSON.parse(opts.body).ops);
+        call += 1;
+        if (call === 1) return { ok: false, status: 400 };
+        if (call === 2) await gate;
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      fetchImpl.sent = [];
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
+      await client.flush(); // batch rejected → force-single, all 3 requeued
+      await vi.advanceTimersByTimeAsync(10); // debounce resends op 1, which now hangs
+      expect(fetchImpl.sent).toHaveLength(2);
 
-    client.flush();
-    client.close();
-    await new Promise((r) => setTimeout(r, 10));
-    release();
-    expect(fetchImpl.sent.slice(2)).toEqual([
-      [{ op: 'nodes_hidden', node_ids: ['h'] }],
-      [{ op: 'edges_hidden', edge_ids: ['e'] }],
-    ]);
+      client.flush();
+      client.close();
+      await vi.advanceTimersByTimeAsync(10);
+      release();
+      expect(fetchImpl.sent.slice(2)).toEqual([
+        [{ op: 'nodes_hidden', node_ids: ['h'] }],
+        [{ op: 'edges_hidden', edge_ids: ['e'] }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('teardown flush sends queued ops even if the stream never became ready', async () => {
@@ -1109,7 +1550,37 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'session_renamed', name: 'Team map' });
     es.emit({ type: 'session_deleted', deleted_by: 'client-other' });
     expect(onSessionRenamed).toHaveBeenCalledWith('Team map');
-    expect(onSessionDeleted).toHaveBeenCalledWith('client-other');
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', null);
+  });
+
+  it('delivers a server-only staged op even when it carries this client id (another tab)', () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, roster: [] });
+    es.emit({
+      type: 'op',
+      seq: 1,
+      client_id: client.clientId,
+      op: { op: 'write_mode_changed', write_mode: 'staged' },
+    });
+    expect(onRemoteOps).toHaveBeenCalledWith(
+      [{ op: 'write_mode_changed', write_mode: 'staged' }],
+      expect.anything()
+    );
+  });
+
+  it('passes the deleted session write mode on, so a staged one is replaced staged', () => {
+    const onSessionDeleted = vi.fn();
+    const { client } = makeClient({ handlers: { onSessionDeleted } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'session_deleted',
+      deleted_by: 'client-other',
+      write_mode: 'staged',
+    });
+    expect(onSessionDeleted).toHaveBeenCalledWith('client-other', 'staged');
   });
 
   it('passes since_seq once a seq is known and stops after close', async () => {
@@ -1187,31 +1658,137 @@ describe('SessionSyncClient', () => {
   });
 
   it('proactively chunks an oversized queue against the server batch caps (R9)', async () => {
-    const fetchImpl = makeFetch([
-      { ok: true, status: 200, json: async () => ({ seq: 500 }) },
-      { ok: true, status: 200, json: async () => ({ seq: 600 }) },
-    ]);
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: true, status: 200, json: async () => ({ seq: 200 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 400 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 600 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+      // 600 distinct annotation_created ops — one op per annotation id — well
+      // over the server's 200-op rate burst (and its 500-op batch cap) but
+      // nowhere near the byte cap.
+      const annotations = Array.from({ length: 600 }, (_, i) => ({
+        id: `ann-${i}`,
+        kind: 'note',
+        text: 'x',
+        position: { x: 0, y: 0 },
+      }));
+      client.syncState({ annotations });
+
+      // Let the debounced flush chain run to completion (each flush's `finally`
+      // reschedules the next one while the queue is non-empty).
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(fetchImpl.calls).toHaveLength(3);
+      expect(fetchImpl.calls[0].body.ops).toHaveLength(200);
+      expect(fetchImpl.calls[1].body.ops).toHaveLength(200);
+      expect(fetchImpl.calls[2].body.ops).toHaveLength(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A 429 between chunks requeues that chunk at the front, so the backlog
+  // behind it still drains in order once the backoff has passed. 600 ops,
+  // not 400: with a chunk still queued behind the rejected one, requeueing it
+  // at the back instead would reorder delivery.
+  it('drains a chunked queue in order across a 429 on a middle chunk (R9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: true, status: 200, json: async () => ({ seq: 200 }) },
+        { ok: false, status: 429 },
+        { ok: true, status: 200, json: async () => ({ seq: 400 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 600 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const ops = Array.from({ length: 600 }, (_, i) => ({
+        op: 'nodes_added',
+        node_ids: [`n${i}`],
+      }));
+      client.sendOps(ops);
+
+      await vi.advanceTimersByTimeAsync(600); // past the 500ms retry backoff
+
+      expect(fetchImpl.calls.map((c) => c.body.ops.length)).toEqual([200, 200, 200, 200]);
+      expect(fetchImpl.calls[2].body.ops).toEqual(fetchImpl.calls[1].body.ops);
+      const delivered = [0, 2, 3].flatMap((i) => fetchImpl.calls[i].body.ops);
+      expect(delivered).toEqual(ops);
+      expect(client.getPendingOps()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The client's byte cap (MAX_BATCH_BYTES, 240 KiB of JSON.stringify output,
+  // below the server's 256 KiB) is not exported, so it is restated here.
+  const CLIENT_BATCH_BYTES = 240 * 1024;
+  const opOfBytes = (bytes) => {
+    const shell = JSON.stringify({ op: 'nodes_hidden', node_ids: [''] }).length;
+    return { op: 'nodes_hidden', node_ids: ['x'.repeat(bytes - shell)] };
+  };
+  const opsBytes = (ops) => ops.reduce((sum, op) => sum + JSON.stringify(op).length, 0);
+
+  it('splits a queue by the byte cap, keeping every POST under it', async () => {
+    const fetchImpl = makeFetch();
     const { client } = makeClient({ fetchImpl });
     client.connect();
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const ops = [0, 1, 2].map(() => opOfBytes(100 * 1024));
+    client.sendOps(ops);
 
-    // 600 distinct annotation_created ops — one op per annotation id — well
-    // over the server's 500-op-per-batch cap but nowhere near the byte cap.
-    const annotations = Array.from({ length: 600 }, (_, i) => ({
-      id: `ann-${i}`,
-      kind: 'note',
-      text: 'x',
-      position: { x: 0, y: 0 },
-    }));
-    client.syncState({ annotations });
+    await client.flush();
+    await client.flush();
 
-    // Let the debounced flush chain run to completion (each flush's `finally`
-    // reschedules the next one while the queue is non-empty).
-    await new Promise((r) => setTimeout(r, 50));
+    expect(fetchImpl.calls.map((c) => c.body.ops.length)).toEqual([2, 1]);
+    expect(fetchImpl.calls.flatMap((c) => c.body.ops)).toEqual(ops);
+    for (const call of fetchImpl.calls) {
+      expect(opsBytes(call.body.ops)).toBeLessThanOrEqual(CLIENT_BATCH_BYTES);
+    }
+  });
 
-    expect(fetchImpl.calls).toHaveLength(2);
-    expect(fetchImpl.calls[0].body.ops).toHaveLength(500);
-    expect(fetchImpl.calls[1].body.ops).toHaveLength(100);
+  it('sends a batch that exactly fills the byte cap as one POST', async () => {
+    const fetchImpl = makeFetch();
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const ops = [opOfBytes(CLIENT_BATCH_BYTES / 2), opOfBytes(CLIENT_BATCH_BYTES / 2)];
+    expect(opsBytes(ops)).toBe(CLIENT_BATCH_BYTES);
+    client.sendOps(ops);
+
+    await client.flush();
+
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual(ops);
+  });
+
+  // An op over the byte cap on its own can never fit a batch; it is still
+  // sent alone, so the server's 413 drops it through onDropped and the ops
+  // behind it are not stalled.
+  it('sends an op over the byte cap alone and drains past it on its 413', async () => {
+    const fetchImpl = makeFetch([{ ok: false, status: 413, json: async () => ({}) }]);
+    const onDropped = vi.fn();
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const oversized = opOfBytes(CLIENT_BATCH_BYTES + 1024);
+    const small = { op: 'nodes_added', node_ids: ['after'] };
+    client.sendOps([oversized, small]);
+
+    await client.flush();
+    await client.flush();
+
+    expect(fetchImpl.calls.map((c) => c.body.ops)).toEqual([[oversized], [small]]);
+    expect(onDropped).toHaveBeenCalledTimes(1);
+    expect(onDropped).toHaveBeenCalledWith([oversized], 413, {});
+    expect(client.getPendingOps()).toEqual([]);
   });
 
   it('ignores a duplicate or stale sequenced op event (R15)', () => {
@@ -1287,6 +1864,35 @@ describe('SessionSyncClient', () => {
     expect(reconnectUrl.searchParams.get('since_seq')).toBe('9');
   });
 
+  // App.jsx's resyncFromServer refetches a reload payload whose seq is below
+  // this, so it must track what the stream applied, not the POST-inflated seq.
+  it('appliedSeq reports the highest seq applied from the stream, not the POST-inflated seq', async () => {
+    const fetchImpl = makeFetch([
+      { ok: true, status: 200, json: async () => ({ applied: [], seq: 11 }) },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(client.appliedSeq).toBe(5);
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['a'] },
+      seq: 6,
+    });
+    expect(client.appliedSeq).toBe(6);
+
+    client.syncState({ node_refs: ['mine'] });
+    await flush();
+    expect(client.seq).toBe(11);
+    expect(client.appliedSeq).toBe(6);
+
+    es.emit({ type: 'catch_up', seq: 12, ops: [], roster: [], claims: {} });
+    expect(client.appliedSeq).toBe(12);
+  });
+
   it('reconnect since_seq tracks the highest seq delivered by the stream, including remote ops', () => {
     const { client } = makeClient();
     client.connect();
@@ -1341,6 +1947,7 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
     expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'nodes_added', node_ids: ['theirs'] }], {
       clientId: 'client-other',
+      sessionId: '1234-5678',
     });
   });
 });
@@ -2329,7 +2936,10 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     // A genuinely newer broadcast must still reach onRemoteOps — round 5's
     // fix must not turn into a "collaboration doesn't work" regression by
     // over-suppressing delivery of real updates.
-    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-B' });
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], {
+      clientId: 'client-B',
+      sessionId: '1234-5678',
+    });
   });
 
   it('a stale broadcast followed by a genuinely newer one: the stale one is dropped but the newer one still applies', async () => {
@@ -2378,7 +2988,10 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     // onRemoteOps sees only the genuinely newer broadcast — the stale one
     // never reaches it (and so never reaches a canvas wired to it either).
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
-    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-C' });
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], {
+      clientId: 'client-C',
+      sessionId: '1234-5678',
+    });
   });
 });
 
@@ -2664,5 +3277,130 @@ describe('foldAckedAnnotationOp', () => {
     const a = result.annotations.find((x) => x.id === 'a');
     expect(a.version).toBe(2);
     expect(a.field_versions).toEqual({ style: 2 });
+  });
+});
+
+describe('SessionSyncClient — a stream that never opens', () => {
+  const probing = (status, body = { detail: 'session not found' }) =>
+    vi.fn(async () => ({ ok: status < 400, status, json: async () => body }));
+
+  it('tells the host once when the stream answers 404: the session id is retired', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sessions/1234-5678/stream?'),
+      expect.objectContaining({ headers: { Accept: 'text/event-stream' } })
+    );
+    expect(handlers.onStreamRefused).toHaveBeenCalledWith(404);
+    // The next failed connect does not ask again.
+    client.connect();
+    FakeEventSource.instances.at(-1).error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(handlers.onStreamRefused).toHaveBeenCalledTimes(1);
+    client.close();
+  });
+
+  it('says nothing for a refusal that is not a 404, or a network failure', async () => {
+    for (const fetchImpl of [
+      // A 404 from something in front of the server, not the stream route's.
+      probing(404, { message: 'Not Found' }),
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => Promise.reject(new Error('html')),
+      })),
+      probing(429),
+      probing(503),
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    ]) {
+      FakeEventSource.instances = [];
+      const { client, handlers } = makeClient({ fetchImpl });
+      handlers.onStreamRefused = vi.fn();
+      client.connect();
+      FakeEventSource.instances[0].error(true);
+      await flush();
+      expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+      client.close();
+    }
+  });
+
+  it('does not ask about a stream that was open before it dropped', async () => {
+    const fetchImpl = probing(404);
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('does not tell a client whose stream opened while the probe was asked', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.connect();
+    FakeEventSource.instances.at(-1).emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+    answer({ ok: false, status: 404, json: async () => ({ detail: 'session not found' }) });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('aborts a probe still waiting when the client closes', async () => {
+    let signal;
+    const fetchImpl = vi.fn((url, opts) => {
+      signal = opts.signal;
+      return new Promise(() => {});
+    });
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    expect(signal.aborted).toBe(false);
+    client.close();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('aborts the probe once a non-404 answer is read, so its stream is not left open', async () => {
+    let signal;
+    const fetchImpl = vi.fn(async (url, opts) => {
+      signal = opts.signal;
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(true);
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('does not tell a closed client', async () => {
+    let answer;
+    const fetchImpl = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const { client, handlers } = makeClient({ fetchImpl });
+    handlers.onStreamRefused = vi.fn();
+    client.connect();
+    FakeEventSource.instances[0].error(true);
+    client.close();
+    answer({ ok: false, status: 404, json: async () => ({ detail: 'session not found' }) });
+    await flush();
+    expect(handlers.onStreamRefused).not.toHaveBeenCalled();
   });
 });

@@ -27,6 +27,15 @@
 // do not emit a stream of no-op node_moved ops.
 const POSITION_EPSILON = 0.5;
 
+// Ops only the server emits (docs/SESSION_OVERLAY_CONTRACT.md §15), never
+// echoes of a client's own batch.
+const SERVER_ONLY_OPS = new Set([
+  'graph_change_staged',
+  'graph_changes_discarded',
+  'graph_changes_merged',
+  'write_mode_changed',
+]);
+
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
 // initial materialisation within the server's per-batch op cap.
@@ -35,10 +44,12 @@ const LAYOUT_BATCH_THRESHOLD = 20;
 // Mirror the server's per-batch caps (design §3.9) so an oversized queue is
 // chunked proactively (R9) instead of only after the server rejects a
 // too-large batch and the client falls back to one-op-at-a-time recovery.
-// Kept comfortably under the server's actual limits (500 ops / 256 KB) to
-// leave margin for JSON encoding differences between JSON.stringify and the
-// server's json.dumps.
-const MAX_OPS_PER_BATCH = 500;
+// The op count is the server's per-client rate-bucket burst (200), not its
+// 500-op batch cap: a batch costing more than the whole bucket is refused as
+// 413 however long the client waits. The byte cap is kept comfortably under
+// the server's 256 KB to leave margin for JSON encoding differences between
+// JSON.stringify and the server's json.dumps.
+const MAX_OPS_PER_BATCH = 200;
 const MAX_BATCH_BYTES = 240 * 1024;
 
 // A single `POST /ops` that never settles (a hung connection through a proxy —
@@ -648,7 +659,10 @@ export class SessionSyncClient {
    *   does, is protected by construction rather than needing its own version
    *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
+   *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
+   *   onStreamRefused (the stream answered 404 before it ever opened: the
+   *   session id is retired),
+   *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
    *   server's confirmed version/field_versions back onto the live canvas —
@@ -716,6 +730,13 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    this._refusalProbed = false; // asked once why the stream never opened
+    this._probeController = null;
+    // Seq the host's initial REST load reflected (setBaseline's `seq`), or
+    // null when the baseline did not come from a load. The first stream
+    // snapshot carries no content the host applies, so a snapshot newer than
+    // this means ops landed between that load and the stream subscribe.
+    this._loadedSeq = null;
     this._source = null;
     this._flushTimer = null;
     this._retryTimer = null;
@@ -756,6 +777,12 @@ export class SessionSyncClient {
 
   get seq() {
     return this._seq;
+  }
+  // Read-only view of `_appliedSeq`, for App.jsx's resyncFromServer: a reload
+  // whose payload seq is below this is older than state the stream already
+  // applied, and applying it would wipe that state.
+  get appliedSeq() {
+    return this._appliedSeq;
   }
   get connected() {
     return this._source != null;
@@ -1192,12 +1219,44 @@ export class SessionSyncClient {
           /* ignore */
         }
         this._source = null;
+        if (!this._hadSnapshot) this._probeStreamRefusal(url);
         this._scheduleReconnect();
       }
       // readyState 0 (CONNECTING) means a drop of an already-open stream; the
       // browser is already retrying, so native reconnect will recover — no action.
     };
     this._source = source;
+  }
+
+  // An EventSource does not say why it never opened. The stream creates a
+  // session it does not hold, so the server's own 404 there means the id is
+  // retired (a deleted staged session's, §5.3) and nothing will ever save in
+  // it: ask once, by status and body (a proxy's 404 is not that), and tell
+  // the host. Anything else keeps reconnecting.
+  async _probeStreamRefusal(url) {
+    if (this._refusalProbed || !this._fetch || !this.handlers.onStreamRefused) return;
+    this._refusalProbed = true;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this._probeController = controller;
+    let refused = false;
+    try {
+      const resp = await this._fetch(url, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller?.signal,
+      });
+      if (resp?.status === 404) {
+        const body = await resp.json().catch(() => null);
+        refused = body?.detail === 'session not found';
+      }
+    } catch {
+      return;
+    } finally {
+      controller?.abort();
+      this._probeController = null;
+    }
+    if (refused && !this._closed && !this._hadSnapshot) {
+      this.handlers.onStreamRefused(404);
+    }
   }
 
   _resolveReadyWaiters() {
@@ -1222,9 +1281,14 @@ export class SessionSyncClient {
     return new Promise((resolve) => this._readyWaiters.push(resolve));
   }
 
-  /** Set the synced baseline without emitting ops (after a load or remote apply). */
-  setBaseline(state) {
+  /**
+   * Set the synced baseline without emitting ops (after a load or remote apply).
+   * Pass `seq` when `state` came from the initial session load, so the first
+   * stream snapshot can tell whether the load was already stale.
+   */
+  setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
+    if (typeof seq === 'number') this._loadedSeq = seq;
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
     // the fresh baseline already reflects server truth for every annotation,
@@ -1343,6 +1407,17 @@ export class SessionSyncClient {
     if (list.length) this._enqueue([{ op: 'edges_updated', edges: list }]);
   }
 
+  /**
+   * Queue already-formed session ops from a renderer that has no full canvas
+   * snapshot to diff. Intended for small, generic protocol ops such as a single
+   * `node_moved`; callers that own a complete mirror should keep using
+   * `syncState`.
+   */
+  sendOps(ops) {
+    const list = (ops || []).filter((op) => op && typeof op.op === 'string');
+    if (list.length) this._enqueue(list);
+  }
+
   _enqueue(ops) {
     for (const op of ops) this._queue.push(op);
     this._scheduleFlush();
@@ -1373,12 +1448,16 @@ export class SessionSyncClient {
       const pending = this._queue.splice(0);
       return (async () => {
         for (const op of pending) {
+          const batch = [op];
           try {
             // Bounded like every other ops POST (_postOps) so a hung request on
             // teardown cannot stall this drain loop indefinitely.
-            await this._postOps([op]);
+            this._inFlightOps = this._inFlightOps.concat(batch);
+            await this._postOps(batch);
           } catch {
             /* best-effort teardown flush */
+          } finally {
+            this._removeInFlight(batch);
           }
         }
       })();
@@ -1387,7 +1466,11 @@ export class SessionSyncClient {
   }
 
   _scheduleFlush() {
-    if (this._flushTimer || this._closed) return;
+    // While a retry is pending it owns the next send: a debounced flush ahead of
+    // it would re-hit a server that just failed (429/5xx/timeout) every
+    // flushIntervalMs and turn the backoff into a no-op. Ops enqueued meanwhile
+    // ride the retry.
+    if (this._flushTimer || this._retryTimer || this._closed) return;
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null;
       this._flush();
@@ -1440,7 +1523,7 @@ export class SessionSyncClient {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const options = {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
     };
     if (controller) options.signal = controller.signal;
@@ -1626,7 +1709,14 @@ export class SessionSyncClient {
   }
 
   _scheduleRetry() {
-    if (this._retryTimer || this._closed) return;
+    if (this._closed) return;
+    // A flush debounced while this request was in flight would otherwise fire
+    // before the backoff.
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    if (this._retryTimer) return;
     this._retryTimer = setTimeout(
       () => {
         this._retryTimer = null;
@@ -1661,6 +1751,16 @@ export class SessionSyncClient {
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
+          if (
+            typeof data.seq === 'number' &&
+            typeof this._loadedSeq === 'number' &&
+            data.seq > this._loadedSeq &&
+            this.handlers.onResync
+          ) {
+            // Name the session: during a session switch the host's handler can
+            // still be bound to the previous one when this snapshot arrives.
+            this.handlers.onResync(this.sessionId);
+          }
         } else {
           this._readvertiseSelection();
           this._readvertiseLeases();
@@ -1723,7 +1823,11 @@ export class SessionSyncClient {
           if (data.client_id !== this.clientId) this._applyLeaseOp(data.client_id, op);
           return;
         }
-        if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
+        // Echo of our own op — baseline already has it. Not so for an op
+        // only the server emits: one carrying this client id (a write-mode
+        // switch made from this browser) may come from another tab sharing
+        // the id, which must still learn of it.
+        if (data.client_id === this.clientId && !SERVER_ONLY_OPS.has(op.op)) return;
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an
         // echo — UNLESS foldLocalOp already folded this exact annotation
@@ -1773,8 +1877,12 @@ export class SessionSyncClient {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
-        if (this.handlers.onRemoteOps && !staleRemoteAnnotation)
-          this.handlers.onRemoteOps([op], { clientId: data.client_id });
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
+          this.handlers.onRemoteOps([op], {
+            clientId: data.client_id,
+            sessionId: this.sessionId,
+          });
+        }
         break;
       }
       case 'presence_joined':
@@ -1810,7 +1918,24 @@ export class SessionSyncClient {
         if (this.handlers.onSessionRenamed) this.handlers.onSessionRenamed(data.name);
         break;
       case 'session_deleted':
-        if (this.handlers.onSessionDeleted) this.handlers.onSessionDeleted(data.deleted_by);
+        // The notice carries the deleted session's write mode, so a client
+        // leaving a staged session replaces it with a staged one
+        // (docs/SESSION_OVERLAY_CONTRACT.md §13).
+        if (this.handlers.onSessionDeleted) {
+          this.handlers.onSessionDeleted(data.deleted_by, data.write_mode || null);
+        }
+        break;
+      case 'viewport_summoned':
+        // "Bring everyone here" (ephemeral, never replayed): the summoner's own
+        // echo is skipped — it is already looking at the region.
+        if (data.client_id === this.clientId) break;
+        if (this.handlers.onViewportSummoned) {
+          this.handlers.onViewportSummoned({
+            bounds: data.bounds,
+            summonedBy: data.summoned_by || null,
+            sessionId: this.sessionId,
+          });
+        }
         break;
       case 'command':
         // MCP visualization push, broadcast to every subscriber (design §3.8),
@@ -1825,6 +1950,7 @@ export class SessionSyncClient {
 
   close() {
     this._closed = true;
+    this._probeController?.abort();
     if (this._source) {
       try {
         this._source.close();

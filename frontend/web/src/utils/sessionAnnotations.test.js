@@ -305,62 +305,213 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
   );
 });
 
-// A group has always been lockable over MCP (create_group_annotation takes
-// `locked`), but both group translators dropped the flag, so it never reached
-// the canvas and the browser's next autosave diffed it back to its default —
-// the exact failure docs/ANNOTATION_CONTRACT.md warns about for envelope
-// fields. `z` is carried for the same reason; nothing reads it for groups yet
-// (their paint order is array order), so this preserves the value without
-// offering a control for it.
-describe('group envelope round-trip (locked, z)', () => {
-  it('carries locked and z from the server annotation onto the canvas group', () => {
+// smallfix-browser-clobbers-unsized-annotation-geometry: build_annotation
+// defaults geometry.w/h to 0 for an agent-created label/line/freehand, but
+// these three translator branches (unlike GENERIC_OVERLAY_TYPES above) never
+// carried geometry.w/h through at all — so the very first browser round trip
+// (no user resize) silently rewrote the stored 0 into createAnnotation's
+// 160x96 default, and rewrote an agent-set, non-default size the same way.
+describe('geometry w/h round-trip for label/line/freehand', () => {
+  const serverAnnotationFor = (type, w, h, extra) => ({
+    id: `${type}-1`,
+    type,
+    kind: type,
+    position: { x: 0, y: 0 },
+    geometry: { x: 0, y: 0, w, h, rotation: 0 },
+    ...extra,
+  });
+
+  const CASES = [
+    ['label', { text: 'hi' }],
+    ['line', { from: { x: 0, y: 0 }, to: { x: 160, y: 0 } }],
+    [
+      'freehand',
+      {
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 10 },
+        ],
+      },
+    ],
+  ];
+
+  it.each(CASES)(
+    'does not clobber an unsized %s annotation (geometry w/h 0) into the 160x96 default on a browser touch',
+    (type, extra) => {
+      const server = [serverAnnotationFor(type, 0, 0, extra)];
+      const overlays = annotationsToOverlays(server);
+      // A browser that only loads and re-serializes (no user resize) must not
+      // change the stored geometry at all.
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.w).toBe(0);
+      expect(roundTripped[0].geometry.h).toBe(0);
+    }
+  );
+
+  it.each(CASES)(
+    'preserves an agent-set, non-default %s size (200x100) across a browser touch',
+    (type, extra) => {
+      const server = [serverAnnotationFor(type, 200, 100, extra)];
+      const overlays = annotationsToOverlays(server);
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.w).toBe(200);
+      expect(roundTripped[0].geometry.h).toBe(100);
+    }
+  );
+
+  it.each(CASES)(
+    'rotation and other envelope fields are unaffected by the %s geometry fix',
+    (type, extra) => {
+      const server = [{ ...serverAnnotationFor(type, 0, 0, extra), z: 3, locked: true }];
+      server[0].geometry.rotation = 45;
+      const overlays = annotationsToOverlays(server);
+      expect(overlays[0].rotation).toBe(45);
+      expect(overlays[0].z).toBe(3);
+      expect(overlays[0].locked).toBe(true);
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.rotation).toBe(45);
+      expect(roundTripped[0].z).toBe(3);
+      expect(roundTripped[0].locked).toBe(true);
+    }
+  );
+
+  // The saved-view path (App.jsx's handleConfirmSaveView) builds
+  // annotation_document via legacyMetadataToAnnotationDocument from canvas
+  // overlays, then annotationDocumentToLegacyMetadata for the legacy mirror —
+  // both built on overlaysToAnnotations/annotationsToOverlays, so this pins
+  // the same guarantee through that entry point, mirroring the generic-kind
+  // coverage above.
+  const overlayFor = (kind) => {
+    if (kind === 'label') {
+      return {
+        id: 'label-sized',
+        kind: 'label',
+        position: { x: 0, y: 0 },
+        text: 'hi',
+        size: { w: 220, h: 60 },
+      };
+    }
+    if (kind === 'arrow') {
+      return {
+        id: 'arrow-sized',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 160,
+        dy: 0,
+        size: { w: 0, h: 0 },
+      };
+    }
+    return {
+      id: 'freehand-sized',
+      kind: 'freehand',
+      position: { x: 0, y: 0 },
+      points: [
+        { x: 0, y: 0 },
+        { x: 10, y: 10 },
+      ],
+      size: { w: 32, h: 41 },
+    };
+  };
+
+  it.each(['label', 'arrow', 'freehand'])(
+    'preserves an explicit non-default size for %s through the saved-view legacy metadata path',
+    (kind) => {
+      const overlay = overlayFor(kind);
+      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+      const stored = document.annotations.find((a) => a.id === overlay.id);
+      expect(stored.geometry.w).toBe(overlay.size.w);
+      expect(stored.geometry.h).toBe(overlay.size.h);
+
+      const metadata = annotationDocumentToLegacyMetadata(document);
+      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+      expect(roundTripped.size).toEqual(overlay.size);
+    }
+  );
+});
+
+// A group has always carried the same envelope fields as other annotations, but
+// dropping any of them before the browser's save path makes the next autosave
+// write a default back over server-owned state.
+describe('group envelope round-trip (locked, z, rotation)', () => {
+  it('carries locked, z and rotation from the server annotation onto the canvas group', () => {
     const { groups } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 3 },
+      {
+        id: 'g1',
+        kind: 'group',
+        label: 'Team',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 300, h: 200, rotation: 30 },
+        locked: true,
+        z: 3,
+      },
     ]);
     expect(groups[0].locked).toBe(true);
     expect(groups[0].z).toBe(3);
+    expect(groups[0].rotation).toBe(30);
   });
 
-  it('defaults an unlocked group at the base layer when the server omits both', () => {
+  it('defaults an unlocked group at the base layer with no rotation when the server omits them', () => {
     const { groups } = annotationsToGroups([
       { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 } },
     ]);
     expect(groups[0].locked).toBe(false);
     expect(groups[0].z).toBe(0);
+    expect(groups[0].rotation).toBe(0);
   });
 
-  it('carries locked and z back from the canvas group to the annotation', () => {
+  it('carries locked, z and rotation back from the canvas group to the annotation', () => {
     const [ann] = groupsToAnnotations(
-      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2 }],
+      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2, rotation: 45 }],
       {}
     );
     expect(ann.locked).toBe(true);
     expect(ann.z).toBe(2);
+    expect(ann.geometry.rotation).toBe(45);
   });
 
   // The autosave path: a locked group loaded from the server is re-serialised
-  // on every save. Before this round-trip existed the save wrote locked=false
-  // back, silently unlocking a group nobody had touched.
-  it('survives the save/restore round trip instead of reverting to unlocked', () => {
+  // on every save. Before this round-trip existed the save wrote envelope
+  // defaults back, silently changing a group nobody had touched.
+  it('survives the save/restore round trip instead of reverting to defaults', () => {
     const { groups, parentIds } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', position: { x: 1, y: 2 }, locked: true, z: 5 },
+      {
+        id: 'g1',
+        kind: 'group',
+        label: 'Team',
+        position: { x: 1, y: 2 },
+        geometry: { x: 1, y: 2, w: 300, h: 200, rotation: 15 },
+        locked: true,
+        z: 5,
+      },
     ]);
     const [ann] = groupsToAnnotations(groups, parentIds);
     expect(ann.locked).toBe(true);
     expect(ann.z).toBe(5);
+    expect(ann.geometry.rotation).toBe(15);
   });
 
-  it('keeps the flag through the legacy saved-view metadata leg', () => {
+  it('keeps the envelope fields through the legacy saved-view metadata leg', () => {
     const metadata = annotationDocumentToLegacyMetadata([
-      { id: 'g1', type: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 4 },
+      {
+        id: 'g1',
+        type: 'group',
+        label: 'Team',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 300, h: 200, rotation: 60 },
+        locked: true,
+        z: 4,
+      },
     ]);
-    expect(metadata.groups[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+    expect(metadata.groups[0]).toEqual(
+      expect.objectContaining({ locked: true, z: 4, rotation: 60 })
+    );
     const document = legacyMetadataToAnnotationDocument({
       groups: metadata.groups,
       parentIds: {},
       annotations: [],
     });
     expect(document.annotations[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+    expect(document.annotations[0].geometry.rotation).toBe(60);
   });
 });
 
@@ -411,5 +562,243 @@ describe('opacity round-trip through the server annotation document', () => {
       { id: 'n1', kind: 'note', position: { x: 0, y: 0 }, text: 'x' },
     ]);
     expect(note.style.opacity).toBeUndefined();
+  });
+});
+
+// smallfix-label-overlay-drops-nonvisual-style-keys: label and line listed
+// their style keys explicitly, so any other key an agent stored in `style`
+// was gone after the browser's first write-back.
+describe('label/line style keys the canvas has no control for', () => {
+  const label = {
+    id: 'l1',
+    type: 'label',
+    position: { x: 0, y: 0 },
+    text: 'x',
+    style: { color: 'red', fontSize: 18, opacity: 0.5, dash: 'dotted', weight: 700 },
+  };
+  const line = {
+    id: 'a1',
+    type: 'line',
+    from: { x: 0, y: 0 },
+    to: { x: 160, y: 0 },
+    style: { color: 'red', opacity: 0.5, dash: 'dotted', strokeWidth: 3 },
+  };
+
+  it('survive an untouched label/line round trip', () => {
+    const [labelBack, lineBack] = overlaysToAnnotations(annotationsToOverlays([label, line]));
+    expect(labelBack.style).toEqual(label.style);
+    expect(lineBack.style).toEqual(line.style);
+  });
+
+  it("keep a line's fontSize, which the line overlay has no field for", () => {
+    const withFontSize = { ...line, style: { ...line.style, fontSize: 18 } };
+    const [back] = overlaysToAnnotations(annotationsToOverlays([withFontSize]));
+    expect(back.style).toEqual(withFontSize.style);
+  });
+
+  it('survive a GUI edit of a named style key, which still wins', () => {
+    const overlays = annotationsToOverlays([label, line]).map((o) => ({
+      ...o,
+      color: 'blue',
+      opacity: 0.9,
+      ...(o.kind === 'label' ? { fontSize: 24 } : {}),
+    }));
+    const [labelBack, lineBack] = overlaysToAnnotations(overlays);
+    expect(labelBack.style).toEqual({ ...label.style, color: 'blue', opacity: 0.9, fontSize: 24 });
+    expect(lineBack.style).toEqual({ ...line.style, color: 'blue', opacity: 0.9 });
+  });
+
+  it('never override a named key, even one left in extraStyle', () => {
+    const [labelBack, lineBack] = overlaysToAnnotations([
+      {
+        id: 'l1',
+        kind: 'label',
+        position: { x: 0, y: 0 },
+        text: 'x',
+        color: 'blue',
+        fontSize: 24,
+        opacity: 0.9,
+        extraStyle: { color: 'stale', fontSize: 99, opacity: 0.1, dash: 'dotted' },
+      },
+      {
+        id: 'a1',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 160,
+        dy: 0,
+        color: 'blue',
+        opacity: 0.9,
+        extraStyle: { color: 'stale', opacity: 0.1, dash: 'dotted' },
+      },
+    ]);
+    expect(labelBack.style).toEqual({ color: 'blue', fontSize: 24, opacity: 0.9, dash: 'dotted' });
+    expect(lineBack.style).toEqual({ color: 'blue', opacity: 0.9, dash: 'dotted' });
+  });
+
+  it('are not duplicated as the named overlay fields', () => {
+    const [labelOverlay, lineOverlay] = annotationsToOverlays([label, line]);
+    expect(labelOverlay.extraStyle).toEqual({ dash: 'dotted', weight: 700 });
+    expect(lineOverlay.extraStyle).toEqual({ dash: 'dotted', strokeWidth: 3 });
+  });
+
+  it('add no extraStyle field when there is nothing beyond the named keys', () => {
+    const overlays = annotationsToOverlays([
+      { ...label, style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      { ...line, style: { color: 'red', opacity: 0.5 } },
+    ]);
+    for (const overlay of overlays) {
+      expect(Object.prototype.hasOwnProperty.call(overlay, 'extraStyle')).toBe(false);
+    }
+  });
+});
+
+describe('heat-map annotations survive the server <-> overlay round trip', () => {
+  it.each([0, 7, 10])('keeps intensity %i and the circle size', (intensity) => {
+    const server = {
+      id: 'heat-1',
+      type: 'heatmap',
+      position: { x: 5, y: 6 },
+      geometry: { x: 5, y: 6, w: 240, h: 240, rotation: 0 },
+      intensity,
+      z: 0,
+      locked: false,
+    };
+    const overlays = annotationsToOverlays([server]);
+    expect(overlays).toHaveLength(1);
+    expect(overlays[0].kind).toBe('heatmap');
+    expect(overlays[0].intensity).toBe(intensity);
+    const [back] = overlaysToAnnotations(overlays);
+    expect(back.type).toBe('heatmap');
+    expect(back.intensity).toBe(intensity);
+    expect(back.geometry.w).toBe(240);
+    expect(back.geometry.h).toBe(240);
+  });
+
+  it('reads an out-of-range stored intensity as a clamped whole level', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'heat-2', type: 'heatmap', position: { x: 0, y: 0 }, intensity: 14.2 },
+    ]);
+    expect(overlay.intensity).toBe(10);
+  });
+
+  // Written by a client or agent that stored the level as a string; it is
+  // still a readable level, so it must not fall back to the default.
+  it('reads a stored string intensity as its whole level', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'heat-3', type: 'heatmap', position: { x: 0, y: 0 }, intensity: '7' },
+    ]);
+    expect(overlay.intensity).toBe(7);
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.intensity).toBe(7);
+  });
+});
+
+describe('reference annotations survive the server <-> overlay round trip', () => {
+  // The leg that matters most: this is the browser's hydrate -> canvas ->
+  // autosave path, and a field missing from either translator is diffed back
+  // to its default on the next autosave. For a reference that means a live
+  // tile silently turning into a broken one (a dropped `target`) or being
+  // reclassified (a dropped `target_kind`) — the "unsized-geometry clobber"
+  // class of bug with a navigation target instead of a width.
+  it.each([
+    ['session', '8244-1742-3391-0057'],
+    ['url', 'https://example.org/handbook'],
+    ['resource', 'resource-method-guide'],
+  ])('keeps a %s target and the rest of the payload', (targetKind, target) => {
+    const server = {
+      id: 'ref-1',
+      type: 'reference',
+      position: { x: 5, y: 6 },
+      geometry: { x: 5, y: 6, w: 240, h: 80, rotation: 0 },
+      target_kind: targetKind,
+      target,
+      label: 'Overview',
+      icon: 'flag',
+      preview: { title: 'Overview', site: 'example.org' },
+      z: 0,
+      locked: false,
+    };
+    const overlays = annotationsToOverlays([server]);
+    expect(overlays).toHaveLength(1);
+    expect(overlays[0].kind).toBe('reference');
+    expect(overlays[0].target_kind).toBe(targetKind);
+    expect(overlays[0].target).toBe(target);
+    expect(overlays[0].label).toBe('Overview');
+    expect(overlays[0].icon).toBe('flag');
+    expect(overlays[0].preview).toEqual({ title: 'Overview', site: 'example.org' });
+
+    const [back] = overlaysToAnnotations(overlays);
+    expect(back.type).toBe('reference');
+    expect(back.target_kind).toBe(targetKind);
+    expect(back.target).toBe(target);
+    expect(back.label).toBe('Overview');
+    expect(back.icon).toBe('flag');
+    expect(back.preview).toEqual({ title: 'Overview', site: 'example.org' });
+    expect(back.geometry.w).toBe(240);
+    expect(back.geometry.h).toBe(80);
+  });
+
+  it('keeps a reference with no label, icon or preview', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-2',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        target_kind: 'url',
+        target: 'https://example.org',
+      },
+    ]);
+    expect(overlay.label).toBe('');
+    expect(overlay.preview).toBeUndefined();
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target).toBe('https://example.org');
+    expect(back.label).toBe('');
+  });
+
+  // An unrecognised stored target kind is carried through, not coerced: the
+  // tile must render as broken, and a coercion would make it look live.
+  it('carries an unrecognised target kind through verbatim', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-3',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        target_kind: 'graph_node',
+        target: 'x',
+      },
+    ]);
+    expect(overlay.target_kind).toBe('graph_node');
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target_kind).toBe('graph_node');
+  });
+
+  it('does not invent a target kind for a reference stored without one', () => {
+    const [overlay] = annotationsToOverlays([
+      { id: 'ref-4', type: 'reference', position: { x: 0, y: 0 }, target: 'x' },
+    ]);
+    expect(overlay.target_kind).toBe(null);
+    const [back] = overlaysToAnnotations([overlay]);
+    expect(back.target_kind).toBe(null);
+  });
+
+  it('round-trips a move without touching the payload', () => {
+    const [overlay] = annotationsToOverlays([
+      {
+        id: 'ref-5',
+        type: 'reference',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 220, h: 72, rotation: 0 },
+        target_kind: 'url',
+        target: 'https://example.org',
+        label: 'Handbook',
+      },
+    ]);
+    const moved = { ...overlay, position: { x: 400, y: 500 } };
+    const [back] = overlaysToAnnotations([moved]);
+    expect(back.position).toEqual({ x: 400, y: 500 });
+    expect(back.target).toBe('https://example.org');
+    expect(back.label).toBe('Handbook');
+    expect(back.geometry.w).toBe(220);
+    expect(back.geometry.h).toBe(72);
   });
 });

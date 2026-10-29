@@ -6,13 +6,14 @@ from fastapi.testclient import TestClient
 from backend.api_host import create_app, AppConfig
 
 
-def test_cors_wildcard_no_credentials(temp_graph_file, temp_static_dirs):
+def test_cors_wildcard_no_credentials(temp_graph_file, temp_static_dirs, tmp_path):
     """Test that wildcard origins do not allow credentials."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
         cors_allowed_origins=["*"],
     )
     # Ensure no auth required for health to simplify test
@@ -35,13 +36,16 @@ def test_cors_wildcard_no_credentials(temp_graph_file, temp_static_dirs):
     assert response.headers.get("access-control-allow-credentials") is None
 
 
-def test_cors_specific_origin_allows_credentials(temp_graph_file, temp_static_dirs):
+def test_cors_specific_origin_allows_credentials(
+    temp_graph_file, temp_static_dirs, tmp_path
+):
     """Test that specific origins allow credentials."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
         cors_allowed_origins=["https://example.com"],
     )
     config.auth_enabled = False
@@ -61,7 +65,7 @@ def test_cors_specific_origin_allows_credentials(temp_graph_file, temp_static_di
     assert response.headers.get("access-control-allow-credentials") == "true"
 
 
-def test_cors_origins_whitespace_stripped(temp_graph_file, temp_static_dirs):
+def test_cors_origins_whitespace_stripped(temp_graph_file, temp_static_dirs, tmp_path):
     """Test that whitespace around origins in CORS_ALLOWED_ORIGINS is stripped.
 
     Operators may write 'https://a.com, https://b.com' with a space after the
@@ -76,6 +80,7 @@ def test_cors_origins_whitespace_stripped(temp_graph_file, temp_static_dirs):
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
         cors_allowed_origins=origins_with_spaces,
     )
     config.auth_enabled = False
@@ -98,7 +103,7 @@ def test_cors_origins_whitespace_stripped(temp_graph_file, temp_static_dirs):
 
 
 def test_cors_default_is_same_origin_only(
-    temp_graph_file, temp_static_dirs, monkeypatch
+    temp_graph_file, temp_static_dirs, monkeypatch, tmp_path
 ):
     """With CORS_ALLOWED_ORIGINS unset the default is no cross-origin access.
 
@@ -112,6 +117,7 @@ def test_cors_default_is_same_origin_only(
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
     )
     config.auth_enabled = False
     assert config.cors_allowed_origins == []
@@ -127,13 +133,14 @@ def test_cors_default_is_same_origin_only(
     assert "access-control-allow-origin" not in response.headers
 
 
-def test_cors_unauthorized_origin_rejected(temp_graph_file, temp_static_dirs):
+def test_cors_unauthorized_origin_rejected(temp_graph_file, temp_static_dirs, tmp_path):
     """Test that unauthorized origins are rejected in CORS."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
         cors_allowed_origins=["https://trusted.com"],
     )
     config.auth_enabled = False

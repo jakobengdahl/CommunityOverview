@@ -2,11 +2,12 @@
   position: fixed;
   top: 16px;
   top: calc(16px + env(safe-area-inset-top));
-  left: var(--floating-search-left, calc(16px + env(safe-area-inset-left)));
+  left: var(--floating-search-left, 50%);
+  transform: var(--floating-search-transform, translateX(-50%));
   z-index: 100;
   width: var(
     --floating-search-width,
-    calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right))
+    min(400px, calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right)))
   );
   max-width: calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right));
 }
@@ -90,6 +91,35 @@
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* Wraps one result so a federated result can carry a teleport button beside
+   the row's own action; a plain result keeps the row's full width. */
+.floating-search-result-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.floating-search-result-teleport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  padding: 8px 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #9aa0ff;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.floating-search-result-teleport:hover,
+.floating-search-result-teleport:focus-visible {
+  background: rgba(100, 108, 255, 0.25);
+  color: #c3c7ff;
 }
 
 .floating-search-result {

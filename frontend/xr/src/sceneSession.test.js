@@ -9,13 +9,24 @@ class FakeClient {
     Object.assign(this, opts);
     this.connected = false;
     this.closed = false;
-    this.posted = [];
+    this.selections = [];
+    this.sentOps = [];
+    this.foldedOps = [];
   }
   connect() {
     this.connected = true;
   }
   close() {
     this.closed = true;
+  }
+  setLocalSelection(elementIds) {
+    this.selections.push(elementIds);
+  }
+  sendOps(ops) {
+    this.sentOps.push(...ops);
+  }
+  foldOpIntoBaseline(op) {
+    this.foldedOps.push(op);
   }
 }
 
@@ -402,5 +413,46 @@ describe('SceneSession', () => {
     onChange.mockClear();
     await client().handlers.onReady(1);
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('publishes local selection claims through the sync client', async () => {
+    const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
+    session.connect();
+    await client().handlers.onReady(1);
+
+    session.setLocalSelection('n1');
+    session.setLocalSelection(null);
+    session.setLocalSelection('missing');
+
+    expect(client().selections).toEqual([['n1'], []]);
+  });
+
+  it('updates a dragged node locally and emits node_moved on commit', async () => {
+    const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
+    session.connect();
+    await client().handlers.onReady(1);
+
+    expect(session.moveNode('n1', { x: 12, y: 14 }, { sync: false })).toBe(true);
+    expect(session.getState().scene.nodes.n1).toMatchObject({ x: 12, y: 14 });
+    expect(client().sentOps).toEqual([]);
+
+    expect(session.moveNode('n1', { x: 12, y: 14 })).toBe(true);
+    expect(client().foldedOps).toEqual([
+      { op: 'node_moved', node_id: 'n1', position: { x: 12, y: 14 } },
+    ]);
+    expect(client().sentOps).toEqual([
+      { op: 'node_moved', node_id: 'n1', position: { x: 12, y: 14 } },
+    ]);
+  });
+
+  it('does not emit a move for an unknown node or invalid coordinates', async () => {
+    const { session, client } = makeSession({ loadSession: vi.fn().mockResolvedValue(twoNodes) });
+    session.connect();
+    await client().handlers.onReady(1);
+
+    expect(session.moveNode('missing', { x: 1, y: 2 })).toBe(false);
+    expect(session.moveNode('n1', { x: Infinity, y: 2 })).toBe(false);
+
+    expect(client().sentOps).toEqual([]);
   });
 });

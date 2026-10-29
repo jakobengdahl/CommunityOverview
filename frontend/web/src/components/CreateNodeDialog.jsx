@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import useGraphStore from '../store/graphStore';
+import StagedEditNotice from './StagedEditNotice';
 import * as api from '../services/api';
 import SubtypeInput from './SubtypeInput';
 import './CreateNodeDialog.css';
@@ -96,12 +97,9 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
         }
       }
 
-      const result = await api.addNodes([node], []);
-
-      if (result.added_node_ids && result.added_node_ids.length > 0) {
-        const createdNode = { ...node, id: result.added_node_ids[0] };
-        onSave?.(createdNode);
-      }
+      // The owner persists the node: only it knows whether the session the
+      // dialog was opened in is still the one to draw it into.
+      await onSave(node);
 
       onClose();
     } catch (err) {
@@ -122,17 +120,24 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   return (
     <div className="create-node-overlay" onClick={onClose}>
-      <div className="create-node-dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="create-node-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-node-dialog-title"
+      >
         <header className="create-node-header">
           <div className="create-node-header-title">
             <span className="create-node-type-dot" style={{ backgroundColor: color }} />
-            <h2>Create {nodeType}</h2>
+            <h2 id="create-node-dialog-title">Create {nodeType}</h2>
           </div>
-          <button className="close-button" onClick={onClose} aria-label="Close">
+          <button className="close-button" onClick={onClose} aria-label="Close" title="Close">
             ×
           </button>
         </header>
 
+        <StagedEditNotice />
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label htmlFor="create-name">Name *</label>

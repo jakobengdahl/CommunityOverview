@@ -26,6 +26,15 @@ that declaration, not by an `isinstance` check against the protocols. (The two
 things `GraphStorage` does decide by type are the vector and history sidecars,
 which exist for the file backend alone — see *Vectors and history*.)
 
+**One graph per core process.** Whichever contract a backend implements, it
+is bound to exactly one graph, fixed at boot: a core process holds one
+`GraphStorage`, over one backend, over one graph (for PostgreSQL, one
+schema). A backend author does not implement graph selection or a resolver
+that picks a store per request, and the core never calls one. A deployment
+that serves many graphs runs several core processes and routes a request to
+the process that binds its graph outside the core — see
+[ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md).
+
 ## The snapshot contract
 
 ```python
@@ -67,6 +76,8 @@ class BackendCapabilities:
     transactions: bool = False
     change_notification: bool = False
     store_traversal: bool = False
+    revision_enforcement: bool = False
+    staged_sessions: bool = False
 ```
 
 | Flag | Means | Consequence in `GraphStorage` |
@@ -75,6 +86,8 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
+| `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
+| `staged_sessions` | the layer store is implemented: session layers, staged-session records and merge records live next to the graph | nothing yet — the slices that stage and merge build on it; see *The layer store* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -83,8 +96,11 @@ The declaration is checked once, when `GraphStorage` is constructed
 implementing all six methods of the incremental contract is refused there
 with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
-the in-memory graph has already changed. `change_notification` and
-`store_traversal` are checked the same way, and for the same reason stated
+the in-memory graph has already changed. `change_notification`,
+`store_traversal`, `revision_enforcement` and `staged_sessions` are checked
+the same way (the last two also require `incremental_writes` and
+`transactions`, and `staged_sessions` beside `change_notification` also
+requires `revision_enforcement`), and for the same reason stated
 twice over: a missing `start_change_notification` would fail at first use, and
 a missing `traverse` would not fail at all — every traversal would warn and fall back
 to the walk, quietly, for the life of the process.
@@ -212,8 +228,12 @@ passes against it.
 
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
-`test_persistence_contract_memory.py` runs the reference backend both as
-declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
+`test_persistence_contract_memory.py` runs the reference backend as declared,
+as snapshot-only, and a third time reporting every entity write via
+`entities_read_on_demand` instead of `entities` — so the deferred form below
+is held to every notification clause by a backend that needs no server to
+run, not only by PostgreSQL's own transport for it.
+`test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares all
 four capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
 clauses skipping, then with the entity contract, then with notification, then
@@ -436,6 +456,9 @@ Two things hold on both paths, because neither has anything to arbitrate:
 
 ### A local write that failed
 
+This section describes a backend that does not declare
+`revision_enforcement`; for one that does, see *Entity revisions*.
+
 A failed entity write - or a failed whole-graph write, the same way - leaves
 the backend's on-disk image behind what memory holds, and `GraphStorage`
 heals the gap by re-issuing the whole graph on the next write, `flush()` or
@@ -462,6 +485,231 @@ prove the refresh path end to end — including two `GraphStorage` instances
 writing one store at the same time. Because it dispatches rather than
 delivers inline, the contract has a `settle_notifications` hook; any backend
 whose reports are not delivered before the write returns has to override it.
+
+## Entity revisions
+
+Every node and edge carries `revision`: a stamp from one graph-wide counter,
+taken by every write the storage applies and never reused, including across
+a delete and a re-creation under the same id. A write may carry an
+expectation — `expected_revision` on an update, archive change or delete,
+`expect_absent` on a create — and is refused with `entity_revision_conflict`
+when it does not hold. The normative description is
+[`SESSION_OVERLAY_CONTRACT.md` §4](SESSION_OVERLAY_CONTRACT.md#4-entity-revisions);
+this section is what it asks of a backend.
+
+**A single-writer store** (the file backend, or any backend that does not
+declare `revision_enforcement`) keeps nothing new. `GraphStorage` holds the
+counter and checks expectations against its own model. What it needs
+persisted is a **reservation**: `revision_reservation` in the graph metadata,
+the ceiling below which values may already have been handed out. It is raised
+by a block (`REVISION_RESERVATION_BLOCK`, 100,000) before any value at or above
+it is used, durably and waited for, so a crash skips values rather than
+repeating one; a load starts the counter at the reservation or one past the
+highest revision held, whichever is higher. A backend may implement
+`reserve_revisions(ceiling)` to make that write cheap — the file backend
+records it with a checkpoint of its own, never a journal record, so an older
+build can still replay its journal. Without it the reservation travels in a
+whole-graph save. Writes keep today's fire-and-forget path, except that one
+carrying an expectation is waited for. A whole-graph replace (an import)
+restamps every entity with fresh values. Expectations are never written to
+the journal: they are a condition of a write, not part of it.
+
+**A shared store** declares `revision_enforcement`, and then:
+
+- `apply_batch(operations, write_token=None)` assigns each upsert the next
+  value of the store's own counter in the statement that writes it, checks
+  each operation's `expected_revision` / `expect_absent` in that same
+  statement, and returns the stored revisions in operation order (`None` for
+  a delete). An expectation that does not hold raises
+  `EntityRevisionConflict` and rolls the whole batch back. `GraphStorage`
+  sends every create with `expect_absent`, whether or not its caller asked,
+  so a create never replaces an entity another instance created. Every
+  entity the batch writes stores `write_token`, which is server-internal and
+  never part of an entity a read returns.
+- `read_write_evidence(keys)` returns, for each `(kind, id)`, the stored
+  revision and write token, or `None` when the entity is absent — read in one
+  snapshot.
+
+`GraphStorage` then waits for every write while holding the storage lock,
+stamps the revisions the store returned onto memory, and only then fires the
+write's events. A refused expectation undoes the change in memory without an
+event. So does a write the store refused outright, which also fails at once
+with `write_failed`, reading nothing back: a backend says so by raising
+`WriteRefusedByStore` (from `storage_backends`), or an error whose `sqlstate`
+is in class 22, 23, 42 or 54 - a value the store cannot hold, a constraint, a
+statement or privilege it rejects, a program limit. The PostgreSQL backend
+raises `WriteRefusedByStore` for a value its driver refuses before sending
+(a NUL or a lone surrogate in an id). A refusal raised any other way is
+indistinguishable from a lost commit and pays for the evidence reads below,
+holding the storage lock throughout. Any other failure is decided on the
+write's evidence, read twice with
+a delay (`WRITE_RESOLVE_DELAY_SECONDS`) between: every upserted entity
+carrying the token means it landed and the call completes; every touched
+entity unchanged on both reads means it did not, memory is undone and the
+call fails with `write_failed`; anything else — including any delete, whose
+success no token can confirm — fails with `write_outcome_unknown` after the
+graph is re-read from the store. None of these set the whole-graph resync
+that *A local write that failed* describes: that path does not exist for a
+store that enforces revisions. A backend that declares `change_notification`
+without `revision_enforcement` gets per-instance revisions, which are not
+unique across instances; `GraphStorage` warns about it at construction.
+
+## The layer store
+
+A backend declaring `staged_sessions` persists what a staged session
+([`SESSION_OVERLAY_CONTRACT.md` §7](SESSION_OVERLAY_CONTRACT.md#7-storage-seam))
+needs next to the graph: each session's **layer** (at most one entry per
+`(kind, entity_id)`), its **staged-session record** (`active` or `retired`,
+§5.3) and the **records of merges** applied from it. All three backends here
+implement it, and each only when constructed with `staged_sessions=True`;
+without it a backend declares nothing new, reads and writes nothing new, and
+its layer methods raise. Staged writes (`backend/service/staging.py`) and the
+review, merge and discard of staged changes (`backend/service/staged_review.py`,
+`GraphStorage.apply_session_merge`) are what call it.
+
+The operations are `backend.core.layer_store.LayerStoreBackend`:
+
+```python
+def load_layer(session_id) -> list[dict]
+def stage(session_id, entries, removals=(), *, max_entries=None, expected=None, exact=False) -> None
+def merge(session_id, merge_id, operations, checks, removals, record) -> MergeResult
+def discard(session_id, removals=None, *, expected=None) -> list[tuple[str, str]]
+def load_merge(merge_id) -> dict | None
+def drop_layer(session_id) -> None
+def record_staged(session_id) -> None
+def staged_status(session_id) -> "active" | "retired" | "none"
+def retire(session_id, *, require_empty=False) -> None
+def layers_in_use() -> list[str]
+def purge_merge_records(retention, *, limit, now=None) -> int
+```
+
+- **Arguments are validated before anything is read.** A session id must
+  have the shape a session id has; a key is `("node" | "edge", id)` with a
+  non-empty id of at most 512 characters and no NUL; an entry, a payload
+  and a record must be JSON with no NUL or lone surrogate in any string.
+  Anything else raises `InvalidLayerRequest`. The store keeps an entry whole
+  and reads only its `kind`, `entity_id` and, for one check, `session_seq`.
+- **Only an active record has a layer.** `stage`, `discard` and `merge` on a
+  session without one raise `StagedSessionNotActive` (`status` says whether
+  it is `none` or `retired`). `record_staged` is idempotent for an active
+  record and raises `StagedSessionRetired` for a retired one; `retire` drops
+  the layer and marks the record retired in one unit, and records an unknown
+  id as retired. With `require_empty`, a layer holding entries raises
+  `LayerNotEmpty` inside that unit and nothing changes - a session delete
+  uses it so it never drops work staged after it looked. A retired record is
+  never active again.
+- **`stage` is one unit**: upserts and removals land together, a key named
+  twice in one op is refused, and with `max_entries` an op that would leave
+  the layer holding more raises `LayerFull` and applies nothing. `expected`
+  maps keys to the version of the entry the caller read
+  (`layer_store.entry_version`: the `stage_token` the op that wrote it
+  stamped, unique on every instance, where `session_seq` alone can repeat
+  across instances' session documents; an int compares `session_seq`; None:
+  it found none); checked inside the unit, after the session's record is
+  locked, so an op decided on a layer another op has changed since raises
+  `LayerRaced` and applies nothing; with `exact` (the op scanned the whole
+  layer), so does any entry `expected` does not name. A staged write passes
+  every entry its decision read - the ones it changes, the endpoints it
+  validated against, all of them when it scanned the layer - and is decided
+  again on `LayerRaced`, so two writers staging into one session at once, on
+  any instances, never lose each other's change or stage against an entry
+  that has since gone. `discard` takes the same `expected`: a discard decided
+  on an entry that was restaged since removes nothing.
+- **`merge` is one unit** (§7, §11.3). `operations` are `EntityOperation`s,
+  one per entity, each with its expectation; `checks` are `MergeCheck`s:
+  `node_exists(id)` (judged on the state the operations leave),
+  `incident_edges(node_id, edge_ids)` (the node's incident edges before the
+  operations are exactly those) and `entry_unchanged(kind, id, session_seq)`
+  (the layer still holds the entry the decision read). Every removal must
+  name an entry the layer holds. Any failure raises `MergeRaced` and nothing
+  — graph, layer or record — changes. On success the entries are removed and
+  the record stored: the caller's `record` with `merge_id`, `session_id`,
+  `status: "applied"` and `applied`, one `{kind, entity_id, action,
+  revision}` per operation with the revision the store wrote. A merge id
+  already recorded for the same session returns that record with
+  `replayed=True` and writes nothing; one recorded for another session
+  raises `MergeIdTaken`.
+- **Every merge delete must find its entity**; one that does not raises
+  `MergeRaced`. A delete with nothing left to do is left out of a merge, and
+  the file backend's recovery tells a landed delete from one that did not
+  land by the entity being gone.
+- **`purge_merge_records` removes at most `limit` merge records** whose
+  session's record was retired more than `retention` (a positive
+  `timedelta`) before `now` (the store's own clock when None), and returns
+  how many (§11.5). `retire` stores the retirement time and a repeated
+  `retire` keeps it; a retired record without one is stamped `now` by the
+  purge, so its window starts there (the file backend stamps every such
+  record in one call, PostgreSQL at most `limit` per call). A record of an active session, of a
+  retirement inside the window, or not marked `applied`, is never removed,
+  nor is the retired record itself. It is idempotent, and the server runs it
+  in batches from a thread of its own (`backend/core/merge_record_retention.py`).
+  The file backend settles a pending merge first and rewrites the merge log
+  without the purged ids' lines, atomically; the PostgreSQL backend judges
+  the window on the database clock and takes its rows `FOR UPDATE SKIP
+  LOCKED`, so two instances purging at once never wait on or fail over each
+  other.
+- **A single-writer store keeps the revision an upsert carries**, which the
+  instance assigned (§4.2); the file backend refuses a merge upsert whose
+  revision is missing or equal to the stored entity's, because its crash
+  recovery recognises a landed write by that revision. A store declaring
+  `revision_enforcement` assigns its own.
+
+`backend/core/tests/layer_store_contract.py` is the executable form; the
+in-memory reference backend, the file backend and the PostgreSQL backend
+(scoped and unscoped) all run it.
+
+**The file backend** keeps two sidecars beside `graph.json`:
+`<stem>.layers.json`, every record and layer, rewritten whole and atomically
+by each operation that changes one; and `<stem>.merges.ndjson`, the merge
+log, appended to. A merge follows §11.6 under the backend's lock: a `pending`
+line holding the operations, removals and record, synced; the operations as
+one journal record — the commit point; the layers file without the merged
+entries; an `applied` line. A failure while writing the journal record does
+not by itself mean the merge did not land — the error can come after the
+record is durable — so the backend re-reads the store and settles the
+pending merge on what is there: it returns the merge if it landed, raises if
+not. A failure after it does not fail the merge, which has landed: the
+remaining steps are completed before the backend accepts any other write,
+so nothing touches the merged entities in between, or at the next load if
+the process dies first. At load a pending merge is judged against the graph,
+never the journal (a checkpoint empties it): every upsert's payload present
+and every deleted entity absent means it landed and is completed; none
+present means it did not and it is marked aborted; part of it raises
+`GraphJournalError` rather than guess. So does a pending merge written
+against a different `graph.json`, an unreadable layers file, or a damaged
+line other than an interrupted last one in the merge log.
+
+**The PostgreSQL backend** creates three tables at boot, inside the
+migrating transaction and behind the same catalog guard as the others:
+`graph_staged_sessions`, `graph_layer_entries` (keyed
+`(session_id, kind, entity_id)`) and `graph_merge_records` (keyed
+`merge_id`). Each carries `scope_id` from birth and, where a scope is
+configured, the same row-level security policy as the graph tables, so a
+layer is as isolated as the rows it would change (a role that may not create
+the policies needs them provisioned; the statements are under *Keeping
+scopes apart*). The application's own predicate on these tables is stricter
+than on the graph tables: `scope_id IS NOT DISTINCT FROM` the instance's
+scope, so a session belongs to exactly the scope that recorded it — no
+scope being one — and an unscoped session is not shared with scoped
+instances the way an unscoped graph row is. To a scoped instance
+another scope's session is not there (`StagedSessionNotActive` on staging,
+discarding or merging), and it cannot take over its session id
+(`CrossScopeWriteRefused` on `record_staged` or `retire`) or reuse its merge
+id (`MergeIdTaken`). Every operation is one `READ COMMITTED` transaction, and
+every one that changes a layer locks the session's record row, so the
+changes to one session are serialised across instances. A merge first takes
+a per-merge-id advisory lock (two instances retrying one merge apply it
+once) and the save's shared lock, then the session row, the layer rows, and
+the rows its checks read — a node whose incident edges are checked `FOR UPDATE`, which is what a
+direct edge create's `FOR KEY SHARE` on its endpoints is ordered against —
+then applies the operations through the same statements as a direct write,
+removes the entries, stores the record and announces the graph changes
+inside the transaction. A connection lost at commit leaves the outcome
+open; the merge record is the evidence (`load_merge`). A role that may not
+create the tables needs them provisioned, and the boot names them; the
+statements are under *Inside the PostgreSQL backend*, after the graph's own.
+If a scope is configured and the role may not create the policies, the boot
+warns as it does for the graph tables.
 
 ## Answering a traversal from the store
 
@@ -548,7 +796,9 @@ save; loading replays the journal — and refuses one written against a
 different `graph.json`, which it tells by a `journal_id` the backend keeps in
 the file's metadata and stamps on every journal line. That id is the backend's
 own: it is not in the dict `load_graph_data` hands out, so `GraphStorage` and
-exports never see it. See
+exports never see it. Both files are UTF-8; a string holding a lone UTF-16
+surrogate, which UTF-8 cannot carry, makes that one write fall back to `\u`
+escapes for all non-ASCII text, which reads back unchanged. See
 [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#graph-journal) for what that means
 for backups and for replacing a graph file. The constructor's
 `checkpoint_interval` and `journal_path` are the only knobs, and nothing sets
@@ -556,8 +806,8 @@ either in the app.
 
 `PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`) is the
 second backend, and it is **optional**: nothing in the always-imported path
-touches it, `psycopg` lives in `backend/requirements-postgres.txt` rather than
-the base requirements, and the app selects it nowhere yet. It exists for the
+touches it and `psycopg` lives in `backend/requirements-postgres.txt` rather
+than the base requirements. It exists for the
 one deployment the file backend cannot serve — several instances sharing one
 graph — because a file is rewritten whole by whichever instance saved last,
 and on a FUSE-mounted object store its locking gives no protection at all.
@@ -569,9 +819,125 @@ embedded database is not an alternative, however good its write path —
 SQLite and DuckDB would give each instance its own writer on a shared file,
 which is the problem rather than the fix.
 
+### Selecting a backend
+
+`GRAPH_BACKEND` picks one. It defaults to `file`, so a deployment that sets
+nothing runs exactly what it ran before this setting existed — `GraphStorage`
+builds its own `FileGraphPersistenceBackend`, and there is no second
+construction site to drift from that one.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRAPH_BACKEND` | `file` | `file` or `postgres` |
+| `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required for `postgres` |
+| `GRAPH_POSTGRES_SCHEMA` | `public` | One database can hold several graphs, one per schema |
+| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Connections this instance may hold; at least 1 |
+| `GRAPH_POSTGRES_SCOPE` | *(unset)* | An opaque identifier tagging this instance's rows; see *Keeping scopes apart*. Set-but-empty is refused, not read as unset |
+
+Six ways to get it wrong fail at boot rather than later, in
+`backend/api_host/persistence.py`: an unrecognised `GRAPH_BACKEND`, `postgres`
+with no DSN (unset, empty or whitespace), `postgres` without the psycopg extra
+installed, a `GRAPH_POSTGRES_POOL_SIZE` below 1, a `GRAPH_POSTGRES_SCOPE` set
+to an empty value, and a `GRAPH_POSTGRES_SCOPE` set while `GRAPH_BACKEND` is
+not `postgres`. The last two are the ones where silence would be worst — a
+scope that is dropped leaves the instance with no isolation while the
+configuration says it has some — so neither is normalised away the way an
+empty `GRAPH_BACKEND` or pool size is, and the value is passed through
+unstripped because an opaque identifier is not ours to tidy. The first
+matters most — a value of `postgresql` falling back to `file` would boot
+happily and look correct until a second instance started writing the same
+graph.
+
+**Selecting `postgres` moves the graph and the node vectors, leaves one thing
+where it is, and stops one more.** The vectors travel inline, as an
+`embedding` key on each node,
+rather than in the binary sidecar the file backend keeps beside `graph.json`.
+
+Sessions do not move. They stay file-backed in the directory `SESSIONS_DIR`
+names, or one derived from the graph path when it is unset, so two instances
+sharing a database but not that directory share a graph and not their
+sessions — see [CAPACITY.md](CAPACITY.md) for what that condition costs in
+practice.
+
+Mutation history stops. `GraphStorage` builds its history sidecar only for a
+file-backed store, so under `postgres` the `/api/history` endpoints return
+nothing and `HISTORY_MAX_EVENTS` and `HISTORY_MAX_AGE_DAYS` become inert. That
+is stated under *Vectors and history* above and is repeated here because this
+is the section an operator reads before flipping the switch.
+
+Node attachments need a directory. The attachment store
+([ADR 0008](adr/0008-node-attachment-storage.md)) is a second seam beside this
+one and keeps its files on disk whatever `GRAPH_BACKEND` says. With `file` it
+defaults to a directory beside the graph file; with `postgres` there is no
+graph file, so `ATTACHMENT_DIR` must name a root that every instance serving
+the schema shares. Until it is set, the attachment routes answer
+`503 attachments_unavailable` and the rest of the instance runs unchanged.
+
+### Importing an existing graph file
+
+Use `scripts/graph_file_to_postgres.py` to copy an existing `graph.json` into
+`PostgresGraphPersistenceBackend`:
+
+```bash
+python scripts/graph_file_to_postgres.py data/active/graph.json \
+  --dsn "$GRAPH_POSTGRES_DSN" \
+  --schema "${GRAPH_POSTGRES_SCHEMA:-public}"
+```
+
+The tool refuses to replace a target that already contains graph data. Pass
+`--allow-non-empty-target` only when replacing that target is intentional. After
+the write, it reloads the target and verifies the node count, edge count, and
+that every edge endpoint refers to a stored node.
+
+**Into a store that keeps scopes apart, pass `--scope`.** A row that carries no
+scope is admitted to every session (*Keeping scopes apart*, below), so a graph
+converted without one would be readable by every scope in the store. The tool
+therefore refuses an unscoped conversion when the target shows any sign of
+keeping scopes apart: row-level security enabled, or a policy present, on
+`graph_nodes` or `graph_edges`, or rows there already carrying a scope. It
+refuses before writing anything, and `--allow-non-empty-target` does not
+override it: that flag decides whether to replace a graph, not whether to
+publish one to every scope.
+
+```bash
+python scripts/graph_file_to_postgres.py data/active/graph.json \
+  --dsn "$GRAPH_POSTGRES_DSN" \
+  --schema "${GRAPH_POSTGRES_SCHEMA:-public}" \
+  --scope "$GRAPH_POSTGRES_SCOPE"
+```
+
+With `--scope`, verification also counts the nodes and edges carrying that
+scope, rather than trusting the reload alone: a scoped session is shown every
+row that carries no scope as well as its own, so a graph written unscoped
+would pass the reload's count check with the right numbers.
+
+**A scope's graph wants a schema of its own.** Rows that carry no scope, and the
+metadata table's one row per schema, are shared by every scope in the schema
+(*Keeping scopes apart*, below). So when a scoped conversion finds its target
+not empty, `--allow-non-empty-target` replaces those for every scope there, not
+only for this one. The refusal says so: pass the flag only if the schema holds
+no graph but this scope's, neither another scope's nor one written without a
+scope. The tool leaves that call to the operator. A scoped conversion reads the
+target through the backend, which returns only rows carrying no scope and this
+scope's own whatever role runs it (a policy is a second layer on top), and rows
+carrying no scope look alike whoever wrote them. An application started
+against an empty schema saves an empty graph there, metadata included, so a
+first conversion after that start needs the flag.
+
+The import migrates only the graph payload read from `graph.json`. Embedding
+sidecars, history sidecars, and session files are not migrated. Regenerate or
+move those artifacts separately if the deployment needs them.
+
+`GRAPH_POSTGRES_POOL_SIZE` is the one setting here with a ceiling to fit
+under rather than a value to pick freely. *Sizing it: what an instance costs*,
+below, has the arithmetic and the table; it is not repeated here, so there is
+one copy to keep true.
+
+### Inside the PostgreSQL backend
+
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Six things about it are worth knowing before
+should have an opinion about. Seven things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same
@@ -588,7 +954,16 @@ writing a backend of your own against a shared server:
   that the server's `max_connections` covers
   `instance_count × (pool_size + 1)`. The `+ 1` is notification: a listener
   cannot return its connection to a pool and still be listening, so it holds
-  one further connection open per instance for as long as it runs.
+  one further connection open per instance for as long as it runs. That
+  formula counts one graph per instance, which is the shape of every core
+  process ([ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md)): the
+  server calls `build_persistence_backend` once and it constructs exactly
+  one backend. Each `PostgresGraphPersistenceBackend` builds its own pool,
+  and opens its own listening connection when notification starts, and
+  nothing here shares either across two of them, so a process that did hold
+  more than one schema would pay this cost once per graph, not once per
+  process; see *Sizing it: what an instance costs*, below, for the full
+  multiplier and a worked example.
 
 - **A load is one moment, under `REPEATABLE READ`.** Nodes, edges and metadata
   read as three queries are three moments: PostgreSQL takes its snapshot per
@@ -620,12 +995,41 @@ writing a backend of your own against a shared server:
   after it takes a fresh snapshot at statement start; under a server or role
   default of `REPEATABLE READ` the snapshot would be taken at the lock,
   before it blocks, and the writer that waited would die on a serialization
-  failure rather than proceed. Neither level is left to the environment for
-  the save or the load — each states its own. Migration (`_ensure_schema()`)
-  and `exists()` are not part of that guarantee: they run under whatever the
-  connection's environment defaults to, which is fine for what they do —
-  neither reads graph data, so neither is exposed to the statement-snapshot
-  anomaly the save and the load guard against. What they actually send
+  failure rather than proceed. Two more transactions state theirs for the
+  same two reasons: `traverse()` states `REPEATABLE READ`, so every level of
+  one traversal reads the same moment, and `apply_batch()` — which every
+  entity write goes through — states `READ COMMITTED`, so a second writer on
+  a contended row waits and wins rather than failing on serialization. None
+  of those four leaves its level to the environment. Migration
+  (`_ensure_schema()`) and `exists()` are not part of that guarantee: they
+  run under whatever the connection's environment defaults to. Neither reads
+  nodes or edges, so neither is exposed to the snapshot anomalies those four
+  guard against. The one graph row they do touch is the `graph_metadata` row:
+  the graph-identity check that ends migration reads it (and, only when it
+  exists without a claim, writes this instance's with one `UPDATE`), and
+  `exists()` reads it too. That `UPDATE` is conditional on the row still
+  being unclaimed, because the read before it takes no lock. When two
+  differently named instances claim an unclaimed store at once, neither
+  overwrites the other: under READ COMMITTED the one that waited on the
+  other's row lock matches nothing, reads the winner's claim with one more
+  `SELECT`, and raises `GraphIdentityCollision`; under REPEATABLE READ (the
+  load and the traversal, or an environment default) its `UPDATE` fails with
+  a serialization failure instead, the check stays incomplete, and its next
+  call raises the collision.
+  `_resolve()`, the read behind change notification, inherits the default
+  too; it answers each identifier from what the store holds when it reads,
+  and a write it sees that is newer than the announcement it is resolving is
+  followed by that write's own announcement. So does the transaction
+  `start_change_notification()` opens before it starts listening, which
+  holds only the graph-identity check (`_claim_or_check_graph_identity()`):
+  at most one read of the metadata row before any claim — none once this backend's check has
+  completed, which, on this backend's first migration, the `_ensure_schema()`
+  call just before it does if the row was there to find —
+  and, only when that row exists without a claim, one conditional `UPDATE`
+  writing this instance's, followed by a second read of the row only when
+  another instance claimed it first. It states no level of its own.
+  What migration and `exists()`
+  actually send
   depends on whether the store has been migrated before. Cold (nothing
   provisioned yet), `_ensure_schema()` issues one advisory-lock statement,
   then one catalog lookup for the schema (`pg_namespace`) plus a
@@ -633,17 +1037,35 @@ writing a backend of your own against a shared server:
   tables one catalog lookup via `_create_missing()` (a `pg_class`/
   `pg_namespace` join) plus a `CREATE TABLE IF NOT EXISTS` if it is missing:
   up to four catalog lookups and four creates behind the one lock, not a
-  single `SELECT`. Once a process has migrated once, `self._migrated`
+  single `SELECT`. The last thing a cold migration sends, in a transaction of
+  its own after the lock is released, is the graph-identity check: one
+  `SELECT doc` from `graph_metadata`, plus the claiming `UPDATE` described
+  above when the row exists unclaimed, and its re-read when that `UPDATE`
+  loses to another instance's claim. Once a process has migrated once,
+  `self._migrated`
   short-circuits every later call on that backend object: no advisory lock,
-  no catalog lookup, nothing sent to the server. `exists()` adds exactly one
-  further read on top of whichever of those two paths `_ensure_schema()`
-  took — the single-row `SELECT` against `graph_metadata` — so a warm
-  `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
-  that same `SELECT` plus everything above. The traversal's two indexes are
-  not in those counts: they are created after the lock is released, one pooled
-  connection each, and each costs a `pg_class`/`pg_index` lookup plus a
-  `CREATE INDEX IF NOT EXISTS` only when the lookup says it is missing — see
-  the index bullet below for why they sit outside the transaction.
+  no catalog lookup, nothing sent to the server. `exists()` then runs the
+  identity check again, unless this backend has already completed it, and
+  adds the single-row `SELECT 1` against `graph_metadata`. The check counts as
+  completed only once it has found the row, so on a store nothing has been
+  saved to yet, it repeats on every call. A warm `exists()` call is therefore
+  one `SELECT` and zero advisory locks once this backend has seen the metadata
+  row, and two `SELECT`s until then — including on a store another instance
+  saved to after this one migrated, until the first call that finds the row;
+  a cold call is that plus everything above.
+  Two more steps are left out of those counts. The traversal's two indexes are
+  created after the lock is released, one pooled connection each, and each
+  costs a `pg_class`/`pg_index` lookup plus a `CREATE INDEX IF NOT EXISTS`
+  only when the lookup says it is missing — see the index bullet below for
+  why they sit outside the transaction. After them, and before the identity
+  check, the scope seam reads the catalog for each scoped table (the
+  `scope_id` column in `pg_attribute`, the policy state in
+  `pg_class`/`pg_policy`), adding the column with `ALTER TABLE … ADD COLUMN
+  IF NOT EXISTS` where it is missing, then reads the column (and, for a
+  scoped instance, the policy state) again to learn what took. A scoped
+  instance also sends, per table and only for what is missing, `CREATE
+  POLICY`, `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `ALTER TABLE … FORCE
+  ROW LEVEL SECURITY` — see "Keeping scopes apart" below.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
@@ -699,14 +1121,45 @@ writing a backend of your own against a shared server:
   a sequential scan (45 ms) and a generic one a nested loop (830 ms).
 
   Nothing else here needs it, and that was measured rather than assumed.
-  `_resolve`'s `WHERE id = ANY(%s)` looks the same but is not: equality
-  against the primary key's unique btree gives the identical plan either way
-  — bitmap index scan into a bitmap heap scan, 51 ms against 55 ms for 20 000
-  ids — because the plan does not turn on the array's estimated length. The
-  level query is different because it filters on *expressions*
+  `_resolve`'s `WHERE id = ANY(%s)` is subject to the same generic-vs-custom
+  split as the level query — the primary key's unique btree is just as
+  sensitive to the array's estimated length, not immune to it. Measured with a
+  real prepared statement crossing psycopg's `prepare_threshold` (`PREPARE
+  r(text[]) AS SELECT id, doc FROM graph_nodes WHERE id = ANY($1)`, simple
+  protocol, execution 1 = custom plan vs. execution 10 = generic plan, on the
+  repo's 50 000-node fixture): at 1 000 ids the custom plan is a bitmap heap
+  scan (1 000 rows, 3.6 ms) and the generic plan an index scan on the primary
+  key (its fixed `rows=10` estimate, 2.2 ms); at 20 000 ids the custom plan
+  switches to a sequential scan (20 000 rows, 15.3 ms) while the generic plan
+  stays an index scan on the same fixed `rows=10` estimate and costs more,
+  45.3 ms. The plans are not identical at any size, and the generic plan's
+  *fixed* mis-estimate — never updated for the array actually bound — is the
+  same array-length sensitivity the paragraph above describes for the level
+  query, not its absence. (A separate measurement using
+  `SET plan_cache_mode = force_generic_plan / force_custom_plan` instead of a
+  real prepared statement reported identical plans and 51/55 ms; that method
+  does not reach `prepare_threshold` the way psycopg does in production and
+  does not reproduce here — treat the numbers above, from an actual prepared
+  statement, as authoritative.)
+
+  `_resolve` still does not need `prepare=False`. Unlike the level query, the
+  mis-estimate here does cost more in isolation — 45.3 ms vs. 15.3 ms at
+  20 000 ids, roughly 3x — but `_resolve` filters on the primary key directly,
+  and a real call in production carries a change notification's worth of ids,
+  not 20 000; at that scale the ~30 ms planning delta is swamped by the cost
+  of transferring the documents themselves. A separate prepared-statement run at
+  `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
+  no cliff, dominated by transferring 20 000 jsonb documents rather than by
+  planning. The two scales are not in conflict: the `_resolve` figures above
+  are server-side execution times as `EXPLAIN ANALYZE` reports them, which
+  never send a row to the client, while the per-call figure includes
+  transferring and decoding every one of those 20 000 documents. The level
+  query is different because it filters on *expressions*
   (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
-  the frontier's size decides the join strategy. Every other statement is
-  single-row key access or a parameterless read.
+  the frontier's size decides the join strategy and where the mis-estimate can
+  turn into orders of magnitude rather than tens of milliseconds. Every other
+  statement is single-row key access, or a read whose only parameter is the
+  scope — a value that changes no selectivity worth a plan of its own.
 
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
@@ -723,12 +1176,18 @@ app role that owns nothing but DML on tables an operator provisioned — the
 ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
 store it has every permission it actually needs on.
 
-To provision it that way, create these three tables and their two indexes,
-and grant the app role `USAGE` on the schema plus
-`SELECT, INSERT, UPDATE, DELETE` on the tables. The grants cover the app's
+To provision it that way, create these three tables, their two indexes and
+the revision sequence, and grant the app role `USAGE` on the schema,
+`SELECT, INSERT, UPDATE, DELETE` on the tables, and `USAGE, SELECT, UPDATE`
+on the sequence (`nextval` on every write, `setval` on a whole-graph save).
+A store provisioned before entity revisions needs only the sequence and its
+grant added; an app role that may create in its schema creates it itself at
+boot. An instance run with staged sessions needs the three layer tables at
+the end of the block too, with the same table grants; one run without them
+never asks for them. The grants cover the app's
 reads and writes; they do not cover maintenance. A role that owns nothing
 cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
-error - the backend now prints the warning, but keeping the statistics
+error - the backend now logs it as a WARNING, but keeping the statistics
 current is the operator's or autovacuum's job on a store provisioned this
 way, and stale statistics leave the two indexes below unused. The
 primary key on `graph_metadata.only_row` is not decoration: the save upserts
@@ -738,11 +1197,18 @@ then fails on **every** save.
 ```sql
 CREATE TABLE <schema>.graph_nodes (
   id text PRIMARY KEY,
-  doc jsonb NOT NULL
+  doc jsonb NOT NULL,
+  -- Optional, and nullable for a reason: a row that carries no scope is
+  -- every row of every store written before this column existed, and the
+  -- policy below admits it to every session. See "Keeping scopes apart": a
+  -- store that sets no GRAPH_POSTGRES_SCOPE leaves the column NULL on every
+  -- row it writes, and still names it in its reads.
+  scope_id text
 );
 CREATE TABLE <schema>.graph_edges (
   id text PRIMARY KEY,
-  doc jsonb NOT NULL
+  doc jsonb NOT NULL,
+  scope_id text
 );
 CREATE TABLE <schema>.graph_metadata (
   only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
@@ -759,7 +1225,186 @@ CREATE TABLE <schema>.graph_metadata (
 -- REINDEX INDEX CONCURRENTLY is what repairs it.
 CREATE INDEX graph_edges_source_idx ON <schema>.graph_edges ((doc->>'source'));
 CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
+
+-- The graph-wide revision counter (see "Entity revisions").
+CREATE SEQUENCE <schema>.graph_revision_seq;
+
+-- Only for an instance run with staged sessions (see "The layer store").
+-- The app role needs SELECT, INSERT, UPDATE, DELETE on all three.
+CREATE TABLE <schema>.graph_staged_sessions (
+  session_id text PRIMARY KEY,
+  status text NOT NULL CHECK (status IN ('active', 'retired')),
+  scope_id text,
+  retired_at timestamptz
+);
+-- A table provisioned before merge-record retention lacks the last column;
+-- an instance that may not add it refuses to boot and says so:
+-- ALTER TABLE <schema>.graph_staged_sessions ADD COLUMN retired_at timestamptz;
+CREATE TABLE <schema>.graph_layer_entries (
+  session_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('node', 'edge')),
+  entity_id text NOT NULL,
+  doc jsonb NOT NULL,
+  scope_id text,
+  PRIMARY KEY (session_id, kind, entity_id)
+);
+CREATE TABLE <schema>.graph_merge_records (
+  merge_id text PRIMARY KEY,
+  session_id text NOT NULL,
+  doc jsonb NOT NULL,
+  scope_id text
+);
 ```
+
+#### Keeping scopes apart
+
+Each entity row can carry an **opaque scope identifier**, and a store that
+supplies one also gets a row-level security policy binding on it. It is off
+until a host asks: `GRAPH_POSTGRES_SCOPE` unset is a store whose `scope_id`
+is NULL on every row and whose tables carry no policy, which is exactly the
+store this backend wrote before the column existed.
+
+What the value *means* is the host's business. The backend stores it,
+compares it and passes it through; nothing here interprets it, and the name is
+generic because the seam is.
+
+Leaving it unset is not quite "the column is never read". Once the column is
+there an unscoped instance still names it, and its predicate reduces to
+`scope_id IS NULL` — the same set the policy would show a session that named
+no scope. On a store only that instance writes, every row carries NULL and
+nothing changes. On a store it *shares* with a scoped one, it sees the rows
+carrying no scope and not the scoped ones, and its whole-graph save deletes
+only what it saw. That is deliberate: an instance that read every row would
+delete every row.
+
+Set it and three things change.
+
+- **Every entity row this instance writes carries the value.** Both write
+  paths — the whole-graph save and the entity upsert — stamp it, including a
+  row that carried none before, so a store does not drift into two kinds of
+  row. The `graph_metadata` row is the exception, and the first boundary below
+  says what follows from that.
+- **Every statement this instance issues carries the predicate**
+  `scope_id IS NULL OR scope_id = <the value>`. That is the application layer,
+  and it holds whether or not the server enforces anything — which matters for
+  the least-privilege provisioning above, where the app role owns nothing and
+  no policy can be created at all.
+- **The tables take a policy carrying the same expression**, with
+  `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`. FORCE is not
+  decoration: a policy does not apply to a table's *owner* without it, and on
+  a self-provisioned store the owner is this application. That is the second
+  layer — what still refuses when the application's own query is wrong.
+
+The predicate admits a row that carries **no** scope to every session, which is
+what makes the seam optional: an already-populated table keeps working when
+the column lands, and a store written before a scope was configured stays
+readable after one is. It admits a row that carries **a** scope only to a
+session set to that same value — and `= NULL` is never true, so a session that
+named no scope is refused a scoped row rather than shown every one of them.
+That is the direction that has to fail closed, because an unset setting is what
+a mistake arrives as.
+
+Two boundaries and one cost, none of them accidents:
+
+- **`graph_metadata` is not covered, and for two scopes behind one set of
+  tables that is a hazard rather than a gap.** Its primary key is a column that
+  can only hold true, so it holds one row for the whole store and has nowhere
+  to put a second scope's; a column there would suggest an isolation the shape
+  cannot deliver. What follows, measured with the policy enabled *and* forced:
+  the single metadata row is readable by every scope in both directions, and
+  the next whole-graph save from either replaces it — so whatever a host puts
+  in graph metadata crosses scopes and can be destroyed by another. And because
+  `exists()` answers for the *store* rather than for the scope, a scope with no
+  rows of its own finds the store non-empty, skips the bootstrap
+  `GraphStorage` would otherwise do, and loads an empty graph carrying another
+  scope's metadata — `graph_name` included. A schema per scope has none of
+  this; one set of tables for several scopes is the shape this bullet exists to
+  rule out.
+- **`id` remains the primary key of each entity table**, so two scopes sharing
+  one table cannot both hold `n0`. An upsert therefore conflicts with *the* row
+  of that id whatever scope it carries, and the backend **refuses** such a
+  write rather than applying it: the conflicting row carries the same predicate
+  every read does, and a conflict that predicate excludes raises rather than
+  silently affecting no rows. Before it was there, the statement replaced the
+  other scope's row and restamped its scope, and that scope's next load
+  returned nothing. Where the policy is in force the server refuses the same
+  write, so the two layers agree; a whole-graph save carrying such an id fails
+  on the primary key, which is the same answer by a louder road. Louder, and
+  worth knowing before it happens: `GraphStorage` answers a failed entity write
+  by re-issuing the whole graph, so once such an id is in an instance's memory
+  every subsequent write becomes that failing save and the instance persists
+  nothing until the id leaves it. Change
+  notification is per schema too (the channel is derived from it), so two
+  scopes behind one set of tables would hear each other's entity ids announced.
+  The seam is the row-level layer *underneath* the separation this backend
+  already offers — a schema per graph — not a replacement for it.
+- **A policy costs the traversal its expression indexes.** A policy reaches a
+  query as a security qual, and PostgreSQL will not evaluate a qual that is not
+  leakproof before one. The traversal filters on `doc->>'source'`, and
+  `jsonb_object_field_text` is not marked leakproof (`texteq`, which the
+  primary key uses, is) — so for a session the policy applies to, the two
+  indexes above go unused and each level of a walk reads the edge table.
+  Measured on PostgreSQL 16: a one-id frontier over 1000 edges plans a bitmap
+  scan on both indexes without a policy and a sequential scan with one. The
+  indexes exist for a 3.7 ms against 61 ms difference at 60k edges, so this is
+  the price of the second layer, and it is the reason the policy is created
+  only for a store that configured a scope. A deployment that wants the
+  separation without the cost separates by schema and leaves the scope unset.
+
+**A scope the store cannot hold is a refusal, not a warning.** If
+`GRAPH_POSTGRES_SCOPE` is set and the tables have no `scope_id` column — an
+older store whose app role cannot `ALTER TABLE` — the backend raises at boot
+rather than writing rows that carry no scope, because such rows are readable
+by every other session on that store. Provision the column and the policy, or
+run the instance without a scope:
+
+```sql
+ALTER TABLE <schema>.graph_nodes ADD COLUMN IF NOT EXISTS scope_id text;
+ALTER TABLE <schema>.graph_edges ADD COLUMN IF NOT EXISTS scope_id text;
+
+-- Create the policy BEFORE enabling row-level security. A table with it
+-- enabled and no policy admits nothing at all, so the other order leaves a
+-- window in which the store looks empty.
+CREATE POLICY graph_nodes_scope_policy ON <schema>.graph_nodes
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+CREATE POLICY graph_edges_scope_policy ON <schema>.graph_edges
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+
+ALTER TABLE <schema>.graph_nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_nodes FORCE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_edges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_edges FORCE ROW LEVEL SECURITY;
+
+-- With staged sessions, the same for each layer table (see "The layer
+-- store"): graph_staged_sessions, graph_layer_entries, graph_merge_records.
+CREATE POLICY graph_layer_entries_scope_policy ON <schema>.graph_layer_entries
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+ALTER TABLE <schema>.graph_layer_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_layer_entries FORCE ROW LEVEL SECURITY;
+-- ...and likewise graph_staged_sessions_scope_policy and
+-- graph_merge_records_scope_policy on the other two.
+```
+
+**What the upgrade itself costs.** The first boot after this change runs
+`ALTER TABLE … ADD COLUMN` on both entity tables of **every** PostgreSQL store,
+scope configured or not. The column has no default, so it is a catalog-only
+change and rewrites nothing — but it takes `ACCESS EXCLUSIVE` for the moment it
+runs, a stronger lock than the `ShareLock` the index note above warns about: it
+queues readers as well as writers, and it waits behind any transaction already
+holding the table, such as a `REPEATABLE READ` traversal or a whole-graph save.
+Brief on any store, but on a busy one it is worth taking that first boot when a
+long transaction is unlikely — or adding the column by hand beforehand with the
+statements above, after which the migration finds it there and asks for
+nothing.
+
+The backend runs those statements itself where it owns the tables, one
+transaction per table so a failure part-way cannot leave a table with
+row-level security enabled and no policy. It binds `app.graph_scope` with
+`set_config(..., is_local => true)` at the start of each transaction, so the
+value is gone when the connection returns to the pool.
 
 **Two payload restrictions** are worth knowing before pointing an existing
 graph at this backend, because neither is shared with the file backend. A
@@ -785,8 +1430,9 @@ node is one row, not a rewrite of every node — and that is what makes
 several writers safe rather than merely orderly: two instances editing
 different parts of the graph touch different rows and do not contend at all,
 where two whole-graph saves had the later one discard the earlier one's work
-whatever it was. Concurrent writes to the *same* entity resolve
-last-writer-wins on the row, which is why the entity path states
+whatever it was. Concurrent writes to the *same* entity without an
+expectation resolve last-writer-wins on the row (a create always carries
+one, so the second create of an id is refused instead), which is why the entity path states
 `READ COMMITTED` as the save does: under `REPEATABLE READ` the second writer
 would abort rather than wait.
 
@@ -816,8 +1462,34 @@ id is not the same batch reordered — so a deadlocked batch is retried
 (`DEADLOCK_RETRIES`, three times), which is safe precisely because the batch
 is atomic: the aborted transaction left nothing behind. Retries are bounded,
 and under heavy contention from many instances a batch can still exhaust
-them; the error then propagates and `GraphStorage` heals by re-issuing the
-whole graph, which is the pre-entity behaviour rather than a new hazard.
+them; the error then propagates to the caller, which resolves it on the
+write's evidence (see *Entity revisions*) rather than re-issuing the whole
+graph.
+
+The backend declares `revision_enforcement`. One sequence per schema,
+`graph_revision_seq`, is the graph-wide counter: every upsert takes
+`nextval` in the statement that writes it, laid over the payload together
+with the write's token (`_write_token` inside `doc`, stripped from every
+read). An update or delete with an expectation is a conditional statement
+(`... AND COALESCE((doc->>'revision')::bigint, 0) = %s`) and a create
+expecting absence is `ON CONFLICT DO NOTHING`; no row back is the refusal.
+Every write therefore waits for the store — the cost is measured in
+[`CAPACITY.md`](CAPACITY.md#write-latency-with-entity-revisions). A batch's
+edge upserts hold their endpoint rows `FOR KEY SHARE` until commit, so a node
+delete on another instance, which locks the row it removes, is ordered
+against them; `KEY SHARE` rather than `SHARE` so an ordinary update of the
+node does not wait on someone drawing an edge to it. A whole-graph save keeps the revisions it is handed and raises
+the sequence past the highest, under the save's exclusive lock. It does not
+restamp: an import into a PostgreSQL store sets every imported entity's
+revision to 0 ("never written under revisions") rather than keep the
+document's values, which are not this store's and could otherwise carry its
+sequence to its ceiling. An expectation taken against the replaced graph
+therefore matches an imported entity only if it was 0 - the restamp §4.2 asks
+of an import is done on a single-writer store so far. A shared store's
+revisions also count every scope's writes, so a scoped instance can infer
+how much the other scopes in its schema write from the gaps between its own
+revisions; a deployment that must hide that keeps scopes in schemas of their
+own.
 
 `checkpoint()` is a no-op here. The file backend needs it because it appends
 to a journal and rewrites the graph only periodically; a database has no
@@ -913,33 +1585,88 @@ is how the listening thread reads its channel while still noticing a stop.
 
 ### Sizing it: what an instance costs
 
-One instance costs **`pool_size + 1`** server connections while notification is
-running — the pool, plus the listening connection that cannot go back to a pool
-and still be listening. So a deployment needs
-`instance_count × (pool_size + 1)`, and it needs it at the instance count it
-*scales to*, not the one it was tested at. Getting this wrong is not a slow
-deployment: the instance that cannot get a connection fails to boot.
+One instance costs **`pool_size + 1`** server connections *per backend it
+holds* while notification is running — the pool, plus the listening
+connection that cannot go back to a pool and still be listening. A core
+process holds one backend.
+`PostgresGraphPersistenceBackend.__init__` builds its own `ConnectionPool`,
+and `start_change_notification` opens its own listening connection; nothing
+here pools or shares either across two instances of the class, so a process
+holding N backends (N schemas) would hold N of both. The arithmetic below
+counts both, which is the budget an instance has to be sized for once
+notification is running.
+
+Every deployment this repository ships holds one graph per process: the
+running server calls `build_persistence_backend`
+(`backend/api_host/persistence.py`) exactly once at boot, and that function
+constructs exactly one backend, bound to the one schema
+`GRAPH_POSTGRES_SCHEMA` names — there is no second call in the server's own
+boot path. (`scripts/graph_file_to_postgres.py` and
+`scripts/measure_capacity.py` also construct the class directly, for
+importing a graph and for benchmarking; neither runs inside the server
+process or holds more than one graph at a time, so neither changes this.) So
+for a single-graph deployment — every deployment of this open-core app as it
+ships today — "instance" and "graph" already coincide,
+graph_count is 1, and the arithmetic and table below are exactly as they were:
+a deployment needs `instance_count × (pool_size + 1)`, checked at the instance
+count it *scales to*, not the one it was tested at.
+
+The schema seam exists precisely so **one database can hold several graphs**,
+one per schema (see `GRAPH_POSTGRES_SCHEMA` above). Under
+[ADR 0009](./adr/0009-dual-mode-graph-storage-seam.md) a core process never
+holds several of them: a deployment serving many graphs runs one core process
+per graph, each with its own schema, and `graph_count` in the formula is the
+number of graphs sharing the server, with `instance_count` counting the
+replicas of each graph's process. Every `PostgresGraphPersistenceBackend`
+pays the cost once per backend, so the total is the same product:
+
+```
+instance_count × (pool_size + 1) × graph_count
+```
+
+checked at the instance count *and* the graph count the deployment scales to.
+Getting either wrong is not a slow deployment: the instance that cannot get a
+connection fails to boot.
 
 Against a stock server — `max_connections` 100, three reserved for superusers,
 so 97 available:
 
-| Instances | `pool_size` | Connections | Fits in 97 |
-|---:|---:|---:|:--|
-| 1 | 4 (default) | 5 | yes |
-| 10 | 4 (default) | 50 | yes, with room for psql and a migration |
-| 10 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
-| 20 | 4 (default) | 100 | **no** |
-| 20 | 2 | 60 | yes |
+| Replicas per graph | Graphs on the server | `pool_size` | Connections | Fits in 97 |
+|---:|---:|---:|---:|:--|
+| 1 | 1 | 4 (default) | 5 | yes |
+| 10 | 1 | 4 (default) | 50 | yes, with room for psql and a migration |
+| 10 | 1 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
+| 20 | 1 | 4 (default) | 100 | **no** |
+| 20 | 1 | 2 | 60 | yes |
+| 5 | 4 | 4 (default) | 100 | **no** — the entire stock ceiling, before the three superuser-reserved connections |
 
-Two things worth reading off that table. Raising `pool_size` costs
-`instance_count` connections per step, not one — it is the multiplied number,
-which is why the default is deliberately small. And scaling out is cheaper per
-instance at a small pool than at a large one, so an autoscaling deployment
-should lower `pool_size` before it raises `max_connections`.
+Worked example for that last row: at `DEFAULT_POOL_SIZE = 4`, one process
+for one graph takes `4 + 1 = 5` connections. Four graphs on one server, each
+run as five replicas, take `(4 + 1) × 5 × 4 = 100` — the whole stock ceiling, with
+nothing left for a `psql` session or a migration.
+
+Three things worth reading off that table. Raising `pool_size` costs
+`instance_count × graph_count` connections per step, not one — it is the
+fully multiplied number, which is why the default is deliberately small.
+Each dimension's step costs `pool_size + 1` times the other dimension —
+the two multiply rather than add, so a deployment serving many small graphs
+reaches the ceiling far sooner than the replica count alone suggests. And scaling out is cheaper per
+instance at a small pool than at a large one, so a deployment adding
+instances or graphs should lower `pool_size` before it raises
+`max_connections`.
 
 `backend/core/tests/test_multi_instance_postgres.py` asserts the per-instance
-half of this against a running server, so the number above is measured rather
-than argued.
+half of this — several instances sharing one graph — against a running
+server, so that part of the number above is measured rather than argued. The
+per-graph multiplier is not exercised by that test, or by any acceptance run
+in this repository: it follows directly from
+`PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`)
+building an independent pool in `__init__` and opening an independent
+listening connection in `start_change_notification`, with no pooling or sharing across instances of the class — not from a
+multi-graph deployment this repository runs or tests today. How many graphs
+share a database is the hosting layer's choice; the core does not change the
+arithmetic, because under ADR 0009 it never holds more than one graph per
+process.
 
 ### The acceptance test
 

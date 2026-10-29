@@ -39,6 +39,15 @@ export {
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
   normalizeShapeName,
+  // The renderer's own safe-scheme gate for a `reference` target. Exported so
+  // the host can apply the identical rule at the point where it actually
+  // hands the string to a browser (`window.open`), rather than keeping a
+  // second copy that can drift from this one.
+  isSafeReferenceUrl,
+  REFERENCE_WHITESPACE_CLASS,
+  trimReferenceTarget,
+  REFERENCE_SAFE_URL_SCHEMES,
+  REFERENCE_TARGET_KINDS,
 } from './utils/annotationModel';
 
 // Canvas-facing annotation type set (ReactFlow node `type` values, e.g.
@@ -56,6 +65,7 @@ export { createFreehandStrokeCapture } from './utils/freehandStroke';
 // Constants
 export {
   NODE_COLORS,
+  DEFAULT_NODE_COLOR,
   DEFAULT_EDGE_STYLE,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
@@ -63,3 +73,7 @@ export {
   NODE_HEIGHT,
   getNodeColor,
 } from './utils/constants';
+
+// Node provenance (which graph owns a node) — shared with the host app so the
+// search result list and the canvas context menu agree on what is federated.
+export { originGraphId, isFederatedNode, originGraphName } from './utils/nodeProvenance';

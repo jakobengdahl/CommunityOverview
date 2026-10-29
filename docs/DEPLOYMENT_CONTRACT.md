@@ -47,6 +47,40 @@ image digest) to guarantee reproducible rollouts. Floating tags (`dev`,
 
 ---
 
+## Release SBOM Evidence
+
+The image build job scans both published images by their immutable digest with
+Syft and produces SPDX 2.3 JSON and CycloneDX 1.6 JSON for each image. The core
+reports cover installed Python dependencies (including the default ML extras),
+OS packages, and the production npm dependency tree for the web and widget
+bundles. The gateway reports cover its installed Python dependencies and OS
+packages. The XR workspace is not shipped by this workflow.
+
+The core image retains npm `package.json` metadata under
+`/usr/share/communityoverview/frontend-dependencies`, copied from the installed
+production dependency tree in the same builder stage as the bundles. Module
+code and development-only packages are not copied. This lets Syft identify
+frontend package versions despite bundling/minification. Coverage is conservative:
+production dependencies can include code removed by tree shaking.
+
+Every successful image build retains one GitHub Actions artifact named
+`release-evidence-<commit_sha>-<run_id>-<run_attempt>` for 90 days (subject to the
+repository retention limit). The build summary links to it. It contains:
+
+- `core-sha-<commit_sha>.spdx.json` and `.cyclonedx.json`;
+- `gateway-sha-<commit_sha>.spdx.json` and `.cyclonedx.json`;
+- `release.json`, binding the full commit SHA, source ref/version tag, immutable
+  `sha-<commit_sha>` version, workflow run/attempt, and both image digest references;
+- `SHA256SUMS`, covering all JSON evidence files.
+
+Each SBOM also identifies its digest-pinned image and full source commit. A scan
+or evidence upload failure fails the build job and prevents infra notification.
+Images may already have been pushed when a scan fails. Evidence stays with the
+existing CI run; this workflow does not create GitHub Releases, publish SBOMs to
+another service, sign, or attest them.
+
+---
+
 ## Release Channels
 
 | Branch | Channel |
