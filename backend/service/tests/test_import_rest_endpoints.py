@@ -211,6 +211,7 @@ class TestImportJobReadAuthorization:
         "allowed, narrowing, status",
         [
             (False, GraphAccessNarrowing(), 403),
+            (False, GraphAccessNarrowing(enabled=True), 403),
             (True, GraphAccessNarrowing(enabled=True), 409),
             (
                 True,
@@ -254,7 +255,11 @@ class TestImportJobReadAuthorization:
         )
 
         assert response.status_code == status
-        if status == 409:
+        detail = response.json()["detail"]
+        assert detail["success"] is False
+        if status == 403:
+            assert detail["error_code"] == "access_denied"
+        else:
             assert (
                 response.json()["detail"]["error_code"]
                 == "import_requires_full_graph_access"
