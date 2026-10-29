@@ -3,9 +3,11 @@ Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 """
 
 import base64
+import io
 import json
 import os
 import tempfile
+import zipfile
 
 import pytest
 from unittest.mock import patch
@@ -614,9 +616,62 @@ class TestSessionCookieLogin:
                     "Sec-Fetch-Site": "same-site",
                 },
             )
-            assert response.status_code == 415
+            assert response.status_code == 403
             assert client.get("/api/nodes/csrf").status_code == 404
             assert client.post("/api/import", json=document).status_code == 200
+        finally:
+            os.unlink(path)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"Origin": "https://sibling.example.com", "Sec-Fetch-Site": "same-site"},
+            {"Origin": "https://sibling.example.com"},
+            {"Sec-Fetch-Site": "cross-site"},
+            {"Sec-Fetch-Site": "same-site"},
+            {"Origin": "null"},
+        ],
+    )
+    def test_cookie_archive_import_rejects_foreign_origin(self, metadata):
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            login = client.post(
+                "/auth/login",
+                data={"username": "admin", "password": "secret"},
+                follow_redirects=False,
+            )
+            assert login.status_code == 303
+            original = {
+                "nodes": [{"id": "original", "type": "Actor", "name": "Original"}],
+                "edges": [],
+            }
+            assert client.post("/api/import", json=original).status_code == 200
+            before = client.get("/api/export").json()
+            document = {
+                "nodes": [{"id": "csrf", "type": "Actor", "name": "CSRF"}],
+                "edges": [],
+            }
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("graph.json", json.dumps(document))
+            upload = {"file": ("graph.zip", archive.getvalue(), "application/zip")}
+            response = client.post(
+                "/api/import/archive", files=upload, headers=metadata
+            )
+            assert response.status_code == 403
+            assert client.get("/api/export").json() == before
+            # The identical archive is valid and can replace the graph locally.
+            response = client.post(
+                "/api/import/archive",
+                files=upload,
+                headers={
+                    "Origin": "http://testserver",
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert client.get("/api/nodes/csrf").status_code == 200
+            assert client.get("/api/nodes/original").status_code == 404
         finally:
             os.unlink(path)
 
