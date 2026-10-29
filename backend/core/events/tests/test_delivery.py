@@ -542,6 +542,7 @@ class TestDeliveryWorker:
         success_response = Mock()
         success_response.is_redirect = False
         success_response.status_code = 200
+        success_response.headers = {}
 
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
@@ -586,6 +587,7 @@ class TestDeliveryWorker:
         success_response = Mock()
         success_response.is_redirect = False
         success_response.status_code = 200
+        success_response.headers = {}
 
         mock_client = Mock()
         mock_client.__enter__ = Mock(return_value=mock_client)
