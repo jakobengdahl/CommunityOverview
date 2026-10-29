@@ -2400,8 +2400,8 @@ class SessionManager:
         """Raise ``LeaseConflict`` if ``op`` would mutate an annotation a
         *different* client currently holds a live edit lease on.
 
-        Shared by every synchronous MCP write method that can mutate an
-        existing annotation (``upsert_annotation``/``upsert_image_annotation``/
+        Shared by every synchronous MCP write method whose op targets an
+        annotation directly (``upsert_annotation``/``upsert_image_annotation``/
         ``update_annotation``/``delete_annotation``/``set_group_members``) —
         each calls this immediately before its own ``_apply_op_sync``, after
         every other precondition (revision/existence/budget checks), so a

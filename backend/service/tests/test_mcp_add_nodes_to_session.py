@@ -1379,6 +1379,24 @@ class TestRemoveNodesFromSession:
         assert result["removed"] == ["alpha"]
         assert len(result["skipped"]) == 1 and result["skipped"][0] is cyclic
 
+    @pytest.mark.asyncio
+    async def test_a_busy_session_is_charged_once_and_left_unchanged(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+        buckets = _record_every_bucket(manager)
+        lock = manager._lock(sid)
+        await lock.acquire()
+        try:
+            result = tools_map["remove_nodes_from_session"](
+                session_id=sid, node_ids=["alpha", "ghost"]
+            )
+        finally:
+            lock.release()
+
+        assert result["error"] == "busy"
+        assert buckets["_mcp_bucket"].consumed == [2]
+        assert manager.get_session(sid).seq == revision
+        assert "alpha" in manager.get_session(sid).state["node_refs"]
+
     def test_only_unencodable_ids_are_skipped_without_a_write(self, tools):
         tools_map, manager, sid, revision = self._seeded(tools)
         cyclic = []
