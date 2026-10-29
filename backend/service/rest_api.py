@@ -820,11 +820,20 @@ def _parse_body_or_422(model_cls, body: bytes, *, include_input: bool = True):
     Automatic body validation no longer runs once the route takes a raw
     ``Request`` (see ``_read_body_within_cap``), so this reproduces it: a
     list of error dicts, the same shape ``RequestValidationError`` produces.
-    ``jsonable_encoder`` handles error entries whose ``"input"`` is raw bytes
-    (e.g. an invalid-JSON error embeds the undecoded body).
+    JSON decoding failures omit the uploaded body from the error response.
     """
     try:
-        return model_cls.model_validate_json(body)
+        # Match FastAPI's JSON decoding before model validation. Pydantic's
+        # JSON parser rejects escaped lone surrogates and caps nesting below
+        # the graph service's metadata limit.
+        decoded = json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=[{"type": "json_invalid", "loc": [], "msg": f"Invalid JSON: {exc}"}],
+        ) from exc
+    try:
+        return model_cls.model_validate(decoded)
     except PydanticValidationError as exc:
         raise HTTPException(
             status_code=422,

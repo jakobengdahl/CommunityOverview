@@ -102,6 +102,7 @@ def test_authenticated_unsafe_tool_allowed(authenticated_app):
             },
         },
         auth=auth,
+        headers={"X-Requested-With": "XMLHttpRequest"},
     )
 
     assert response.status_code != 403

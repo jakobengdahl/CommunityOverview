@@ -103,7 +103,10 @@ class TestImportEndpoint:
         assert response.status_code == 413
         assert client.get("/api/graph/nodes/old-1").status_code == 200
 
-    @pytest.mark.parametrize("body", [b"not json", b"[]", b"null", b""])
+    @pytest.mark.parametrize(
+        "body",
+        [b"not json", b"[]", b"null", b"", b"\xff", b"[" * 10_000 + b"]" * 10_000],
+    )
     def test_invalid_body_returns_422(self, client, body):
         response = client.post(
             "/api/graph/import",
