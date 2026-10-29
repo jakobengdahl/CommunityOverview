@@ -48,6 +48,38 @@ def replace_attribution(
         "operation": {"client_id"},
     }
     result = dict(value)
+    # Activity snapshots are annotations only when the affected entity says so.
+    # Graph-history before/after values and arbitrary content stay untouched.
+    if envelope == "activity" and isinstance(value.get("affected"), dict):
+        if value["affected"].get("kind") == "annotation":
+            for key in ("before", "after"):
+                if key in value:
+                    result[key] = replace_attribution(
+                        value[key], actor_id, replacement_token, envelope="annotation"
+                    )
+    if (
+        envelope == "activity_operation"
+        and value.get("op") in {"annotation_created", "annotation_updated"}
+        and "annotation" in value
+    ):
+        result["annotation"] = replace_attribution(
+            value["annotation"], actor_id, replacement_token, envelope="annotation"
+        )
+    if envelope == "annotation" and value.get("created_by") == actor_id:
+        result["created_by"] = replacement_token
+    if envelope == "activity":
+        if "inverse_op" in value:
+            result["inverse_op"] = replace_attribution(
+                value["inverse_op"],
+                actor_id,
+                replacement_token,
+                envelope="activity_operation",
+            )
+        # Process ordinary record attribution without revisiting inverse_op.
+        value = {k: v for k, v in value.items() if k != "inverse_op"}
+        envelope = "record"
+    elif envelope == "activity_operation":
+        envelope = "operation"
     for key, item in value.items():
         if key in slots.get(envelope, set()) and isinstance(item, str):
             if item == actor_id:

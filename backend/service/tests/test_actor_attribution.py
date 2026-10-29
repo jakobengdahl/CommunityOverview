@@ -542,3 +542,72 @@ def test_erasure_preserves_entity_and_execution_content(erasure_stores, tmp_path
         assert set(service.erase_actor(ACTOR, TOKEN)["counts"].values()) == {0}
     finally:
         history.close()
+
+
+@pytest.mark.parametrize("cold", [False, True])
+def test_erasure_scrubs_annotation_history_and_delete_undo(tmp_path, cold):
+    """Another actor's delete must not preserve or resurrect creator attribution."""
+    from backend.core.session_manager import SessionManager
+
+    backend = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(backend)
+    manager = SessionManager(store)
+    session = manager.create_session()
+    manager.upsert_annotation(
+        session.id, ACTOR, {"id": "note", "type": "note", "text": "original"}
+    )
+    manager.update_annotation(
+        session.id, "other", {"id": "note", "type": "note", "text": "edited"}
+    )
+    manager.delete_annotation(session.id, "other", "note")
+    store.persist(session)
+    original = copy.deepcopy(session.activity_log)
+    if cold:
+        store = SessionStore(backend)
+        manager = SessionManager(store)
+    assert store.erase_actor(ACTOR, TOKEN) == 3
+    session = store.get(session.id)
+    expected = copy.deepcopy(original)
+    expected[0]["actor"] = TOKEN
+    for record in expected:
+        for key in ("before", "after"):
+            if isinstance(record[key], dict):
+                record[key]["created_by"] = TOKEN
+        if "annotation" in record["inverse_op"]:
+            record["inverse_op"]["annotation"]["created_by"] = TOKEN
+    assert session.activity_log == expected
+    assert backend.load(session.id)["activity_log"] == expected
+    assert ACTOR not in json.dumps(expected)
+    assert store.erase_actor(ACTOR, TOKEN) == 0
+    manager.undo_last_action(session.id, "other")
+    assert session.state["annotations"][0]["created_by"] == TOKEN
+    assert session.state["annotations"][0]["text"] == "edited"
+    store.persist(session)
+    assert ACTOR not in json.dumps(backend.load(session.id))
+
+
+def test_erasure_limits_annotation_traversal_to_defined_fields():
+    from backend.core.actor_attribution import replace_attribution
+
+    content = {"created_by": ACTOR, "text": ACTOR, "data": {"created_by": ACTOR}}
+    record = {
+        "affected": {"kind": "annotation"},
+        "before": copy.deepcopy(content),
+        "after": copy.deepcopy(content),
+        "inverse_op": {
+            "op": "annotation_updated",
+            "annotation": copy.deepcopy(content),
+        },
+    }
+    cleaned = replace_attribution(record, ACTOR, TOKEN, envelope="activity")
+    for snapshot in (
+        cleaned["before"],
+        cleaned["after"],
+        cleaned["inverse_op"]["annotation"],
+    ):
+        assert snapshot == {**content, "created_by": TOKEN}
+    # Identical keys in graph snapshots and non-annotation activity are content.
+    assert replace_attribution(record, ACTOR, TOKEN) == record
+    record["affected"]["kind"] = "node"
+    record["inverse_op"]["op"] = "node_moved"
+    assert replace_attribution(record, ACTOR, TOKEN, envelope="activity") == record

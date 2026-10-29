@@ -1405,7 +1405,9 @@ class SessionStore:
                 changed_ids = set()
                 if raw is not None:
                     activity = raw.get("activity_log", [])
-                    cleaned = replace_attribution(activity, actor_id, replacement_token)
+                    cleaned = replace_attribution(
+                        activity, actor_id, replacement_token, envelope="activity"
+                    )
                     changed_ids.update(
                         a.get("id", i)
                         for i, (a, b) in enumerate(zip(activity, cleaned))
@@ -1416,7 +1418,10 @@ class SessionStore:
                         self._backend.save(raw)
                 if session is not None:
                     cleaned = replace_attribution(
-                        session.activity_log, actor_id, replacement_token
+                        session.activity_log,
+                        actor_id,
+                        replacement_token,
+                        envelope="activity",
                     )
                     changed_ids.update(
                         a.get("id", i)
