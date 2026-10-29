@@ -585,20 +585,38 @@ class TestMCPLoaderLifecycle:
     @pytest.mark.parametrize(
         "capability", ["O_DIRECTORY", "O_NOFOLLOW", "supports_dir_fd", "supports_fd"]
     )
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file", "list_directory"])
     def test_execute_fs_tool_without_directory_fd_support(
-        self, workspace, tmp_path, monkeypatch, capability
+        self, workspace, tmp_path, monkeypatch, capability, tool_name
     ):
-        """Platforms without Unix directory APIs retain contained, redacted I/O."""
+        """Unsupported platforms refuse I/O even if the checked root is replaced."""
+        (workspace / "a.txt").write_text("inside", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.txt").write_text("outside", encoding="utf-8")
+        real_check = mcp_loader._unsafe_workspace_reason
+
+        def check_then_replace(root):
+            reason = real_check(root)
+            workspace.rename(tmp_path / "pinned-workspace")
+            workspace.symlink_to(outside, target_is_directory=True)
+            return reason
+
+        monkeypatch.setattr(mcp_loader, "_unsafe_workspace_reason", check_then_replace)
         if capability.startswith("supports_"):
             monkeypatch.setattr(os, capability, set())
         else:
             monkeypatch.delattr(os, capability)
-        self.test_execute_fs_tool_round_trips_inside_the_workspace(workspace)
-        self.test_execute_fs_tool_path_traversal(workspace)
-        self.test_execute_fs_tool_read_file_blocks_symlink_escape(tmp_path, workspace)
-        self.test_execute_fs_tool_write_file_blocks_symlink_escape(tmp_path, workspace)
-        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "missing.txt"})
-        assert result == {"error": "missing.txt: No such file or directory"}
+        result = MCPLoader([])._execute_fs_tool(
+            tool_name,
+            {
+                "path": "." if tool_name == "list_directory" else "a.txt",
+                "content": "new",
+            },
+        )
+
+        assert result == {"error": "Secure agent workspace access is unavailable"}
+        assert (outside / "a.txt").read_text(encoding="utf-8") == "outside"
         assert str(workspace.parent) not in json.dumps(result)
 
     def test_execute_fs_tool_follows_existing_internal_symlinks(self, workspace):
