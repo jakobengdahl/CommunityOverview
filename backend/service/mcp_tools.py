@@ -2742,7 +2742,7 @@ def register_mcp_tools(
             return refused
         # Not resolved against the graph: a ref whose node has since been
         # deleted must still be removable, and the session's refs are already
-        # readable as-is through get_visualization_session_state.
+        # readable as-is through get_visualization_layout.
         # A non-string id can never be in the session; the write path only
         # takes strings, so one is reported skipped without reaching it.
         strings = [n for n in unique_ids if isinstance(n, str)]
@@ -6018,8 +6018,9 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    A push writes nothing to the session's stored state when it is sent (only
-    ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores this
+    A push writes nothing to the session's stored state when it is sent (of the
+    MCP tools, only ``add_nodes_to_session`` and ``remove_nodes_from_session``
+    write ``node_refs``), so a caller that ignores this
     report cannot tell afterwards whether anything received the push. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
