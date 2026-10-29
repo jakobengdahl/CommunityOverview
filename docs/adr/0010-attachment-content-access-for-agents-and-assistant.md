@@ -650,9 +650,18 @@ user from reading it through Agent output, without knowing the new target.
 Tests list and fetch runs and proposals of a granted Agent, and approve
 and reject its proposals, before and after the grant is revoked and the
 Agent deleted, under a hook that refuses `read_node_attachment_content`
-and under a narrowing that hides a recorded node; a test rejects a tainted
-proposal after its recorded node is deleted, and one approves with a
-mismatching `decided_by` and checks the recorded approver.
+and under a narrowing that hides a recorded node. After deleting a recorded
+node, tests GET and list both its run and its tainted proposal: a reader
+whose narrowing excludes the stored graph id is denied on detail routes
+and sees neither entry in lists; a permitted reader receives the full
+bodies. Reject alone does not exercise this stored-graph-id check. A caller
+who fails the content check also rejects an already approved tainted
+proposal and receives only `id`, `status`, `decided_at`. For each of
+`add_node_attachment` and `delete_node_attachment`, an `act_after_approval`
+proposal is approved with a bound request actor different from `decided_by`;
+the test asserts that the resulting `attachments.audit` record's
+`on_behalf_of` equals the bound actor, while `actor` remains the proposing
+Agent.
 With the default permissive hook, everyone who can reach the `/agents/*`
 routes can read what granted Agents quoted.
 
@@ -747,9 +756,11 @@ with `MCP_AUTH_ENABLED=false` the auth middleware skips both `/mcp` and
 authenticated: `compute_auth_active(config)` is true and
 `config.mcp_auth_enabled is not False` (the variable parses anything but
 `true` — `0`, `no`, an empty value — as `False`; a boot test uses
-`MCP_AUTH_ENABLED=0`). Both
-routes already run inside `use_request_authorization`, so the hook decides
-per request.
+`MCP_AUTH_ENABLED=0`). Both routes already run inside
+`use_request_authorization`. `POST /execute_tool` binds the actor per
+request; stateful MCP sessions bind the tool execution context from the
+session's initial request headers, so their hook sees that session actor
+on subsequent calls.
 
 #### Per-caller access table
 
