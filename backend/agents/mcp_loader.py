@@ -10,6 +10,7 @@ Handles:
 
 import json
 import logging
+from os import open as _os_open
 import subprocess
 import threading
 from contextlib import ExitStack
@@ -1026,13 +1027,24 @@ class MCPLoader:
         with ExitStack() as stack:
             # Pin the root before checking ownership/mode. All I/O stays relative
             # to this fd so replacing the root pathname cannot redirect a tool.
-            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            try:
-                root_fd = os.open(base_path, directory_flags)
-            except OSError:
-                return {"error": "Agent workspace unavailable"}
-            stack.callback(os.close, root_fd)
-            unsafe = _unsafe_workspace_reason(root_fd)
+            use_directory_fds = (
+                hasattr(os, "O_DIRECTORY")
+                and hasattr(os, "O_NOFOLLOW")
+                and {_os_open, os.mkdir} <= os.supports_dir_fd
+                and os.listdir in os.supports_fd
+            )
+            if use_directory_fds:
+                directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                try:
+                    root_fd = os.open(base_path, directory_flags)
+                except OSError:
+                    return {"error": "Agent workspace unavailable"}
+                stack.callback(os.close, root_fd)
+                unsafe = _unsafe_workspace_reason(root_fd)
+            else:
+                # Windows lacks directory-relative I/O. Preserve its portable
+                # path-based behavior; root pinning is available on Unix only.
+                unsafe = _unsafe_workspace_reason(base_path)
             if unsafe:
                 return {"error": f"Agent workspace is not private: {unsafe}"}
             base_path = os.path.realpath(base_path)
@@ -1049,6 +1061,19 @@ class MCPLoader:
             try:
                 if tool_name not in ("read_file", "write_file", "list_directory"):
                     return {"error": f"Unknown fs tool: {tool_name}"}
+                if not use_directory_fds:
+                    if tool_name == "list_directory":
+                        return {"path": path, "entries": os.listdir(full_path)}
+                    writing = tool_name == "write_file"
+                    if writing:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, "w" if writing else "r") as f:
+                        if writing:
+                            content = input_args.get("content", "")
+                            f.write(content)
+                            return {"path": path, "written": len(content)}
+                        return {"path": path, "content": f.read()}
+
                 # Resolve existing internal symlinks above, then refuse new ones
                 # while walking the relative path, including newly made parents.
                 parts = relative_path.split(os.sep)

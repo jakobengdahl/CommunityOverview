@@ -582,6 +582,25 @@ class TestMCPLoaderLifecycle:
         }
         assert not (workspace / "notes/a.txt").stat().st_mode & 0o111
 
+    @pytest.mark.parametrize(
+        "capability", ["O_DIRECTORY", "O_NOFOLLOW", "supports_dir_fd", "supports_fd"]
+    )
+    def test_execute_fs_tool_without_directory_fd_support(
+        self, workspace, tmp_path, monkeypatch, capability
+    ):
+        """Platforms without Unix directory APIs retain contained, redacted I/O."""
+        if capability.startswith("supports_"):
+            monkeypatch.setattr(os, capability, set())
+        else:
+            monkeypatch.delattr(os, capability)
+        self.test_execute_fs_tool_round_trips_inside_the_workspace(workspace)
+        self.test_execute_fs_tool_path_traversal(workspace)
+        self.test_execute_fs_tool_read_file_blocks_symlink_escape(tmp_path, workspace)
+        self.test_execute_fs_tool_write_file_blocks_symlink_escape(tmp_path, workspace)
+        result = MCPLoader([])._execute_fs_tool("read_file", {"path": "missing.txt"})
+        assert result == {"error": "missing.txt: No such file or directory"}
+        assert str(workspace.parent) not in json.dumps(result)
+
     def test_execute_fs_tool_follows_existing_internal_symlinks(self, workspace):
         """Symlinks to targets inside the workspace remain usable."""
         (workspace / "notes").mkdir()
