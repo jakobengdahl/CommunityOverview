@@ -1345,6 +1345,83 @@ class TestRemoveNodesFromSession:
         assert too_many_bytes["error"] == "too_large"
         assert all(bucket.consumed == [] for bucket in buckets.values())
 
+    def test_skipped_is_deduplicated_alongside_a_removal(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools, ids=("alpha",))
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha", "absent", "absent"]
+        )
+
+        assert result["removed"] == ["alpha"]
+        assert result["skipped"] == ["absent"]
+
+    def test_only_non_string_ids_are_all_skipped_without_a_write(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=[123, {"a": 1}, 123, {"a": 1}]
+        )
+
+        assert result["success"] is True
+        assert result["removed"] == []
+        assert result["skipped"] == [123, {"a": 1}]
+        assert result["revision"] == revision
+
+    def test_an_unencodable_id_is_skipped_next_to_a_removal(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha", cyclic]
+        )
+
+        assert result["removed"] == ["alpha"]
+        assert len(result["skipped"]) == 1 and result["skipped"][0] is cyclic
+
+    def test_a_removed_node_leaves_group_members_and_keeps_the_rest(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        group = tools_map["create_group_annotation"](
+            session_id=sid, x=0, y=0, member_node_ids=["alpha", "beta"]
+        )
+        assert group["success"] is True
+
+        tools_map["remove_nodes_from_session"](session_id=sid, node_ids=["alpha"])
+
+        (stored,) = manager.get_session(sid).state["annotations"]
+        assert stored["member_node_ids"] == ["beta"]
+
+    def test_calls_refused_before_the_write_draw_nothing(self, tools, monkeypatch):
+        tools_map, manager = tools
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        remove = tools_map["remove_nodes_from_session"]
+
+        remove(session_id="not-a-session", node_ids=["alpha"])
+        remove(session_id="1234-5678-9012-3456", node_ids=["alpha"])
+        remove(session_id=sid, node_ids=[])
+        remove(session_id=sid, node_ids="alpha")
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        remove(session_id=sid, node_ids=["alpha"])
+
+        assert all(bucket.consumed == [] for bucket in buckets.values())
+
+    def test_read_only_mode_is_denied_before_the_session_lookup(
+        self, tools, monkeypatch
+    ):
+        tools_map, manager = tools
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        looked_up = []
+        original = manager.get_session
+        manager.get_session = lambda sid: looked_up.append(sid) or original(sid)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id="9999-9999", node_ids=["alpha"]
+        )
+
+        assert result.get("error_code") == "access_denied"
+        assert looked_up == []
+
     def test_read_only_mode_denies_the_write(self, tools, monkeypatch):
         tools_map, manager, sid, _ = self._seeded(tools)
 
