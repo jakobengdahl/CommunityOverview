@@ -256,6 +256,7 @@ def _validate_backup_replace(
             validation.nodes, validation.edges, event_context=event_context
         )
     except Exception as exc:
+        logger.exception("Import failed while committing the new graph")
         return (
             {
                 "success": False,
@@ -264,7 +265,7 @@ def _validate_backup_replace(
                 else "replace_failed",
                 "message": (
                     "Import failed while committing the new graph; the previous "
-                    f"graph is unchanged: {exc}"
+                    "graph is unchanged."
                 ),
                 "graph_replaced": False,
                 "backup_path": backup_path,
@@ -365,7 +366,7 @@ def _enqueue_and_start_regeneration(
             "embeddings_status": "not_started",
             "embeddings_message": (
                 "The graph was replaced successfully, but background "
-                f"embedding generation could not be started: {exc}. Run "
+                "embedding generation could not be started. Run "
                 "scripts/generate_embeddings.py, or POST the import again "
                 "later, to generate embeddings for it."
             ),

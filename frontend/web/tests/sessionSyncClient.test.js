@@ -781,6 +781,7 @@ describe('SessionSyncClient', () => {
     client.sendEdgesAdded([edge]);
     await flush();
     const posted = fetchImpl.calls.at(-1).body.ops;
+    expect(fetchImpl.mock.calls.at(-1)[1].headers['X-Requested-With']).toBe('XMLHttpRequest');
     expect(posted).toContainEqual({ op: 'edges_added', edges: [edge] });
   });
 

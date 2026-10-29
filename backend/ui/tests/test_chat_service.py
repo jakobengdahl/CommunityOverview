@@ -811,6 +811,24 @@ ACTOR_ONLY_PERMS = {
 class TestResolveCollection:
     """Tests for ChatService._resolve_collection."""
 
+    def test_successful_collection_resolution_is_cached(
+        self, chat_service, graph_service
+    ):
+        """Two permitted resolutions share one collection search."""
+        service, _ = chat_service
+        node = _make_akc_node("cached", ACTOR_ONLY_PERMS)
+        graph_service.add_nodes(nodes=[node], edges=[])
+        with patch.object(
+            graph_service, "search_graph", wraps=graph_service.search_graph
+        ) as search:
+            first = service._resolve_collection("cached")
+            second = service._resolve_collection("cached")
+        assert first == second
+        assert "Collect test data." in first[0]
+        search.assert_called_once_with(
+            query="", node_types=["ActiveKnowledgeCollection"], limit=500
+        )
+
     def test_finds_matching_collection(self, graph_service, mock_llm_provider):
         from backend.ui import ChatService
 

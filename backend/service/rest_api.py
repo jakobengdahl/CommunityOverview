@@ -48,7 +48,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, RootModel, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import (
@@ -785,15 +785,14 @@ async def _read_body_within_cap(
 ) -> bytes:
     """Read a request body, rejecting early once it is known to exceed ``max_bytes``.
 
-    Shared by ``apply_session_ops`` and ``ingest_session_image``, both of
-    which take their body as a raw ``Request`` instead of a typed Pydantic
-    parameter specifically so this check can run *before* the request is
+    Used by routes that take their body as a raw ``Request`` instead of a typed
+    Pydantic parameter specifically so this check can run *before* the request is
     buffered — a typed body parameter would let FastAPI/Starlette read and
     parse the whole thing first, defeating the point of a pre-parse cap.
 
     Checks the declared ``Content-Length`` header first, so a wildly
     oversized request is rejected without ever being read into memory; then
-    re-checks the actually-buffered length as a backstop for a request whose
+    checks the streamed length as a backstop for a request whose
     header is missing, absent, or understates the truth (e.g. chunked
     transfer-encoding, or a client that simply lies).
     """
@@ -805,25 +804,41 @@ async def _read_body_within_cap(
             declared_length = None
         if declared_length is not None and declared_length > max_bytes:
             raise HTTPException(status_code=413, detail=oversized_detail)
-    body = await http_request.body()
-    if len(body) > max_bytes:
-        raise HTTPException(status_code=413, detail=oversized_detail)
-    return body
+    chunks = []
+    size = 0
+    async for chunk in http_request.stream():
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(status_code=413, detail=oversized_detail)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def _parse_body_or_422(model_cls, body: bytes):
+def _parse_body_or_422(model_cls, body: bytes, *, include_input: bool = True):
     """Parse ``body`` as ``model_cls``, matching FastAPI's default 422 shape.
 
     Automatic body validation no longer runs once the route takes a raw
     ``Request`` (see ``_read_body_within_cap``), so this reproduces it: a
     list of error dicts, the same shape ``RequestValidationError`` produces.
-    ``jsonable_encoder`` handles error entries whose ``"input"`` is raw bytes
-    (e.g. an invalid-JSON error embeds the undecoded body).
+    JSON decoding failures omit the uploaded body from the error response.
     """
     try:
-        return model_cls.model_validate_json(body)
+        # Match FastAPI's JSON decoding before model validation. Pydantic's
+        # JSON parser rejects escaped lone surrogates and caps nesting below
+        # the graph service's metadata limit.
+        decoded = json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=[{"type": "json_invalid", "loc": [], "msg": f"Invalid JSON: {exc}"}],
+        ) from exc
+    try:
+        return model_cls.model_validate(decoded)
     except PydanticValidationError as exc:
-        raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+        raise HTTPException(
+            status_code=422,
+            detail=jsonable_encoder(exc.errors(include_input=include_input)),
+        )
 
 
 # ==================== Route Registration Helpers ====================
@@ -2061,6 +2076,11 @@ _IMPORT_ERROR_STATUS = {
 # product limit — the same role MAX_IMPORT_NODES/MAX_IMPORT_EDGES play for
 # POST /import's JSON body.
 _MAX_IMPORT_ARCHIVE_BYTES = 200 * 1024 * 1024
+_MAX_IMPORT_JSON_BYTES = 200 * 1024 * 1024
+
+
+class _ImportDocument(RootModel[Dict[str, Any]]):
+    pass
 
 
 def _register_import_endpoints(
@@ -2093,10 +2113,18 @@ def _register_import_endpoints(
                 },
             )
 
-    @router.post("/import")
-    async def import_graph(
-        request: Request, document: Dict[str, Any] = Body(...)
-    ) -> Dict[str, Any]:
+    @router.post(
+        "/import",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": _ImportDocument.model_json_schema()}
+                },
+            }
+        },
+    )
+    async def import_graph(request: Request) -> Dict[str, Any]:
         """
         Replace the ENTIRE active graph with ``document`` (same shape as
         ``GET /export``: a ``nodes`` list and an ``edges`` list).
@@ -2110,6 +2138,25 @@ def _register_import_endpoints(
         live graph exactly, and nothing from the previous graph survives
         unless it also appears in ``document``.
         """
+        # Cookie-authenticated browsers can send simple content types from a
+        # sibling origin without a CORS preflight. Require JSON before reading.
+        media_type = (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        )
+        if not (
+            media_type == "application/json"
+            or (media_type.startswith("application/") and media_type.endswith("+json"))
+        ):
+            raise HTTPException(
+                status_code=415, detail="Import requires a JSON content type"
+            )
+        body = await _read_body_within_cap(
+            request,
+            _MAX_IMPORT_JSON_BYTES,
+            "Import document exceeds the request size limit",
+        )
+        # Parse errors must not echo an entire (potentially large) upload.
+        document = _parse_body_or_422(_ImportDocument, body, include_input=False).root
         with use_request_authorization(headers=request.headers):
             result = service.import_graph(
                 document,
