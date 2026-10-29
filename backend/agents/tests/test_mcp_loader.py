@@ -869,8 +869,16 @@ class TestMCPLoaderLifecycle:
         root.mkdir(mode=0o700)
         monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
 
+        real_fstat = os.fstat
+        root_info = root.stat()
+
+        # pytest also stats its capture descriptors while this patch is active.
+        # Deny only the workspace descriptor so reporting remains functional.
         def stat_failing(fd):
-            raise PermissionError(13, "Permission denied", str(root))
+            info = real_fstat(fd)
+            if (info.st_dev, info.st_ino) == (root_info.st_dev, root_info.st_ino):
+                raise PermissionError(13, "Permission denied", str(root))
+            return info
 
         monkeypatch.setattr(os, "fstat", stat_failing)
         result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})

@@ -522,6 +522,18 @@ def _process_has_exited(pid):
     return fields[0] in ("Z", "X")
 
 
+def _wait_for_process_exit(pid):
+    # A task can lose access to /proc/<pid>/fd before its state becomes Z.
+    # Allow that exit transition to finish, but fail shut for a persistent
+    # denial on a live task. The enclosing scan deadline still applies.
+    deadline = time.monotonic() + 0.05
+    while not _process_has_exited(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
+    return True
+
+
 def _work_dir_exceeds_quota(spec):
     """Count entries and bytes without following links; stop at the quota.
 
@@ -585,7 +597,7 @@ def _work_dir_exceeds_quota(spec):
             except PermissionError:
                 # /proc can deny access during exit, after the task has lost
                 # its files. A live task's unreadable descriptors still fail shut.
-                if _process_has_exited(pid):
+                if _wait_for_process_exit(pid):
                     continue
                 raise
             for descriptor in descriptors:
@@ -594,7 +606,7 @@ def _work_dir_exceeds_quota(spec):
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # Closed or exited during the scan.
                 except PermissionError:
-                    if _process_has_exited(pid):
+                    if _wait_for_process_exit(pid):
                         break
                     raise
                 identity = (info.st_dev, info.st_ino)

@@ -251,7 +251,12 @@ class MCPLoader:
         try:
             # First, try the execute_tool endpoint to get tool info
             # For our own graph MCP, we can query the available tools
-            base_url = integration.url.replace("/sse", "").replace("/mcp", "")
+            parsed_url = urllib.parse.urlsplit(integration.url)
+            base_url = urllib.parse.urlunsplit(
+                parsed_url._replace(
+                    path=parsed_url.path.removesuffix("/sse").removesuffix("/mcp")
+                )
+            )
 
             # Try info endpoint
             info_url = f"{base_url}/info"
