@@ -1056,19 +1056,15 @@ class TestAddNodesToSession:
         assert f"Session '{sid}' not found" in raced["error"]
 
     def test_an_unadopted_federated_search_result_id_is_not_addable(self, tmp_path):
-        """The tool sends agents to search_graph, which can return remote ids.
-
-        An unadopted federated node lives only in the FederationManager's cache,
-        so the projection cannot resolve it. Adoption is what changes that, and
-        the next test covers the other side — together they pin the whole
-        promise the docstring makes, not just its convenient half.
-        """
+        """Remote search hits remain unaddable until adopted into local storage."""
         service = _make_multi_graph_service(tmp_path, DefaultGraphAuthorizationHook())
         tools_map, manager = _wire(None, service)
         sid = _session(manager)
 
         found = service.search_graph(query="Alpha result")
-        federated_ids = [n["id"] for n in found["nodes"]]
+        federated_ids = [
+            n["id"] for n in found["nodes"] if n["id"].startswith("federated::")
+        ]
         assert federated_ids == ["federated::graph-alpha::remote-1"]
 
         result = tools_map["add_nodes_to_session"](
@@ -1284,6 +1280,38 @@ class TestRemoveNodesFromSession:
 
         assert result["success"] is True
         assert result["removed"] == ["alpha"]
+
+    @pytest.mark.parametrize(
+        "create_tool,delete_tool,extra",
+        [
+            ("create_sticky_note", "delete_sticky_note", {}),
+            ("create_annotation", "delete_annotation", {"type": "label"}),
+        ],
+    )
+    def test_annotations_can_be_deleted_without_a_browser(
+        self, tools, create_tool, delete_tool, extra
+    ):
+        """Annotation deletion edits stored state without clearing node membership."""
+        tools_map, manager, sid, _ = self._seeded(tools)
+        created = tools_map[create_tool](
+            session_id=sid, annotation_id="annotation-1", x=0, y=0, **extra
+        )
+        assert created["success"] is True
+        assert manager.connected_count(sid) == 0
+        published = []
+        manager.bus.publish = lambda session_id, event: published.append(event)
+
+        deleted = tools_map[delete_tool](
+            session_id=sid,
+            annotation_id="annotation-1",
+            expected_revision=created["revision"],
+        )
+
+        assert deleted["success"] is True
+        assert deleted["revision"] == created["revision"] + 1
+        assert manager.get_session(sid).state["annotations"] == []
+        assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta", "gamma"]
+        assert [event["op"]["op"] for event in published] == ["annotation_deleted"]
 
     def test_each_distinct_id_draws_from_this_tools_own_budget(self, tools):
         tools_map, manager, sid, _ = self._seeded(tools)
