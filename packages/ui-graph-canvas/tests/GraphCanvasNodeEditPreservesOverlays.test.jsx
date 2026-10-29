@@ -259,4 +259,73 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     });
     expectOverlaysPresent();
   });
+
+  it('keeps the restored overlays when the host hands over the new sessionKey after restoring', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas nodes={[nodeA]} edges={[]} sessionKey="s1" canvasBaselineEpoch={0} />
+    );
+
+    // The switch loads first: clear and restore land under the old key.
+    const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
+    const groups = GROUPS_TO_RESTORE.map((g) => ({ ...g }));
+    const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+          groupsToRestore={groups}
+          annotationsToRestore={annotations}
+        />
+      );
+    });
+    expectOverlaysPresent();
+
+    // Then the new id is adopted, nothing left to restore.
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeB]}
+          edges={[]}
+          sessionKey="s2"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    expectOverlaysPresent();
+  });
+
+  it('drops the overlays on a sessionKey change outside a clear', () => {
+    const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[nodeA]}
+        edges={[]}
+        sessionKey="s1"
+        groupsToRestore={GROUPS_TO_RESTORE}
+        annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+      />
+    );
+    expectOverlaysPresent();
+
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={[nodeA]}
+          edges={[]}
+          sessionKey="s2"
+          groupsToRestore={GROUPS_TO_RESTORE}
+          annotationsToRestore={ANNOTATIONS_TO_RESTORE}
+        />
+      );
+    });
+    const ids = manualNodeIds();
+    expect(ids.has('g1')).toBe(false);
+    expect(ids.has('note-1')).toBe(false);
+  });
 });

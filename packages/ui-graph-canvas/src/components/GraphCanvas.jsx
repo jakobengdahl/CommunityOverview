@@ -1625,6 +1625,11 @@ function GraphCanvasInner({
       clearGroupsFlag &&
       (!lastClearGroupsFlagRef.current ||
         canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current);
+    // A host that clears and restores the new session's content before it
+    // hands over the new sessionKey (App's switch awaits the load, then sets
+    // the id) has already had its clear handled here; dropping again on the
+    // key change would remove the overlays that restore just added.
+    const clearAlreadyHandled = clearGroupsFlag && !clearRaised;
     lastClearGroupsFlagRef.current = clearGroupsFlag;
     lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
@@ -1651,7 +1656,7 @@ function GraphCanvasInner({
       // ego graph is the whole view and an overlay parked elsewhere would only
       // drag the fitted frame off it.
       let manualNodes;
-      if (clearRaised || sessionChanged) manualNodes = [];
+      if (clearRaised || (sessionChanged && !clearAlreadyHandled)) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
       else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);
