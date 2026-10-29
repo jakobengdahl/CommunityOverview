@@ -88,6 +88,7 @@ sys.stdin.read()
         (ProcessLookupError, "R"),
         (PermissionError, "R"),
         (PermissionError, "Z"),
+        (PermissionError, "exiting"),
     ],
 )
 def test_disk_scan_ignores_exit_races_but_fails_on_live_permission_errors(
@@ -113,9 +114,13 @@ def test_disk_scan_ignores_exit_races_but_fails_on_live_permission_errors(
 
     monkeypatch.setattr(sandbox.os, "listdir", descriptors)
     monkeypatch.setattr(sandbox.os, "stat", descriptor_stat)
-    monkeypatch.setattr(
-        "builtins.open", lambda path: io.StringIO(f"123 (a ) name) {state} 1 0")
-    )
+    states = iter(["R", "Z"]) if state == "exiting" else None
+
+    def process_stat(path):
+        current = next(states) if states is not None else state
+        return io.StringIO(f"123 (a ) name) {current} 1 0")
+
+    monkeypatch.setattr("builtins.open", process_stat)
     spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 8192, "files": 1}}
     if error is PermissionError and state == "R":
         with pytest.raises(PermissionError):
@@ -133,6 +138,19 @@ def test_process_exit_check_accepts_disappearing_proc_stat(monkeypatch, error):
 
     monkeypatch.setattr("builtins.open", missing)
     assert sandbox._process_has_exited(123) is True
+
+
+@pytest.mark.parametrize("exits", [False, True])
+def test_permission_denial_waits_only_briefly_for_process_exit(monkeypatch, exits):
+    ticks = iter([0.0, 0.01, 0.02, 0.06])
+    states = iter([False, False, exits])
+    sleeps = []
+    monkeypatch.setattr(sandbox.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(sandbox.time, "sleep", sleeps.append)
+    monkeypatch.setattr(sandbox, "_process_has_exited", lambda pid: next(states))
+
+    assert sandbox._wait_for_process_exit(123) is exits
+    assert sleeps == [0.001, 0.001]
 
 
 @pytest.mark.parametrize("stop", [False, True])

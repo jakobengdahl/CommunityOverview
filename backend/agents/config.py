@@ -255,12 +255,9 @@ class MCPIntegration:
             "name": self.name,
             "description": self.description,
             "transport": self.transport.value,
-            "url": self.url,
-            # `command` is deliberately omitted: the argv is operator-supplied and
-            # can carry host paths (e.g. the agent workspace root under the
-            # service account's home), and this dict is served over HTTP by the
-            # agents routes. No client needs it; the subprocess reads
-            # `self.command` directly.
+            # Connection details are operator-supplied and can carry credentials,
+            # internal hosts or service-account paths. HTTP clients need neither
+            # `url` nor `command`; the loader reads these attributes directly.
             # Redact literal env values so an inline secret is never serialized;
             # secret://<name> references name a secret rather than holding its
             # value, so they are safe to expose.

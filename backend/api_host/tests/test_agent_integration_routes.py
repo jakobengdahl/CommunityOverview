@@ -1,9 +1,10 @@
-"""The agents routes never disclose an MCP integration's subprocess argv."""
+"""The agents routes never disclose an MCP integration's connection details."""
 
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from backend.agents.config import (
     AGENTS_WORKSPACE_ENV_VAR,
@@ -16,6 +17,8 @@ from backend.api_host.agent_routes import register_agent_routes
 
 WORKSPACE_MARKER = "/home/svc-agent-user/private-workspace-marker"
 ARGV_MARKER = "--argv-marker-token"
+URL_MARKER = "https://operator:password@private-host.invalid/mcp?token=url-secret"
+pytestmark = pytest.mark.asyncio
 
 
 def _client(tmp_path, monkeypatch):
@@ -31,7 +34,8 @@ def _client(tmp_path, monkeypatch):
             description="Operator tool",
             transport=MCPTransport.STDIO,
             command=["/opt/tools/custom-mcp", ARGV_MARKER, WORKSPACE_MARKER],
-        )
+        ),
+        MCPIntegration(id="HTTP", name="HTTP tool", url=URL_MARKER),
     ]
     settings = AgentsSettings(
         enabled=False,
@@ -49,15 +53,14 @@ def _client(tmp_path, monkeypatch):
         graph_service=MagicMock(),
         federation_manager=MagicMock(),
     )
-    return TestClient(app)
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-def test_integrations_response_never_contains_argv_or_workspace_path(
+async def test_integrations_response_never_contains_argv_or_workspace_path(
     tmp_path, monkeypatch
 ):
-    client = _client(tmp_path, monkeypatch)
-
-    resp = client.get("/agents/integrations")
+    async with _client(tmp_path, monkeypatch) as client:
+        resp = await client.get("/agents/integrations")
 
     assert resp.status_code == 200
     body = resp.text
@@ -67,27 +70,43 @@ def test_integrations_response_never_contains_argv_or_workspace_path(
     assert all("command" not in item for item in resp.json())
 
 
-def test_integrations_response_keeps_fields_the_agent_dialog_reads(
+async def test_integrations_response_keeps_fields_the_agent_dialog_reads(
     tmp_path, monkeypatch
 ):
-    client = _client(tmp_path, monkeypatch)
-
-    items = {i["id"]: i for i in client.get("/agents/integrations").json()}
+    async with _client(tmp_path, monkeypatch) as client:
+        response = await client.get("/agents/integrations")
+    items = {i["id"]: i for i in response.json()}
 
     assert {"GRAPH", "WEB", "FS", "CUSTOM"} <= set(items)
     assert items["CUSTOM"]["description"] == "Operator tool"
     assert items["FS"]["transport"] == "stdio"
 
 
-def test_status_response_never_contains_argv_or_workspace_path(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-
-    resp = client.get("/agents/status")
+async def test_status_response_never_contains_argv_or_workspace_path(
+    tmp_path, monkeypatch
+):
+    async with _client(tmp_path, monkeypatch) as client:
+        resp = await client.get("/agents/status")
 
     assert resp.status_code == 200
     integrations = resp.json()["mcp_integrations"]
-    assert len(integrations) == 4
+    assert len(integrations) == 5
     assert all("command" not in item for item in integrations)
     assert WORKSPACE_MARKER not in resp.text
     assert ARGV_MARKER not in resp.text
     assert "/opt/tools/custom-mcp" not in resp.text
+
+
+@pytest.mark.parametrize("route", ["/agents/integrations", "/agents/status"])
+async def test_agent_responses_omit_integration_urls(tmp_path, monkeypatch, route):
+    async with _client(tmp_path, monkeypatch) as client:
+        response = await client.get(route)
+
+    assert response.status_code == 200
+    items = response.json()
+    if route == "/agents/status":
+        items = items["mcp_integrations"]
+    assert any(item["id"] == "HTTP" for item in items)
+    assert all("url" not in item for item in items)
+    for marker in (URL_MARKER, "operator", "password", "private-host", "url-secret"):
+        assert marker not in response.text
