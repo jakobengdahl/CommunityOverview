@@ -268,7 +268,10 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
 
     // The switch loads first: clear and restore land under the old key.
     const nodeB = { id: 'node-b', name: 'B', type: 'Actor', description: 'b' };
-    const groups = GROUPS_TO_RESTORE.map((g) => ({ ...g }));
+    const groups = {
+      groups: GROUPS_TO_RESTORE.map((g) => ({ ...g })),
+      parentIds: { 'node-b': 'g1' },
+    };
     const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
     act(() => {
       rerender(
@@ -298,6 +301,8 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
       );
     });
     expectOverlaysPresent();
+    // The group keeps its members too, or the autosave would store it empty.
+    expect(store.nodes.find((n) => n.id === 'node-b').parentId).toBe('g1');
   });
 
   it('drops the overlays on a sessionKey change outside a clear', () => {

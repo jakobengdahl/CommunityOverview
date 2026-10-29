@@ -1630,6 +1630,7 @@ function GraphCanvasInner({
     // the id) has already had its clear handled here; dropping again on the
     // key change would remove the overlays that restore just added.
     const clearAlreadyHandled = clearGroupsFlag && !clearRaised;
+    const contentSwapped = clearRaised || (sessionChanged && !clearAlreadyHandled);
     lastClearGroupsFlagRef.current = clearGroupsFlag;
     lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
@@ -1656,7 +1657,7 @@ function GraphCanvasInner({
       // ego graph is the whole view and an overlay parked elsewhere would only
       // drag the fitted frame off it.
       let manualNodes;
-      if (clearRaised || (sessionChanged && !clearAlreadyHandled)) manualNodes = [];
+      if (contentSwapped) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
       else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);
@@ -1665,7 +1666,9 @@ function GraphCanvasInner({
         prevNodes: nds,
         incomingNodes: reactFlowNodes,
         incomingEdges: reactFlowEdges,
-        sessionChanged,
+        // The swap, not the key: positions and group parents of the previous
+        // content are dropped with it, and kept when the key only catches up.
+        sessionChanged: contentSwapped,
         inLazyMode: unfocusedNodeCount > LAZY_LOAD_THRESHOLD,
       });
 
