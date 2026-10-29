@@ -1,5 +1,5 @@
 """
-Tests for the ``add_nodes_to_session`` MCP tool.
+Tests for the ``add_nodes_to_session`` and ``remove_nodes_from_session`` MCP tools.
 
 The tool places a known set of nodes on a session's canvas by id, instead of
 requiring a search whose results happen to be exactly that set. It is a thin
@@ -1104,6 +1104,259 @@ class TestAddNodesToSession:
         assert manager.get_session(sid).state["node_refs"] == [federated_id]
 
 
+class TestRemoveNodesFromSession:
+    def _seeded(self, tools, ids=("alpha", "beta", "gamma")):
+        tools_map, manager = tools
+        sid = _session(manager)
+        added = tools_map["add_nodes_to_session"](session_id=sid, node_ids=list(ids))
+        assert added["success"] is True
+        return tools_map, manager, sid, added["revision"]
+
+    def test_named_nodes_leave_the_session_and_the_rest_stay(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha", "gamma"]
+        )
+
+        assert result == {
+            "success": True,
+            "session_id": sid,
+            "removed": ["alpha", "gamma"],
+            "skipped": [],
+            "node_count": 1,
+            "revision": revision + 1,
+        }
+        assert manager.get_session(sid).state["node_refs"] == ["beta"]
+
+    def test_ids_not_in_the_session_are_skipped_and_reported(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools, ids=("alpha",))
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha", "beta", "no-such-node", "alpha", 7]
+        )
+
+        assert result["success"] is True
+        assert result["removed"] == ["alpha"]
+        assert result["skipped"] == ["beta", "no-such-node", 7]
+        assert result["node_count"] == 0
+
+    def test_removing_nothing_present_does_not_advance_the_revision(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools, ids=("alpha",))
+        published = []
+        manager.bus.publish = lambda session_id, event: published.append(event)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["beta", 7]
+        )
+
+        assert result["success"] is True
+        assert result["removed"] == []
+        assert result["revision"] == revision
+        assert manager.get_session(sid).seq == revision
+        assert published == []
+
+    def test_a_ref_whose_graph_node_was_deleted_is_still_removable(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools, ids=("alpha", "beta"))
+        tools_map["delete_nodes"](node_ids=["alpha"], confirmed=True)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"]
+        )
+
+        assert result["removed"] == ["alpha"]
+        assert manager.get_session(sid).state["node_refs"] == ["beta"]
+
+    def test_the_removal_is_broadcast_to_connected_clients(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        published = []
+        manager.bus.publish = lambda session_id, event: published.append(
+            (session_id, event)
+        )
+
+        tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["beta", "missing"]
+        )
+
+        assert [s for s, _ in published] == [sid]
+        op = published[0][1]["op"]
+        assert op["op"] == "nodes_removed"
+        assert op["node_ids"] == ["beta"]
+
+    def test_stale_expected_revision_is_rejected(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"], expected_revision=revision - 1
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "revision_conflict"
+        assert result["current_revision"] == revision
+        assert "alpha" in manager.get_session(sid).state["node_refs"]
+
+    def test_stale_expected_revision_is_rejected_when_no_id_is_a_string(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=[7], expected_revision=revision - 1
+        )
+
+        assert result["error"] == "revision_conflict"
+
+    def test_current_revision_is_accepted(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"], expected_revision=revision
+        )
+
+        assert result["success"] is True
+        assert result["revision"] == revision + 1
+
+    def test_other_nodes_positions_and_annotations_are_untouched(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        layout = tools_map["apply_visualization_layout"](
+            session_id=sid,
+            positions={
+                "alpha": {"x": 1, "y": 2},
+                "beta": {"x": 3, "y": 4},
+                "gamma": {"x": 5, "y": 6},
+            },
+        )
+        assert layout["success"] is True
+        note = tools_map["create_sticky_note"](session_id=sid, text="keep me", x=0, y=0)
+        assert note["success"] is True
+        annotations_before = manager.get_session(sid).state["annotations"]
+
+        tools_map["remove_nodes_from_session"](session_id=sid, node_ids=["alpha"])
+
+        state = manager.get_session(sid).state
+        assert state["positions"] == {
+            "beta": {"x": 3.0, "y": 4.0},
+            "gamma": {"x": 5.0, "y": 6.0},
+        }
+        assert state["annotations"] == annotations_before
+
+    def test_a_removed_node_re_added_comes_back_unpositioned_and_visible(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        tools_map["apply_visualization_layout"](
+            session_id=sid, positions={"alpha": {"x": 10, "y": 20}}
+        )
+        manager.get_session(sid).state["hidden_node_ids"] = ["alpha"]
+        manager.get_session(sid).state["dimmed_node_ids"] = ["alpha"]
+
+        tools_map["remove_nodes_from_session"](session_id=sid, node_ids=["alpha"])
+        readded = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert readded["added"] == ["alpha"]
+        state = manager.get_session(sid).state
+        assert "alpha" in state["node_refs"]
+        assert "alpha" not in state["positions"]
+        assert "alpha" not in state["hidden_node_ids"]
+        assert "alpha" not in state["dimmed_node_ids"]
+        view = tools_map["get_visualization_session_state"](session_id=sid)
+        assert "alpha" in view["visible_node_ids"]
+
+    def test_unknown_and_invalid_sessions_are_reported(self, tools):
+        tools_map, _ = tools
+        remove = tools_map["remove_nodes_from_session"]
+
+        unknown = remove(session_id="1234-5678-9012-3456", node_ids=["alpha"])
+        invalid = remove(session_id="nope", node_ids=["alpha"])
+        empty = remove(session_id="1234-5678-9012-3456", node_ids=[])
+
+        assert "not found" in unknown["error"]
+        assert "Invalid session ID" in invalid["error"]
+        assert empty["error"] == "'node_ids' must be a non-empty list"
+
+    def test_works_with_no_client_connected(self, tools):
+        """Unlike clear_visualization, the removal needs no live canvas."""
+        tools_map, manager, sid, _ = self._seeded(tools)
+        assert (
+            tools_map["clear_visualization"](visualization_session_id=sid)["success"]
+            is False
+        )
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"]
+        )
+
+        assert result["success"] is True
+        assert result["removed"] == ["alpha"]
+
+    def test_each_distinct_id_draws_from_this_tools_own_budget(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        buckets = _record_every_bucket(manager)
+
+        tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha", "alpha", "missing"]
+        )
+
+        drawn = [b for b in buckets.values() if b.consumed]
+        assert len(drawn) == 1
+        assert drawn[0].consumed == [2]
+        assert drawn[0].keys == ["mcp-agent:remove_nodes_from_session"]
+
+    def test_a_spent_budget_is_rate_limited_and_removes_nothing(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        assert manager._mcp_bucket.consume("mcp-agent:remove_nodes_from_session", 1.0)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"]
+        )
+
+        assert result["error"] == "rate_limited"
+        assert "alpha" in manager.get_session(sid).state["node_refs"]
+
+    def test_more_ids_than_the_whole_budget_is_too_large_and_draws_nothing(
+        self, tmp_path
+    ):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, bucket_refill_per_sec=0.0)
+        sid = _session(manager)
+        ids = [f"n{i}" for i in range(int(manager.mcp_rate_budget_capacity) + 1)]
+
+        over = tools_map["remove_nodes_from_session"](session_id=sid, node_ids=ids)
+        at_capacity = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=ids[:-1]
+        )
+
+        assert over["error"] == "too_large"
+        assert "rate budget" in over["message"]
+        assert at_capacity["success"] is True
+
+    def test_the_batch_caps_refuse_before_any_budget_is_drawn(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage, service, max_ops_per_batch=1, max_op_batch_bytes=20
+        )
+        sid = _session(manager)
+        buckets = _record_every_bucket(manager)
+        remove = tools_map["remove_nodes_from_session"]
+
+        too_many = remove(session_id=sid, node_ids=["alpha", "beta"])
+        too_many_bytes = remove(session_id=sid, node_ids=["x" * 30])
+
+        assert too_many["error"] == "too_large"
+        assert too_many_bytes["error"] == "too_large"
+        assert all(bucket.consumed == [] for bucket in buckets.values())
+
+    def test_read_only_mode_denies_the_write(self, tools, monkeypatch):
+        tools_map, manager, sid, _ = self._seeded(tools)
+
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"]
+        )
+
+        assert result.get("error_code") == "access_denied"
+        assert "alpha" in manager.get_session(sid).state["node_refs"]
+
+
 class TestAuthorization:
     def test_read_only_mode_denies_the_write(self, tools, monkeypatch):
         """The tool goes through the same gate as the other session mutations."""
@@ -1281,6 +1534,7 @@ def test_every_session_tool_names_both_accepted_session_id_forms(tools):
         assert "older DDDD-DDDD form" in result["error"], name
         checked.append(name)
     assert "add_nodes_to_session" in checked
+    assert "remove_nodes_from_session" in checked
     assert "apply_visualization_layout" in checked
     assert "rename_visualization_session" in checked
 

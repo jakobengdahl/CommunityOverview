@@ -1711,6 +1711,80 @@ class SessionManager:
             "node_count": len(session.state.get("node_refs", [])),
         }
 
+    def remove_node_refs(
+        self,
+        session_id: str,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
+        precharged: bool = False,
+    ) -> Dict[str, Any]:
+        """Remove node references from a session **synchronously** (MCP write path).
+
+        The complement of ``add_node_refs``, with the same atomicity, cap and
+        rate-budget contract. It broadcasts the same ``nodes_removed`` op a
+        browser sends, so the stored state drops each removed node's position,
+        hidden/dimmed flags and group membership with it, and a later
+        ``add_node_refs`` of that id starts from a clean slate.
+
+        Ids not in the session are not removed and do not advance the revision:
+        when none of them is present the call is a no-op that broadcasts nothing.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(node_ids, list) or not node_ids:
+            raise OpError("'node_ids' must be a non-empty list")
+        if len(node_ids) > self._max_ops:
+            raise OpBatchTooLarge()
+        if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not precharged:
+            self._consume_mcp_budget(
+                self._mcp_rate_limit_key(client_id, rate_limit_label),
+                max(1, len(node_ids)),
+            )
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        present = set(session.state.get("node_refs", []))
+        removed: List[str] = []
+        for node_id in node_ids:
+            if not isinstance(node_id, str) or node_id not in present:
+                continue
+            present.discard(node_id)
+            removed.append(node_id)
+        if not removed:
+            return {
+                "applied": None,
+                "revision": session.seq,
+                "removed": [],
+                "node_count": len(session.state.get("node_refs", [])),
+            }
+
+        op: Dict[str, Any] = {
+            "op": "nodes_removed",
+            "node_ids": removed,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "removed": removed,
+            "node_count": len(session.state.get("node_refs", [])),
+        }
+
     def upsert_annotation(
         self,
         session_id: str,

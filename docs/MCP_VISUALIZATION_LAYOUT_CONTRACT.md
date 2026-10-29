@@ -28,8 +28,8 @@ arrange a session without colliding nodes or fighting concurrent editors.
 An MCP-connected assistant can populate a visualization session (by pushing
 results into it with `search_graph` / `get_related_nodes` and a
 `visualization_session_id`, or by naming the node ids outright with
-`add_nodes_to_session`) but then
-needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
+`add_nodes_to_session`, and prune it again with `remove_nodes_from_session`)
+but then needs to **arrange** it: place nodes as a left-to-right DAG, a grid, or
 swimlanes. To do that safely it must agree with the server and the canvas on a
 single coordinate model, on how a bulk move is applied, and on how concurrent
 edits and animation are handled.

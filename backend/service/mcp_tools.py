@@ -1826,8 +1826,9 @@ def register_mcp_tools(
             }
         visible, _ = _session_view_state(session_id)
         stored_state_tools = (
-            "add_nodes_to_session, get_visualization_layout and "
-            "apply_visualization_layout act on its stored state"
+            "add_nodes_to_session, remove_nodes_from_session, "
+            "get_visualization_layout and apply_visualization_layout act on "
+            "its stored state"
         )
         if stored and clients > 0:
             message = (
@@ -2372,6 +2373,120 @@ def register_mcp_tools(
             return {"success": False, "error": str(exc)}
         return {"success": True, "session_id": session_id, **result}
 
+    def _dedupe_and_charge_node_ids(node_ids: List[Any], label: str):
+        """Dedupe, cap and rate-charge a session tool's ``node_ids``.
+
+        Returns ``(unique_ids, unencodable, None)``, or ``(None, None, error)``
+        with the result dict to return when a cap or the budget refuses.
+        """
+        # A repeated id is one id: dedupe before the caps and the rate budget
+        # below count it. This runs on the uncapped list, so it must stay
+        # linear — an unhashable value (a dict or list arriving unvalidated
+        # through POST /execute_tool) is keyed by its canonical JSON instead of
+        # being compared pairwise. Every id is encoded once here, and the byte
+        # cap below is summed from those encodings. A value with no canonical
+        # JSON (a cycle, mixed-type dict keys, nesting past the recursion
+        # limit, a ``__str__`` that raises) can only come from an in-process
+        # caller; it could never resolve and the byte cap could not measure
+        # it, so it is skipped before both, whether it is hashable or not.
+        unique_ids: List[Any] = []
+        unique_ids_bytes = 0
+        unencodable: List[Any] = []
+        seen: set = set()
+        for node_id in node_ids:
+            try:
+                key = ("h", node_id)
+                hash(key)
+                hashable = True
+            except Exception:
+                hashable = False
+            if hashable and key in seen:
+                continue
+            # Only an unhashable id needs the sorted form, as its dedupe key;
+            # sorting a hashable one could refuse keys the unsorted form takes.
+            try:
+                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
+            except Exception:
+                key = ("i", id(node_id))
+                if key not in seen:
+                    seen.add(key)
+                    unencodable.append(node_id)
+                continue
+            if not hashable:
+                key = ("u", encoded)
+            if key not in seen:
+                seen.add(key)
+                unique_ids.append(node_id)
+                unique_ids_bytes += len(encoded)
+        # Both caps are checked before any per-id work (add_nodes_to_session's
+        # resolve costs one node lookup per id): the write path enforces them
+        # too, but only after that work is already done.
+        if len(unique_ids) > session_manager.max_ops_per_batch:
+            return (
+                None,
+                None,
+                {
+                    "success": False,
+                    "error": "too_large",
+                    "message": (
+                        f"Too many node ids in one write (the cap is "
+                        f"{session_manager.max_ops_per_batch}); split into batches."
+                    ),
+                },
+            )
+        # The length of ``json.dumps(unique_ids)``: the brackets plus a ", "
+        # between items.
+        if unique_ids_bytes + 2 * max(len(unique_ids), 1) > (
+            session_manager.max_op_batch_bytes
+        ):
+            return (
+                None,
+                None,
+                {
+                    "success": False,
+                    "error": "too_large",
+                    "message": (
+                        f"The node ids in one write exceed the "
+                        f"{session_manager.max_op_batch_bytes}-byte size cap; send "
+                        "fewer or shorter ids per call."
+                    ),
+                },
+            )
+
+        # Charged before any per-id work, so a call where no id resolves (or,
+        # for a removal, none is in the session) is not free.
+        try:
+            session_manager.consume_mcp_rate_budget(
+                _MCP_SESSION_CLIENT_ID,
+                max(1, len(unique_ids)),
+                rate_limit_label=label,
+            )
+        except RateLimited:
+            return (
+                None,
+                None,
+                {
+                    "success": False,
+                    "error": "rate_limited",
+                    "message": "Too many session writes; slow down and retry.",
+                },
+            )
+        except OpBatchTooLarge:
+            return (
+                None,
+                None,
+                {
+                    "success": False,
+                    "error": "too_large",
+                    "message": (
+                        f"More node ids than this tool's rate budget admits in one "
+                        f"call (at most {session_manager.mcp_rate_budget_capacity:g}); "
+                        "split into batches."
+                    ),
+                },
+            )
+        return unique_ids, unencodable, None
+
     @register_tool
     def add_nodes_to_session(
         session_id: str,
@@ -2463,96 +2578,11 @@ def register_mcp_tools(
         # no_resolvable_nodes when none of the ids resolve either.
         if session_manager.get_session(session_id) is None:
             return session_not_found
-        # A repeated id is one id: dedupe before the caps and the rate budget
-        # below count it. This runs on the uncapped list, so it must stay
-        # linear — an unhashable value (a dict or list arriving unvalidated
-        # through POST /execute_tool) is keyed by its canonical JSON instead of
-        # being compared pairwise. Every id is encoded once here, and the byte
-        # cap below is summed from those encodings. A value with no canonical
-        # JSON (a cycle, mixed-type dict keys, nesting past the recursion
-        # limit, a ``__str__`` that raises) can only come from an in-process
-        # caller; it could never resolve and the byte cap could not measure
-        # it, so it is skipped before both, whether it is hashable or not.
-        unique_ids: List[Any] = []
-        unique_ids_bytes = 0
-        unencodable: List[Any] = []
-        seen: set = set()
-        for node_id in node_ids:
-            try:
-                key = ("h", node_id)
-                hash(key)
-                hashable = True
-            except Exception:
-                hashable = False
-            if hashable and key in seen:
-                continue
-            # Only an unhashable id needs the sorted form, as its dedupe key;
-            # sorting a hashable one could refuse keys the unsorted form takes.
-            try:
-                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
-            except Exception:
-                key = ("i", id(node_id))
-                if key not in seen:
-                    seen.add(key)
-                    unencodable.append(node_id)
-                continue
-            if not hashable:
-                key = ("u", encoded)
-            if key not in seen:
-                seen.add(key)
-                unique_ids.append(node_id)
-                unique_ids_bytes += len(encoded)
-        # Both caps are checked before the resolve below, which costs one node
-        # lookup per id: the write path enforces them too, but only after that
-        # work is already done.
-        if len(unique_ids) > session_manager.max_ops_per_batch:
-            return {
-                "success": False,
-                "error": "too_large",
-                "message": (
-                    f"Too many node ids in one write (the cap is "
-                    f"{session_manager.max_ops_per_batch}); split into batches."
-                ),
-            }
-        # The length of ``json.dumps(unique_ids)``: the brackets plus a ", "
-        # between items.
-        if unique_ids_bytes + 2 * max(len(unique_ids), 1) > (
-            session_manager.max_op_batch_bytes
-        ):
-            return {
-                "success": False,
-                "error": "too_large",
-                "message": (
-                    f"The node ids in one write exceed the "
-                    f"{session_manager.max_op_batch_bytes}-byte size cap; send "
-                    "fewer or shorter ids per call."
-                ),
-            }
-
-        # Charged before the resolve, which costs one node lookup per id, so a
-        # call where no id resolves is not free.
-        try:
-            session_manager.consume_mcp_rate_budget(
-                _MCP_SESSION_CLIENT_ID,
-                max(1, len(unique_ids)),
-                rate_limit_label="add_nodes_to_session",
-            )
-        except RateLimited:
-            return {
-                "success": False,
-                "error": "rate_limited",
-                "message": "Too many session writes; slow down and retry.",
-            }
-        except OpBatchTooLarge:
-            return {
-                "success": False,
-                "error": "too_large",
-                "message": (
-                    f"More node ids than this tool's rate budget admits in one "
-                    f"call (at most {session_manager.mcp_rate_budget_capacity:g}); "
-                    "split into batches."
-                ),
-            }
+        unique_ids, unencodable, refused = _dedupe_and_charge_node_ids(
+            node_ids, "add_nodes_to_session"
+        )
+        if refused:
+            return refused
 
         # Resolve through the projection under the *mutate* decision, not a read
         # one: a hook may narrow the two to different graph scopes, and this call
@@ -2638,6 +2668,154 @@ def register_mcp_tools(
             "success": True,
             "session_id": session_id,
             "added": result["added"],
+            "skipped": skipped,
+            "node_count": result["node_count"],
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def remove_nodes_from_session(
+        session_id: str,
+        node_ids: List[str],
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Take a known set of nodes off a session's canvas by their ids.
+
+        The complement of ``add_nodes_to_session``: it writes the session's
+        stored state whether or not anyone has it open, and connected clients
+        receive the change live. Only the given nodes go; the other nodes keep
+        their positions and annotations stay (a removed node drops out of any
+        group annotation's members). The graph itself is not touched.
+
+        A removed node's position and hidden/dimmed state go with it, so adding
+        the id back with ``add_nodes_to_session`` brings it back unpositioned
+        and visible, like any newly added node.
+
+        Ids not in the session — including ids that never named a node — are
+        reported in ``skipped`` and change nothing; a call that removes nothing
+        leaves the revision untouched. Caps, rate budget and the ``too_large``
+        threshold are the same as ``add_nodes_to_session``'s, on this tool's own
+        budget, charged per distinct id sent, skipped ids included.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            node_ids: Ids of the nodes to remove.
+            expected_revision: If given, the write is rejected unless it equals
+                the session's current ``revision`` (optimistic concurrency).
+                Omit for last-write-wins.
+
+        Returns:
+            Dict with success, removed (ids actually removed, deduplicated),
+            skipped (ids not in the session, deduplicated), node_count (nodes
+            the session still references, hidden ones included) and the
+            revision. Retryable errors: revision_conflict, busy, rate_limited;
+            change the request for too_large or a validation error.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": _INVALID_SESSION_ID_ERROR,
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "remove_nodes_from_session")
+        if denied:
+            return denied
+        if not isinstance(node_ids, list) or not node_ids:
+            return {"success": False, "error": "'node_ids' must be a non-empty list"}
+        session_not_found = {
+            "success": False,
+            "error": (
+                f"Session '{session_id}' not found. "
+                "This tool acts on a session's stored state, which exists "
+                "once create_visualization_session created it or a browser "
+                "made its first change to it."
+            ),
+        }
+        if session_manager.get_session(session_id) is None:
+            return session_not_found
+        unique_ids, unencodable, refused = _dedupe_and_charge_node_ids(
+            node_ids, "remove_nodes_from_session"
+        )
+        if refused:
+            return refused
+        # Not resolved against the graph: a ref whose node has since been
+        # deleted must still be removable, and the session's refs are already
+        # readable as-is through get_visualization_session_state.
+        # A non-string id can never be in the session; the write path only
+        # takes strings, so one is reported skipped without reaching it.
+        strings = [n for n in unique_ids if isinstance(n, str)]
+        if not strings:
+            session = session_manager.get_session(session_id)
+            if session is None:
+                return session_not_found
+            if expected_revision is not None and expected_revision != session.seq:
+                return {
+                    "success": False,
+                    "error": "revision_conflict",
+                    "message": (
+                        "The session changed since you read it; re-read the "
+                        "session and retry with the current revision."
+                    ),
+                    "expected_revision": expected_revision,
+                    "current_revision": session.seq,
+                }
+            return {
+                "success": True,
+                "session_id": session_id,
+                "removed": [],
+                "skipped": unique_ids + unencodable,
+                "node_count": len(session.state.get("node_refs", [])),
+                "revision": session.seq,
+            }
+        try:
+            result = session_manager.remove_node_refs(
+                session_id,
+                _MCP_SESSION_CLIENT_ID,
+                strings,
+                expected_revision=expected_revision,
+                rate_limit_label="remove_nodes_from_session",
+                precharged=True,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read the session "
+                    "and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except OpBatchTooLarge:
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": (
+                    "Too many node ids, or too many bytes of them, in one write; "
+                    "split into batches."
+                ),
+            }
+        except SessionNotFound:
+            return session_not_found
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        removed = set(result["removed"])
+        skipped = [
+            n for n in unique_ids if not (isinstance(n, str) and n in removed)
+        ] + unencodable
+        return {
+            "success": True,
+            "session_id": session_id,
+            "removed": result["removed"],
             "skipped": skipped,
             "node_count": result["node_count"],
             "revision": result["revision"],
