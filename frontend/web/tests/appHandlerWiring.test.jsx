@@ -424,6 +424,46 @@ describe('App handler wiring', () => {
     expect(api.getNodeDetails).toHaveBeenCalledWith('v2');
     expect(nodeIds()).toEqual(['v1', 'v2']);
   });
+  it.each(['drawer', 'connect dialog', 'new session'])(
+    '%s still opens an empty session on 404 without a missing-link notice',
+    async (path) => {
+      await renderApp();
+      const previousSession = canvas().sessionKey;
+      const target = '8244-1742-3391-0057';
+      api.getSession.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }));
+
+      await act(async () => {
+        if (path === 'drawer') captured.desktop.onSelectSession(target);
+        else if (path === 'connect dialog') dialogs().onConnectSession(target);
+        else captured.desktop.onNewSession();
+      });
+      expect(api.getSession).not.toHaveBeenCalled();
+      expect(canvas().sessionKey).toBe(previousSession);
+      expect(nodeIds()).toEqual(['a', 'b']);
+
+      // Complete the outgoing board's snapshot before the queued switch.
+      await act(async () => {
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+
+      const nextSession =
+        path === 'new session'
+          ? api.generateVisualizationSessionId.mock.results.at(-1).value
+          : target;
+      expect(api.getSession).toHaveBeenCalledWith(nextSession, { resolve: true });
+      expect(canvas().sessionKey).toBe(nextSession);
+      expect(canvas().sessionKey).not.toBe(previousSession);
+      expect(new URL(window.location.href).searchParams.get('session')).toBe(nextSession);
+      expect(nodeIds()).toEqual([]);
+      expect(store().edges).toEqual([]);
+      expect(screen.queryByText(en.sessions.link_not_found)).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+      if (path === 'new session') {
+        expect(screen.getByRole('status')).toHaveTextContent(en.sessions.new_session_started);
+      }
+    }
+  );
+
   // ── Reference tiles ────────────────────────────────────────────────────
   // The host is the THIRD place the reference URL gate is applied — the
   // backend decides what may be stored, the canvas what it may draw as
@@ -514,6 +554,7 @@ describe('App handler wiring', () => {
       });
       expect(api.getNodeDetails).toHaveBeenCalledWith('res-1');
       expect(nodeIds()).toContain('res-1');
+      expect(store().focusNodeId).toBe('res-1');
     });
 
     it('does not add anything when a resource target cannot be fetched', async () => {
@@ -526,16 +567,28 @@ describe('App handler wiring', () => {
         await canvas().onReferenceOpen({ targetKind: 'resource', target: 'res-missing' });
       });
       expect(nodeIds()).toEqual(before);
+      expect(screen.getByRole('alert')).toHaveTextContent(en.context_menu.reference_broken_target);
       expect(openSpy).not.toHaveBeenCalled();
     });
 
-    it('does not open a window for a session target', async () => {
-      // A session target switches boards in-app; it must never become a
-      // browser navigation.
+    it('loads a session target in-app without opening a window or a missing-link notice', async () => {
       await renderApp();
+      api.getSession.mockResolvedValueOnce({
+        id: '8244-1742-3391-0057',
+        state: {},
+        resolved: { nodes: [NODE_B], edges: [] },
+        roster: [],
+      });
       await act(async () => {
         await canvas().onReferenceOpen({ targetKind: 'session', target: '8244-1742-3391-0057' });
       });
+      await act(async () => {
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+      expect(api.getSession).toHaveBeenCalledWith('8244-1742-3391-0057', { resolve: true });
+      expect(canvas().sessionKey).toBe('8244-1742-3391-0057');
+      expect(nodeIds()).toEqual(['b']);
+      expect(screen.queryByText(en.sessions.link_not_found)).toBeNull();
       expect(openSpy).not.toHaveBeenCalled();
     });
 
@@ -572,6 +625,10 @@ describe('App handler wiring', () => {
       expect(api.getSession).toHaveBeenCalledWith('8244-1742-3391-0057', {
         resolve: true,
       });
+      expect(canvas().sessionKey).toBe('8244-1742-3391-0057');
+      expect(new URL(window.location.href).searchParams.get('session')).toBe('8244-1742-3391-0057');
+      expect(nodeIds()).toEqual([]);
+      expect(store().edges).toEqual([]);
       expect(
         await screen.findByText(
           'That session link could not be found — it may have been deleted or expired.'
