@@ -604,6 +604,15 @@ class DeliveryWorker:
                     follow_redirects=False,
                 ) as response:
                     if not response.is_redirect:
+                        # HTTPX decodes before iter_bytes yields, so even a tiny
+                        # compressed chunk can allocate far beyond our body cap.
+                        # Webhook diagnostics do not require encoded bodies.
+                        encoding = response.headers.get("content-encoding", "")
+                        if encoding.strip().lower() not in ("", "identity"):
+                            raise httpx.RequestError(
+                                "Encoded webhook response body is not supported",
+                                request=response.request,
+                            )
                         chunks = []
                         total = 0
                         for chunk in response.iter_bytes():

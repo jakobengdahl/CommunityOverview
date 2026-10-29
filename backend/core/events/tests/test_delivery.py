@@ -1174,25 +1174,45 @@ class TestWebhookRedirectHops:
         assert outcome.text == "terminal error"
         assert closed == [True]
 
-    @pytest.mark.parametrize("extra", [0, 1])
-    def test_compressed_terminal_body_is_capped_after_decoding(
-        self, monkeypatch, extra
+    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize(
+        "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
+    )
+    def test_encoded_terminal_body_is_rejected_before_decoding(
+        self, monkeypatch, status, encoding
     ):
         import gzip
 
+        # This tiny wire payload expands to 128 times the response budget.
+        compressed = gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES * 128))
+        assert len(compressed) < delivery.MAX_WEBHOOK_BODY_BYTES
+        closed = []
+
         class CompressedBody(httpx.SyncByteStream):
             def __iter__(self):
-                yield gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES + extra))
+                pytest.fail("encoded terminal bodies must be rejected before reading")
+                yield compressed
+
+            def close(self):
+                closed.append(True)
 
         _, outcome = self._post(
             monkeypatch,
             lambda *a: httpx.Response(
-                500, headers={"content-encoding": "gzip"}, stream=CompressedBody()
+                status, headers={"content-encoding": encoding}, stream=CompressedBody()
             ),
         )
-        if extra:
-            assert isinstance(outcome, httpx.RequestError)
-            assert "response body exceeds" in str(outcome)
-        else:
-            assert outcome.text == "x" * delivery.MAX_WEBHOOK_BODY_BYTES
-            assert outcome.is_closed
+        assert isinstance(outcome, httpx.RequestError)
+        assert "Encoded webhook response" in str(outcome)
+        assert outcome.request.url.host == "start.example.com"
+        assert closed == [True]
+
+    def test_identity_terminal_encoding_is_accepted(self, monkeypatch):
+        _, outcome = self._post(
+            monkeypatch,
+            lambda *a: httpx.Response(
+                500, headers={"content-encoding": "identity"}, content=b"diagnostic"
+            ),
+        )
+        assert outcome.text == "diagnostic"
+        assert outcome.is_closed
