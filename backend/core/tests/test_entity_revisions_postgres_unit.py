@@ -154,3 +154,49 @@ def test_create_guard_accounts_for_edges_written_in_the_batch(backend):
     for call in conn.execute.call_args_list:
         assert call.args[1] == ("n", ["new"])
         assert "id = ANY(%s::text[])" in call.args[0].as_string()
+
+
+@pytest.mark.parametrize("stored", [None, ("Actor", []), ("Actor", ["Agency"])])
+def test_edge_endpoint_subtypes_are_checked_under_key_share(backend, stored):
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = stored
+    op = EntityOperation(
+        "edge",
+        "upsert",
+        "e",
+        {"source": "a", "target": "a"},
+        endpoint_subtypes=(("a", ("Agency",)),),
+    )
+    if stored == ("Actor", ["Agency"]):
+        backend._hold_endpoints(conn, [op])
+    else:
+        with pytest.raises(EntityRevisionConflict):
+            backend._hold_endpoints(conn, [op])
+    assert "FOR KEY SHARE" in str(conn.execute.call_args.args[0])
+
+
+@pytest.mark.parametrize("rows", [[("new-edge", 5)], [("kept", 6)]])
+def test_direct_incident_guard_refuses_added_or_changed_edges_before_writing(
+    backend, rows
+):
+    backend._pool = MagicMock()
+    conn = backend._pool.connection.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = rows
+    backend._bind_scope = Mock()
+    backend._claim_or_check_graph_identity = Mock()
+    backend._apply_one = Mock()
+    backend._announce = Mock()
+    op = EntityOperation(
+        "node",
+        "upsert",
+        "a",
+        {"id": "a", "type": "Actor", "subtypes": []},
+        incident_edge_revisions=(("kept", 5),),
+    )
+    with pytest.raises(EntityRevisionConflict) as refused:
+        backend._apply_batch_once([op], "token")
+    backend._apply_one.assert_not_called()
+    backend._announce.assert_not_called()
+    assert "new-edge" not in str(refused.value)
+    assert "kept" not in str(refused.value)
+    assert any("FOR UPDATE" in str(c.args[0]) for c in conn.execute.call_args_list)

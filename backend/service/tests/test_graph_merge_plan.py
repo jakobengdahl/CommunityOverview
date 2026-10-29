@@ -1285,6 +1285,9 @@ class TestSubtypeReduction:
             nodes = [{"id": "a1", "type": "Actor", "name": "A", "subtypes": ["x"]}]
             edge = None
             policy = MergePolicy(default="overwrite")
+        # Setup mutations also run applicability validation. Observe only
+        # the planner's reduced endpoint representation below.
+        seen.clear()
         _plan(storage, nodes, [edge] if edge else [], policy=policy)
         assert any("Agency" in pair[0] + pair[1] for pair in seen)
         assert all(
