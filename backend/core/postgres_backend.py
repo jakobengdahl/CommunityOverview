@@ -1623,6 +1623,22 @@ class PostgresGraphPersistenceBackend:
                     (SAVE_LOCK_KEY, self.schema),
                 )
                 self._claim_or_check_graph_identity(conn)
+                checks = [
+                    layer_store.MergeCheck.incident_edges(
+                        op.entity_id,
+                        [eid for eid, _ in op.incident_edge_revisions],
+                        revisions=dict(op.incident_edge_revisions),
+                    )
+                    for op in operations
+                    if op.incident_edge_revisions is not None
+                ]
+                try:
+                    self._verify_incident_edges(conn, checks)
+                except layer_store.MergeRaced as exc:
+                    # Refuse atomically without exposing stored incident edges.
+                    raise EntityRevisionConflict(
+                        "node", checks[0].entity_id, None, None
+                    ) from exc
                 self._hold_endpoints(conn, operations)
                 created_nodes = []
                 revisions = [
@@ -1693,6 +1709,9 @@ class PostgresGraphPersistenceBackend:
         under FOR UPDATE, so an edge judged before it waits here and then
         finds the new type, and is refused rather than landing a
         relationship the new type does not allow.
+        Subtype-changing direct updates take the same FOR UPDATE lock before
+        checking incident edges. Compare subtypes as well, so an edge judged
+        before such an update cannot land after it.
         """
         upserted = {
             op.entity_id
@@ -1712,18 +1731,24 @@ class PostgresGraphPersistenceBackend:
         if not endpoints:
             return
         judged: Dict[str, str] = {}
+        subtypes = {}
         for op in operations:
             if op.kind == "edge" and op.action == "upsert":
                 judged.update(op.endpoint_types)
+                subtypes.update(op.endpoint_subtypes)
         scope, scope_params = self._and_scope()
         statement = sql.SQL(
-            "SELECT doc->>'type' FROM {} WHERE id = %s{} FOR KEY SHARE"
+            "SELECT doc->>'type', doc->'subtypes' FROM {} WHERE id = %s{} FOR KEY SHARE"
         ).format(self._table("graph_nodes"), scope)
         for endpoint in endpoints:
             row = conn.execute(statement, (endpoint, *scope_params)).fetchone()
             # Gone counts too: the id could be created again with any type.
             if endpoint in judged and (row is None or row[0] != judged[endpoint]):
                 raise NodeTypeChanged(endpoint, judged[endpoint])
+            if endpoint in subtypes and (
+                row is None or tuple(sorted(row[1] or [])) != subtypes[endpoint]
+            ):
+                raise EntityRevisionConflict("node", endpoint, None, None)
 
     def _stored_revision_of(self, conn, table: str, entity_id: str) -> Optional[int]:
         """The visible row's revision, or None when there is no such row."""

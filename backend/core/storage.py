@@ -1400,14 +1400,14 @@ class GraphStorage:
                 ) from exc
             for offset, entity in enumerate(upserted):
                 entity.revision = first + offset
-            future = self._persist(self._operations(changes, expectations))
+            future = self._persist(self._operations(changes, expectations, undo=undo))
             if expectations:
                 self._await_landing(future)
             return
 
         if not changes:
             return
-        operations = self._operations(changes, expectations)
+        operations = self._operations(changes, expectations, undo=undo)
         token = uuid.uuid4().hex
         future = self._io_executor.submit(
             self._do_apply, tuple(operations), token=token
@@ -1437,6 +1437,8 @@ class GraphStorage:
         self,
         changes: List[Tuple[str, str, Any]],
         expectations: Dict[Tuple[str, str], Any],
+        *,
+        undo: Optional[_Undo] = None,
     ) -> List[EntityOperation]:
         """The entity operations for `changes`. Callers must hold _lock."""
         operations: List[EntityOperation] = []
@@ -1462,9 +1464,35 @@ class GraphStorage:
                     ),
                     expect_absent=expected is EXPECT_ABSENT,
                     endpoint_types=self._endpoint_types(kind, action, payload),
+                    endpoint_subtypes=self._endpoint_subtypes(kind, action, payload),
+                    incident_edge_revisions=(
+                        tuple(
+                            sorted(
+                                (e.id, e.revision)
+                                for e in self.get_edges_for_node(entity_id)
+                            )
+                        )
+                        if undo is not None
+                        and kind == "node"
+                        and action == "upsert"
+                        and undo.nodes.get(entity_id) is not None
+                        and node_applicability_changed(undo.nodes[entity_id], payload)
+                        else None
+                    ),
                 )
             )
         return operations
+
+    def _endpoint_subtypes(self, kind, action, payload):
+        if kind != "edge" or action != "upsert" or not payload:
+            return ()
+        return tuple(
+            sorted(
+                (end, tuple(sorted(self.nodes[end].subtypes)))
+                for end in {payload.get("source"), payload.get("target")}
+                if end in self.nodes
+            )
+        )
 
     def _endpoint_types(
         self, kind: str, action: str, payload: Optional[Dict[str, Any]]
@@ -1552,9 +1580,11 @@ class GraphStorage:
                     f"a write reported a failure but landed ({failure}); completing it"
                 )
                 return [
-                    evidence[(op.kind, op.entity_id)][0]
-                    if op.action == "upsert"
-                    else None
+                    (
+                        evidence[(op.kind, op.entity_id)][0]
+                        if op.action == "upsert"
+                        else None
+                    )
                     for op in operations
                 ]
             readings.append(evidence)
@@ -3893,14 +3923,16 @@ class GraphStorage:
                     ResourceChange.snapshot(
                         write.kind,
                         write.entity_id,
-                        current.to_dict()
-                        if (
-                            current := (
-                                self.nodes if write.kind == "node" else self.edges
-                            ).get(write.entity_id)
-                        )
-                        is not None
-                        else None,
+                        (
+                            current.to_dict()
+                            if (
+                                current := (
+                                    self.nodes if write.kind == "node" else self.edges
+                                ).get(write.entity_id)
+                            )
+                            is not None
+                            else None
+                        ),
                         write.payload if write.action == "upsert" else None,
                     )
                     for write in plan.writes
@@ -3936,13 +3968,18 @@ class GraphStorage:
                     (
                         None
                         if entity is None
-                        else self._serialize_node(entity)
-                        if write.kind == "node"
-                        else entity.to_dict()
+                        else (
+                            self._serialize_node(entity)
+                            if write.kind == "node"
+                            else entity.to_dict()
+                        )
                     ),
                     expected_revision=write.expected_revision,
                     expect_absent=write.expect_absent,
                     endpoint_types=self._endpoint_types(
+                        write.kind, write.action, write.payload
+                    ),
+                    endpoint_subtypes=self._endpoint_subtypes(
                         write.kind, write.action, write.payload
                     ),
                 )
@@ -4253,12 +4290,16 @@ class GraphStorage:
                 for edge in self.get_edges_for_node(node_id):
                     error = edge_applicability_error(
                         edge.type_str,
-                        validated
-                        if edge.source == node_id
-                        else self.nodes.get(edge.source),
-                        validated
-                        if edge.target == node_id
-                        else self.nodes.get(edge.target),
+                        (
+                            validated
+                            if edge.source == node_id
+                            else self.nodes.get(edge.source)
+                        ),
+                        (
+                            validated
+                            if edge.target == node_id
+                            else self.nodes.get(edge.target)
+                        ),
                     )
                     if error:
                         raise ValueError(error)
@@ -4291,9 +4332,11 @@ class GraphStorage:
             self._commit(
                 [("node", "upsert", node)],
                 undo,
-                {("node", node_id): expected_revision}
-                if expected_revision is not None
-                else None,
+                (
+                    {("node", node_id): expected_revision}
+                    if expected_revision is not None
+                    else None
+                ),
                 event_context=event_context,
             )
 
@@ -4678,9 +4721,11 @@ class GraphStorage:
             self._commit(
                 [("edge", "upsert", edge)],
                 undo,
-                {("edge", edge_id): expected_revision}
-                if expected_revision is not None
-                else None,
+                (
+                    {("edge", edge_id): expected_revision}
+                    if expected_revision is not None
+                    else None
+                ),
                 event_context=event_context,
             )
 
@@ -4814,9 +4859,11 @@ class GraphStorage:
             self._commit(
                 [("edge", "delete", edge_id)],
                 undo,
-                {("edge", edge_id): expected_revision}
-                if expected_revision is not None
-                else None,
+                (
+                    {("edge", edge_id): expected_revision}
+                    if expected_revision is not None
+                    else None
+                ),
                 event_context=event_context,
             )
 
@@ -4979,9 +5026,11 @@ class GraphStorage:
             self._commit(
                 [("edge", "upsert", edge)],
                 undo,
-                {("edge", edge.id): EXPECT_ABSENT}
-                if expect_absent or self._store_assigns_revisions
-                else None,
+                (
+                    {("edge", edge.id): EXPECT_ABSENT}
+                    if expect_absent or self._store_assigns_revisions
+                    else None
+                ),
                 event_context=event_context,
             )
 
