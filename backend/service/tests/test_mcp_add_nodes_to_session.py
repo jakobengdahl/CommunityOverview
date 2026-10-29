@@ -1392,10 +1392,26 @@ class TestRemoveNodesFromSession:
         finally:
             lock.release()
 
+        assert result["success"] is False
         assert result["error"] == "busy"
         assert buckets["_mcp_bucket"].consumed == [2]
         assert manager.get_session(sid).seq == revision
         assert "alpha" in manager.get_session(sid).state["node_refs"]
+
+    def test_a_session_deleted_before_the_write_is_reported_as_not_found(self, tools):
+        tools_map, manager, sid, _ = self._seeded(tools)
+
+        def vanish(*args, **kwargs):
+            raise SessionNotFound()
+
+        manager.remove_node_refs = vanish
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=["alpha"]
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
 
     def test_only_unencodable_ids_are_skipped_without_a_write(self, tools):
         tools_map, manager, sid, revision = self._seeded(tools)
