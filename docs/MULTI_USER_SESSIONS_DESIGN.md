@@ -127,7 +127,7 @@ uses `parentId` internally.
 Two protocols, mirroring the existing `GraphPersistenceBackend` pattern:
 
 - `SessionPersistenceBackend` — `load(id)`, `save(session)`, `delete(id)`,
-  `list_meta()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
+  `list_meta()`, `list_ids()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
   session under `data/sessions/<id>.json` (atomic temp+rename, same locking style as
   `storage_backends.py`). Per-session files keep write amplification low under
   frequent op-driven saves. **No automatic retention/eviction in v1** (D13): sessions
@@ -921,11 +921,17 @@ core needs to change.
 
 | Downstream SaaS slice | Open-core seam it binds to | Core-shipped default | Where it is injected |
 |---|---|---|---|
-| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
+| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` / `list_ids` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
 | Durability / retention | same `SessionPersistenceBackend` seam; the core adds **no** auto-eviction (D13), so a durable backend owns its own retention policy | file persistence, kept until explicit delete | `SessionStore(<backend>)` |
 | Redis event bus (multi-instance fan-out) | `SessionEventBus` Protocol — `publish` / `subscribe` / `unsubscribe` (`backend/core/session_hub.py`) | `InProcessEventBus` (per-subscriber asyncio queues, slow-consumer drop→resync) | `SessionManager(store, event_bus=<bus>)` |
 | Identity / named-identity presence | request-actor pass-through (`service.get_request_actor_info(headers=...)`) feeding the per-client `{client_id, display_name, color}` presence registration (§3.4) | anonymous guest identity (`Guest-<n>`, server-assigned colour); session id is the capability (D7) | session CRUD/stream endpoints in `rest_api.py` |
 | Access control / session history | (a) session id as capability + optional HTTP Basic Auth + per-source lookup rate limit (§3.9); (b) the localStorage recents index as the *personal* history seam (§3.6) | no accounts, no ACLs, no server-stored cross-user history | endpoints honour an identity context **when present**, otherwise fall through to the capability model |
+
+**Adapter migration — actor attribution maintenance:** session persistence
+adapters now provide `list_ids() -> List[str]`, enumerating every persisted
+session without silently skipping unreadable documents. `SessionStore.erase_actor`
+uses it to scrub activity in cold and loaded sessions without modifying session
+state or sequence numbers. Existing CRUD signatures are unchanged.
 
 Contract obligations the core commits to, so hosted slices can depend on them:
 

@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
+from backend.core.actor_attribution import validate_erasure
+
 from .models import Proposal, ProposalStatus, utcnow
 
 _SCHEMA_VERSION = 3
@@ -80,6 +82,8 @@ class ProposalStore(Protocol):
     ) -> List[Proposal]: ...
 
     def redact(self, proposal_ids: Sequence[str]) -> int: ...
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int: ...
 
     def purge(self, proposal_ids: Sequence[str]) -> int: ...
 
@@ -172,6 +176,16 @@ class InMemoryProposalStore:
                 item.apply_result = None
                 item.apply_error = None
                 count += 1
+        return count
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            for item in self._items.values():
+                if item.decided_by == actor_id:
+                    item.decided_by = replacement_token
+                    count += 1
         return count
 
     def purge(self, proposal_ids: Sequence[str]) -> int:
@@ -400,6 +414,13 @@ class SqliteProposalStore:
             )
             """,
             params,
+        )
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        return self._write_many(
+            "UPDATE proposals SET decided_by = ? WHERE decided_by = ?",
+            [(replacement_token, actor_id)],
         )
 
     def purge(self, proposal_ids: Sequence[str]) -> int:

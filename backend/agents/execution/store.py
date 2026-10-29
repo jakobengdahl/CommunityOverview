@@ -163,6 +163,10 @@ class ExecutionStore(Protocol):
         """
         ...
 
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        """Replace structured actor attribution; return changed record count."""
+        ...
+
     # -- retention ------------------------------------------------------------
 
     def list_terminal_older_than(
