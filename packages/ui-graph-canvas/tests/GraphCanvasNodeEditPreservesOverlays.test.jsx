@@ -333,4 +333,42 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('g1')).toBe(false);
     expect(ids.has('note-1')).toBe(false);
   });
+
+  it('gives a node shared by both sessions the target session position on a switch', () => {
+    const shared = { id: 'shared', name: 'S', type: 'Actor', description: 's' };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={[{ ...shared, _savedPosition: { x: 900, y: 900 } }]}
+        edges={[]}
+        sessionKey="s1"
+        canvasBaselineEpoch={0}
+      />
+    );
+    expect(store.nodes.find((n) => n.id === 'shared').position).toEqual({ x: 900, y: 900 });
+
+    const target = [{ ...shared, _savedPosition: { x: 40, y: 40 } }];
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={target}
+          edges={[]}
+          sessionKey="s1"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    act(() => {
+      rerender(
+        <GraphCanvas
+          nodes={target}
+          edges={[]}
+          sessionKey="s2"
+          canvasBaselineEpoch={1}
+          clearGroupsFlag={true}
+        />
+      );
+    });
+    expect(store.nodes.find((n) => n.id === 'shared').position).toEqual({ x: 40, y: 40 });
+  });
 });
