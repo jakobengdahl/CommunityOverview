@@ -1612,7 +1612,7 @@ sticky-note tools' session/revision contract — model-space coordinates,
 on a stale write, `lease_conflict` on a live human edit lease — over the same
 annotation document. `create_group_annotation`/`update_group_members`/
 `delete_group_annotation` and `create_image_annotation` (below) share it too;
-all thirteen MCP annotation tools check the same
+all thirteen MCP annotation write tools check the same
 lease at the actual mutation boundary and never acquire one themselves.
 
 A `heatmap` is a soft red heat-map circle whose only payload field is
