@@ -453,3 +453,92 @@ def test_cli_rejects_wrong_store_path_type_without_disclosure(
     captured = capsys.readouterr()
     assert ACTOR not in captured.out + captured.err
     assert json.loads(captured.out)["failed_stores"] == ["session_activity"]
+
+
+def test_erasure_preserves_entity_and_execution_content(erasure_stores, tmp_path):
+    """Attribution-like keys in user content must survive erasure unchanged."""
+    runs, _ = erasure_stores
+    content = {
+        "actor": ACTOR,
+        "actor_id": ACTOR,
+        "client_id": ACTOR,
+        "origin": ACTOR,
+        "event_origin": f"agent:{ACTOR}",
+        "staged_by": ACTOR,
+        "decided_by": ACTOR,
+        "on_behalf_of": {"id": ACTOR},
+        "attribution": {"actor": {"actor_id": ACTOR}},
+        "metadata": {"actor": ACTOR},
+    }
+    history = GraphHistoryStore(tmp_path / "history.ndjson")
+    record = {
+        "before": copy.deepcopy(content),
+        "after": copy.deepcopy(content),
+        "patch": copy.deepcopy(content),
+        "attribution": {"actor": {"actor_id": ACTOR}},
+    }
+    history.append_record(record)
+    run = _run(runs)
+    # Store copies on enqueue, so add content before creating this job.
+    job = ExecutionJob(
+        agent_id="agent-1",
+        kind=ExecutionKind.EVENT,
+        idempotency_key="content",
+        payload={
+            "event": {
+                "entity": copy.deepcopy(content),
+                "origin": {"attribution": {"actor": {"actor_id": ACTOR}}},
+            },
+            "data": copy.deepcopy(content),
+        },
+        result={"data": copy.deepcopy(content), "attribution": record["attribution"]},
+    )
+    content_run = runs.enqueue(job)
+    backend = InMemorySessionPersistenceBackend()
+    sessions = SessionStore(backend)
+    session = sessions.create()
+    session.activity_log = [
+        {
+            "id": "content",
+            "actor": ACTOR,
+            "before": copy.deepcopy(content),
+            "after": copy.deepcopy(content),
+            "inverse_op": {"client_id": ACTOR, "data": copy.deepcopy(content)},
+        }
+    ]
+    sessions.persist(session)
+    try:
+        service = ActorErasureService(
+            mutation_history=history, run_history=runs, session_activity=sessions
+        )
+        assert service.erase_actor(ACTOR, TOKEN)["counts"] == {
+            "mutation_history": 1,
+            "run_history": 2,
+            "proposals": 0,
+            "session_activity": 1,
+        }
+        cleaned = history.get_recent()[0]
+        for key in ("before", "after", "patch"):
+            assert cleaned[key] == content
+        assert cleaned["attribution"]["actor"]["actor_id"] == TOKEN
+        cleaned_run = runs.get(content_run.id)
+        assert cleaned_run.payload["event"]["entity"] == content
+        assert cleaned_run.payload["data"] == content
+        assert cleaned_run.result["data"] == content
+        assert cleaned_run.result["attribution"]["actor"]["actor_id"] == TOKEN
+        assert (
+            cleaned_run.payload["event"]["origin"]["attribution"]["actor"]["actor_id"]
+            == TOKEN
+        )
+        assert runs.get(run.id).origin == f"agent:{TOKEN}"
+        for activity in (
+            session.activity_log,
+            backend.load(session.id)["activity_log"],
+        ):
+            assert activity[0]["actor"] == TOKEN
+            assert activity[0]["inverse_op"]["client_id"] == TOKEN
+            assert activity[0]["inverse_op"]["data"] == content
+            assert activity[0]["before"] == activity[0]["after"] == content
+        assert set(service.erase_actor(ACTOR, TOKEN)["counts"].values()) == {0}
+    finally:
+        history.close()

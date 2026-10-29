@@ -57,7 +57,9 @@ class InMemoryExecutionStore:
                     "result": job.result,
                     "origin": job.origin,
                 }
-                after = replace_attribution(before, actor_id, replacement_token)
+                after = replace_attribution(
+                    before, actor_id, replacement_token, envelope="run"
+                )
                 if after != before:
                     job.payload = after["payload"]
                     job.result = after["result"]

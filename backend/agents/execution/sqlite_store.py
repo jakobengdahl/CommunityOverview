@@ -614,7 +614,9 @@ class SqliteExecutionStore:
                         "result": json.loads(row["result"]) if row["result"] else None,
                         "origin": row["origin"],
                     }
-                    after = replace_attribution(before, actor_id, replacement_token)
+                    after = replace_attribution(
+                        before, actor_id, replacement_token, envelope="run"
+                    )
                     if after != before:
                         self._conn.execute(
                             "UPDATE execution_jobs SET payload = ?, result = ?, origin = ? WHERE id = ?",
