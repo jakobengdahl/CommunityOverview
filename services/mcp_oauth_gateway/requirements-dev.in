@@ -30,3 +30,6 @@ pytest-timeout>=2.1.0
 # ASGI transport. The gateway's runtime HTTP client is httpx2, so plain httpx is
 # a test-only dependency and is intentionally kept out of requirements.in.
 httpx>=0.27.0
+
+# PYSEC-2026-4320: exclude vulnerable CA bundles pulled in by httpx.
+certifi>=2026.10.19

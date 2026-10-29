@@ -1297,3 +1297,343 @@ def test_g1_a_payload_larger_than_the_pipe_is_never_blocking(code):
     )
     assert result.status in (ae.STATUS_FAILED, ae.STATUS_TIMEOUT)
     assert time.monotonic() - started < 4
+
+
+@pytest.mark.parametrize("extra", [0, 1, 6204])
+def test_g1_reply_byte_cap_accepts_exactly_the_limit(extra):
+    limits = ExtractionLimits(max_chars=10, max_segments=1)
+    cap = ae._max_reply_bytes(limits)
+    assert cap == 6204
+    code = (
+        f"import sys; reply = {_OK_REPLY!r}; "
+        f"sys.stdout.write(reply + ' ' * ({cap + extra} - len(reply)))"
+    )
+    result = ae._run_worker(b"x", ae.TEXT, limits, _fake_worker(code))
+    if extra:
+        assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_output")
+    else:
+        assert result.status == ae.STATUS_OK
+        assert _texts(result) == ["done"]
+
+
+@pytest.mark.parametrize(
+    "field,detail",
+    [
+        ("max_zip_members", "zip_members"),
+        ("max_zip_uncompressed_bytes", "zip_uncompressed_bytes"),
+    ],
+)
+def test_g2_zip_declared_caps_accept_exactly_the_limit(field, detail):
+    data = _zip({"one": b"a" * 250_000, "two": b"a" * 250_000})
+    cap = 2 if field == "max_zip_members" else 500_000
+    # Both the archive and its members compress beyond the ratio cap, but
+    # remain below the floor where a ratio signals a bomb.
+    assert 500_000 / len(data) > ExtractionLimits().max_zip_ratio
+    with ae._open_zip(data, ExtractionLimits(**{field: cap})) as archive:
+        assert len(archive.infolist()) == 2
+    with pytest.raises(ae._TooLarge, match=detail):
+        ae._open_zip(data, ExtractionLimits(**{field: cap - 1}))
+
+
+def test_g3_xml_parser_disables_entities_dtd_loading_and_network(monkeypatch):
+    from lxml import etree
+
+    real_parser = etree.XMLParser
+    seen = []
+
+    def parser(**kwargs):
+        seen.append(kwargs)
+        return real_parser(**kwargs)
+
+    monkeypatch.setattr(etree, "XMLParser", parser)
+    assert ae._parse_xml(b"<root/>").tag == "root"
+    assert len(seen) == 1
+    for name, value in {
+        "resolve_entities": False,
+        "load_dtd": False,
+        "no_network": True,
+    }.items():
+        assert seen[0][name] is value
+
+
+@pytest.mark.parametrize(
+    "name,entry",
+    [
+        (
+            "word/extra.dat",
+            '<Default Extension="dat" ContentType="application/custom+xml"/>',
+        ),
+        (
+            "word/Extra.DaT",
+            '<Default Extension="dAt" ContentType="application/custom+xml"/>',
+        ),
+        (
+            "word/Extra.DaT",
+            '<Override PartName="/WORD/extra.dAT" ContentType="application/custom+xml"/>',
+        ),
+        ("word/extra.XML", ""),
+        ("word/_rels/extra.ReLs", ""),
+    ],
+)
+def test_g3_docx_scans_default_override_and_untyped_xml_parts(name, entry):
+    members = {
+        "[Content_Types].xml": f"<Types>{entry}</Types>".encode(),
+        name: b'<!DOCTYPE x [<!ENTITY e "value">]><x/>',
+    }
+    with pytest.raises(ae._Refused, match="xml_dtd"):
+        ae._refuse_docx_dtds(members)
+
+
+def test_g3_docx_missing_content_types_has_a_specific_detail():
+    result = extract(_zip({"word/document.xml": "<document/>"}), ae.DOCX)
+    assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="missing_part")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="resource limits require POSIX")
+def test_g1_worker_applies_cpu_and_file_size_limits_before_parsing():
+    import json
+
+    # Run the real worker entry point, replacing only parsing with a probe.
+    code = f"""
+import json, resource, runpy
+ns = runpy.run_path({ae.__file__!r})
+def probe(*args):
+    values = [resource.getrlimit(resource.RLIMIT_CPU), resource.getrlimit(resource.RLIMIT_FSIZE)]
+    return ns['ExtractionResult']('ok', (ns['Segment'](json.dumps(values)),))
+ns['_worker_main'].__globals__['_extract_in_process'] = probe
+raise SystemExit(ns['_worker_main']())
+"""
+    result = ae._run_worker(
+        b"x", ae.TEXT, ExtractionLimits(timeout_seconds=2.25), _fake_worker(code)
+    )
+    assert result.status == ae.STATUS_OK
+    assert json.loads(result.segments[0].text) == [[3, 3], [0, 0]]
+
+
+def test_g1_isolated_worker_ignores_a_shadow_module_beside_the_script(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    script = tmp_path / "attachment_extract.py"
+    script.write_bytes(Path(ae.__file__).read_bytes())
+    (tmp_path / "json.py").write_text("raise RuntimeError('shadow module imported')")
+    monkeypatch.setattr(ae, "__file__", str(script))
+    result = extract(b"isolated", ae.TEXT)
+    assert result.status == ae.STATUS_OK
+    assert _texts(result) == ["isolated"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the selector exchange is POSIX")
+@pytest.mark.parametrize(
+    "failure", ["timeout", "overflow", "selector_create", "selector_select"]
+)
+def test_g1_worker_failures_close_pipes_unregister_and_reap(monkeypatch, failure):
+    import os
+    import selectors
+    import subprocess
+
+    real_popen = subprocess.Popen
+    children = []
+    registered, unregistered = [], []
+
+    def popen(*args, **kwargs):
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        proc = real_popen(*args, **kwargs)
+        children.append(proc)
+        return proc
+
+    class Selector(selectors.DefaultSelector):
+        def __init__(self):
+            if failure == "selector_create":
+                raise OSError("no descriptors")
+            super().__init__()
+
+        def register(self, fd, *args):
+            registered.append(fd)
+            return super().register(fd, *args)
+
+        def unregister(self, fd):
+            unregistered.append(fd)
+            return super().unregister(fd)
+
+        def select(self, timeout=None):
+            if failure == "selector_select":
+                raise OSError("selector failed")
+            return super().select(timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(selectors, "DefaultSelector", Selector)
+    code = "import time; time.sleep(60)"
+    if failure == "overflow":
+        code = "import sys; sys.stdout.write('x' * 100000)"
+    result = ae._run_worker(
+        b"x",
+        ae.TEXT,
+        ExtractionLimits(max_chars=10, max_segments=1, timeout_seconds=0.5),
+        _fake_worker(code),
+    )
+    expected = {
+        "timeout": (ae.STATUS_TIMEOUT, "wall_clock"),
+        "overflow": (ae.STATUS_FAILED, "worker_output"),
+        "selector_create": (ae.STATUS_FAILED, "worker_io"),
+        "selector_select": (ae.STATUS_FAILED, "worker_io"),
+    }
+    assert (result.status, result.detail) == expected[failure]
+    assert len(children) == 1
+    proc = children[0]
+    assert proc.stdin.closed and proc.stdout.closed
+    assert proc.returncode is not None
+    assert sorted(registered) == sorted(unregistered)
+    if failure != "selector_create":
+        assert len(registered) == 2
+    with pytest.raises(ChildProcessError):
+        os.waitpid(proc.pid, os.WNOHANG)
+
+
+@pytest.mark.parametrize("ctype", [ae.DOCX, ae.XLSX, ae.ODS])
+def test_g7_table_rows_drop_trailing_empty_cells_but_keep_internal_cells(ctype):
+    row = ["left", "", "right", "", ""]
+    if ctype == ae.DOCX:
+        data = _docx(paragraphs=[], table=[row])
+    elif ctype == ae.XLSX:
+        data = _xlsx({"Sheet": [row]})
+    else:
+        cells = "".join(
+            f"<table:table-cell><text:p>{v}</text:p></table:table-cell>" for v in row
+        )
+        data = _odf(
+            ae.ODS,
+            f'<office:spreadsheet><table:table table:name="Sheet"><table:table-row>{cells}</table:table-row></table:table></office:spreadsheet>',
+        )
+    result = extract(data, ctype)
+    assert result.status == ae.STATUS_OK
+    assert _texts(result) == ["left\t\tright"]
+
+
+def test_g7_lone_cr_and_whitespace_only_lines_preserve_block_locators():
+    result = extract(b"first\r \t\rsecond\rthird", ae.TEXT)
+    assert result.segments == (
+        ae.Segment("first", {"line": 1}),
+        ae.Segment("second\nthird", {"line": 3}),
+    )
+
+
+@pytest.mark.parametrize("ctype", [ae.PPTX, ae.ODP])
+def test_g7_empty_presentation_paragraphs_do_not_add_separators(ctype):
+    if ctype == ae.PPTX:
+        data = _pptx([["", "first", "  ", "second", ""]])
+    else:
+        paragraphs = "".join(
+            f"<text:p>{v}</text:p>" for v in ["", "first", "  ", "second", ""]
+        )
+        data = _odf(
+            ae.ODP,
+            f"<office:presentation><draw:page>{paragraphs}</draw:page></office:presentation>",
+        )
+    assert _texts(extract(data, ctype)) == ["first\nsecond"]
+
+
+def test_g7_odf_line_break_zero_spaces_and_nested_paragraphs():
+    body = '<office:text><text:p>outer<text:line-break/>line<text:s text:c="0"/>end<draw:frame><text:p>nested</text:p></draw:frame>tail</text:p></office:text>'
+    result = extract(_odf(ae.ODT, body), ae.ODT)
+    assert _texts(result) == ["outer\nline endtail", "nested"]
+
+
+def test_g7_ods_covered_cells_keep_column_positions():
+    body = '<office:spreadsheet><table:table table:name="S"><table:table-row><table:table-cell><text:p>a</text:p></table:table-cell><table:covered-table-cell/><table:table-cell><text:p>b</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet>'
+    assert _texts(extract(_odf(ae.ODS, body), ae.ODS)) == ["a\t\tb"]
+
+
+def test_g7_xlsx_ignores_phonetic_guides_and_negative_shared_indices():
+    data = _xlsx({"": [["s:0", "s:-1", "tail"]]})
+    data = _replace_member(
+        data,
+        "xl/sharedStrings.xml",
+        f'<sst xmlns="{_S}"><si><t>word</t><rPh><t>phonetic</t></rPh></si></sst>',
+    )
+    result = extract(data, ae.XLSX)
+    assert result.segments == (ae.Segment("word\t\ttail", {"sheet": ""}),)
+
+
+@pytest.mark.parametrize("kind", ["external", "absolute", "missing"])
+def test_g7_xlsx_relationships_respect_external_absolute_and_missing_targets(kind):
+    data = _xlsx({"S": [["visible"]]})
+    target = (
+        "/xl/worksheets/sheet1.xml"
+        if kind != "missing"
+        else "/xl/worksheets/missing.xml"
+    )
+    rels = _rels([("rId1", _REL_WS, target)])
+    if kind == "external":
+        rels = rels.replace('Id="rId1"', 'Id="rId1" TargetMode="External"')
+    result = extract(_replace_member(data, "xl/_rels/workbook.xml.rels", rels), ae.XLSX)
+    assert result.status == ae.STATUS_OK
+    assert _texts(result) == (["visible"] if kind == "absolute" else [])
+
+
+def test_g7_docx_body_custom_xml_wraps_paragraphs():
+    data = _docx(["wrapped"])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        body = archive.read("word/document.xml").decode()
+    body = body.replace("<w:body>", "<w:body><w:customXml>").replace(
+        "</w:body>", "</w:customXml></w:body>"
+    )
+    assert _texts(
+        extract(_replace_member(data, "word/document.xml", body), ae.DOCX)
+    ) == ["wrapped"]
+
+
+def test_g7_docx_cell_paragraphs_are_joined_by_newlines():
+    document = docx.Document(io.BytesIO(_docx(paragraphs=[], table=[["first"]])))
+    document.tables[0].cell(0, 0).add_paragraph("second")
+    out = io.BytesIO()
+    document.save(out)
+    assert _texts(extract(out.getvalue(), ae.DOCX)) == ["first\nsecond"]
+
+
+def test_g7_docx_text_box_at_paragraph_start_has_no_leading_newline():
+    data = _docx(["after"])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        body = archive.read("word/document.xml").decode()
+    body = body.replace(
+        "<w:r><w:t>after</w:t></w:r>",
+        "<w:r><w:pict><w:txbxContent><w:p><w:r><w:t>box</w:t></w:r></w:p></w:txbxContent></w:pict></w:r><w:r><w:t>after</w:t></w:r>",
+    )
+    assert _texts(
+        extract(_replace_member(data, "word/document.xml", body), ae.DOCX)
+    ) == ["box\nafter"]
+
+
+def test_g3_docx_mixed_case_image_content_type_is_opaque():
+    ae._refuse_docx_dtds(
+        {
+            "[Content_Types].xml": b'<Types><Override PartName="/word/picture.xml" ContentType="ImAgE/svg+xml"/></Types>',
+            "word/picture.xml": b"<!DOCTYPE svg><svg/>",
+        }
+    )
+
+
+def test_g4_segment_after_exactly_full_budget_adds_no_empty_segment():
+    out = ae._Collector(4, max_segments=10)
+    assert out.add("full", {"page": 1})
+    assert not out.add("extra", {"page": 2})
+    assert out.segments == [ae.Segment("full", {"page": 1})]
+    assert out.truncated
+
+
+def test_g4_pdf_text_with_a_lone_surrogate_is_ok(monkeypatch):
+    import pypdf
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        pypdf,
+        "PdfReader",
+        lambda _: SimpleNamespace(
+            is_encrypted=False, pages=[SimpleNamespace(extract_text=lambda: "a\ud800b")]
+        ),
+    )
+    result = ae._extract_in_process(b"pdf", ae.PDF, ExtractionLimits())
+    assert result.status == ae.STATUS_OK
+    assert _texts(result) == ["a?b"]
+    result.segments[0].text.encode("utf-8")

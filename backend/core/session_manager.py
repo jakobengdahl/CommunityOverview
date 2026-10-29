@@ -266,7 +266,7 @@ class LeaseConflict(Exception):
     ``undo_last_action`` (``/undo``), which replays a stored inverse op and
     is reachable from the browser only — no MCP tool calls it — and, since
     ``task-mcp-annotation-human-edit-guard``, every synchronous MCP write
-    method that can mutate an existing annotation: ``upsert_annotation``,
+    method whose op targets an annotation directly: ``upsert_annotation``,
     ``upsert_image_annotation``, ``update_annotation``, ``delete_annotation``
     and ``set_group_members`` (all keyed to the shared ``mcp-agent`` client
     id — see ``mcp_tools.py``). Each of those five checks
@@ -297,7 +297,11 @@ class LeaseConflict(Exception):
     (``layout_applied``/``nodes_added``/``session_renamed``, or no op at all)
     can mutate an annotation, so ``_claimed_annotation_target`` always
     reports no target for them — out of scope by construction, not merely
-    unaddressed.
+    unaddressed. ``remove_node_refs`` stays unguarded too, though its
+    ``nodes_removed`` op does prune the removed ids from group annotations'
+    ``member_node_ids``: that is a side effect of the node leaving the canvas,
+    not an edit of the group, and it is the same op the browser sends through
+    ``apply_ops`` without a lease check.
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
@@ -1711,6 +1715,80 @@ class SessionManager:
             "node_count": len(session.state.get("node_refs", [])),
         }
 
+    def remove_node_refs(
+        self,
+        session_id: str,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
+        precharged: bool = False,
+    ) -> Dict[str, Any]:
+        """Remove node references from a session **synchronously** (MCP write path).
+
+        The complement of ``add_node_refs``, with the same atomicity, cap and
+        rate-budget contract. It broadcasts the same ``nodes_removed`` op a
+        browser sends, so the stored state drops each removed node's position,
+        hidden/dimmed flags and group membership with it, and a later
+        ``add_node_refs`` of that id starts from a clean slate.
+
+        Ids not in the session are not removed and do not advance the revision:
+        when none of them is present the call is a no-op that broadcasts nothing.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if not isinstance(client_id, str) or not client_id:
+            raise OpError("'client_id' is required")
+        if not isinstance(node_ids, list) or not node_ids:
+            raise OpError("'node_ids' must be a non-empty list")
+        if len(node_ids) > self._max_ops:
+            raise OpBatchTooLarge()
+        if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
+        if not precharged:
+            self._consume_mcp_budget(
+                self._mcp_rate_limit_key(client_id, rate_limit_label),
+                max(1, len(node_ids)),
+            )
+
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+        if expected_revision is not None and expected_revision != session.seq:
+            raise RevisionConflict(expected_revision, session.seq)
+
+        present = set(session.state.get("node_refs", []))
+        removed: List[str] = []
+        for node_id in node_ids:
+            if not isinstance(node_id, str) or node_id not in present:
+                continue
+            present.discard(node_id)
+            removed.append(node_id)
+        if not removed:
+            return {
+                "applied": None,
+                "revision": session.seq,
+                "removed": [],
+                "node_count": len(session.state.get("node_refs", [])),
+            }
+
+        op: Dict[str, Any] = {
+            "op": "nodes_removed",
+            "node_ids": removed,
+            "client_id": client_id,
+        }
+        applied = self._apply_op_sync(session, session_id, client_id, op)
+        return {
+            "applied": applied,
+            "revision": session.seq,
+            "removed": removed,
+            "node_count": len(session.state.get("node_refs", [])),
+        }
+
     def upsert_annotation(
         self,
         session_id: str,
@@ -2322,8 +2400,8 @@ class SessionManager:
         """Raise ``LeaseConflict`` if ``op`` would mutate an annotation a
         *different* client currently holds a live edit lease on.
 
-        Shared by every synchronous MCP write method that can mutate an
-        existing annotation (``upsert_annotation``/``upsert_image_annotation``/
+        Shared by every synchronous MCP write method whose op targets an
+        annotation directly (``upsert_annotation``/``upsert_image_annotation``/
         ``update_annotation``/``delete_annotation``/``set_group_members``) —
         each calls this immediately before its own ``_apply_op_sync``, after
         every other precondition (revision/existence/budget checks), so a
@@ -2363,9 +2441,9 @@ class SessionManager:
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
-        above raise a typed exception; ``apply_layout``, ``add_node_refs`` and
-        ``rename_session_sync`` never hit this branch, since their ops always
-        apply). ``record_activity=False``
+        above raise a typed exception; ``apply_layout``, ``add_node_refs``,
+        ``remove_node_refs`` and ``rename_session_sync`` never hit this branch,
+        since their ops always apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own

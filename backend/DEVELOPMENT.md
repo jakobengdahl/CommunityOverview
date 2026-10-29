@@ -238,7 +238,11 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns, and the arguments and apply outcome of decided governance proposals, older than this many days (at most the retention) |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
-| `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
+| `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path: `~` expands only when the service user has a home directory; any path still relative after expansion resolves against the process's working directory. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. With no override, a uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
+
+`GET /agents/integrations` and the `mcp_integrations` field of
+`GET /agents/status` omit integration URLs and subprocess commands. The loader
+uses the configured values directly; they are not part of the client response.
 
 ## Building Frontend
 
@@ -1248,6 +1252,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `summon_session_viewport` | Move every client connected to a session to one model-space region — `bounds` `{x, y, width, height}` or the bounding box of `node_ids` on the session's canvas (each must be placed and readable by the caller; in a staged session, the composed view; a group member's parent-relative position is offset by its group's origin). Ephemeral (nothing stored; later joiners are not moved), animated unless the viewer prefers reduced motion; the viewer sees who summoned them (`display_name`, default "AI assistant") with a Return action. Asks the hook as a mutate; draws from its own MCP rate budget; returns `connected_clients` |
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
+| `remove_nodes_from_session` | Take a known set of nodes off a session's canvas by id (stored state, no browser needed; skips ids not in the session) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted; optional `write_mode`, see Staged sessions) |
 | `set_session_write_mode` | Switch a session `direct` → `staged` (`write_mode_irreversible` the other way) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
@@ -1264,7 +1269,8 @@ Two independent things can be true of a session id, and
 
 - `has_stored_state` — the session exists in the session store. State is
   server-owned, so the tools that act on it (`add_nodes_to_session`,
-  `get_visualization_layout`, `apply_visualization_layout`) and
+  `remove_nodes_from_session`, `get_visualization_layout`,
+  `apply_visualization_layout`) and
   `get_visualization_session_state` work with no client connected, and a browser
   opening the session later picks up what was put there meanwhile. A store entry
   is created by `create_visualization_session` or lazily by a browser's first
@@ -1297,8 +1303,9 @@ field is additive and does not bump the session contract version (§9):
 | `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
 | `warning` | Present only when undelivered, naming the state that made it so. |
 
-This matters because a push writes no session state when it is sent — only
-`add_nodes_to_session` writes `node_refs` — so reading the session back
+This matters because a push writes no session state when it is sent — of the
+MCP tools only `add_nodes_to_session` and `remove_nodes_from_session` write
+`node_refs` — so reading the session back
 afterwards cannot tell an undelivered push apart from one that never happened.
 Undelivered is not the same as discarded, though: when the session has a legacy
 registry entry with nothing draining it, the command still waits in that
@@ -1426,6 +1433,18 @@ session, not authorized, empty `node_ids`), draws nothing. An unknown session is
 id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
 returned when the session exists but none of the ids resolve, and it lists them
 in `skipped`.
+
+`remove_nodes_from_session` is the complement: one `nodes_removed` op (the op a
+browser sends when a node is removed) on the stored state, so it works with no
+client connected — unlike `clear_visualization` — and connected browsers drop the
+nodes live. It shares the add tool's caps, `expected_revision` contract and
+`too_large` / `rate_limited` errors, on a rate budget of its own. Ids are not
+resolved against the graph (a ref whose node was deleted stays removable); any id
+not in the session is reported in `skipped`, and a call that removes nothing is a
+success that leaves `revision` untouched. A removed node's position,
+hidden/dimmed state and group-annotation membership go with it, so re-adding it
+with `add_nodes_to_session` brings it back unpositioned and visible; other nodes'
+positions and the annotations themselves are untouched.
 
 ##### `get_visualization_layout` response
 
@@ -1602,7 +1621,7 @@ sticky-note tools' session/revision contract — model-space coordinates,
 on a stale write, `lease_conflict` on a live human edit lease — over the same
 annotation document. `create_group_annotation`/`update_group_members`/
 `delete_group_annotation` and `create_image_annotation` (below) share it too;
-all thirteen MCP tools that can mutate an existing annotation check the same
+all thirteen MCP annotation write tools check the same
 lease at the actual mutation boundary and never acquire one themselves.
 
 A `heatmap` is a soft red heat-map circle whose only payload field is

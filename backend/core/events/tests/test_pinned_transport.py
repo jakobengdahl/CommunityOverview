@@ -157,15 +157,25 @@ class TestPinnedTransport:
     def test_falls_through_to_the_next_checked_address(
         self, monkeypatch, server, loopback_is_public
     ):
-        """Nothing listens on 127.0.0.2, so the first answer refuses the
-        connection and the second (also checked) one is used."""
+        """A refused address falls through without a platform-dependent socket timeout."""
         port, received, _ = server
+        real_connect = httpcore2.SyncBackend.connect_tcp
+        tried = []
+
+        def refuse_first(self, host, port, **kwargs):
+            tried.append(host)
+            if host == "127.0.0.2":
+                raise httpcore2.ConnectError("refused")
+            return real_connect(self, host, port, **kwargs)
+
+        monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", refuse_first)
         with _resolver(monkeypatch, {"pinned.test": [["127.0.0.2", "127.0.0.1"]]}):
             with httpx.Client(transport=delivery.pinned_transport()) as client:
                 response = client.get(f"http://pinned.test:{port}/x")
 
         assert response.status_code == 200
         assert len(received) == 1
+        assert tried == ["127.0.0.2", "127.0.0.1"]
 
     def test_a_timed_out_address_gets_the_timeout_and_falls_through(
         self, monkeypatch, server, loopback_is_public
@@ -205,7 +215,10 @@ class TestPinnedTransport:
             raise httpcore2.ConnectError("refused")
 
         monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", refuse)
-        with _resolver(monkeypatch, {"pinned.test": [[PUBLIC, "93.184.216.35"]]}):
+        with _resolver(
+            monkeypatch,
+            {"pinned.test": [[PUBLIC, PUBLIC, "93.184.216.35", "93.184.216.35"]]},
+        ):
             with httpx.Client(transport=delivery.pinned_transport()) as client:
                 with pytest.raises(httpx.ConnectError):
                     client.get("http://pinned.test/x")
@@ -222,7 +235,10 @@ class TestPinnedTransport:
             raise httpcore2.ConnectError("refused")
 
         monkeypatch.setattr(httpcore2.AnyIOBackend, "connect_tcp", refuse)
-        with _resolver(monkeypatch, {"pinned.test": [[PUBLIC, "93.184.216.35"]]}):
+        with _resolver(
+            monkeypatch,
+            {"pinned.test": [[PUBLIC, PUBLIC, "93.184.216.35", "93.184.216.35"]]},
+        ):
             async with httpx.AsyncClient(
                 transport=delivery.async_pinned_transport()
             ) as client:
@@ -235,6 +251,16 @@ class TestPinnedTransport:
         self, monkeypatch, server, loopback_is_public
     ):
         port, received, _ = server
+        real_connect = httpcore2.AnyIOBackend.connect_tcp
+        tried = []
+
+        async def refuse_first(self, host, port, **kwargs):
+            tried.append(host)
+            if host == "127.0.0.2":
+                raise httpcore2.ConnectError("refused")
+            return await real_connect(self, host, port, **kwargs)
+
+        monkeypatch.setattr(httpcore2.AnyIOBackend, "connect_tcp", refuse_first)
         with _resolver(monkeypatch, {"pinned.test": [["127.0.0.2", "127.0.0.1"]]}):
             async with httpx.AsyncClient(
                 transport=delivery.async_pinned_transport()
@@ -243,6 +269,7 @@ class TestPinnedTransport:
 
         assert response.status_code == 200
         assert len(received) == 1
+        assert tried == ["127.0.0.2", "127.0.0.1"]
 
     def test_a_failed_lookup_at_connect_is_refused_not_retried_by_name(
         self, monkeypatch, server
@@ -260,6 +287,16 @@ class TestPinnedTransport:
                     client.get(f"http://flaky.test:{port}/x")
         assert isinstance(excinfo.value.__cause__, delivery.UnsafeAddressError)
         assert received == []
+
+    def test_a_non_ip_answer_at_connect_is_wrapped_as_a_connect_error(
+        self, monkeypatch
+    ):
+        with _resolver(monkeypatch, {"garbage.test": [[PUBLIC], ["not-an-ip"]]}):
+            assert delivery.is_safe_url("http://garbage.test/x")
+            with httpx.Client(transport=delivery.pinned_transport()) as client:
+                with pytest.raises(httpx.ConnectError) as excinfo:
+                    client.get("http://garbage.test/x")
+        assert isinstance(excinfo.value.__cause__, delivery.UnsafeAddressError)
 
     @pytest.mark.asyncio
     async def test_async_connect_timeout_also_bounds_the_lookup(self, monkeypatch):
@@ -449,6 +486,49 @@ class TestWalkersRefuseARebindingName:
         with _rebinding(monkeypatch):
             MCPLoader([integration])._connect_http(integration)
         assert received == [("GET", "/info", f"127.0.0.1:{port}")]
+
+    def test_mcp_info_same_host_redirect_uses_the_pinned_client(self, monkeypatch):
+        connected, requests = [], []
+
+        class Stream(httpcore2.NetworkStream):
+            def read(self, max_bytes, timeout=None):
+                return (
+                    b"HTTP/1.1 302 Found\r\nLocation: /next\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+
+            def write(self, buffer, timeout=None):
+                if buffer.startswith(b"GET "):
+                    requests.append(buffer.split(b"\r\n", 1)[0])
+
+            def close(self):
+                pass
+
+        def connect(self, host, port, **kwargs):
+            # Simulate the ordinary by-name backend's lookup, without sockets.
+            connected.append(host)
+            assert socket.getaddrinfo(host, port)[0][4][0] == "127.0.0.1"
+            return Stream()
+
+        monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect)
+        integration = MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url="http://rebind.test/mcp",
+        )
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            monkeypatch.delenv(name, raising=False)
+            monkeypatch.delenv(name.lower(), raising=False)
+        # The configured request reaches loopback; the same hostname passes
+        # the hop check as public, then rebinds at the pinned connect.
+        with _resolver(
+            monkeypatch, {"rebind.test": [["127.0.0.1"], [PUBLIC], ["127.0.0.1"]]}
+        ):
+            tools = MCPLoader([integration])._connect_http(integration)
+        assert tools == []
+        assert connected == ["rebind.test"]
+        assert requests == [b"GET /info HTTP/1.1"]
 
     @pytest.mark.asyncio
     async def test_skills_loader(self, monkeypatch, server):
