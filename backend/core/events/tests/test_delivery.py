@@ -942,6 +942,22 @@ class TestWebhookRedirectHops:
             "https://second.example.com/dir/next",
         ]
 
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_identity_encoding_is_requested_on_every_hop(self, monkeypatch, status):
+        """Initial requests and both POST and GET redirects request identity."""
+
+        def handler(request, index):
+            assert request.headers.get_list("accept-encoding") == ["identity"]
+            if index < 2:
+                return httpx.Response(status, headers={"location": f"/hop{index}"})
+            return httpx.Response(200)
+
+        seen, outcome = self._post(
+            monkeypatch, handler, headers={"accept-encoding": "gzip, deflate"}
+        )
+        assert outcome.status_code == 200
+        assert len(seen) == 3
+
     def test_redirect_cap_is_ten(self):
         assert MAX_REDIRECTS == 10
 
@@ -1117,7 +1133,7 @@ class TestWebhookRedirectHops:
         assert outcome.status_code == 200
         assert [method for method, _ in seen] == ["POST", "GET", "GET"]
 
-    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize("status", [400, 500])
     @pytest.mark.parametrize("extra", [0, 1])
     def test_terminal_body_is_bounded_incrementally(self, monkeypatch, status, extra):
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
@@ -1180,9 +1196,10 @@ class TestWebhookRedirectHops:
     @pytest.mark.parametrize(
         "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
     )
-    def test_encoded_terminal_body_is_rejected_before_decoding(
+    def test_encoded_terminal_body_is_unread_regardless_of_status(
         self, monkeypatch, status, encoding
     ):
+        """A 32 MiB gzip bomb is never read, including on accepted deliveries."""
         import gzip
 
         # This tiny wire payload expands to 128 times the response budget.
@@ -1192,7 +1209,7 @@ class TestWebhookRedirectHops:
 
         class CompressedBody(httpx.SyncByteStream):
             def __iter__(self):
-                pytest.fail("encoded terminal bodies must be rejected before reading")
+                pytest.fail("encoded terminal bodies must not be read")
                 yield compressed
 
             def close(self):
@@ -1204,10 +1221,82 @@ class TestWebhookRedirectHops:
                 status, headers={"content-encoding": encoding}, stream=CompressedBody()
             ),
         )
-        assert isinstance(outcome, httpx.RequestError)
-        assert "Encoded webhook response" in str(outcome)
+        if status == 200:
+            assert outcome.status_code == 200
+            assert outcome.is_closed
+        else:
+            assert isinstance(outcome, httpx.RequestError)
+            assert "Encoded webhook response" in str(outcome)
         assert outcome.request.url.host == "start.example.com"
         assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 204, 299])
+    def test_success_body_is_closed_without_reading(self, monkeypatch, status):
+        """An accepted POST cannot fail due to an oversized or broken body."""
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("successful response bodies must not be read")
+                yield b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES + 1)
+
+            def close(self):
+                closed.append(True)
+
+        _, outcome = self._post(
+            monkeypatch, lambda *a: httpx.Response(status, stream=UnreadBody())
+        )
+        assert outcome.status_code == status
+        assert outcome.is_closed
+        assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 500])
+    def test_compressed_delivery_retries_only_non_success(self, monkeypatch, status):
+        """Compressed 200 is delivered once; compressed 500 exhausts retries unread."""
+        requests = []
+        closed = []
+
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("compressed response bodies must not be read")
+                yield b""
+
+            def close(self):
+                closed.append(True)
+
+        def handler(request):
+            requests.append(request)
+            assert request.method == "POST"
+            assert request.headers["accept-encoding"] == "identity"
+            return httpx.Response(
+                status, headers={"content-encoding": "gzip"}, stream=UnreadBody()
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(handler))
+        )
+        results = []
+        worker = DeliveryWorker(
+            max_attempts=2, backoff_times=[0], on_result=results.append
+        )
+        worker.enqueue(create_test_event(), "https://example.com/hook")
+        while worker.queue_size:
+            worker._deliver(worker._queue.get_nowait())
+
+        if status == 200:
+            assert [r.status for r in results] == [DeliveryStatus.SUCCESS]
+            assert results[0].status_code == 200
+            assert results[0].attempt == 1
+            assert len(requests) == 1
+        else:
+            assert [r.status for r in results] == [
+                DeliveryStatus.RETRYING,
+                DeliveryStatus.DROPPED,
+            ]
+            assert [r.attempt for r in results] == [1, 2]
+            assert all("Encoded webhook response" in r.error_message for r in results)
+            assert len(requests) == 2
+        assert len(closed) == len(requests)
 
     def test_identity_terminal_encoding_is_accepted(self, monkeypatch):
         _, outcome = self._post(

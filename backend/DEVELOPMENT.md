@@ -1565,9 +1565,15 @@ host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
 
 #### Sticky note tools
 
+`delete_sticky_note` and `delete_annotation` both act on stored session state;
+neither needs a browser connected. Create the session first with
+`create_visualization_session`, then use the deletion tool for the annotation's
+type. Deletion persists an `annotation_deleted` op and broadcasts it to any
+connected clients, with the same `expected_revision` guard as layout writes.
+
 `list_sticky_notes` / `create_sticky_note` / `update_sticky_note` /
 `delete_sticky_note` let an assistant read and edit `note` annotations
-(docs/ANNOTATION_CONTRACT.md) in an open session — the same annotation
+(docs/ANNOTATION_CONTRACT.md) in a stored session — the same annotation
 document a connected browser renders and edits, so a note an agent creates
 appears on every collaborator's canvas via the same op broadcast the layout
 tools use. Coordinates are model space, matching the layout tools above.

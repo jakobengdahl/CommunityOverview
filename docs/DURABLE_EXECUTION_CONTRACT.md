@@ -185,6 +185,13 @@ is required.
 | `abandon(job_ids, cutoff, now)` | Dead-letter each job still `RUNNING` and last updated before `cutoff`, with a fixed reason and its last update as `finished_at` (§8a); returns the count. |
 | `redact(job_ids, now)` | Strip each terminal, unredacted job's content (§8a) and stamp `redacted_at`; returns the count. |
 | `purge(job_ids)` | Delete each terminal job; returns the count. |
+| `erase_actor(actor_id, replacement_token)` | Replace matching structured actor attribution in payload/result and origin, across all states; return changed-record count. Preserve queue identity, timestamps and state. Operator maintenance requires stopped writers; see [User Guide](USER_GUIDE.md#52-recent-activity-audit-log). |
+
+**Adapter migration — actor attribution maintenance:** execution adapters now
+implement `erase_actor(actor_id, replacement_token) -> int`; proposal adapters
+provide the same method for `decided_by`. Both reference memory and SQLite
+adapters implement it. Inputs are validated without echoing their values, and
+repeating an erasure changes zero records.
 
 All `now` parameters default to the current UTC time; passing an explicit value
 keeps adapter behaviour deterministic under test.

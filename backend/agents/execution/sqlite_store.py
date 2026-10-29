@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
+from backend.core.actor_attribution import replace_attribution, validate_erasure
+
 from .models import (
     ABANDONED_REASON,
     ExecutionJob,
@@ -595,6 +597,45 @@ class SqliteExecutionStore:
             except Exception:
                 self._conn.rollback()
                 raise
+        return count
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, payload, result, origin FROM execution_jobs"
+                )
+                for row in rows:
+                    before = {
+                        "payload": json.loads(row["payload"]),
+                        "result": json.loads(row["result"]) if row["result"] else None,
+                        "origin": row["origin"],
+                    }
+                    after = replace_attribution(
+                        before, actor_id, replacement_token, envelope="run"
+                    )
+                    if after != before:
+                        self._conn.execute(
+                            "UPDATE execution_jobs SET payload = ?, result = ?, origin = ? WHERE id = ?",
+                            (
+                                json.dumps(after["payload"]),
+                                json.dumps(after["result"])
+                                if after["result"] is not None
+                                else None,
+                                after["origin"],
+                                row["id"],
+                            ),
+                        )
+                        count += 1
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            if count:
+                self._checkpoint()
         return count
 
     def redact(

@@ -903,6 +903,42 @@ everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears
 with it; graph history is the permanent audit trail.
 
+**Operator maintenance: replacing actor attribution.**
+`ActorErasureService.erase_actor(actor_id, replacement_token)` in
+`backend/service/actor_erasure.py` replaces matching structured actor identifiers
+in mutation history, nested run-history attribution, proposal `decided_by`, and
+session activity (including sessions not currently loaded). Supply the optional
+stores to its constructor. An absent store returns zero; PostgreSQL graph storage
+has no mutation-history sidecar, so omit that store. Graph nodes and edges are
+never written. Record IDs, timestamps, decision status and unrelated actors are
+preserved. This replaces attribution, including actor/delegation objects,
+staging actors, client IDs and matching `agent:<id>` origins; it does not search
+free text or erase graph content.
+
+Stop application processes, workers and other writers before maintenance, and
+use a non-personal replacement token that does not contain the original actor
+identifier. The CLI operates on explicitly selected local stores:
+
+```bash
+python -m backend.service.actor_erasure \
+  --actor-id "$ACTOR_ID" --replacement-token erased \
+  --history-path /path/to/graph.history.ndjson \
+  --run-history-db /path/to/runs.db \
+  --governance-db /path/to/proposals.db \
+  --sessions-dir /path/to/sessions
+```
+
+The database flags default to `AGENTS_RUN_HISTORY_DB` and
+`AGENTS_GOVERNANCE_DB`. Omitted or nonexistent stores are clean no-ops and are
+not created. Output contains only per-store changed-record `counts` and
+`failed_stores`, never actor identifiers, replacement tokens or source data.
+Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
+A failed store has a `null` count because partial changes may have happened;
+other stores are still processed. Repair any reported store failure and rerun
+with the same inputs: already replaced records count as zero. Damaged history
+or session records are reported as failures. The operation does not coordinate
+backups, external copies or future writes.
+
 ![Recent activity panel](images/recent-activity.png)
 *The activity panel's Session tab, with a readable description per action and an
 **Undo** button on your own latest undoable action.*

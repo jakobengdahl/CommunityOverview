@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
 
+from .actor_attribution import replace_attribution, validate_erasure
 from .storage_backends import _lock_file, _unlock_file, dumps_storable
 
 if TYPE_CHECKING:
@@ -465,6 +466,50 @@ class GraphHistoryStore:
                         continue
             finally:
                 _unlock_file(f)
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        """Atomically replace attribution, streaming without loading the sidecar."""
+        validate_erasure(actor_id, replacement_token)
+        with self._lock:
+            if not self.history_path.exists():
+                return 0
+            self._close_append_handle()
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix=".ndjson", prefix="graph_history_", dir=self.history_path.parent
+            )
+            count = 0
+            try:
+                with os.fdopen(temp_fd, "wb") as out:
+                    with open(self.history_path, "rb") as source:
+                        _lock_file(source, exclusive=True)
+                        try:
+                            for raw in source:
+                                if not raw.strip():
+                                    out.write(raw)
+                                    continue
+                                # Fail closed on damaged records: never report success
+                                # while leaving unreadable attribution behind.
+                                record = json.loads(raw)
+                                changed = replace_attribution(
+                                    record, actor_id, replacement_token
+                                )
+                                if changed != record:
+                                    out.write(
+                                        (dumps_storable(changed) + "\n").encode("utf-8")
+                                    )
+                                    count += 1
+                                else:
+                                    out.write(raw)
+                            out.flush()
+                            os.fsync(out.fileno())
+                        finally:
+                            _unlock_file(source)
+                if count:
+                    os.replace(temp_path, self.history_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            return count
 
     def _compact_locked(self) -> None:
         """Trim the sidecar to the retention policy. Caller holds ``self._lock``.
