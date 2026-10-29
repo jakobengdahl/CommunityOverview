@@ -240,6 +240,12 @@ Example: An agent subscription that ignores its own changes:
 
 Failed webhook deliveries are retried with exponential backoff:
 
+Any 2xx response confirms delivery; its body is closed without reading it, so body
+handling cannot cause a retry of an accepted POST. Requests send
+`Accept-Encoding: identity` on every redirect hop. Compressed non-2xx responses
+are retried without reading or decompressing their bodies; uncompressed error
+bodies are capped at 256 KiB for diagnostics.
+
 | Attempt | Wait Before Retry |
 |---------|-------------------|
 | 1 | 0.5 seconds |
