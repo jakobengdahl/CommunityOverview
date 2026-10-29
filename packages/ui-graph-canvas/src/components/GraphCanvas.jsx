@@ -1042,6 +1042,13 @@ function GraphCanvasInner({
   // is not treated as a switch (mount already fits via the ReactFlow fitView prop).
   const lastSessionKeyRef = useRef(sessionKey);
   const fitOnSessionKeyRef = useRef(sessionKey);
+  // The clear signal as the node-reconciliation effect last saw it.
+  // clearGroupsFlag stays raised for a while after a clear, so a clear is the
+  // flag rising, or — for a second clear inside that window — the host's
+  // canvasBaselineEpoch moving while it is raised. An epoch move on its own is
+  // not a clear (a host may move it only to drop the undo history).
+  const lastCanvasBaselineEpochRef = useRef(canvasBaselineEpoch);
+  const lastClearGroupsFlagRef = useRef(false);
 
   // Undo/redo history for node-position moves (drag + organize). Restoring a
   // prior state writes the positions back through the same persistence path a
@@ -1614,6 +1621,18 @@ function GraphCanvasInner({
   useEffect(() => {
     const sessionChanged = lastSessionKeyRef.current !== sessionKey;
     lastSessionKeyRef.current = sessionKey;
+    const clearRaised =
+      clearGroupsFlag &&
+      (!lastClearGroupsFlagRef.current ||
+        canvasBaselineEpoch !== lastCanvasBaselineEpochRef.current);
+    // A host that clears and restores the new session's content before it
+    // hands over the new sessionKey (App's switch awaits the load, then sets
+    // the id) has already had its clear handled here; dropping again on the
+    // key change would remove the overlays that restore just added.
+    const clearAlreadyHandled = clearGroupsFlag && !clearRaised;
+    const contentSwapped = clearRaised || (sessionChanged && !clearAlreadyHandled);
+    lastClearGroupsFlagRef.current = clearGroupsFlag;
+    lastCanvasBaselineEpochRef.current = canvasBaselineEpoch;
     const focusChanged = lastFocusRootRef.current !== activeFocusRootId;
     const enteringFocus = focusChanged && activeFocusRootId !== null;
     const leavingFocus = focusChanged && activeFocusRootId === null;
@@ -1623,18 +1642,22 @@ function GraphCanvasInner({
     // exists. Restoring it would force stale coordinates onto whatever ids the
     // old and new content happen to share, and resurrect groups and overlays the
     // replace deliberately dropped.
-    const contentReplaced = sessionChanged || clearGroupsFlag;
+    const contentReplaced = sessionChanged || clearRaised;
     if (contentReplaced) preFocusRef.current = null;
     const snapshot = contentReplaced ? null : preFocusRef.current;
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:
-      // clearVisualization sets clearGroupsFlag, and the new session's overlays
-      // arrive through the restore path. Outside a switch, keep the live ones —
-      // except while focused, where the ego graph is the whole view and an
-      // overlay parked elsewhere would only drag the fitted frame off it.
+      // clearVisualization signals the clear, and the new session's overlays
+      // arrive through the restore path. Only the run that sees the clear
+      // drops them: clearGroupsFlag stays raised for a while, and dropping on
+      // every run inside that window also removed the overlays the restore had
+      // just added — the next autosave then sent a delete for each of them.
+      // Outside a switch, keep the live ones — except while focused, where the
+      // ego graph is the whole view and an overlay parked elsewhere would only
+      // drag the fitted frame off it.
       let manualNodes;
-      if (clearGroupsFlag || sessionChanged) manualNodes = [];
+      if (contentSwapped) manualNodes = [];
       else if (activeFocusRootId) manualNodes = [];
       else if (leavingFocus) manualNodes = (snapshot?.nodes ?? []).filter(isManualNode);
       else manualNodes = nds.filter(isManualNode);
@@ -1643,7 +1666,9 @@ function GraphCanvasInner({
         prevNodes: nds,
         incomingNodes: reactFlowNodes,
         incomingEdges: reactFlowEdges,
-        sessionChanged,
+        // The swap, not the key: positions and group parents of the previous
+        // content are dropped with it, and kept when the key only catches up.
+        sessionChanged: contentSwapped,
         inLazyMode: unfocusedNodeCount > LAZY_LOAD_THRESHOLD,
       });
 
@@ -1698,6 +1723,7 @@ function GraphCanvasInner({
     unfocusedNodeCount,
     setNodes,
     clearGroupsFlag,
+    canvasBaselineEpoch,
     sessionKey,
     activeFocusRootId,
   ]);
