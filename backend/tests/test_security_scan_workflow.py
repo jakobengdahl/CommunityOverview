@@ -849,6 +849,9 @@ def test_trigger_set_is_pinned():
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.stem)
 def test_exactly_the_expected_steps_are_reporting_only(path):
+    assert not re.search(r"\bnon[- ]blocking\b", path.read_text(), re.I), (
+        "scanner prose must not claim that a blocking workflow is non-blocking"
+    )
     workflow = _workflow(path)
     assert not workflow.get("continue-on-error", False)
     reporting_only = set()

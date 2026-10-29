@@ -12,6 +12,7 @@ import json
 import logging
 import subprocess
 import threading
+from contextlib import ExitStack
 from typing import List, Dict, Any, Optional, Callable
 import urllib.parse
 from dataclasses import dataclass, field
@@ -132,8 +133,8 @@ class MCPConnection:
         return True  # HTTP connections are stateless
 
 
-def _unsafe_workspace_reason(path: str) -> Optional[str]:
-    """Why `path` is not safe to use as the agent workspace root, or None.
+def _unsafe_workspace_reason(path: str | int) -> Optional[str]:
+    """Why a path or opened directory is unsafe as the workspace root, or None.
 
     Only the directory's own owner and mode are checked. Auditing every parent
     would reject ordinary layouts (a home under a root-owned /home), and the
@@ -144,9 +145,9 @@ def _unsafe_workspace_reason(path: str) -> Optional[str]:
     import stat as stat_module
 
     try:
-        info = os.stat(path)
-    except OSError as e:
-        return f"cannot stat it ({e})"
+        info = os.fstat(path) if isinstance(path, int) else os.stat(path)
+    except OSError:
+        return "cannot stat it"
 
     if not stat_module.S_ISDIR(info.st_mode):
         return "it is not a directory"
@@ -1019,50 +1020,70 @@ class MCPLoader:
             return {"error": "Agent workspace must not be a symlink"}
         try:
             os.makedirs(base_path, mode=0o700, exist_ok=True)
-        except OSError as e:
-            return {"error": f"Agent workspace unavailable: {e}"}
-        # `mode` above applies only when makedirs creates the directory, so a
-        # root that already existed keeps whatever mode and owner it had. A
-        # symlink is only half the pre-creation race the workspace setting warns
-        # about - a directory the attacker owns is as effective - so check the
-        # root we ended up with rather than trusting that we made it.
-        unsafe = _unsafe_workspace_reason(base_path)
-        if unsafe:
-            return {"error": f"Agent workspace is not private: {unsafe}"}
-        base_path = os.path.realpath(base_path)
+        except OSError:
+            return {"error": "Agent workspace unavailable"}
 
-        path = input_args.get("path", "")
-        if not path:
-            return {"error": "Path required"}
+        with ExitStack() as stack:
+            # Pin the root before checking ownership/mode. All I/O stays relative
+            # to this fd so replacing the root pathname cannot redirect a tool.
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                root_fd = os.open(base_path, directory_flags)
+            except OSError:
+                return {"error": "Agent workspace unavailable"}
+            stack.callback(os.close, root_fd)
+            unsafe = _unsafe_workspace_reason(root_fd)
+            if unsafe:
+                return {"error": f"Agent workspace is not private: {unsafe}"}
+            base_path = os.path.realpath(base_path)
 
-        # Security: ensure path is within workspace after resolving symlinks.
-        full_path = os.path.realpath(os.path.join(base_path, path))
-        if os.path.commonpath([base_path, full_path]) != base_path:
-            return {"error": "Path must be within agent workspace"}
+            path = input_args.get("path", "")
+            if not path:
+                return {"error": "Path required"}
 
-        try:
-            if tool_name == "read_file":
-                with open(full_path, "r") as f:
+            full_path = os.path.realpath(os.path.join(base_path, path))
+            if os.path.commonpath([base_path, full_path]) != base_path:
+                return {"error": "Path must be within agent workspace"}
+            relative_path = os.path.relpath(full_path, base_path)
+
+            try:
+                if tool_name not in ("read_file", "write_file", "list_directory"):
+                    return {"error": f"Unknown fs tool: {tool_name}"}
+                # Resolve existing internal symlinks above, then refuse new ones
+                # while walking the relative path, including newly made parents.
+                parts = relative_path.split(os.sep)
+                parent_fd = root_fd
+                for part in parts[:-1]:
+                    if tool_name == "write_file":
+                        try:
+                            os.mkdir(part, dir_fd=parent_fd)
+                        except FileExistsError:
+                            pass
+                    parent_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+                    stack.callback(os.close, parent_fd)
+
+                if tool_name == "list_directory":
+                    directory_fd = os.open(parts[-1], directory_flags, dir_fd=parent_fd)
+                    stack.callback(os.close, directory_fd)
+                    return {"path": path, "entries": os.listdir(directory_fd)}
+
+                writing = tool_name == "write_file"
+                flags = (
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC if writing else os.O_RDONLY
+                )
+                fd = os.open(parts[-1], flags | os.O_NOFOLLOW, 0o666, dir_fd=parent_fd)
+                with os.fdopen(fd, "w" if writing else "r") as f:
+                    if writing:
+                        content = input_args.get("content", "")
+                        f.write(content)
+                        return {"path": path, "written": len(content)}
                     return {"path": path, "content": f.read()}
 
-            elif tool_name == "write_file":
-                content = input_args.get("content", "")
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, "w") as f:
-                    f.write(content)
-                return {"path": path, "written": len(content)}
-
-            elif tool_name == "list_directory":
-                if not os.path.isdir(full_path):
-                    return {"error": "Not a directory"}
-                entries = os.listdir(full_path)
-                return {"path": path, "entries": entries}
-
-            else:
-                return {"error": f"Unknown fs tool: {tool_name}"}
-
-        except Exception as e:
-            return {"error": str(e)}
+            except OSError as e:
+                reason = os.strerror(e.errno) if e.errno else type(e).__name__
+                return {"error": f"{relative_path}: {reason}"}
+            except Exception:
+                return {"error": f"{relative_path}: Filesystem operation failed"}
 
     def _execute_search_tool(
         self,

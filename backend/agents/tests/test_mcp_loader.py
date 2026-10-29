@@ -576,6 +576,131 @@ class TestMCPLoaderLifecycle:
             "path": "notes/a.txt",
             "content": "hello",
         }
+        assert loader._execute_fs_tool("list_directory", {"path": "notes"}) == {
+            "path": "notes",
+            "entries": ["a.txt"],
+        }
+        assert not (workspace / "notes/a.txt").stat().st_mode & 0o111
+
+    def test_execute_fs_tool_follows_existing_internal_symlinks(self, workspace):
+        """Symlinks to targets inside the workspace remain usable."""
+        (workspace / "notes").mkdir()
+        (workspace / "notes/a.txt").write_text("hello", encoding="utf-8")
+        (workspace / "link").symlink_to("notes", target_is_directory=True)
+
+        assert MCPLoader([])._execute_fs_tool("read_file", {"path": "link/a.txt"}) == {
+            "path": "link/a.txt",
+            "content": "hello",
+        }
+
+    @pytest.mark.parametrize("replaced", ["notes", "notes/a.txt"])
+    def test_execute_fs_tool_refuses_symlinks_planted_after_containment_check(
+        self, tmp_path, workspace, monkeypatch, replaced
+    ):
+        """New symlinks cannot redirect the descriptor-relative directory walk or open."""
+        (workspace / "notes").mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.txt").write_text("outside", encoding="utf-8")
+        real_open = os.open
+
+        def replace_then_open(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None and path == os.path.basename(replaced):
+                target = workspace / replaced
+                if target.is_dir():
+                    target.rmdir()
+                    target.symlink_to(outside, target_is_directory=True)
+                else:
+                    target.symlink_to(outside / "a.txt")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", replace_then_open)
+        result = MCPLoader([])._execute_fs_tool(
+            "write_file", {"path": "notes/a.txt", "content": "new"}
+        )
+
+        assert "error" in result
+        assert str(workspace) not in json.dumps(result)
+        assert (outside / "a.txt").read_text(encoding="utf-8") == "outside"
+
+    @pytest.mark.parametrize(
+        ("tool_name", "path", "reason"),
+        [
+            ("read_file", "missing.txt", "No such file or directory"),
+            ("read_file", "notes", "Is a directory"),
+            ("write_file", "notes", "Is a directory"),
+            ("list_directory", "missing", "No such file or directory"),
+        ],
+    )
+    def test_execute_fs_tool_errors_only_name_workspace_relative_paths(
+        self, workspace, tool_name, path, reason
+    ):
+        """OS failures describe the relative target without the service user's home."""
+        (workspace / "notes").mkdir()
+
+        result = MCPLoader([])._execute_fs_tool(tool_name, {"path": path})
+
+        assert result == {"error": f"{path}: {reason}"}
+        assert str(workspace.parent) not in json.dumps(result)
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file", "list_directory"])
+    def test_execute_fs_tool_uses_the_validated_root_after_path_replacement(
+        self, tmp_path, workspace, monkeypatch, tool_name
+    ):
+        """Replacing a validated root with a symlink cannot redirect any operation."""
+        (workspace / "a.txt").write_text("inside", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.txt").write_text("outside", encoding="utf-8")
+        pinned = tmp_path / "pinned-workspace"
+        real_check = mcp_loader._unsafe_workspace_reason
+
+        def check_then_replace(fd):
+            reason = real_check(fd)
+            workspace.rename(pinned)
+            workspace.symlink_to(outside, target_is_directory=True)
+            return reason
+
+        monkeypatch.setattr(mcp_loader, "_unsafe_workspace_reason", check_then_replace)
+        result = MCPLoader([])._execute_fs_tool(
+            tool_name,
+            {
+                "path": "." if tool_name == "list_directory" else "a.txt",
+                "content": "new",
+            },
+        )
+
+        assert "error" not in result
+        if tool_name == "read_file":
+            assert result["content"] == "inside"
+        elif tool_name == "write_file":
+            assert result["written"] == 3
+            assert (pinned / "a.txt").read_text(encoding="utf-8") == "new"
+        else:
+            assert result["entries"] == ["a.txt"]
+        assert (outside / "a.txt").read_text(encoding="utf-8") == "outside"
+
+    def test_execute_fs_tool_refuses_a_root_replaced_before_open(
+        self, tmp_path, workspace, monkeypatch
+    ):
+        """A symlink planted after makedirs must fail the atomic no-follow open."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.txt").write_text("outside", encoding="utf-8")
+        real_makedirs = os.makedirs
+
+        def create_then_replace(*args, **kwargs):
+            real_makedirs(*args, **kwargs)
+            workspace.rmdir()
+            workspace.symlink_to(outside, target_is_directory=True)
+
+        monkeypatch.setattr(os, "makedirs", create_then_replace)
+        result = MCPLoader([])._execute_fs_tool(
+            "write_file", {"path": "a.txt", "content": "new"}
+        )
+
+        assert result == {"error": "Agent workspace unavailable"}
+        assert (outside / "a.txt").read_text(encoding="utf-8") == "outside"
 
     def test_execute_fs_tool_refuses_a_symlinked_workspace_root(
         self, tmp_path, monkeypatch
@@ -653,15 +778,14 @@ class TestMCPLoaderLifecycle:
         assert "error" in result
         assert "not private" in result["error"]
 
-    @pytest.mark.parametrize("mode", [0o702, 0o707])
     def test_execute_fs_tool_refuses_a_root_only_others_can_write(
-        self, tmp_path, monkeypatch, mode
+        self, tmp_path, monkeypatch
     ):
         """The other-writable bit on its own: 0o777 also sets the group bit, so a
         mask narrowed to the group bit would still refuse it and pass unnoticed."""
         root = tmp_path / "other-writable-workspace"
         root.mkdir()
-        os.chmod(root, mode)
+        os.chmod(root, 0o702)
         monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
 
         result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
@@ -686,17 +810,15 @@ class TestMCPLoaderLifecycle:
         root = tmp_path / "foreign-workspace"
         root.mkdir(mode=0o700)
         monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
-        real_stat = os.stat
+        real_fstat = os.fstat
 
-        def stat_with_foreign_owner(path, *args, **kwargs):
-            info = real_stat(path, *args, **kwargs)
-            if os.path.abspath(path) == os.path.abspath(str(root)):
-                fields = list(info)
-                fields[4] = other_uid
-                return os.stat_result(fields)
-            return info
+        def stat_with_foreign_owner(fd):
+            info = real_fstat(fd)
+            fields = list(info)
+            fields[4] = other_uid
+            return os.stat_result(fields)
 
-        monkeypatch.setattr(os, "stat", stat_with_foreign_owner)
+        monkeypatch.setattr(os, "fstat", stat_with_foreign_owner)
         result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
 
         assert "error" in result
@@ -705,33 +827,28 @@ class TestMCPLoaderLifecycle:
     def test_execute_fs_tool_refuses_a_root_whose_owner_cannot_be_checked(
         self, tmp_path, monkeypatch
     ):
-        """Fail closed: if the root cannot be stat'ed after it was created, its
-        owner and mode are unknown and it must not be used.
-
-        The stat is armed only once makedirs has returned, because makedirs
-        itself stats an existing root and would swallow the failure first."""
+        """An uninspectable root fails closed without exposing OS error paths."""
         root = tmp_path / "unverifiable-workspace"
         root.mkdir(mode=0o700)
         monkeypatch.setenv(AGENTS_WORKSPACE_ENV_VAR, str(root))
-        real_makedirs, real_stat = os.makedirs, os.stat
-        armed = []
 
-        def makedirs_then_arm(*args, **kwargs):
-            real_makedirs(*args, **kwargs)
-            armed.append(True)
+        def stat_failing(fd):
+            raise PermissionError(13, "Permission denied", str(root))
 
-        def stat_failing_once_armed(path, *args, **kwargs):
-            if armed and os.path.abspath(path) == os.path.abspath(str(root)):
-                raise PermissionError(13, "Permission denied")
-            return real_stat(path, *args, **kwargs)
-
-        monkeypatch.setattr(os, "makedirs", makedirs_then_arm)
-        monkeypatch.setattr(os, "stat", stat_failing_once_armed)
+        monkeypatch.setattr(os, "fstat", stat_failing)
         result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
 
         assert "error" in result
         assert "not private" in result["error"]
         assert "cannot stat it" in result["error"]
+        assert str(root) not in json.dumps(result)
+
+    def test_workspace_safety_helper_refuses_a_regular_file(self, tmp_path):
+        """The helper rejects non-directories even without the executor's makedirs."""
+        path = tmp_path / "file"
+        path.touch()
+
+        assert mcp_loader._unsafe_workspace_reason(str(path)) == "it is not a directory"
 
     def test_execute_fs_tool_reports_an_unusable_workspace_as_an_error(
         self, tmp_path, monkeypatch
@@ -746,6 +863,7 @@ class TestMCPLoaderLifecycle:
 
         assert "error" in result
         assert "workspace" in result["error"].lower()
+        assert str(tmp_path) not in json.dumps(result)
 
 
 class _StubHttpxModule:

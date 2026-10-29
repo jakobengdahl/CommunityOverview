@@ -238,7 +238,11 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `AGENTS_RUN_HISTORY_REDACT_AFTER_DAYS` | - (never) | Strip the content of terminal AgentRuns, and the arguments and apply outcome of decided governance proposals, older than this many days (at most the retention) |
 | `AGENTS_RUN_HISTORY_EXPORT_MAX_DAYS` | retention | How far back `GET /agents/runs` reads (at most the retention) |
 | `AGENTS_RUN_HISTORY_SWEEP_INTERVAL_HOURS` | `24` | Hours between retention sweeps |
-| `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path (or one starting with `~`): a relative path resolves against the process's working directory, which can differ between the places that read the setting. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. A uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
+| `AGENTS_WORKSPACE_DIR` | `~/.communityoverview/agent-workspace` | Root the agent's filesystem tools are confined to. Use an absolute path: `~` expands only when the service user has a home directory; any path still relative after expansion resolves against the process's working directory. Must be a directory the service user owns and others cannot write to, or the FS tools refuse it — so prefer a private path over a shared one. With no override, a uid with no home (a container run as an arbitrary uid) falls back to a per-uid directory under the system temp dir |
+
+`GET /agents/integrations` and the `mcp_integrations` field of
+`GET /agents/status` omit integration URLs and subprocess commands. The loader
+uses the configured values directly; they are not part of the client response.
 
 ## Building Frontend
 
