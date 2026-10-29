@@ -3,8 +3,8 @@
 The motivating scenario: an unattended routine refreshes a canvas every night by
 calling ``search_graph`` with a ``visualization_session_id``. Nobody has that
 session open, so the command reaches no consumer — and because a push writes no
-session state (only ``add_nodes_to_session`` writes ``node_refs``), reading the
-session back afterwards shows nothing either. The routine reported a refreshed
+session state (only the stored-state session tools write ``node_refs``), reading
+the session back afterwards shows nothing either. The routine reported a refreshed
 view every night while publishing nothing.
 
 So the invariant under test is not "a push succeeds" but "the result says which

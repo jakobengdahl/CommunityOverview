@@ -3581,6 +3581,25 @@ class TestApplyLayout:
         assert s.state["positions"]["a"] == {"x": 1.0, "y": 1.0}
 
 
+class TestRemoveNodeRefs:
+    """The synchronous MCP session-pruning path (``remove_node_refs``)."""
+
+    async def test_a_repeated_present_id_is_removed_and_broadcast_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.add_node_refs(s.id, "mcp-agent", ["a", "b", "c"])
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+
+        res = mgr.remove_node_refs(s.id, "mcp-agent", ["a", "a", "b", "x"])
+
+        assert res["removed"] == ["a", "b"]
+        assert s.state["node_refs"] == ["c"]
+        events = await _drain(sub)
+        assert [e["op"]["op"] for e in events] == ["nodes_removed"]
+        assert events[0]["op"]["node_ids"] == ["a", "b"]
+
+
 class TestAddNodeRefs:
     """The synchronous MCP session-population path (``add_node_refs``)."""
 
@@ -3840,6 +3859,9 @@ _MCP_BUCKET_WRITES = {
         sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}, rate_limit_label=label
     ),
     "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
+        sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
+    "remove_node_refs": lambda mgr, sid, i, label: mgr.remove_node_refs(
         sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
     ),
     "consume_mcp_rate_budget": lambda mgr, sid, i, label: mgr.consume_mcp_rate_budget(
