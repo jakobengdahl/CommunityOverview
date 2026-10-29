@@ -632,7 +632,15 @@ class TestSessionCookieLogin:
             {"Origin": "null"},
         ],
     )
-    def test_cookie_archive_import_rejects_foreign_origin(self, metadata):
+    def test_cookie_archive_import_rejects_foreign_origin(self, metadata, monkeypatch):
+        from backend.agents.execution.import_worker import drain_import_jobs
+
+        # Finish the seed import's real embedding work before taking snapshots.
+        # Its asynchronous commit legitimately advances node revisions; racing
+        # that commit would misattribute a change to the rejected CSRF request.
+        monkeypatch.setattr(
+            "backend.service.import_service._start_embedding_drain", drain_import_jobs
+        )
         client, path = self._make_client(auth_enabled=True, auth_password="secret")
         try:
             login = client.post(
