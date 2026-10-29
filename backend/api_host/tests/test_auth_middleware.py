@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 from backend.api_host.middleware import add_auth_middleware
-from backend.api_host.session_auth import SESSION_COOKIE_NAME
+from backend.api_host.session_auth import SESSION_COOKIE_NAME, mint_session_cookie
 
 
 def _make_config(**overrides) -> tuple:
@@ -96,6 +96,39 @@ def test_basic_auth_raw_writes_require_fetch_metadata_or_custom_header(
     )
     assert response.status_code == (200 if allowed else 403)
     assert writes == ([b"untrusted body"] if allowed else [])
+
+
+@pytest.mark.parametrize(
+    "authorization,expected",
+    [
+        ("Bearer api-secret", 200),
+        ("bEaReR api-secret", 200),
+        ("Bearer wrong-token", 403),
+        ("Bearer", 403),
+        (None, 403),
+    ],
+)
+def test_bearer_write_with_session_cookie_and_cross_site_metadata(
+    authorization, expected
+):
+    app = FastAPI()
+    writes = []
+
+    @app.post("/api/write")
+    async def write(request: Request):
+        writes.append(await request.body())
+        return {"success": True}
+
+    config = AppConfig(auth_enabled=True, auth_bearer_token="api-secret")
+    add_auth_middleware(app, config)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, mint_session_cookie(config))
+    headers = {"Origin": "https://foreign.example", "Sec-Fetch-Site": "cross-site"}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    response = client.post("/api/write", content=b"payload", headers=headers)
+    assert response.status_code == expected
+    assert writes == ([b"payload"] if expected == 200 else [])
 
 
 class TestMcpBasicAuth:
