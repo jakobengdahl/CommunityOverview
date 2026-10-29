@@ -2,6 +2,7 @@
 Tests for agent configuration models.
 """
 
+import json
 import os
 from unittest.mock import patch
 
@@ -58,7 +59,7 @@ class TestMCPIntegration:
             id="WEB",
             name="Web Fetch",
             transport=MCPTransport.HTTP,
-            url="http://example.com/mcp",
+            url="http://operator:password@private-host.invalid/mcp?token=url-secret",
             description="Web tools",
         )
 
@@ -66,7 +67,8 @@ class TestMCPIntegration:
 
         assert result["id"] == "WEB"
         assert result["transport"] == "http"
-        assert result["url"] == "http://example.com/mcp"
+        assert "url" not in result
+        assert integration.url not in json.dumps(result)
         assert result["description"] == "Web tools"
 
     def test_to_dict_redacts_literal_env_secret(self):
@@ -134,6 +136,23 @@ class TestAgentConfig:
 
 class TestAgentsSettings:
     """Tests for AgentsSettings global configuration."""
+
+    def test_serialized_settings_omit_integration_connection_details(self):
+        """Settings must not reintroduce credentials or argv hidden by integrations."""
+        integration = MCPIntegration(
+            id="CUSTOM",
+            name="Custom",
+            url="http://operator:password@private-host.invalid/mcp?token=url-secret",
+            command=["/home/argv-marker/private-tool", "--token=argv-secret"],
+        )
+
+        result = AgentsSettings(mcp_integrations=[integration]).to_dict()
+        serialized = json.dumps(result)
+
+        assert "url" not in result["mcp_integrations"][0]
+        assert "command" not in result["mcp_integrations"][0]
+        for value in [integration.url, *integration.command]:
+            assert value not in serialized
 
     def test_default_settings(self):
         """Test default settings when no environment variables set."""
@@ -273,6 +292,26 @@ class TestAgentWorkspaceDir:
         """A relative override would resolve against the process cwd."""
         with patch.dict(os.environ, {AGENTS_WORKSPACE_ENV_VAR: "ws"}, clear=True):
             assert agent_workspace_dir() == os.path.join(os.getcwd(), "ws")
+
+    @pytest.mark.parametrize("override", ["", "/srv/explicit-workspace"])
+    def test_other_environment_settings_cannot_override_the_workspace(
+        self, monkeypatch, override
+    ):
+        """An unrelated setting cannot take precedence over the workspace setting."""
+        monkeypatch.setenv("HOME", "/home/workspace-user")
+        monkeypatch.setattr(
+            os.environ,
+            "get",
+            lambda key, default=None: (
+                override
+                if key == AGENTS_WORKSPACE_ENV_VAR
+                else "/srv/unrelated-setting"
+            ),
+        )
+
+        assert agent_workspace_dir() == (
+            override or "/home/workspace-user/.communityoverview/agent-workspace"
+        )
 
     def test_default_is_per_user_not_merely_outside_the_shared_temp_dir(self):
         """B108: a predictable path any other local user can pre-create - as a

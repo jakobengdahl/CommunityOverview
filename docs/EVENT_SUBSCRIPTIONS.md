@@ -302,6 +302,12 @@ matching `ignore_origins` entry using the exact Agent ID. Set `enabled` to false
 in `config` to create it disabled. Agent execution still requires the runtime
 and chosen integrations to be configured, as for agents created in the UI.
 
+The agent status and integration endpoints omit configured integration URLs and
+subprocess commands, which can contain credentials or private host paths. Built-in
+filesystem tools validate the opened workspace directory and keep operations
+relative to it; filesystem errors identify workspace-relative targets without
+exposing the absolute workspace path.
+
 `create_event_subscription` accepts a `config` with `name`, a public HTTP(S)
 `webhook_url`, and optional `filters`, `ignore_origins`, and `ignore_session_ids`.
 It validates operations and delivery before saving; internal subscriptions are
