@@ -569,7 +569,7 @@ class TestAuditSteps(unittest.TestCase):
         argv = (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
         return result.returncode, argv, summary.read_text()
 
-    def test_each_lock_is_audited_from_the_marker_free_copy_with_hashes_required(self):
+    def test_each_lock_is_audited_strictly_from_the_marker_free_copy_with_hashes_required(self):
         for step, lock in zip(self.audits, _LOCKS):
             with self.subTest(lock=lock):
                 code, argv, summary = self._run(step, 0)
@@ -581,6 +581,7 @@ class TestAuditSteps(unittest.TestCase):
                 self.assertNotIn(" ; ", Path(path).read_text())
                 self.assertIn("--require-hashes", argv)
                 self.assertIn("--disable-pip", argv)
+                self.assertIn("--strict", argv)
                 self.assertIn("stub report", summary)
 
     def test_a_failing_audit_fails_its_step_with_pip_audits_exit_code(self):
