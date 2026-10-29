@@ -266,7 +266,7 @@ class LeaseConflict(Exception):
     ``undo_last_action`` (``/undo``), which replays a stored inverse op and
     is reachable from the browser only — no MCP tool calls it — and, since
     ``task-mcp-annotation-human-edit-guard``, every synchronous MCP write
-    method that can mutate an existing annotation: ``upsert_annotation``,
+    method whose op targets an annotation directly: ``upsert_annotation``,
     ``upsert_image_annotation``, ``update_annotation``, ``delete_annotation``
     and ``set_group_members`` (all keyed to the shared ``mcp-agent`` client
     id — see ``mcp_tools.py``). Each of those five checks
@@ -297,7 +297,11 @@ class LeaseConflict(Exception):
     (``layout_applied``/``nodes_added``/``session_renamed``, or no op at all)
     can mutate an annotation, so ``_claimed_annotation_target`` always
     reports no target for them — out of scope by construction, not merely
-    unaddressed.
+    unaddressed. ``remove_node_refs`` stays unguarded too, though its
+    ``nodes_removed`` op does prune the removed ids from group annotations'
+    ``member_node_ids``: that is a side effect of the node leaving the canvas,
+    not an edit of the group, and it is the same op the browser sends through
+    ``apply_ops`` without a lease check.
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
@@ -2437,9 +2441,9 @@ class SessionManager:
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
-        above raise a typed exception; ``apply_layout``, ``add_node_refs`` and
-        ``rename_session_sync`` never hit this branch, since their ops always
-        apply). ``record_activity=False``
+        above raise a typed exception; ``apply_layout``, ``add_node_refs``,
+        ``remove_node_refs`` and ``rename_session_sync`` never hit this branch,
+        since their ops always apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own

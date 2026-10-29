@@ -1379,6 +1379,20 @@ class TestRemoveNodesFromSession:
         assert result["removed"] == ["alpha"]
         assert len(result["skipped"]) == 1 and result["skipped"][0] is cyclic
 
+    def test_only_unencodable_ids_are_skipped_without_a_write(self, tools):
+        tools_map, manager, sid, revision = self._seeded(tools)
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["remove_nodes_from_session"](
+            session_id=sid, node_ids=[cyclic]
+        )
+
+        assert result["success"] is True
+        assert result["removed"] == []
+        assert len(result["skipped"]) == 1 and result["skipped"][0] is cyclic
+        assert result["revision"] == revision
+
     def test_a_removed_node_leaves_group_members_and_keeps_the_rest(self, tools):
         tools_map, manager, sid, _ = self._seeded(tools)
         group = tools_map["create_group_annotation"](
