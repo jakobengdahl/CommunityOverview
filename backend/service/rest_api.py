@@ -2097,10 +2097,11 @@ def _register_import_endpoints(
             service.authorization_hook, action=GRAPH_ACTION_READ, target=target
         )
         if not decision.allowed:
-            _raise_for_access_denied(
-                access.build_access_denied_result(
+            raise HTTPException(
+                status_code=403,
+                detail=access.build_access_denied_result(
                     action=GRAPH_ACTION_READ, target=target, decision=decision
-                )
+                ),
             )
         # Job metadata covers whole-graph imports and cannot be scope-filtered.
         if decision.graph_access.enabled:
