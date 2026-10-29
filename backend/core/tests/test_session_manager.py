@@ -3842,6 +3842,9 @@ _MCP_BUCKET_WRITES = {
     "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
         sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
     ),
+    "remove_node_refs": lambda mgr, sid, i, label: mgr.remove_node_refs(
+        sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
+    ),
     "consume_mcp_rate_budget": lambda mgr, sid, i, label: mgr.consume_mcp_rate_budget(
         "mcp-agent", 1, rate_limit_label=label
     ),
