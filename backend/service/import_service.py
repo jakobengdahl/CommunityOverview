@@ -366,7 +366,7 @@ def _enqueue_and_start_regeneration(
             "embeddings_status": "not_started",
             "embeddings_message": (
                 "The graph was replaced successfully, but background "
-                f"embedding generation could not be started: {exc}. Run "
+                "embedding generation could not be started. Run "
                 "scripts/generate_embeddings.py, or POST the import again "
                 "later, to generate embeddings for it."
             ),
