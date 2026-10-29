@@ -1714,6 +1714,46 @@ class TestGraphStorageSubtypes:
         updated = temp_storage.get_node("actor-sub-2")
         assert updated.subtypes == ["Municipality"]
 
+    @pytest.mark.parametrize("endpoint", ["source", "target", "both"])
+    def test_a_subtype_update_cannot_invalidate_incident_edges(
+        self, temp_storage, monkeypatch, endpoint
+    ):
+        """Subtype validation precedes every mutation, including self-loops."""
+        from backend.config import config_loader
+
+        rules = config_loader.RelationshipTypeConfig(
+            source_types=["Agency"] if endpoint != "target" else [],
+            target_types=["Agency"] if endpoint != "source" else [],
+        )
+        monkeypatch.setitem(
+            config_loader._get_loader().config.schema_.relationship_types,
+            "SUBTYPE_LINK",
+            rules,
+        )
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
+                Node(id="b", type="Actor", name="B"),
+            ],
+            [
+                Edge(
+                    id="ab",
+                    source="a" if endpoint != "target" else "b",
+                    target="a" if endpoint != "source" else "b",
+                    type="SUBTYPE_LINK",
+                )
+            ],
+        )
+        temp_storage.flush()
+        before = temp_storage.get_node("a").to_dict()
+        with pytest.raises(ValueError, match="SUBTYPE_LINK"):
+            temp_storage.update_node("a", {"subtypes": [], "name": "Rejected"})
+        assert temp_storage.get_node("a").to_dict() == before
+        assert temp_storage.edges["ab"].type_str == "SUBTYPE_LINK"
+        assert temp_storage.update_node(
+            "a", {"subtypes": ["Agency", "Municipality"]}
+        ).subtypes == ["Agency", "Municipality"]
+
     def test_get_subtypes_by_node_type(self, temp_storage):
         """Test getting subtypes grouped by node type"""
         nodes = [

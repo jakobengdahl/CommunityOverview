@@ -62,6 +62,7 @@ if sys.platform == "win32":
     def _unlock_file(f) -> None:
         """Release file lock on Windows."""
         msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
 else:
     import fcntl
 
@@ -191,6 +192,10 @@ class EntityOperation:
     expected_revision: Optional[int] = None
     expect_absent: bool = False
     endpoint_types: Tuple[Tuple[str, str], ...] = ()
+    # Transaction conditions, never journal data. None means unchecked;
+    # an empty incident tuple requires no incident edges.
+    endpoint_subtypes: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    incident_edge_revisions: Optional[Tuple[Tuple[str, int], ...]] = None
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":

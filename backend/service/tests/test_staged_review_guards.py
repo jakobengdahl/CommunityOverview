@@ -489,6 +489,106 @@ def test_a_same_type_update_keeps_legacy_misfit_edges(world):
     assert world.storage.edges["legacy"].type_str == "IMPLEMENTS"
 
 
+def _subtype_edge(world, monkeypatch, endpoint, peer="c"):
+    from backend.config import config_loader
+
+    monkeypatch.setitem(
+        config_loader._get_loader().config.schema_.relationship_types,
+        "SUBTYPE_LINK",
+        config_loader.RelationshipTypeConfig(**{f"{endpoint}_types": ["Agency"]}),
+    )
+    world.storage.add_edge(
+        Edge(
+            id="subtype-edge",
+            source="a" if endpoint == "source" else peer,
+            target="a" if endpoint == "target" else peer,
+            type="SUBTYPE_LINK",
+        )
+    )
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_a_subtype_merge_rejudges_kept_edges_and_requires_their_staged_removal(
+    world, monkeypatch, endpoint
+):
+    """A subtype update keeps only edges applicable to the resulting node."""
+    _subtype_edge(world, monkeypatch, endpoint)
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"subtypes": ["Agency", "Municipality"]}}),
+    )
+    assert svc.merge_staged_changes(sid, "valid")["success"] is True
+    assert "subtype-edge" in world.storage.edges
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"subtypes": []}}))
+    result = svc.merge_staged_changes(sid, "refused")
+    assert result["error"] == "invalid_merge_request", result
+    assert world.storage.get_node("a").subtypes == ["Agency", "Municipality"]
+    assert ("node", "a") in world.layer(sid)
+    _stage(world, sid, ("delete_edges", (["subtype-edge"],), {"confirmed": True}))
+    result = svc.merge_staged_changes(
+        sid, "incomplete", entries=[{"kind": "node", "entity_id": "a"}]
+    )
+    assert result["error"] == "merge_incomplete", result
+    assert svc.merge_staged_changes(sid, "complete")["success"] is True
+    assert world.storage.get_node("a").subtypes == []
+    assert "subtype-edge" not in world.storage.edges
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_a_subtype_change_does_not_disclose_hidden_incident_edges(
+    world, monkeypatch, endpoint
+):
+    """Direct refusals and the diff never count or name hidden edges."""
+    _subtype_edge(world, monkeypatch, endpoint, peer="r")
+    svc, sid = world.service, world.staged_session()
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"subtypes": []}}))
+    world.hook.narrow = True
+    assert svc.update_node("a", {"subtypes": []}) == {
+        "success": False,
+        "error": "Node with ID a not found",
+    }
+    assert svc.get_staged_changes(sid)["items"] == []
+    result = svc.merge_staged_changes(
+        sid, "m", entries=[{"kind": "node", "entity_id": "a"}]
+    )
+    assert result["error"] == "merge_raced", result
+    assert "subtype-edge" not in str(result)
+    assert "existing edge" not in str(result)
+    assert world.storage.get_node("a").subtypes == ["Agency"]
+
+
+@pytest.mark.parametrize("world", ["file"], indirect=True)
+def test_a_subtype_merge_refuses_an_incident_edge_added_after_planning(
+    world, monkeypatch
+):
+    """Subtype changes carry the same store-side incident checks as retypes."""
+    svc, sid = world.service, world.staged_session()
+    _stage(
+        world,
+        sid,
+        ("update_node", ("a",), {"updates": {"subtypes": ["Municipality"]}}),
+    )
+    world.storage.flush()
+    backend = world.storage._persistence_backend
+    _race(
+        world,
+        monkeypatch,
+        lambda: backend.apply_batch(
+            [
+                EntityOperation.upsert_edge(
+                    Edge(id="new", source="a", target="c", type="RELATES_TO").to_dict()
+                )
+            ]
+        ),
+    )
+    result = svc.merge_staged_changes(sid, "m")
+    assert result["error"] == "merge_raced", result
+    assert world.storage.get_node("a").subtypes == ["Agency"]
+    assert ("node", "a") in world.layer(sid)
+
+
 def test_a_source_retype_is_refused_while_a_kept_edge_would_no_longer_fit(world):
     svc, sid = world.service, world.staged_session()
     world.storage.add_nodes(

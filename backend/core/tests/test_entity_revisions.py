@@ -858,3 +858,53 @@ def test_only_a_statement_refusal_counts_as_refused_outright(sqlstate, refused):
     failure.sqlstate = sqlstate
     assert refused_outright(failure) is refused
     assert refused_outright(WriteRefusedByStore("x")) is True
+
+
+def test_a_direct_subtype_update_carries_incident_revisions_and_undoes_a_race(
+    make_storage, monkeypatch
+):
+    storage = make_storage()
+    storage.add_nodes(
+        [_node("a", subtypes=["Agency"]), _node("b")],
+        [Edge(id="e", source="a", target="b")],
+    )
+    storage.flush()
+    before = _snapshot(storage)
+    events = _events(storage)
+
+    def raced(operations, write_token=None):
+        (op,) = operations
+        assert op.incident_edge_revisions == (("e", storage.edges["e"].revision),)
+        raise EntityRevisionConflict("node", "a", None, None)
+
+    monkeypatch.setattr(storage, "_store_assigns_revisions", True)
+    monkeypatch.setattr(storage._persistence_backend, "apply_batch", raced)
+    with pytest.raises(EntityRevisionConflict):
+        storage.update_node("a", {"subtypes": []})
+    assert _snapshot(storage) == before
+    assert events == []
+
+
+@pytest.mark.parametrize("updates", [{"name": "renamed"}, {"subtypes": ["Agency"]}])
+def test_plain_shared_store_node_updates_expect_the_before_revision(
+    make_storage, monkeypatch, updates
+):
+    storage = make_storage()
+    storage.add_nodes([_node("a")], [])
+    storage.flush()
+    before = _snapshot(storage)
+    revision = storage.nodes["a"].revision
+    events = _events(storage)
+
+    def raced(operations, write_token=None):
+        (op,) = operations
+        assert op.expected_revision == revision
+        assert not op.expect_absent
+        raise EntityRevisionConflict("node", "a", revision, revision + 1)
+
+    monkeypatch.setattr(storage, "_store_assigns_revisions", True)
+    monkeypatch.setattr(storage._persistence_backend, "apply_batch", raced)
+    with pytest.raises(EntityRevisionConflict):
+        storage.update_node("a", updates)
+    assert _snapshot(storage) == before
+    assert events == []

@@ -197,6 +197,11 @@ A write whose expectation does not hold is refused with
 existing `expected_updated_at` on node updates keeps working unchanged. When
 both it and `expected_revision` are given, both must hold.
 
+In a shared store, an existing-node upsert without an explicit expectation
+uses the instance's before-state revision. Even a name-only update replaces
+the full document, so a stale instance must retry rather than overwrite newer
+subtypes and invalidate relationships judged against them.
+
 ### 4.4 Where revisions are assigned and expectations enforced
 
 Today, a write changes the in-memory model, fires its event and returns. It
@@ -695,11 +700,11 @@ A reader the authorization hook narrows sees, selects and discards only the
 entries its view wholly covers - the entity the entry composes to, the main
 entity and the base, and for an edge their endpoints - and whose dependencies
 it covers too, the rule composed reads follow (§8). A node delete, or an
-entry that changes the type of the node main holds, is also outside that view
-while main holds an edge to the node the reader cannot see, since the merge
-would delete that edge or judge it against the new type. Any other entry is
-answered as if it were not staged: nothing of it, not even its number, is
-shown to that reader.
+entry that changes the type or subtypes of the node main holds, is also outside
+that view while main holds an edge to the node the reader cannot see, since the
+merge would delete that edge or judge it against the new type or subtypes. Any
+other entry is answered as if it were not staged: nothing of it, not even its
+number, is shown to that reader.
 
 ## 11. Merge
 
@@ -795,9 +800,9 @@ still true when the merge applies.
     endpoints exist, or are created by the same unit.
   - **Incident edges as listed.** For every node the merge deletes, the node's
     incident edges in the store are exactly those the merge deletes with it.
-    For every node the merge retypes in place, they are exactly those the
-    merge read, each still at the revision it read, since each was judged
-    against the new type.
+    For every node whose type or subtypes the merge changes, they are exactly
+    those the merge read, each still at the revision it read, since each was
+    judged against the new type or subtypes.
 - In a shared store, the unit locks the rows those checks read, so they cannot
   change before it commits. The same rule applies to direct writes: an edge
   create locks its endpoint rows for share, and a node delete or a merge's
@@ -849,8 +854,8 @@ such an entry; naming one is answered as for any entry not staged.
 The selection must be **closed under dependencies**. An entry depends on:
 
 - for an edge create: the create entries of its endpoints, where they have them;
-- for a node delete or an update staging a new node type: the tombstones of
-  its incident edges;
+- for a node delete or an update staging a new node type or subtypes: the
+  tombstones of its incident edges;
 - for an `as_new` node: the edge creates in the layer that name the old id.
 
 A selection that leaves out a dependency is refused with `merge_incomplete`,
