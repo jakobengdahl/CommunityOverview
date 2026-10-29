@@ -197,6 +197,11 @@ A write whose expectation does not hold is refused with
 existing `expected_updated_at` on node updates keeps working unchanged. When
 both it and `expected_revision` are given, both must hold.
 
+In a shared store, an existing-node upsert without an explicit expectation
+uses the instance's before-state revision. Even a name-only update replaces
+the full document, so a stale instance must retry rather than overwrite newer
+subtypes and invalidate relationships judged against them.
+
 ### 4.4 Where revisions are assigned and expectations enforced
 
 Today, a write changes the in-memory model, fires its event and returns. It

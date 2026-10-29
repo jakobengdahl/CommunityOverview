@@ -1445,6 +1445,17 @@ class GraphStorage:
         for kind, action, entity in changes:
             entity_id = entity if action == "delete" else entity.id
             expected = expectations.get((kind, entity_id))
+            if (
+                expected is None
+                and self._store_assigns_revisions
+                and kind == "node"
+                and action == "upsert"
+                and undo is not None
+                and undo.nodes.get(entity_id) is not None
+            ):
+                # A full-document write also replaces applicability fields.
+                # Even a rename must not restore subtypes from a stale mirror.
+                expected = undo.nodes[entity_id].get("revision", 0)
             if action == "delete":
                 payload = None
             elif kind == "node":

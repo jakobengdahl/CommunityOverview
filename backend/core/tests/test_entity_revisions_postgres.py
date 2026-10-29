@@ -957,3 +957,33 @@ def test_direct_subtype_update_orders_against_another_instances_edge(
         assert "ab" not in other.edges
         assert _stored(schema, "graph_edges", "ab") is None
         assert _stored(schema, "graph_nodes", "a")["subtypes"] == []
+
+
+@pytest.mark.parametrize("scope", [None, "scope-a"])
+def test_a_stale_rename_cannot_remove_subtypes_required_by_a_new_edge(
+    instances, schema, monkeypatch, scope
+):
+    from backend.config import config_loader
+
+    monkeypatch.setitem(
+        config_loader._get_loader().config.schema_.relationship_types,
+        "SUBTYPE_LINK",
+        config_loader.RelationshipTypeConfig(source_types=["Agency"]),
+    )
+    kwargs = {"scope": scope}
+    writer = instances(deaf=True, **kwargs)
+    writer.add_nodes([_node("a"), _node("b")], [])
+    behind = instances(deaf=True, **kwargs)
+    before = behind.nodes["a"].to_dict()
+    events = _events(behind)
+    writer.update_node("a", {"subtypes": ["Agency"]})
+    writer.add_edge(Edge(id="ab", type="SUBTYPE_LINK", source="a", target="b"))
+    stored = _stored(schema, "graph_nodes", "a")
+
+    with pytest.raises(EntityRevisionConflict):
+        behind.update_node("a", {"name": "stale rename"})
+
+    assert behind.nodes["a"].to_dict() == before
+    assert events == []
+    assert _stored(schema, "graph_nodes", "a") == stored
+    assert _stored(schema, "graph_edges", "ab")["type"] == "SUBTYPE_LINK"
