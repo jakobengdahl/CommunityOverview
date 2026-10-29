@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
-# Only a short error excerpt is used; bound decoded terminal bodies as they arrive.
+# Only a short error excerpt is used; bound decoded error bodies as they arrive.
 MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
@@ -581,6 +581,8 @@ class DeliveryWorker:
         self, url: str, payload: dict, headers: dict
     ) -> httpx.Response:
         """POST to url, following redirects while re-applying the SSRF check at each hop."""
+        headers = httpx.Headers(headers)
+        headers["Accept-Encoding"] = "identity"
         redirect_headers = {
             key: value
             for key, value in headers.items()
@@ -604,6 +606,10 @@ class DeliveryWorker:
                     follow_redirects=False,
                 ) as response:
                     if not response.is_redirect:
+                        if 200 <= response.status_code < 300:
+                            # Status confirms acceptance. Reading an unused body
+                            # could fail and retry an already accepted POST.
+                            return response
                         # HTTPX decodes before iter_bytes yields, so even a tiny
                         # compressed chunk can allocate far beyond our body cap.
                         # Webhook diagnostics do not require encoded bodies.
