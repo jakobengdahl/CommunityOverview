@@ -77,7 +77,10 @@ SUPPORTED_CONTENT_TYPES = frozenset({PDF, DOCX, XLSX, PPTX, ODT, ODS, ODP, TEXT,
 
 _MiB = 1024 * 1024
 # Locator strings (sheet names) are file content too; they are cut to this.
-_MAX_LOCATOR_CHARS = 256
+_MAX_LOCATOR_CHARS = 64
+# Locator numbers (page, line, ...) stay below this, so they too fit in the
+# per-segment share of the reply cap.
+_MAX_LOCATOR_INT = 2**53
 _LOCATOR_KEYS = frozenset({"page", "paragraph", "table", "sheet", "slide", "line"})
 
 
@@ -94,8 +97,9 @@ class ExtractionLimits:
     # Sum of the uncompressed sizes the archive's central directory declares.
     max_zip_uncompressed_bytes: int = 100 * _MiB
     max_zip_ratio: float = 100.0
-    # Members (and archives) smaller than this skip the ratio test: small XML
-    # parts legitimately compress far beyond any sane bomb threshold.
+    # Members smaller than this skip the per-member ratio test: small XML
+    # parts legitimately compress far beyond any sane bomb threshold. The
+    # whole-archive ratio has no floor.
     zip_ratio_floor_bytes: int = _MiB
     # Address-space cap for the child process; None leaves it unlimited.
     memory_limit_bytes: int | None = 1024 * _MiB
@@ -136,9 +140,10 @@ def _worker_argv() -> list[str]:
 
 
 def _max_reply_bytes(limits: ExtractionLimits) -> int:
-    # JSON escapes a control character as six bytes, which also bounds a
-    # 256-character locator string; keys and framing fit in the remainder.
-    return 6 * limits.max_chars + 2048 * limits.max_segments + 4096
+    # JSON escapes a control character as six bytes. A segment's one-key
+    # locator (at most 6 x 64 bytes of string) and its framing fit in 512
+    # bytes; the reply's own framing fits in the constant.
+    return 6 * limits.max_chars + 512 * limits.max_segments + 4096
 
 
 def _run_worker(
@@ -323,7 +328,9 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def _valid_locator(locator) -> bool:
-    if not isinstance(locator, dict):
+    # The extractor emits one key per locator; more would break the
+    # per-segment bound in _max_reply_bytes.
+    if not isinstance(locator, dict) or len(locator) > 1:
         return False
     for key, value in locator.items():
         if key not in _LOCATOR_KEYS:
@@ -332,6 +339,8 @@ def _valid_locator(locator) -> bool:
             if len(value) > _MAX_LOCATOR_CHARS:
                 return False
         elif not isinstance(value, int) or isinstance(value, bool):
+            return False
+        elif not 0 <= value < _MAX_LOCATOR_INT:
             return False
     return True
 
@@ -529,10 +538,7 @@ def _open_zip(data: bytes, limits: ExtractionLimits) -> zipfile.ZipFile:
     total = sum(info.file_size for info in infos)
     if total > limits.max_zip_uncompressed_bytes:
         raise _TooLarge("zip_uncompressed_bytes")
-    if (
-        total > limits.zip_ratio_floor_bytes
-        and total / max(len(data), 1) > limits.max_zip_ratio
-    ):
+    if total / max(len(data), 1) > limits.max_zip_ratio:
         raise _TooLarge("zip_ratio")
     for info in infos:
         if (

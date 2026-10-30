@@ -819,17 +819,18 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   OS sandbox with no network and no access to its secrets; the deployment
   documentation for the implementation states this requirement.
 - **The parent trusts nothing the child returns.** The parent reads at most
-  `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` from the child's stdout and at most
-  `ATTACHMENT_EXTRACT_STDERR_MAX_BYTES` (65,536, a named constant, not
-  configurable) from its stderr; more on either is `failed` and
-  the child is killed. The stdout JSON is validated against the expected
+  `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` from the child's stdout; more is
+  `failed` and the child is killed. The child's stderr is connected to the
+  null device, so the parent reads none of it and it cannot affect the
+  result. The stdout JSON is validated against the expected
   shape (segments of `{text, locator}` strings, a known status, a boolean
   `truncated`), anything else is `failed`, and the character, segment and
   locator caps are enforced again in the parent. The extractor emits at most
   `ATTACHMENT_EXTRACT_MAX_SEGMENTS` segments (beyond it the result is
-  `truncated`), and a locator is at most `ATTACHMENT_LOCATOR_MAX_CHARS` (64,
-  a named constant) characters. stderr is discarded, never logged; the log
-  records only the status and the exit code.
+  `truncated`), and a locator has one key whose value is either a string of
+  at most `ATTACHMENT_LOCATOR_MAX_CHARS` (64, a named constant) characters
+  or a non-negative integer below 2^53. stderr is never read or logged; the
+  log records only the status and the exit code.
 - **Wall-clock timeout.** The child is killed after the timeout, and the
   result is `timeout`.
 - **Memory cap.** The child runs under an address-space limit
@@ -852,9 +853,9 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 
 #### Limits and settings
 
-Every limit is a setting, except three named constants
-(`ATTACHMENT_EXTRACT_STDERR_MAX_BYTES`, `ATTACHMENT_LOCATOR_MAX_CHARS`
-above and `ATTACHMENT_READ_DEFAULT_CHARS` in §1); a value
+Every limit is a setting, except two named constants
+(`ATTACHMENT_LOCATOR_MAX_CHARS` above and `ATTACHMENT_READ_DEFAULT_CHARS`
+in §1) and `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES`, which is derived; a value
 of `0` or less is refused at boot, never read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
 which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 `attachment_retrieval.chunk_segments` requires.
@@ -864,10 +865,10 @@ which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 | `ATTACHMENT_EXTRACT_TIMEOUT_SECONDS` | `30` | wall clock per file (child process) |
 | `ATTACHMENT_EXTRACT_MEMORY_BYTES` | 1 GiB | address-space limit of the child |
 | `ATTACHMENT_EXTRACT_MAX_CHARS` | `1000000` | extracted characters per file; beyond it, `truncated` |
-| `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` | 16 MiB | bytes the parent reads from the child's stdout (UTF-8 JSON written without ASCII escaping, so at most 6 bytes per character, for up to `ATTACHMENT_EXTRACT_MAX_CHARS` characters plus segments); must be at least 6 × `ATTACHMENT_EXTRACT_MAX_CHARS` + 512 × `ATTACHMENT_EXTRACT_MAX_SEGMENTS` (a segment's locator and JSON framing fit in 512 bytes), checked at boot |
+| `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES` | derived: 11,124,096 bytes at the defaults | bytes the parent reads from the child's stdout (UTF-8 JSON written without ASCII escaping, so at most 6 bytes per character): 6 × `ATTACHMENT_EXTRACT_MAX_CHARS` + 512 × `ATTACHMENT_EXTRACT_MAX_SEGMENTS` (a segment's one-key locator and JSON framing fit in 512 bytes) + 4,096 for the reply's own framing; not separately configurable |
 | `ATTACHMENT_EXTRACT_MAX_SEGMENTS` | `10000` | segments (pages, sheets, slides, paragraphs) per file; beyond it, `truncated` |
 | `ATTACHMENT_EXTRACT_MAX_UNCOMPRESSED_BYTES` | 100 MiB | declared uncompressed total of a ZIP-based file |
-| `ATTACHMENT_EXTRACT_MAX_ZIP_RATIO` | `100` | compression ratio, whole archive and per member |
+| `ATTACHMENT_EXTRACT_MAX_ZIP_RATIO` | `100` | compression ratio, whole archive (declared total over file size, at any size) and per member |
 | `ATTACHMENT_EXTRACT_ZIP_RATIO_MIN_MEMBER_BYTES` | 1 MiB | members smaller than this (uncompressed) are exempt from the per-member ratio test, so small XML parts are not false positives |
 | `ATTACHMENT_EXTRACT_MAX_ZIP_MEMBERS` | `2000` | members in a ZIP-based file |
 | `ATTACHMENT_EXTRACT_CONCURRENCY` | `2` | extraction child processes running at once, per server process |
