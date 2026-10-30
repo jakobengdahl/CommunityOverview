@@ -795,6 +795,83 @@ def test_cli_replaces_staged_by_in_layers_and_changes_nothing_else(
     assert backend.layers_path.read_bytes() == layer_bytes
 
 
+def test_cli_replaces_merging_actor_in_merge_log_and_changes_nothing_else(
+    tmp_path, monkeypatch, capsys
+):
+    """A merge record's `actor` is replaced; other merges and the graph keep their bytes."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    backend = FileGraphPersistenceBackend(tmp_path / "graph.json", staged_sessions=True)
+    backend.save_graph_data({"nodes": [], "edges": []})
+    backend.record_staged("1234-5678")
+    backend.stage(
+        "1234-5678",
+        [_layer_entry("node-a", "other-member"), _layer_entry("node-b", "other")],
+    )
+    when = "2026-01-01T00:00:00+00:00"
+    backend.merge(
+        "1234-5678",
+        "merge-mine",
+        [],
+        [],
+        [("node", "node-a")],
+        {"actor": ACTOR, "merged_at": when, "entries": []},
+    )
+    backend.merge(
+        "1234-5678",
+        "merge-other",
+        [],
+        [],
+        [("node", "node-b")],
+        {"actor": "other-member", "merged_at": when, "entries": []},
+    )
+    mine = backend.load_merge("merge-mine")
+    other_line = next(
+        line
+        for line in backend.merge_log_path.read_bytes().splitlines(keepends=True)
+        if b"merge-other" in line
+    )
+    graph_bytes = (tmp_path / "graph.json").read_bytes()
+    layer_bytes = backend.layers_path.read_bytes()
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--layers-path", str(backend.layers_path)]
+    assert main(args) == 0
+    captured = capsys.readouterr()
+    assert ACTOR not in captured.out + captured.err
+    assert TOKEN not in captured.out + captured.err
+    assert json.loads(captured.out)["counts"]["staged_layers"] == 1
+    log_bytes = backend.merge_log_path.read_bytes()
+    assert ACTOR.encode() not in log_bytes
+    assert other_line in log_bytes
+    reloaded = FileGraphPersistenceBackend(
+        tmp_path / "graph.json", staged_sessions=True
+    )
+    assert reloaded.load_merge("merge-mine") == {**mine, "actor": TOKEN}
+    assert reloaded.load_merge("merge-other")["actor"] == "other-member"
+    assert (tmp_path / "graph.json").read_bytes() == graph_bytes
+    assert backend.layers_path.read_bytes() == layer_bytes
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["staged_layers"] == 0
+    assert backend.merge_log_path.read_bytes() == log_bytes
+
+
+def test_layer_erasure_fails_malformed_merge_log_without_rewriting(tmp_path, capsys):
+    """A damaged merge log fails the store and neither sidecar is rewritten."""
+    layers = tmp_path / "graph.layers.json"
+    layers.write_text(
+        json.dumps({"sessions": {"s": {"entries": [_layer_entry("n", ACTOR)]}}})
+    )
+    log = tmp_path / "graph.merges.ndjson"
+    log.write_text(json.dumps({"record": {"actor": ACTOR}}) + "\n{not json\n")
+    before = layers.read_bytes(), log.read_bytes()
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    assert main(args + ["--layers-path", str(layers)]) == 1
+    captured = capsys.readouterr()
+    assert ACTOR not in captured.out + captured.err
+    assert json.loads(captured.out)["failed_stores"] == ["staged_layers"]
+    assert (layers.read_bytes(), log.read_bytes()) == before
+
+
 def test_layer_erasure_fails_malformed_file_without_rewriting(tmp_path, capsys):
     """A damaged layers file is a store failure with its bytes unchanged."""
     path = tmp_path / "graph.layers.json"

@@ -119,7 +119,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--sessions-dir", help="Directory containing session JSON files"
     )
     parser.add_argument(
-        "--layers-path", help="Staged-session layers sidecar (<graph>.layers.json)"
+        "--layers-path",
+        help="Staged-session layers sidecar (<graph>.layers.json); "
+        "the merge log beside it is included",
     )
     args = parser.parse_args(argv)
     try:

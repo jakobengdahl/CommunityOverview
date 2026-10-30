@@ -907,8 +907,8 @@ with it; graph history is the permanent audit trail.
 `ActorErasureService.erase_actor(actor_id, replacement_token)` in
 `backend/service/actor_erasure.py` replaces matching structured actor identifiers
 in mutation history, nested run-history attribution, proposal `decided_by` and
-the attribution in applied proposal results, session activity (including sessions not currently loaded) and the `staged_by` of pending entries in
-staged sessions' layers. Supply the optional
+the attribution in applied proposal results, session activity (including sessions not currently loaded), the `staged_by` of pending entries in
+staged sessions' layers and the merging `actor` of staged-merge records. Supply the optional
 stores to its constructor. An absent store returns zero; PostgreSQL graph storage
 has no mutation-history sidecar, so omit that store. Graph nodes and edges are
 never written. Record IDs, timestamps, decision status and unrelated actors are
@@ -916,7 +916,7 @@ preserved. This replaces attribution, including actor/delegation objects,
 `staged_by` in event origins and activity records, client IDs and matching
 `agent:<id>` origins; it does not search free text or erase graph content.
 The CLI reaches the layers of the file graph backend (`<graph>.layers.json`
-next to `graph.json`); layers held in PostgreSQL graph storage are not local
+next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`); layers held in PostgreSQL graph storage are not local
 files, so merge or discard open staged sessions there before maintenance.
 
 Stop application processes, workers and other writers before maintenance, and
