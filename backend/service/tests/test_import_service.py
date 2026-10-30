@@ -181,6 +181,56 @@ class TestImportRequiresFullGraphAccess:
 
 
 class TestImportReplaceFailure:
+    @pytest.mark.parametrize("archive", [False, True], ids=["json", "archive"])
+    @pytest.mark.parametrize("partial_cleanup", [False, True])
+    def test_journal_cleanup_failure_preserves_the_previous_durable_graph(
+        self, empty_storage, monkeypatch, caplog, archive, partial_cleanup
+    ):
+        empty_storage.add_nodes(
+            [Node(id="old-1", type=NodeType.ACTOR, name="Pre-existing")], []
+        )
+        backend = empty_storage._persistence_backend
+        empty_storage.save().result()
+        backend.upsert_node(empty_storage.get_node("old-1").to_dict())
+        assert backend.journal_path.stat().st_size > 0
+        generation = empty_storage.generation
+        private_detail = "journal cleanup failed at /private/store"
+
+        def fail_cleanup():
+            if partial_cleanup:
+                backend.journal_path.write_bytes(b"")
+            raise OSError(private_detail)
+
+        monkeypatch.setattr(backend, "_truncate_journal", fail_cleanup)
+        store = InMemoryExecutionStore()
+        if archive:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as zf:
+                zf.writestr("graph.json", json.dumps(_valid_document()))
+            result = import_service.import_graph_archive(
+                empty_storage, DefaultGraphAuthorizationHook(), store, buffer.getvalue()
+            )
+        else:
+            result = import_service.import_graph(
+                empty_storage, DefaultGraphAuthorizationHook(), store, _valid_document()
+            )
+
+        assert result["success"] is False
+        assert result["graph_replaced"] is False
+        assert result["error_code"] == "replace_failed"
+        with open(result["backup_path"]) as fh:
+            assert {n["id"] for n in json.load(fh)["nodes"]} == {"old-1"}
+        assert {n.id for n in empty_storage.get_all_nodes()} == {"old-1"}
+        assert empty_storage.get_all_edges() == []
+        assert empty_storage.generation == generation
+        reloaded = type(backend)(backend.json_path).load_graph_data()
+        assert {n["id"] for n in reloaded["nodes"]} == {"old-1"}
+        assert reloaded["edges"] == []
+        assert store.list_jobs() == []
+        assert private_detail not in json.dumps(result)
+        assert private_detail in caplog.text
+        assert "Traceback" in caplog.text
+
     def test_a_replace_failure_is_reported_and_keeps_the_backup_path(
         self, empty_storage: GraphStorage, monkeypatch, caplog
     ):

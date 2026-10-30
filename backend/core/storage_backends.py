@@ -827,36 +827,41 @@ class FileGraphPersistenceBackend:
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
-            # A pending merge is judged against the graph it was written
-            # against; replacing that graph first would make it unjudgeable.
-            if self._staged_sessions:
-                if not self._mirrored and self.json_path.exists():
-                    self._load_locked()
-                if self._layers_loaded:
-                    self._settle_merge_locked()
+            # Only read the old snapshot when its journal or staged merges
+            # need settling. Ordinary replacement can overwrite an unreadable
+            # snapshot without first loading it.
+            if (
+                not self._mirrored
+                and self.json_path.exists()
+                and (self._staged_sessions or self.journal_path.exists())
+            ):
+                self._load_locked()
+            if self._staged_sessions and self._layers_loaded:
+                self._settle_merge_locked()
             metadata = dict(data.get("metadata") or {})
-            # The file keeps its identity across whole-graph saves: the
-            # journal is truncated in the same call, so the id only has to be
-            # stable, and a mirrored one is what any journal on disk names.
+            prior_id = self._metadata.get("journal_id") if self._mirrored else None
             metadata["journal_id"] = (
-                (self._metadata.get("journal_id") if self._mirrored else None)
-                or metadata.get("journal_id")
-                or _new_journal_id()
+                prior_id or metadata.get("journal_id") or _new_journal_id()
             )
             snapshot = {**data, "metadata": metadata}
-            self._nodes = {n["id"]: n for n in data.get("nodes", [])}
-            self._edges = {e["id"]: e for e in data.get("edges", [])}
-            # The mirror takes the save's metadata now, as it takes its nodes,
-            # but a freshly minted id only once both writes have landed - see
-            # _checkpoint_locked for why.
-            self._metadata = {
-                k: v
-                for k, v in metadata.items()
-                if k != "journal_id" or v == self._metadata.get("journal_id")
-            }
-            self._mirrored = True
-            self._write_snapshot(snapshot)
-            self._truncate_journal()
+            try:
+                # Preserve every old journal write before retiring the journal.
+                # Even a partial cleanup failure must leave the old graph durable.
+                if self.journal_path.exists():
+                    self._checkpoint_locked()
+                self._write_snapshot(snapshot)
+            finally:
+                # A failed save still installs the attempted graph in the live
+                # mirror. Keep its metadata with its nodes, but do not publish
+                # a new journal identity until the save has fully succeeded.
+                self._nodes = {n["id"]: n for n in data.get("nodes", [])}
+                self._edges = {e["id"]: e for e in data.get("edges", [])}
+                self._metadata = {
+                    k: v
+                    for k, v in metadata.items()
+                    if k != "journal_id" or v == prior_id
+                }
+                self._mirrored = True
             self._metadata = metadata
 
     def default_graph_name(self) -> str:
