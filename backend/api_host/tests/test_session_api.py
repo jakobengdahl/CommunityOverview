@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.requests import Request
 
-from backend.core.session_manager import RateLimited
+from backend.core.session_manager import RateLimited, SessionManager
 from backend.service import rest_api as rest_api_module
 from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
@@ -651,6 +651,30 @@ class TestOpBatchBodyCap:
                 "client_id": "c1",
                 "ops": [{"op": "layout_applied", "positions": positions}],
             },
+        )
+        assert resp.status_code == 413
+
+    @pytest.mark.parametrize("route", ["ops", "annotations/image"])
+    def test_a_chunked_body_stops_being_read_once_it_crosses_the_cap(
+        self, test_app: TestClient, monkeypatch, route
+    ):
+        monkeypatch.setattr(
+            SessionManager, "max_request_body_bytes", property(lambda self: 20)
+        )
+        monkeypatch.setattr(rest_api_module, "_MAX_IMAGE_INGEST_BODY_BYTES", 20)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        async def _stream(self):
+            yield b"x" * 11
+            yield b"x" * 11
+            raise AssertionError("body read past the cap")
+
+        monkeypatch.setattr(Request, "stream", _stream)
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/{route}",
+            content=b"{}",
+            headers={"content-type": "application/json"},
         )
         assert resp.status_code == 413
 

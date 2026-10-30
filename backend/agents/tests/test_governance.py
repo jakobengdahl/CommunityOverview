@@ -673,6 +673,35 @@ def test_attachment_grants_compose_with_autonomy(level, access, name):
 
 
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_grant_does_not_bypass_nonempty_allowlist(name):
+    """A granted attachment tool outside a nonempty allowlist stays blocked."""
+    raw = MagicMock()
+    store = InMemoryProposalStore()
+    allowlist = ["graph.search_graph"]
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=allowlist,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+    )
+    assert "allowlist" in gate.wrap(raw)("graph." + name, {})["error"]
+    assert (
+        filter_tool_definitions(
+            [{"name": "graph." + name}],
+            autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+            tool_allowlist=allowlist,
+            mcp_loader=FakeLoader(),
+            attachment_access="read_write",
+        )
+        == []
+    )
+    raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
 def test_attachment_denying_hook_blocks_execution_and_proposals(name):
     raw = MagicMock()
     store = InMemoryProposalStore()

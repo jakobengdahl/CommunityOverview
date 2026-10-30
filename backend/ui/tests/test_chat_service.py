@@ -2495,6 +2495,7 @@ class TestNonObjectToolInput:
         "assistant",
         "kiosk",
         "kiosk_granted",
+        "kiosk_federated",
         "kiosk_failed",
         "kiosk_unresolved",
         "override",
@@ -2526,8 +2527,10 @@ def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode
     node = _make_akc_node(
         "coll",
         ACTOR_ONLY_PERMS,
-        tool_allowlist=[name] if mode == "kiosk_granted" else [],
+        tool_allowlist=[name] if mode in ("kiosk_granted", "kiosk_federated") else [],
     )
+    if mode == "kiosk_federated":
+        node["id"] = "federated::remote::akc-coll"
     with (
         patch.object(
             service._graph_service,
@@ -2556,6 +2559,47 @@ def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode
         raw.assert_not_called()
         result = _tool_result_payloads(llm)[0]
         assert result.get("error_code") == "access_denied"
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "add_node_attachment"])
+@pytest.mark.parametrize("case", ["allowlist_excludes", "override_without_resolver"])
+def test_processor_blocks_attachment_tools_without_grant_and_allowlist(
+    chat_service, name, case
+):
+    """A grant never bypasses the allowlist, and an override never supplies a grant."""
+    from unittest.mock import MagicMock
+
+    service, llm = chat_service
+    processor = service._processor
+    raw = MagicMock(return_value={"success": True})
+    processor.tool_definitions.append({"name": name})
+    llm.mock_tool_calls = [{"name": name, "input": {}}]
+    if case == "allowlist_excludes":
+        processor.tools_map[name] = raw
+        kwargs = {
+            "tool_allowlist": ["search_graph"],
+            "attachment_access": lambda _: "read_write",
+        }
+    else:
+        kwargs = {"tools_override": {name: raw}}
+    processor.process_message(
+        messages=[{"role": "user", "content": "read files"}], **kwargs
+    )
+    assert name not in {t["name"] for t in llm.received_tools[0]}
+    raw.assert_not_called()
+    result = _tool_result_payloads(llm)[0]
+    if case == "allowlist_excludes":
+        assert "allowlist" in result["error"]
+    else:
+        assert result["error_code"] == "access_denied"
+
+
+def test_attachment_tools_are_absent_from_the_default_execution_map(chat_service):
+    from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+    service, _ = chat_service
+    assert ATTACHMENT_TOOLS.isdisjoint(service._tools_map)
+    assert ATTACHMENT_TOOLS.isdisjoint(service._processor.tools_map)
 
 
 def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
