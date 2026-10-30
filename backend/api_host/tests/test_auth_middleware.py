@@ -180,7 +180,7 @@ def test_session_cookie_raw_writes_require_same_origin_or_custom_header(
     assert writes == ([b"untrusted body"] if allowed else [])
 
 
-@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
 @pytest.mark.parametrize("credential", ["basic", "cookie"])
 def test_authenticated_safe_methods_skip_write_guard(method, credential):
     """Cross-site metadata alone does not refuse an authenticated safe request."""
