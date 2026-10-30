@@ -550,6 +550,8 @@ def _work_dir_exceeds_quota(spec):
 
     push(os.open(spec["work_dir"], flags))
     work_prefix = os.path.realpath(spec["work_dir"]).rstrip("/") + "/"
+    retained = spec.setdefault("_disk_mapping_fds", {})
+    live_inodes = set()
     total_bytes = 0
     total_files = 0
     try:
@@ -594,20 +596,57 @@ def _work_dir_exceeds_quota(spec):
                     descriptors = os.listdir(fd_dir)
                 except FileNotFoundError:
                     continue
+                references = []
                 for descriptor in descriptors:
+                    reference = f"{fd_dir}/{descriptor}"
                     try:
-                        info = os.stat(f"{fd_dir}/{descriptor}")
+                        info = os.stat(reference)
                     except FileNotFoundError:
-                        continue  # Closed or exited during the scan.
+                        continue
+                    references.append((info, reference))
+                # /proc/map_files dereferencing requires extra capabilities.
+                # maps exposes inode identities without them. Pin mapped work
+                # inodes through O_PATH descriptors before the run closes its
+                # mmap fd, so fstat remains current even after unlink/close.
+                try:
+                    with open(f"/proc/{pid}/task/{task}/maps") as handle:
+                        mappings = handle.readlines()
+                except FileNotFoundError:
+                    mappings = []
+                for mapping in mappings:
+                    fields = mapping.split(None, 5)
+                    if len(fields) < 6 or not fields[5].startswith(work_prefix):
+                        continue
+                    major, minor = (int(part, 16) for part in fields[3].split(":"))
+                    identity = (os.makedev(major, minor), int(fields[4]))
+                    live_inodes.add(identity)
+                    if identity not in retained:
+                        source = next(
+                            (
+                                path
+                                for info, path in references
+                                if (info.st_dev, info.st_ino) == identity
+                            ),
+                            None,
+                        )
+                        if source is None:
+                            raise OSError("mapped work file usage unavailable")
+                        retained[identity] = os.open(source, os.O_PATH | os.O_CLOEXEC)
+                    info = os.fstat(retained[identity])
+                    if (info.st_dev, info.st_ino) != identity:
+                        raise OSError("mapped work file changed during accounting")
+                    if info.st_nlink == 0:
+                        references.append((info, None))
+                for info, reference in references:
                     identity = (info.st_dev, info.st_ino)
                     if (
-                        info.st_nlink != 0
+                        (reference is not None and info.st_nlink != 0)
                         or not stat.S_ISREG(info.st_mode)
                         or identity in seen
                     ):
                         continue
                     try:
-                        target = os.readlink(f"{fd_dir}/{descriptor}")
+                        target = os.readlink(reference) if reference else work_prefix
                     except FileNotFoundError:
                         continue
                     # procfs names an unlinked file by its former path. Memfds
@@ -618,6 +657,8 @@ def _work_dir_exceeds_quota(spec):
                     total_bytes += max(info.st_size, info.st_blocks * 512)
                     if total_bytes > limits["bytes"]:
                         return True
+        for identity in set(retained) - live_inodes:
+            os.close(retained.pop(identity))
         return False
     finally:
         for directory, entries in reversed(stack):
@@ -693,7 +734,7 @@ _DISK_SYSCALLS = {
 
 
 # These calls can block on IPC without changing any disk usage. Their output
-# descriptor is argument 0, except splice's argument 2.
+# descriptor is argument 0, except splice's argument 2 and tee's argument 1.
 _IPC_OUTPUT_CALLS = {
     arch: {
         _DISK_CALL_NUMBERS[name][index]: argument
@@ -702,7 +743,7 @@ _IPC_OUTPUT_CALLS = {
             ("writev", 0),
             ("sendfile", 0),
             ("splice", 2),
-            ("tee", 2),
+            ("tee", 1),
         )
     }
     for arch, index in (("x86_64", 0), ("aarch64", 1))
@@ -719,6 +760,22 @@ def _is_ipc_output(pid, number, info):
     except FileNotFoundError:
         return False  # An invalid descriptor cannot block or change storage.
     return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+def _is_nonmutating_open(number, info):
+    """Allow blocking FIFO/device opens to rendezvous with other tracees.
+
+    Without creation or truncation, opening a path cannot grow disk usage.
+    The returned descriptor is still accounted at subsequent syscall stops.
+    """
+    index = 0 if os.uname().machine == "x86_64" else 1
+    for name, argument in (("open", 1), ("openat", 2)):
+        if number == _DISK_CALL_NUMBERS[name][index]:
+            flags = struct.unpack_from("Q", info, 32 + 8 * argument)[0]
+            return not flags & (os.O_CREAT | os.O_TRUNC) and (
+                flags & os.O_TMPFILE != os.O_TMPFILE
+            )
+    return False
 
 
 def _ptrace(request, pid, address=0, data=0):
@@ -772,6 +829,7 @@ def _trace_quota(spec, child, status_fd):
                     operation == 1
                     and number in calls
                     and not _is_ipc_output(pid, number, info.raw)
+                    and not _is_nonmutating_open(number, info.raw)
                 ):
                     if owner is not None and owner != pid:
                         queued.append(pid)

@@ -44,7 +44,10 @@ def test_disk_scan_counts_both_allocated_and_apparent_bytes(tmp_path, sparse):
     assert sandbox._work_dir_exceeds_quota(spec) is True
 
 
-def test_unlinked_descriptor_accounting_deduplicates_inodes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mapped_only", [False, True])
+def test_unlinked_descriptor_accounting_deduplicates_inodes(
+    monkeypatch, tmp_path, mapped_only
+):
     work = tmp_path / "work"
     work.mkdir()
     child = subprocess.Popen(
@@ -52,7 +55,7 @@ def test_unlinked_descriptor_accounting_deduplicates_inodes(monkeypatch, tmp_pat
             sys.executable,
             "-c",
             """
-import os, sys
+import ctypes, os, sys
 memfd = os.memfd_create('quota-regression')
 os.ftruncate(memfd, 1024 * 1024)
 outside = open(sys.argv[2], 'w+b', buffering=0)
@@ -62,11 +65,21 @@ f = open(sys.argv[1], 'w+b', buffering=0)
 os.unlink(sys.argv[1])
 f.truncate(8192)
 duplicate = os.dup(f.fileno())
+libc = ctypes.CDLL(None)
+libc.mmap.restype = ctypes.c_void_p
+mapping = libc.mmap(None, 8192, 1, 1, f.fileno(), 0)
+assert mapping != ctypes.c_void_p(-1).value
 print('ready', flush=True)
+sys.stdin.readline()
+if sys.argv[3] == 'True':
+    f.close()
+    os.close(duplicate)
+print('closed', flush=True)
 sys.stdin.read()
 """,
             str(work / "deleted"),
             str(tmp_path / "work-outside"),
+            str(mapped_only),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -82,12 +95,17 @@ sys.stdin.read()
         )
         spec = {"work_dir": str(work), "disk_limits": {"bytes": 8192, "files": 1}}
         assert sandbox._work_dir_exceeds_quota(spec) is False
+        child.stdin.write("close\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "closed"
         (work / "entry").touch()
         assert sandbox._work_dir_exceeds_quota(spec) is False
         spec["disk_limits"]["bytes"] -= 1
         assert sandbox._work_dir_exceeds_quota(spec) is True
     finally:
         child.communicate(timeout=5)
+        for fd in spec.get("_disk_mapping_fds", {}).values():
+            os.close(fd)
 
 
 @pytest.mark.parametrize(
@@ -353,7 +371,7 @@ def test_children_of_parses_the_last_parenthesis_and_ignores_disappearing_pids(
     assert sandbox._children_of(42) == [101, 104]
 
 
-@pytest.mark.parametrize("transfer", ["write", "writev", "splice"])
+@pytest.mark.parametrize("transfer", ["write", "writev", "splice", "tee", "fifo"])
 def test_blocking_pipe_output_does_not_prevent_reader_closing_duplicate(
     tmp_path, transfer
 ):
@@ -373,7 +391,30 @@ def reader():
 
 thread = threading.Thread(target=reader)
 thread.start()
-if sys.argv[1] == 'splice':
+if sys.argv[1] == 'fifo':
+    os.mkfifo('fifo')
+    def fifo_reader():
+        with open('fifo', 'rb', buffering=0) as fifo:
+            assert fifo.read(1) == b'x'
+    partner = threading.Thread(target=fifo_reader)
+    partner.start()
+    with os.fdopen(os.open('fifo', os.O_WRONLY), 'wb', buffering=0) as fifo:
+        fifo.write(b'x')
+    partner.join()
+    os.write(write_fd, b'x' * size)
+elif sys.argv[1] == 'tee':
+    import ctypes
+    source_read, source_write = os.pipe()
+    os.write(source_write, b'x' * 4096)
+    libc = ctypes.CDLL(None, use_errno=True)
+    remaining = size
+    while remaining:
+        transferred = libc.tee(source_read, write_fd, min(4096, remaining), 0)
+        assert transferred > 0, ctypes.get_errno()
+        remaining -= transferred
+    os.close(source_read)
+    os.close(source_write)
+elif sys.argv[1] == 'splice':
     with open('source', 'w+b', buffering=0) as source:
         source.write(b'x' * size)
         source.seek(0)
