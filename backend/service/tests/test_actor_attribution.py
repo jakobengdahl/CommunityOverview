@@ -12,6 +12,7 @@ from backend.agents.execution.memory_store import InMemoryExecutionStore
 from backend.agents.execution.sqlite_store import SqliteExecutionStore
 from backend.agents.governance.models import AutonomyLevel, Proposal, ProposalStatus
 from backend.agents.governance.store import InMemoryProposalStore, SqliteProposalStore
+from backend.agents.governance.store import _SCHEMA_VERSION as proposal_schema_version
 from backend.core import Node, Edge, NodeType, RelationshipType
 from backend.core.events import EventContext, EventAttribution, EventActorAttribution
 from backend.core.history_store import GraphHistoryStore
@@ -20,6 +21,8 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
+from backend.core.storage_backends import FileGraphPersistenceBackend
+from backend.service import actor_erasure
 from backend.service.actor_erasure import ActorErasureService, main
 
 from typing import TYPE_CHECKING
@@ -204,6 +207,7 @@ def test_erasure_replaces_all_attribution_and_preserves_graph_bytes(
             "run_history": 1,
             "proposals": 1,
             "session_activity": 1,
+            "staged_layers": 0,
         },
         "failed_stores": [],
     }
@@ -250,6 +254,7 @@ def test_erasure_handles_absent_stores_and_unloaded_sessions(tmp_path):
         "run_history": 0,
         "proposals": 0,
         "session_activity": 1,
+        "staged_layers": 0,
     }
     assert cold.get(session.id).activity_log[0]["actor"] == TOKEN
     missing = GraphHistoryStore(tmp_path / "absent" / "history.ndjson")
@@ -345,6 +350,7 @@ def test_cli_close_failure_after_erasure_reports_store_with_exit_1(
             "run_history": 0,
             "proposals": None,
             "session_activity": 0,
+            "staged_layers": 0,
         },
         "failed_stores": ["proposals"],
     }
@@ -422,6 +428,7 @@ def test_cli_erases_durable_stores_and_outputs_only_counts(
         "run_history": 1,
         "proposals": 1,
         "session_activity": 0,
+        "staged_layers": 0,
     }
     assert main(args) == 0
     assert set(json.loads(capsys.readouterr().out)["counts"].values()) == {0}
@@ -636,6 +643,7 @@ def test_erasure_preserves_entity_and_execution_content(erasure_stores, tmp_path
             "run_history": 2,
             "proposals": 0,
             "session_activity": 1,
+            "staged_layers": 0,
         }
         cleaned = history.get_recent()[0]
         for key in ("before", "after", "patch"):
@@ -731,3 +739,141 @@ def test_erasure_limits_annotation_traversal_to_defined_fields():
     record["affected"]["kind"] = "node"
     record["inverse_op"]["op"] = "node_moved"
     assert replace_attribution(record, ACTOR, TOKEN, envelope="activity") == record
+
+
+def _layer_entry(entity_id, staged_by):
+    return {
+        "session_id": "1234-5678",
+        "kind": "node",
+        "entity_id": entity_id,
+        "action": "create",
+        "base_revision": None,
+        "base": None,
+        "staged": {"name": ACTOR, "metadata": {"staged_by": ACTOR}},
+        "staged_by": staged_by,
+        "staged_at": "2026-01-01T00:00:00+00:00",
+        "session_seq": 1,
+    }
+
+
+def test_cli_replaces_staged_by_in_layers_and_changes_nothing_else(
+    tmp_path, monkeypatch, capsys
+):
+    """Only `staged_by` of pending layer entries changes; a rerun counts zero."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    backend = FileGraphPersistenceBackend(tmp_path / "graph.json", staged_sessions=True)
+    backend.save_graph_data({"nodes": [], "edges": []})
+    backend.record_staged("1234-5678")
+    backend.stage(
+        "1234-5678",
+        [_layer_entry("node-a", ACTOR), _layer_entry("node-b", "other-member")],
+    )
+    before = backend.load_layer("1234-5678")
+    graph_bytes = (tmp_path / "graph.json").read_bytes()
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--layers-path", str(backend.layers_path)]
+    assert main(args) == 0
+    captured = capsys.readouterr()
+    assert ACTOR not in captured.out + captured.err
+    assert TOKEN not in captured.out + captured.err
+    assert json.loads(captured.out)["counts"]["staged_layers"] == 1
+    after = FileGraphPersistenceBackend(
+        tmp_path / "graph.json", staged_sessions=True
+    ).load_layer("1234-5678")
+    expected = copy.deepcopy(before)
+    for entry in expected:
+        if entry["entity_id"] == "node-a":
+            entry["staged_by"] = TOKEN
+    assert sorted(after, key=lambda e: e["entity_id"]) == sorted(
+        expected, key=lambda e: e["entity_id"]
+    )
+    assert (tmp_path / "graph.json").read_bytes() == graph_bytes
+    layer_bytes = backend.layers_path.read_bytes()
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["staged_layers"] == 0
+    assert backend.layers_path.read_bytes() == layer_bytes
+
+
+def test_layer_erasure_fails_malformed_file_without_rewriting(tmp_path, capsys):
+    """A damaged layers file is a store failure with its bytes unchanged."""
+    path = tmp_path / "graph.layers.json"
+    path.write_text(json.dumps({"sessions": {"s": {"entries": [ACTOR]}}}))
+    before = path.read_bytes()
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    assert main(args + ["--layers-path", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert ACTOR not in captured.out + captured.err
+    assert json.loads(captured.out)["failed_stores"] == ["staged_layers"]
+    assert path.read_bytes() == before
+
+
+def test_cli_refuses_unreadable_store_path_with_exit_2(tmp_path, monkeypatch, capsys):
+    """A permission error while checking a path is an invocation error, not a traceback."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    history = tmp_path / "history.ndjson"
+    history.write_text(json.dumps({"actor": ACTOR}) + "\n")
+    blocked = tmp_path / ACTOR / "runs.db"
+    real_exists = actor_erasure.Path.exists
+
+    def exists(self):
+        if self == blocked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self)
+
+    monkeypatch.setattr(actor_erasure.Path, "exists", exists)
+    before = _cli_store_bytes(tmp_path)
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--history-path", str(history), "--run-history-db", str(blocked)]
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert ACTOR not in captured.err
+    assert _cli_store_bytes(tmp_path) == before
+
+
+def _crashed_wal_copy(store_cls, source, target):
+    """Copy a store while it is open, leaving a -wal and no clean shutdown."""
+    store = store_cls(source)
+    try:
+        if store_cls is SqliteProposalStore:
+            _proposal(store)
+        else:
+            _run(store)
+        assert (source.parent / f"{source.name}-wal").stat().st_size > 0
+        target.write_bytes(source.read_bytes())
+        (target.parent / f"{target.name}-wal").write_bytes(
+            (source.parent / f"{source.name}-wal").read_bytes()
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_schema_probe_with_leftover_wal_leaves_sidecars_untouched(
+    tmp_path, monkeypatch, capsys, matches
+):
+    """With a pending WAL the probe neither creates -shm nor changes any file."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    live = tmp_path / "live"
+    live.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    target = store_dir / "target.db"
+    store_cls = SqliteProposalStore if matches else SqliteExecutionStore
+    _crashed_wal_copy(store_cls, live / "source.db", target)
+    before = _cli_store_bytes(store_dir)
+    assert (
+        actor_erasure._sqlite_schema_matches(
+            str(target), "proposals", proposal_schema_version
+        )
+        is matches
+    )
+    assert _cli_store_bytes(store_dir) == before
+    if not matches:
+        args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+        assert main(args + ["--governance-db", str(target)]) == 2
+        assert capsys.readouterr().out == ""
+        assert _cli_store_bytes(store_dir) == before

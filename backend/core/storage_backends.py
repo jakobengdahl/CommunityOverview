@@ -48,6 +48,8 @@ from typing import (
 
 from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
 
+from .actor_attribution import validate_erasure
+
 logger = logging.getLogger(__name__)
 
 
@@ -1945,6 +1947,37 @@ class FileGraphPersistenceBackend:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
             raise
+
+
+class StagedLayersFile:
+    """Actor erasure over a file backend's `<stem>.layers.json` alone.
+
+    Operator maintenance with writers stopped. Only the `staged_by` of
+    pending layer entries is rewritten; the graph is never loaded and a
+    pending merge is never settled, so nothing else of the store changes.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        if not self.path.exists():
+            return 0
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        count = 0
+        # Every entry is checked before anything is written, so a malformed
+        # file fails the store without a partial rewrite.
+        for session in data["sessions"].values():
+            for entry in session["entries"]:
+                if entry.get("staged_by") == actor_id:
+                    entry["staged_by"] = replacement_token
+                    count += 1
+        if count:
+            FileGraphPersistenceBackend._write_json_atomically(
+                self.path, data, prefix="layers_"
+            )
+        return count
 
 
 # Last, because that module imports this one: by now every name it takes from

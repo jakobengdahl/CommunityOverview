@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -32,12 +34,14 @@ class ActorErasureService:
         run_history: Optional[ActorErasureStore] = None,
         proposals: Optional[ActorErasureStore] = None,
         session_activity: Optional[ActorErasureStore] = None,
+        staged_layers: Optional[ActorErasureStore] = None,
     ):
         self._stores = {
             "mutation_history": mutation_history,
             "run_history": run_history,
             "proposals": proposals,
             "session_activity": session_activity,
+            "staged_layers": staged_layers,
         }
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> dict:
@@ -61,24 +65,33 @@ class ActorErasureService:
 
 
 def _sqlite_schema_matches(path: str, table: str, version: int) -> bool:
-    """Read-only check that *path* is a current-schema store owning *table*."""
-    uri = f"{Path(path).resolve().as_uri()}?mode=ro"
-    if not Path(f"{path}-wal").exists():
-        # Without a pending WAL the main file is complete; immutable stops
-        # SQLite from leaving -shm/-wal sidecars next to the store.
-        uri += "&immutable=1"
-    try:
-        conn = sqlite3.connect(uri, uri=True)
+    """Check that *path* is a current-schema store owning *table*.
+
+    Nothing next to *path* is created or changed. immutable=1 keeps SQLite
+    from creating -shm/-wal sidecars, but it also ignores a pending WAL,
+    which may hold the schema; such a store is probed as a private copy.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        if Path(f"{path}-wal").exists():
+            probe = Path(scratch) / "probe.db"
+            shutil.copyfile(path, probe)
+            shutil.copyfile(f"{path}-wal", f"{probe}-wal")
+            # The copy is private, so SQLite may recover the WAL into it.
+            uri = probe.as_uri()
+        else:
+            uri = f"{Path(path).resolve().as_uri()}?mode=ro&immutable=1"
         try:
-            found = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (table,),
-            ).fetchone()
-            current = conn.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return False
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                found = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()
+                current = conn.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
     return found is not None and current == version
 
 
@@ -105,6 +118,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--sessions-dir", help="Directory containing session JSON files"
     )
+    parser.add_argument(
+        "--layers-path", help="Staged-session layers sidecar (<graph>.layers.json)"
+    )
     args = parser.parse_args(argv)
     try:
         validate_erasure(args.actor_id, args.replacement_token)
@@ -121,6 +137,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             FileSessionPersistenceBackend,
             SessionStore,
         )
+        from backend.core.storage_backends import StagedLayersFile
     except Exception:
         print("error: actor attribution erasure failed", file=sys.stderr)
         return 2
@@ -139,14 +156,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.sessions_dir,
             lambda p: SessionStore(FileSessionPersistenceBackend(p)),
         ),
+        ("staged_layers", args.layers_path, StagedLayersFile),
     ):
         # An empty path would resolve to the working directory, not a store.
-        if not path or not Path(path).exists():
+        if not path:
             continue
-        is_dir = name == "session_activity"
-        valid = Path(path).is_dir() if is_dir else Path(path).is_file()
-        if valid and name in sqlite_schemas:
-            valid = _sqlite_schema_matches(path, *sqlite_schemas[name])
+        try:
+            if not Path(path).exists():
+                continue
+            is_dir = name == "session_activity"
+            valid = Path(path).is_dir() if is_dir else Path(path).is_file()
+            if valid and name in sqlite_schemas:
+                valid = _sqlite_schema_matches(path, *sqlite_schemas[name])
+        except OSError:
+            # An unreadable path is refused like a mis-pointed one; the
+            # exception would print the path.
+            valid = False
         if not valid:
             # A mis-pointed path is an invocation error: refuse before any
             # store is opened, because the read-write SQLite constructors
