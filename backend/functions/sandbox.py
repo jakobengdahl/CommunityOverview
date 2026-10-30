@@ -7,8 +7,8 @@ with the function's standard streams already attached. It never imports
 application modules: it runs outside the sandbox, as the run's supervisor.
 
 As supervisor it registers as a child subreaper, forks the function process and
-polls its working-directory quota. Once the function exits, exceeds its quota
-or the host asks it to stop (SIGTERM), it kills every descendant it can see
+traces filesystem changes to enforce its working-directory quota. Once the
+function exits, exceeds its quota or the host asks it to stop (SIGTERM), it kills every descendant it can see
 before it reports on the status descriptor and exits.
 
 The forked child applies, in order: resource limits, ``no_new_privs``, a
@@ -28,7 +28,6 @@ import signal
 import stat
 import struct
 import sys
-import time
 
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
@@ -37,7 +36,6 @@ PR_SET_PDEATHSIG = 1
 SECCOMP_MODE_FILTER = 2
 
 MIB = 1024 * 1024
-DISK_POLL_SECONDS = 0.1
 
 # Exit code of the function child when setting up the sandbox failed; the
 # reason travels over the setup descriptor, so the code is never trusted alone.
@@ -429,6 +427,9 @@ def _child(spec, setup_w):
         libc().prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
         if os.getppid() != spec["supervisor_pid"]:
             raise SetupError("supervisor exited during start")
+        if spec.get("disk_limits"):
+            _ptrace(0, 0)  # PTRACE_TRACEME, before confinement denies ptrace.
+            os.kill(os.getpid(), signal.SIGSTOP)
         confine(spec)
         os.chdir(spec["work_dir"])
         argv = spec["argv"]
@@ -473,10 +474,12 @@ def _children_of(pid):
     return children
 
 
-def _reap_all():
+def _reap_all(spec=None):
     """Kill and reap every descendant; orphans re-parent to this subreaper."""
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     me = os.getpid()
+    disk_exceeded = False
+    monitor_error = ""
     while True:
         for pid in _children_of(me):
             try:
@@ -484,9 +487,22 @@ def _reap_all():
             except ProcessLookupError:
                 pass
         try:
-            os.waitpid(-1, 0)
+            pid, status = os.waitpid(-1, 0x40000000)
+            if os.WIFSTOPPED(status):
+                # SIGKILL itself has a ptrace exit stop, before fd teardown.
+                # Account there too: a write in flight when shutdown started
+                # may have finished after the preceding scan.
+                if spec is not None and not disk_exceeded and not monitor_error:
+                    try:
+                        disk_exceeded = _work_dir_exceeds_quota(spec)
+                    except OSError as exc:
+                        monitor_error = str(exc)
+                try:
+                    _ptrace(7, pid, 0, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         except ChildProcessError:
-            return
+            return disk_exceeded, monitor_error
 
 
 def _report(status_fd, message):
@@ -568,31 +584,181 @@ def _work_dir_exceeds_quota(spec):
             pid = pending.pop()
             pending.extend(_children_of(pid))
             try:
-                descriptors = os.listdir(f"/proc/{pid}/fd")
+                tasks = os.listdir(f"/proc/{pid}/task")
             except FileNotFoundError:
                 continue
-            for descriptor in descriptors:
+            for task in tasks:
+                fd_dir = f"/proc/{pid}/task/{task}/fd"
                 try:
-                    info = os.stat(f"/proc/{pid}/fd/{descriptor}")
+                    descriptors = os.listdir(fd_dir)
                 except FileNotFoundError:
-                    continue  # Closed or exited during the scan.
-                identity = (info.st_dev, info.st_ino)
-                if (
-                    info.st_nlink != 0
-                    or not stat.S_ISREG(info.st_mode)
-                    or identity in seen
-                ):
                     continue
-                seen.add(identity)
-                total_files += 1
-                total_bytes += max(info.st_size, info.st_blocks * 512)
-                if total_bytes > limits["bytes"] or total_files > limits["files"]:
-                    return True
+                for descriptor in descriptors:
+                    try:
+                        info = os.stat(f"{fd_dir}/{descriptor}")
+                    except FileNotFoundError:
+                        continue  # Closed or exited during the scan.
+                    identity = (info.st_dev, info.st_ino)
+                    if (
+                        info.st_nlink != 0
+                        or not stat.S_ISREG(info.st_mode)
+                        or identity in seen
+                    ):
+                        continue
+                    seen.add(identity)
+                    total_bytes += max(info.st_size, info.st_blocks * 512)
+                    if total_bytes > limits["bytes"]:
+                        return True
         return False
     finally:
         for directory, entries in reversed(stack):
             entries.close()
             os.close(directory)
+
+
+# Trace filesystem-changing calls through their completion. Unlike a timer,
+# syscall stops cannot miss a create/write followed immediately by a removal.
+# Calls which can discard storage also hold the lock, including close and exit.
+# Other calls (notably futex/read/poll) must run concurrently so threads can
+# communicate while a writer is blocked in the kernel.
+# Each pair is x86-64 / asm-generic (arm64); -1 means absent.
+_DISK_CALL_NUMBERS = {
+    "write": (1, 64),
+    "open": (2, -1),
+    "close": (3, 57),
+    "mmap": (9, 222),
+    "munmap": (11, 215),
+    "ioctl": (16, 29),
+    "pwrite64": (18, 68),
+    "writev": (20, 66),
+    "msync": (26, 227),
+    "madvise": (28, 233),
+    "dup": (32, 23),
+    "dup2": (33, -1),
+    "sendfile": (40, 71),
+    "execve": (59, 221),
+    "exit": (60, 93),
+    "fcntl": (72, 25),
+    "truncate": (76, 45),
+    "ftruncate": (77, 46),
+    "rename": (82, -1),
+    "mkdir": (83, -1),
+    "rmdir": (84, -1),
+    "creat": (85, -1),
+    "link": (86, -1),
+    "unlink": (87, -1),
+    "symlink": (88, -1),
+    "mknod": (133, -1),
+    "setxattr": (188, 5),
+    "lsetxattr": (189, 6),
+    "fsetxattr": (190, 7),
+    "removexattr": (197, 14),
+    "lremovexattr": (198, 15),
+    "fremovexattr": (199, 16),
+    "exit_group": (231, 94),
+    "openat": (257, 56),
+    "mkdirat": (258, 34),
+    "mknodat": (259, 33),
+    "unlinkat": (263, 35),
+    "renameat": (264, 38),
+    "linkat": (265, 37),
+    "symlinkat": (266, 36),
+    "splice": (275, 76),
+    "tee": (276, 77),
+    "sync_file_range": (277, 84),
+    "fallocate": (285, 47),
+    "dup3": (292, 24),
+    "preadv": (295, 69),
+    "pwritev": (296, 70),
+    "renameat2": (316, 276),
+    "execveat": (322, 281),
+    "copy_file_range": (326, 285),
+    "pwritev2": (328, 287),
+    "close_range": (436, 436),
+    "openat2": (437, 437),
+}
+_DISK_SYSCALLS = {
+    arch: {pair[index] for pair in _DISK_CALL_NUMBERS.values() if pair[index] >= 0}
+    for arch, index in (("x86_64", 0), ("aarch64", 1))
+}
+
+
+def _ptrace(request, pid, address=0, data=0):
+    result = libc().ptrace(request, pid, ctypes.c_void_p(address), data)
+    if result == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return result
+
+
+def _trace_quota(spec, child, status_fd):
+    """Return the child's wait status, stopping with all descriptors intact.
+
+    Descendants inherit tracing even when they escape their parent's process
+    group. PTRACE_EVENT_EXIT stops before the kernel releases descriptors.
+    PTRACE_GET_SYSCALL_INFO avoids architecture-specific register layouts.
+    """
+    calls = _DISK_SYSCALLS.get(os.uname().machine)
+    if calls is None:
+        raise OSError("disk enforcement unsupported on this architecture")
+    owner = None
+    queued = []
+    newborn = set()
+    options = 1 | 2 | 4 | 8 | 16 | 64 | (1 << 20)
+    # TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/EXIT, EXITKILL.
+    _, status = os.waitpid(child, os.WUNTRACED)
+    if not os.WIFSTOPPED(status):
+        return status, False
+    _ptrace(0x4200, child, 0, options)  # SETOPTIONS
+    _ptrace(24, child)  # SYSCALL
+    while True:
+        pid, status = os.waitpid(-1, 0x40000000)  # __WALL, includes threads
+        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+            if pid == child:
+                return status, False
+            if owner == pid:
+                owner = None
+        else:
+            event = status >> 16
+            sig = os.WSTOPSIG(status)
+            if event in (1, 2, 3):
+                descendant = ctypes.c_ulong()
+                _ptrace(0x4201, pid, 0, ctypes.byref(descendant))
+                newborn.add(descendant.value)
+            if sig == (signal.SIGTRAP | 0x80):
+                info = ctypes.create_string_buffer(88)
+                _ptrace(0x420E, pid, 88, ctypes.byref(info))
+                operation = info.raw[0]
+                number = struct.unpack_from("Q", info.raw, 24)[0]
+                if operation == 1 and number in calls:
+                    if owner is not None and owner != pid:
+                        queued.append(pid)
+                        continue
+                    owner = pid
+                if owner == pid and _work_dir_exceeds_quota(spec):
+                    return None, True
+                if operation == 2 and owner == pid:
+                    owner = None
+                sig = 0
+            elif event:
+                if event == 4 and pid == child:
+                    _report(status_fd, {"started": child})
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+                if _work_dir_exceeds_quota(spec):
+                    return None, True
+                # Exit is held until accounting has run, before fd teardown.
+                if event == 6 and owner == pid:
+                    owner = None
+                sig = 0
+            elif pid in newborn and sig == signal.SIGSTOP:
+                newborn.remove(pid)
+                sig = 0
+            _ptrace(24, pid, 0, sig)
+        if owner is None and queued:
+            owner = queued.pop(0)
+            if _work_dir_exceeds_quota(spec):
+                return None, True
+            _ptrace(24, owner)
 
 
 def supervise(spec, status_fd):
@@ -623,33 +789,32 @@ def supervise(spec, status_fd):
     disk_exceeded = False
     monitor_error = ""
     try:
-        setup_error = _read_all(setup_r)
+        traced_status = None
+        if spec.get("disk_limits"):
+            traced_status, disk_exceeded = _trace_quota(spec, child, status_fd)
+            stopped = disk_exceeded
+        setup_error = _read_all(setup_r) if not stopped else b""
         if setup_error:
             _reap_all()
             _report(status_fd, {"setup_error": setup_error.decode(errors="replace")})
             return
-        _report(status_fd, {"started": child})
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
-        next_disk_poll = 0
-        try:
-            while True:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-                if pid == child:
-                    if os.WIFSIGNALED(status):
-                        exit_signal = os.WTERMSIG(status)
-                    else:
-                        exit_code = os.WEXITSTATUS(status)
-                    break
-                if time.monotonic() >= next_disk_poll:
-                    disk_exceeded = _work_dir_exceeds_quota(spec)
-                    if disk_exceeded:
-                        stopped = True
+        if not spec.get("disk_limits"):
+            _work_dir_exceeds_quota(spec)
+            _report(status_fd, {"started": child})
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+            try:
+                while True:
+                    pid, status = os.waitpid(-1, 0)
+                    if pid == child:
+                        traced_status = status
                         break
-                    next_disk_poll = time.monotonic() + DISK_POLL_SECONDS
-                if pid == 0:
-                    time.sleep(DISK_POLL_SECONDS)
-        except ChildProcessError:
-            pass
+            except ChildProcessError:
+                pass
+        if traced_status is not None:
+            if os.WIFSIGNALED(traced_status):
+                exit_signal = os.WTERMSIG(traced_status)
+            else:
+                exit_code = os.WEXITSTATUS(traced_status)
         # EOF can make the host ask to stop after the child has exited. Ignore
         # that request while still protected by the _Stop handler, so it cannot
         # interrupt the handoff to cleanup and lose the final report.
@@ -659,13 +824,18 @@ def supervise(spec, status_fd):
     except OSError as exc:
         monitor_error = str(exc)
         stopped = True
-    _reap_all()
-    # Catch fast runs and EOF-triggered stop requests between polling ticks.
+    # Account before cleanup releases retained unlinked files.
     if not disk_exceeded and not monitor_error:
         try:
             disk_exceeded = _work_dir_exceeds_quota(spec)
         except OSError as exc:
             monitor_error = str(exc)
+    if spec.get("disk_limits"):
+        cleanup_exceeded, cleanup_error = _reap_all(spec)
+        disk_exceeded = disk_exceeded or cleanup_exceeded
+        monitor_error = monitor_error or cleanup_error
+    else:
+        _reap_all()
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     _report(
         status_fd,

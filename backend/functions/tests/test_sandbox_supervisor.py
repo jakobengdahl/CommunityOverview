@@ -74,6 +74,8 @@ sys.stdin.read()
         )
         spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 8192, "files": 1}}
         assert sandbox._work_dir_exceeds_quota(spec) is False
+        (tmp_path / "entry").touch()
+        assert sandbox._work_dir_exceeds_quota(spec) is False
         spec["disk_limits"]["bytes"] -= 1
         assert sandbox._work_dir_exceeds_quota(spec) is True
     finally:
