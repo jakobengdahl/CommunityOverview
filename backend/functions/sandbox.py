@@ -549,6 +549,7 @@ def _work_dir_exceeds_quota(spec):
         stack.append((fd, entries))
 
     push(os.open(spec["work_dir"], flags))
+    work_prefix = os.path.realpath(spec["work_dir"]).rstrip("/") + "/"
     total_bytes = 0
     total_files = 0
     try:
@@ -604,6 +605,14 @@ def _work_dir_exceeds_quota(spec):
                         or not stat.S_ISREG(info.st_mode)
                         or identity in seen
                     ):
+                        continue
+                    try:
+                        target = os.readlink(f"{fd_dir}/{descriptor}")
+                    except FileNotFoundError:
+                        continue
+                    # procfs names an unlinked file by its former path. Memfds
+                    # and files deleted outside this tree are not work usage.
+                    if not target.startswith(work_prefix):
                         continue
                     seen.add(identity)
                     total_bytes += max(info.st_size, info.st_blocks * 512)
@@ -683,6 +692,35 @@ _DISK_SYSCALLS = {
 }
 
 
+# These calls can block on IPC without changing any disk usage. Their output
+# descriptor is argument 0, except splice's argument 2.
+_IPC_OUTPUT_CALLS = {
+    arch: {
+        _DISK_CALL_NUMBERS[name][index]: argument
+        for name, argument in (
+            ("write", 0),
+            ("writev", 0),
+            ("sendfile", 0),
+            ("splice", 2),
+            ("tee", 2),
+        )
+    }
+    for arch, index in (("x86_64", 0), ("aarch64", 1))
+}
+
+
+def _is_ipc_output(pid, number, info):
+    argument = _IPC_OUTPUT_CALLS[os.uname().machine].get(number)
+    if argument is None:
+        return False
+    descriptor = struct.unpack_from("Q", info, 32 + 8 * argument)[0]
+    try:
+        mode = os.stat(f"/proc/{pid}/fd/{descriptor}").st_mode
+    except FileNotFoundError:
+        return False  # An invalid descriptor cannot block or change storage.
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
 def _ptrace(request, pid, address=0, data=0):
     result = libc().ptrace(request, pid, ctypes.c_void_p(address), data)
     if result == -1:
@@ -730,7 +768,11 @@ def _trace_quota(spec, child, status_fd):
                 _ptrace(0x420E, pid, 88, ctypes.byref(info))
                 operation = info.raw[0]
                 number = struct.unpack_from("Q", info.raw, 24)[0]
-                if operation == 1 and number in calls:
+                if (
+                    operation == 1
+                    and number in calls
+                    and not _is_ipc_output(pid, number, info.raw)
+                ):
                     if owner is not None and owner != pid:
                         queued.append(pid)
                         continue

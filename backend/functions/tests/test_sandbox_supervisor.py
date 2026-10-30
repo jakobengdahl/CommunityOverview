@@ -45,12 +45,19 @@ def test_disk_scan_counts_both_allocated_and_apparent_bytes(tmp_path, sparse):
 
 
 def test_unlinked_descriptor_accounting_deduplicates_inodes(monkeypatch, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
     child = subprocess.Popen(
         [
             sys.executable,
             "-c",
             """
 import os, sys
+memfd = os.memfd_create('quota-regression')
+os.ftruncate(memfd, 1024 * 1024)
+outside = open(sys.argv[2], 'w+b', buffering=0)
+os.unlink(sys.argv[2])
+outside.truncate(1024 * 1024)
 f = open(sys.argv[1], 'w+b', buffering=0)
 os.unlink(sys.argv[1])
 f.truncate(8192)
@@ -58,7 +65,8 @@ duplicate = os.dup(f.fileno())
 print('ready', flush=True)
 sys.stdin.read()
 """,
-            str(tmp_path / "deleted"),
+            str(work / "deleted"),
+            str(tmp_path / "work-outside"),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -72,9 +80,9 @@ sys.stdin.read()
             "_children_of",
             lambda pid: [child.pid] if pid == os.getpid() else [],
         )
-        spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 8192, "files": 1}}
+        spec = {"work_dir": str(work), "disk_limits": {"bytes": 8192, "files": 1}}
         assert sandbox._work_dir_exceeds_quota(spec) is False
-        (tmp_path / "entry").touch()
+        (work / "entry").touch()
         assert sandbox._work_dir_exceeds_quota(spec) is False
         spec["disk_limits"]["bytes"] -= 1
         assert sandbox._work_dir_exceeds_quota(spec) is True
@@ -343,3 +351,65 @@ def test_children_of_parses_the_last_parenthesis_and_ignores_disappearing_pids(
 
     monkeypatch.setattr("builtins.open", read_stat)
     assert sandbox._children_of(42) == [101, 104]
+
+
+@pytest.mark.parametrize("transfer", ["write", "writev", "splice"])
+def test_blocking_pipe_output_does_not_prevent_reader_closing_duplicate(
+    tmp_path, transfer
+):
+    program = """
+import os, sys, threading, time
+read_fd, write_fd = os.pipe()
+duplicate = os.dup(read_fd)
+size = 1024 * 1024
+
+def reader():
+    time.sleep(0.2)  # Let the writer fill the pipe and block first.
+    os.close(duplicate)
+    received = 0
+    while received < size:
+        received += len(os.read(read_fd, 65536))
+    os.close(read_fd)
+
+thread = threading.Thread(target=reader)
+thread.start()
+if sys.argv[1] == 'splice':
+    with open('source', 'w+b', buffering=0) as source:
+        source.write(b'x' * size)
+        source.seek(0)
+        remaining = size
+        while remaining:
+            remaining -= os.splice(source.fileno(), write_fd, remaining)
+else:
+    payload = b'x' * size
+    assert (os.write(write_fd, payload) if sys.argv[1] == 'write'
+            else os.writev(write_fd, [payload])) == size
+thread.join()
+os.close(write_fd)
+print('complete', flush=True)
+"""
+    driver = """
+import os, sys
+from backend.functions import sandbox
+status_fd = os.dup(2)  # Standard streams are redirected by the supervisor.
+sandbox.confine = lambda spec: None
+sandbox.supervise({
+    'host_pid': os.getppid(), 'work_dir': sys.argv[1],
+    'argv': [sys.executable, '-c', sys.argv[2], sys.argv[3]],
+    'disk_limits': {'bytes': 4 * 1024 * 1024, 'files': 10},
+}, status_fd)
+os.close(status_fd)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, str(tmp_path), program, transfer],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "complete\n"
+    final = json.loads(completed.stderr.splitlines()[-1])
+    assert final["exit_code"] == 0
+    assert final["stopped"] is False
+    assert "disk_exceeded" not in final
+    assert "monitor_error" not in final
