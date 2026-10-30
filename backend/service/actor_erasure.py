@@ -95,8 +95,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--actor-id", required=True)
     parser.add_argument("--replacement-token", required=True)
     parser.add_argument("--history-path", help="Mutation-history NDJSON sidecar")
-    parser.add_argument("--run-history-db", default=os.getenv("AGENTS_RUN_HISTORY_DB"))
-    parser.add_argument("--governance-db", default=os.getenv("AGENTS_GOVERNANCE_DB"))
+    # Empty env values mean unset, as in AgentsConfig.from_env.
+    parser.add_argument(
+        "--run-history-db", default=os.getenv("AGENTS_RUN_HISTORY_DB") or None
+    )
+    parser.add_argument(
+        "--governance-db", default=os.getenv("AGENTS_GOVERNANCE_DB") or None
+    )
     parser.add_argument(
         "--sessions-dir", help="Directory containing session JSON files"
     )
@@ -135,7 +140,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             lambda p: SessionStore(FileSessionPersistenceBackend(p)),
         ),
     ):
-        if path is None or not Path(path).exists():
+        # An empty path would resolve to the working directory, not a store.
+        if not path or not Path(path).exists():
             continue
         is_dir = name == "session_activity"
         valid = Path(path).is_dir() if is_dir else Path(path).is_file()

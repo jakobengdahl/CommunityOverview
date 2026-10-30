@@ -526,6 +526,24 @@ def test_cli_rejects_wrong_store_path_type_before_touching_any_store(
     assert _cli_store_bytes(tmp_path) == before
 
 
+def test_cli_treats_empty_store_paths_as_omitted(tmp_path, monkeypatch, capsys):
+    """Empty env or argument paths skip the store instead of exiting 2 or using cwd."""
+    monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", "")
+    monkeypatch.setenv("AGENTS_GOVERNANCE_DB", "")
+    monkeypatch.chdir(tmp_path)
+    history = tmp_path / "history.ndjson"
+    history.write_text("")
+    (tmp_path / "session.json").write_text(json.dumps({"actor": ACTOR}))
+    before = _cli_store_bytes(tmp_path)
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--history-path", str(history), "--sessions-dir", ""]
+    assert main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["failed_stores"] == []
+    assert set(report["counts"].values()) == {0}
+    assert _cli_store_bytes(tmp_path) == before
+
+
 @pytest.mark.parametrize("kind", ["run_history_db", "empty_file", "old_schema"])
 def test_cli_refuses_sqlite_file_that_is_not_a_current_store_without_writing(
     tmp_path, monkeypatch, capsys, kind
