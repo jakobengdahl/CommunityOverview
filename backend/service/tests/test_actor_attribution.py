@@ -282,6 +282,77 @@ def test_erasure_reports_failures_without_exception_content(erasure_stores, capl
     assert ACTOR not in json.dumps(report) + caplog.text
 
 
+def test_proposal_erasure_replaces_approver_in_applied_result(erasure_stores):
+    """Mutation attribution stored in apply_result is erased; other content stays."""
+    _, proposals = erasure_stores
+    proposal = Proposal(
+        agent_id="agent-1",
+        tool="graph.update",
+        input_args={"name": "Keep"},
+        autonomy_level=AutonomyLevel.PROPOSE,
+    )
+    proposal.status = ProposalStatus.APPLIED
+    proposal.decided_by = "other-member"
+    proposal.apply_result = {
+        "success": True,
+        "note": ACTOR,
+        "attribution": {
+            "actor": {"actor_id": ACTOR, "actor_type": "member"},
+            "scope": {"graph_id": "graph-42"},
+        },
+    }
+    proposal = proposals.create(proposal)
+    report = ActorErasureService(proposals=proposals).erase_actor(ACTOR, TOKEN)
+    assert report["counts"]["proposals"] == 1
+    after = proposals.get(proposal.id)
+    assert after.apply_result == {
+        "success": True,
+        "note": ACTOR,
+        "attribution": {
+            "actor": {"actor_id": TOKEN, "actor_type": "member"},
+            "scope": {"graph_id": "graph-42"},
+        },
+    }
+    assert after.decided_by == "other-member"
+    assert after.status == ProposalStatus.APPLIED
+    assert after.updated_at == proposal.updated_at
+    assert proposals.erase_actor(ACTOR, TOKEN) == 0
+
+
+def test_cli_close_failure_after_erasure_reports_store_with_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    """A failure after stores were modified must not exit 2 or drop the report."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    proposals = SqliteProposalStore(tmp_path / "proposals.db")
+    proposal = _proposal(proposals)
+    proposals.close()
+
+    def broken_close(self):
+        raise RuntimeError(ACTOR)
+
+    monkeypatch.setattr(SqliteProposalStore, "close", broken_close)
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--governance-db", str(tmp_path / "proposals.db")]
+    assert main(args) == 1
+    captured = capsys.readouterr()
+    assert ACTOR not in captured.out + captured.err
+    assert json.loads(captured.out) == {
+        "counts": {
+            "mutation_history": 0,
+            "run_history": 0,
+            "proposals": None,
+            "session_activity": 0,
+        },
+        "failed_stores": ["proposals"],
+    }
+    monkeypatch.undo()
+    proposals = SqliteProposalStore(tmp_path / "proposals.db")
+    assert proposals.get(proposal.id).decided_by == TOKEN
+    proposals.close()
+
+
 def test_history_erasure_is_atomic_on_malformed_records(tmp_path):
     """An unreadable record fails the store without committing an incomplete rewrite."""
     path = tmp_path / "history.ndjson"

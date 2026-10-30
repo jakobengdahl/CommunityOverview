@@ -11,7 +11,6 @@ import argparse
 import json
 import os
 import sys
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -88,47 +87,54 @@ def main(argv: Optional[list[str]] = None) -> int:
             FileSessionPersistenceBackend,
             SessionStore,
         )
-
-        stores = {}
-        failed = []
-        with ExitStack() as stack:
-            for name, path, factory in (
-                ("mutation_history", args.history_path, GraphHistoryStore),
-                ("run_history", args.run_history_db, SqliteExecutionStore),
-                ("proposals", args.governance_db, SqliteProposalStore),
-                (
-                    "session_activity",
-                    args.sessions_dir,
-                    lambda p: SessionStore(FileSessionPersistenceBackend(p)),
-                ),
-            ):
-                if path is None:
-                    continue
-                try:
-                    if not Path(path).exists():
-                        continue
-                    if name == "session_activity":
-                        if not Path(path).is_dir():
-                            raise ValueError("Expected a session directory")
-                    elif not Path(path).is_file():
-                        raise ValueError("Expected a store file")
-                    store = factory(path)
-                    if hasattr(store, "close"):
-                        stack.callback(store.close)
-                    stores[name] = store
-                except Exception:
-                    failed.append(name)
-            report = ActorErasureService(**stores).erase_actor(
-                args.actor_id, args.replacement_token
-            )
-            for name in failed:
-                report["counts"][name] = None
-                report["failed_stores"].append(name)
-        print(json.dumps(report))
-        return 1 if report["failed_stores"] else 0
     except Exception:
         print("error: actor attribution erasure failed", file=sys.stderr)
         return 2
+
+    # From here on stores may be modified, so every failure is reported per
+    # store with exit 1; exit 2 is reserved for runs that touched nothing.
+    stores = {}
+    failed = []
+    try:
+        for name, path, factory in (
+            ("mutation_history", args.history_path, GraphHistoryStore),
+            ("run_history", args.run_history_db, SqliteExecutionStore),
+            ("proposals", args.governance_db, SqliteProposalStore),
+            (
+                "session_activity",
+                args.sessions_dir,
+                lambda p: SessionStore(FileSessionPersistenceBackend(p)),
+            ),
+        ):
+            if path is None:
+                continue
+            try:
+                if not Path(path).exists():
+                    continue
+                if name == "session_activity":
+                    if not Path(path).is_dir():
+                        raise ValueError("Expected a session directory")
+                elif not Path(path).is_file():
+                    raise ValueError("Expected a store file")
+                stores[name] = factory(path)
+            except Exception:
+                failed.append(name)
+        report = ActorErasureService(**stores).erase_actor(
+            args.actor_id, args.replacement_token
+        )
+    finally:
+        for name, store in stores.items():
+            try:
+                if hasattr(store, "close"):
+                    store.close()
+            except Exception:
+                failed.append(name)
+    for name in failed:
+        report["counts"][name] = None
+        if name not in report["failed_stores"]:
+            report["failed_stores"].append(name)
+    print(json.dumps(report))
+    return 1 if report["failed_stores"] else 0
 
 
 if __name__ == "__main__":

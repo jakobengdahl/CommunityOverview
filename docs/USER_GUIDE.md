@@ -906,14 +906,16 @@ with it; graph history is the permanent audit trail.
 **Operator maintenance: replacing actor attribution.**
 `ActorErasureService.erase_actor(actor_id, replacement_token)` in
 `backend/service/actor_erasure.py` replaces matching structured actor identifiers
-in mutation history, nested run-history attribution, proposal `decided_by`, and
-session activity (including sessions not currently loaded). Supply the optional
+in mutation history, nested run-history attribution, proposal `decided_by` and
+the attribution in applied proposal results, and session activity (including sessions not currently loaded). Supply the optional
 stores to its constructor. An absent store returns zero; PostgreSQL graph storage
 has no mutation-history sidecar, so omit that store. Graph nodes and edges are
 never written. Record IDs, timestamps, decision status and unrelated actors are
 preserved. This replaces attribution, including actor/delegation objects,
-staging actors, client IDs and matching `agent:<id>` origins; it does not search
-free text or erase graph content.
+`staged_by` in event origins and activity records, client IDs and matching
+`agent:<id>` origins; it does not search free text or erase graph content.
+Pending entries in a staged session's layer keep their `staged_by`: merge or
+discard open staged sessions before maintenance.
 
 Stop application processes, workers and other writers before maintenance, and
 use a non-personal replacement token that does not contain the original actor
