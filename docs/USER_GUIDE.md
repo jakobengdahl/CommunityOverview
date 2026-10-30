@@ -935,6 +935,10 @@ The database flags default to `AGENTS_RUN_HISTORY_DB` and
 not created. Output contains only per-store changed-record `counts` and
 `failed_stores`, never actor identifiers, replacement tokens or source data.
 Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
+A path of the wrong kind (a file given as `--sessions-dir`, or a database that
+is not a current-schema store of that flag's kind) is an invocation error: no
+store is opened or migrated. Start the application once to migrate an older
+database before running maintenance.
 A failed store has a `null` count because partial changes may have happened;
 other stores are still processed. Repair any reported store failure and rerun
 with the same inputs: already replaced records count as zero. Damaged history

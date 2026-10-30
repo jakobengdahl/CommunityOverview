@@ -2,6 +2,7 @@
 
 import copy
 import json
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
@@ -500,30 +501,60 @@ def test_session_erasure_updates_different_loaded_and_persisted_records():
     assert store.erase_actor(ACTOR, TOKEN) == 0
 
 
-def test_cli_rejects_wrong_store_path_type_without_disclosure(
+def _cli_store_bytes(tmp_path):
+    return {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+
+
+def test_cli_rejects_wrong_store_path_type_before_touching_any_store(
     tmp_path, monkeypatch, capsys
 ):
-    """An existing file passed as a sessions directory must not look like an empty store."""
+    """A file passed as a sessions directory is exit 2 with every store unchanged."""
     monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
     monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    proposals = SqliteProposalStore(tmp_path / "proposals.db")
+    _proposal(proposals)
+    proposals.close()
     path = tmp_path / ACTOR
     path.write_text("{}")
-    assert (
-        main(
-            [
-                "--actor-id",
-                ACTOR,
-                "--replacement-token",
-                TOKEN,
-                "--sessions-dir",
-                str(path),
-            ]
-        )
-        == 1
-    )
+    before = _cli_store_bytes(tmp_path)
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--governance-db", str(tmp_path / "proposals.db")]
+    assert main(args + ["--sessions-dir", str(path)]) == 2
     captured = capsys.readouterr()
-    assert ACTOR not in captured.out + captured.err
-    assert json.loads(captured.out)["failed_stores"] == ["session_activity"]
+    assert captured.out == ""
+    assert ACTOR not in captured.err
+    assert _cli_store_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["run_history_db", "empty_file", "old_schema"])
+def test_cli_refuses_sqlite_file_that_is_not_a_current_store_without_writing(
+    tmp_path, monkeypatch, capsys, kind
+):
+    """A mis-pointed, empty or older governance DB is exit 2 and never migrated."""
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
+    target = tmp_path / "target.db"
+    if kind == "run_history_db":
+        SqliteExecutionStore(target).close()
+    elif kind == "empty_file":
+        target.write_bytes(b"")
+    else:
+        SqliteProposalStore(target).close()
+        conn = sqlite3.connect(target)
+        conn.execute("PRAGMA user_version=2")
+        conn.commit()
+        conn.close()
+    runs = SqliteExecutionStore(tmp_path / "runs.db")
+    _run(runs)
+    runs.close()
+    before = _cli_store_bytes(tmp_path)
+    args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
+    args += ["--run-history-db", str(tmp_path / "runs.db")]
+    assert main(args + ["--governance-db", str(target)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert ACTOR not in captured.err
+    assert _cli_store_bytes(tmp_path) == before
 
 
 def test_erasure_preserves_entity_and_execution_content(erasure_stores, tmp_path):
