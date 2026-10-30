@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
-# Only a short error excerpt is used; bound decoded terminal bodies as they arrive.
+# Only a short error excerpt is used; terminal bodies are read up to this cap.
 MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
@@ -466,6 +466,9 @@ class DeliveryWorker:
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": "CommunityGraph-Events/1.0",
+                # Replaces httpx's default gzip/deflate offer: encoded bodies
+                # are left unread, so ask receivers not to send them.
+                "Accept-Encoding": "identity",
                 "X-Event-ID": event.event_id,
                 "X-Event-Type": event.event_type.value,
             }
@@ -604,29 +607,7 @@ class DeliveryWorker:
                     follow_redirects=False,
                 ) as response:
                     if not response.is_redirect:
-                        # HTTPX decodes before iter_bytes yields, so even a tiny
-                        # compressed chunk can allocate far beyond our body cap.
-                        # Webhook diagnostics do not require encoded bodies.
-                        encoding = response.headers.get("content-encoding", "")
-                        if encoding.strip().lower() not in ("", "identity"):
-                            raise httpx.RequestError(
-                                "Encoded webhook response body is not supported",
-                                request=response.request,
-                            )
-                        chunks = []
-                        total = 0
-                        for chunk in response.iter_bytes():
-                            total += len(chunk)
-                            if total > MAX_WEBHOOK_BODY_BYTES:
-                                raise httpx.RequestError(
-                                    "Webhook response body exceeds "
-                                    f"{MAX_WEBHOOK_BODY_BYTES} bytes",
-                                    request=response.request,
-                                )
-                            chunks.append(chunk)
-                        # Cache the decoded bytes as Response.read() does, so
-                        # response.text remains usable after the stream closes.
-                        response._content = b"".join(chunks)
+                        response._content = self._read_bounded_body(response)
                         return response
                     location = str(response.headers.get("location", ""))
                     if not location:
@@ -642,6 +623,29 @@ class DeliveryWorker:
                         current_method = "GET"
                     current_url = next_url
         raise httpx.TooManyRedirects("Exceeded redirect limit", request=None)
+
+    @staticmethod
+    def _read_bounded_body(response: httpx.Response) -> bytes:
+        """Read at most MAX_WEBHOOK_BODY_BYTES of a terminal body, then stop.
+
+        The body is diagnostic only, so an oversized or encoded body never
+        changes the delivery outcome; the status code alone decides it.
+        """
+        # HTTPX decodes before iter_bytes yields, so even a tiny compressed
+        # chunk can allocate far beyond the cap: leave encoded bodies unread.
+        encoding = response.headers.get("content-encoding", "")
+        if encoding.strip().lower() not in ("", "identity"):
+            return b""
+        chunks = []
+        remaining = MAX_WEBHOOK_BODY_BYTES
+        # Check the budget before asking for the next chunk, so nothing is
+        # pulled from the stream once the cap is reached.
+        for chunk in response.iter_bytes():
+            chunks.append(chunk[:remaining])
+            remaining -= len(chunks[-1])
+            if remaining <= 0:
+                break
+        return b"".join(chunks)
 
     def _handle_failure(
         self,
