@@ -48,6 +48,8 @@ from typing import (
 
 from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
 
+from .actor_attribution import validate_erasure
+
 logger = logging.getLogger(__name__)
 
 
@@ -1947,6 +1949,79 @@ class FileGraphPersistenceBackend:
             else:
                 os.rename(temp_path, target)
         except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
+
+class StagedLayersFile:
+    """Actor erasure over a file backend's layer store sidecars.
+
+    Operator maintenance with writers stopped. Only the `staged_by` of
+    pending layer entries in `<stem>.layers.json` and the merging `actor` of
+    the records in the `<stem>.merges.ndjson` beside it are rewritten; the
+    graph is never loaded and a pending merge is never settled, so nothing
+    else of the store changes.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        suffix = ".layers.json"
+        self.merge_log_path = (
+            self.path.with_name(self.path.name[: -len(suffix)] + ".merges.ndjson")
+            if self.path.name.endswith(suffix)
+            else None
+        )
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        # Both files are read and checked before either is written, so a
+        # malformed one fails the store without a partial rewrite.
+        data = None
+        count = 0
+        if self.path.exists():
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            for session in data["sessions"].values():
+                for entry in session["entries"]:
+                    if entry.get("staged_by") == actor_id:
+                        entry["staged_by"] = replacement_token
+                        count += 1
+        layer_count = count
+        lines = []
+        if self.merge_log_path is not None and self.merge_log_path.exists():
+            raw = self.merge_log_path.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                # An interrupted append; the backend cuts it off at its next
+                # load, after which a rerun can rewrite the log.
+                raise ValueError("merge log ends in an incomplete line")
+            for line in raw.split(b"\n")[:-1] if raw else []:
+                parsed = json.loads(line)
+                record = parsed.get("record")
+                if isinstance(record, dict) and record.get("actor") == actor_id:
+                    record["actor"] = replacement_token
+                    count += 1
+                    # Same serialisation as the backend's append.
+                    line = dumps_storable(parsed).encode("utf-8")
+                lines.append(line + b"\n")
+        if layer_count:
+            FileGraphPersistenceBackend._write_json_atomically(
+                self.path, data, prefix="layers_"
+            )
+        if count > layer_count:
+            self._replace_merge_log(b"".join(lines))
+        return count
+
+    def _replace_merge_log(self, payload: bytes) -> None:
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix=".ndjson", prefix="merges_", dir=self.merge_log_path.parent
+        )
+        try:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.merge_log_path)
+        except BaseException:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
             raise
