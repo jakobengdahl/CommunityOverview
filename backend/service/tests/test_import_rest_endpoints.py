@@ -103,6 +103,24 @@ class TestImportEndpoint:
         assert response.status_code == 413
         assert client.get("/api/graph/nodes/old-1").status_code == 200
 
+    def test_oversized_stream_stops_reading_once_the_cap_is_crossed(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(rest_api, "_MAX_IMPORT_JSON_BYTES", 20)
+
+        async def _stream(self):
+            yield b"x" * 11
+            yield b"x" * 11
+            raise AssertionError("body read past the cap")
+
+        with patch.object(rest_api.Request, "stream", _stream):
+            response = client.post(
+                "/api/graph/import",
+                content=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+        assert response.status_code == 413
+
     @pytest.mark.parametrize(
         "body",
         [b"not json", b"[]", b"null", b"", b"\xff", b"[" * 10_000 + b"]" * 10_000],
@@ -116,10 +134,15 @@ class TestImportEndpoint:
         assert response.status_code == 422
         assert client.get("/api/graph/nodes/old-1").status_code == 200
 
-    def test_parse_errors_do_not_echo_the_upload(self, client):
+    @pytest.mark.parametrize(
+        "body",
+        [b"caller-controlled-" * 1_000, json.dumps(["caller-controlled-"] * 1_000)],
+        ids=["malformed", "non-object"],
+    )
+    def test_parse_errors_do_not_echo_the_upload(self, client, body):
         response = client.post(
             "/api/graph/import",
-            content=b"caller-controlled-" * 1_000,
+            content=body,
             headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 422
@@ -132,6 +155,24 @@ class TestImportEndpoint:
         ]
         assert body["required"] is True
         assert body["content"]["application/json"]["schema"]["type"] == "object"
+
+    @pytest.mark.parametrize("content_type", [None, "text/plain"])
+    def test_non_json_media_types_are_refused_before_reading(
+        self, client, content_type
+    ):
+        headers = {} if content_type is None else {"Content-Type": content_type}
+        with patch.object(
+            rest_api.Request,
+            "stream",
+            side_effect=AssertionError("body must not be read"),
+        ):
+            response = client.post(
+                "/api/graph/import",
+                content=json.dumps(_valid_document()),
+                headers=headers,
+            )
+        assert response.status_code == 415
+        assert client.get("/api/graph/nodes/old-1").status_code == 200
 
     @pytest.mark.parametrize(
         "content_type", ["application/json; charset=utf-8", "application/graph+json"]
@@ -197,6 +238,17 @@ class TestImportEndpoint:
         jobs = response.json()
         assert any(job["id"] == job_id for job in jobs)
 
+    @pytest.mark.parametrize("query, limit", [("", 100), ("?limit=500", 500)])
+    def test_list_import_jobs_passes_the_requested_limit_to_the_store(
+        self, client, import_job_store, monkeypatch, query, limit
+    ):
+        list_jobs = Mock(wraps=import_job_store.list_jobs)
+        monkeypatch.setattr(import_job_store, "list_jobs", list_jobs)
+
+        assert client.get(f"/api/graph/import{query}").status_code == 200
+
+        assert list_jobs.call_args.kwargs["limit"] == limit
+
 
 class TestImportJobReadAuthorization:
     @pytest.mark.parametrize(
@@ -208,13 +260,14 @@ class TestImportJobReadAuthorization:
         ],
     )
     @pytest.mark.parametrize(
-        "allowed, narrowing, status",
+        "allowed, reason, narrowing, status",
         [
-            (False, GraphAccessNarrowing(), 403),
-            (False, GraphAccessNarrowing(enabled=True), 403),
-            (True, GraphAccessNarrowing(enabled=True), 409),
+            (False, "", GraphAccessNarrowing(), 403),
+            (False, "outside workspace", GraphAccessNarrowing(enabled=True), 403),
+            (True, "", GraphAccessNarrowing(enabled=True), 409),
             (
                 True,
+                "",
                 GraphAccessNarrowing(
                     enabled=True,
                     allow_local_graph=False,
@@ -233,12 +286,26 @@ class TestImportJobReadAuthorization:
         path,
         target,
         allowed,
+        reason,
         narrowing,
         status,
     ):
         """Denied or narrowed readers cannot access even the job store."""
+        import_job_store.enqueue(
+            ExecutionJob(
+                id="job-1",
+                agent_id="import",
+                kind=ExecutionKind.IMPORT,
+                idempotency_key="job-1",
+                payload={"backup_path": "/backups/private-graph.json"},
+            )
+        )
         authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
-            allowed=allowed, graph_access=narrowing
+            allowed=allowed,
+            reason=reason,
+            mode="read-only",
+            source="test-hook",
+            graph_access=narrowing,
         )
         for method in ("get", "list_jobs"):
             monkeypatch.setattr(
@@ -255,15 +322,27 @@ class TestImportJobReadAuthorization:
         )
 
         assert response.status_code == status
+        assert "private-graph" not in response.text
         detail = response.json()["detail"]
-        assert detail["success"] is False
         if status == 403:
-            assert detail["error_code"] == "access_denied"
+            assert detail == {
+                "success": False,
+                "error": "Graph access denied",
+                "message": reason or "Graph access denied.",
+                "error_code": "access_denied",
+                "authorization": {
+                    "action": GRAPH_ACTION_READ,
+                    "target": target,
+                    "mode": "read-only",
+                    "source": "test-hook",
+                },
+            }
         else:
-            assert (
-                response.json()["detail"]["error_code"]
-                == "import_requires_full_graph_access"
-            )
+            assert detail == {
+                "success": False,
+                "error_code": "import_requires_full_graph_access",
+                "message": "Reading import jobs requires full graph access.",
+            }
         authorization_hook.evaluate.assert_called_once()
         context = authorization_hook.evaluate.call_args.args[0]
         assert (context.action, context.target) == (GRAPH_ACTION_READ, target)
