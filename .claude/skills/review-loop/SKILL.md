@@ -84,7 +84,9 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
   finding that touches a security guarantee (authentication or authorization,
   secrets, egress/SSRF, privacy or erasure, sandboxing) is also filed: appended
   to the repo's one rolling residue node in the planning graph (ask the graph
-  for it), never a new node per PR. Everything else is dropped after the PR
+  for it), never a new node per PR. Each appended entry names its PR, the
+  finding's file:line and a one-line issue, so `/small-fix-session` can list
+  and mark it resolved on its own. Everything else is dropped after the PR
   body lists it. `unfalsifiable` findings are only ever listed in the PR body.
   If the planning MCP is unreachable, flag the security residue to the owner.
 - Test volume follows `CLAUDE.md` Testing: one test per guarantee, a second
