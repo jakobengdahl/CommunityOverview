@@ -1307,11 +1307,13 @@ class TestWebhookRedirectHops:
 
 class _WireBackend:
     """Stands in for httpcore's SyncBackend: serves canned raw responses, one
-    per request written, and records how many bytes each request read."""
+    per request written, and records how many bytes each request read, in
+    total and per socket read."""
 
     def __init__(self, responses):
         self.responses = list(responses)
         self.reads = []
+        self.read_sizes = []
 
     def __call__(self):
         return self
@@ -1327,10 +1329,12 @@ class _WireBackend:
                 if b"\r\n\r\n" in data and backend.responses:
                     self.buffer = backend.responses.pop(0)
                     backend.reads.append(0)
+                    backend.read_sizes.append([])
 
             def read(self, max_bytes, timeout=None):
                 data, self.buffer = self.buffer[:max_bytes], self.buffer[max_bytes:]
                 backend.reads[-1] += len(data)
+                backend.read_sizes[-1].append(len(data))
                 return data
 
             def close(self):
@@ -1395,6 +1399,25 @@ class TestWebhookWireReadBound:
         assert cap - 64 * 1024 < len(outcome.content) <= cap
         head = len(final) - len(body)
         assert backend.reads[0] - len(continues) - head <= cap
+
+    def test_cap_counts_from_the_read_that_completes_the_final_head(self, monkeypatch):
+        """Reads before the one completing the final head are free; that read
+        and every later one together stay within the cap."""
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        continues = b"HTTP/1.1 100 Continue\r\n\r\n" * (2 * cap // 25)
+        body = b"b" * (4 * cap)
+        final = _raw_response(200, body)
+        backend, outcome = self._post(monkeypatch, [continues + final])
+        assert outcome.status_code == 200
+        head_end = len(continues) + len(final) - len(body)
+        sizes = backend.read_sizes[0]
+        read_so_far = 0
+        for index, size in enumerate(sizes):
+            read_so_far += size
+            if read_so_far >= head_end:
+                break
+        assert sum(sizes[:index]) > cap
+        assert sum(sizes[index:]) <= cap
 
     def test_each_hop_gets_its_own_cap(self, monkeypatch):
         cap = delivery.MAX_WEBHOOK_BODY_BYTES

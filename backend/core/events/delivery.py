@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
-# Only a short error excerpt is used; each hop reads at most this many bytes
-# off its connection, response headers included.
+# Only a short error excerpt is used. Once a hop's final response head is in,
+# at most this many bytes are read off its connection, counting the read that
+# completed that head; the header phase before it (any 1xx responses and the
+# earlier reads of the final head) is not capped. See _ReadBudget.
 MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
