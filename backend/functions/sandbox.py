@@ -786,6 +786,20 @@ def _ptrace(request, pid, address=0, data=0):
     return result
 
 
+def _sleeps_interruptibly(pid):
+    """Whether a tracee waits in the kernel for an event, not on storage I/O.
+
+    Lock waits, FIFO opens and terminal drains sleep interruptibly ("S") and
+    may wait for a peer queued behind them; storage I/O sleeps in "D".
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            stat = handle.read()
+    except OSError:
+        return False  # Its exit is reported by waitpid.
+    return stat[stat.rfind(b")") + 2 :].startswith(b"S")
+
+
 def _trace_quota(spec, child, status_fd):
     """Return the child's wait status, stopping with all descriptors intact.
 
@@ -798,6 +812,9 @@ def _trace_quota(spec, child, status_fd):
         raise OSError("disk enforcement unsupported on this architecture")
     owner = None
     queued = []
+    # Serialized calls resumed and not yet at their exit stop. A former owner
+    # stays here after yielding the lock, so its completion is still checked.
+    in_flight = set()
     newborn = set()
     options = 1 | 2 | 4 | 8 | 16 | 64 | (1 << 20)
     # TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/EXIT, EXITKILL.
@@ -806,59 +823,91 @@ def _trace_quota(spec, child, status_fd):
         return status, False
     _ptrace(0x4200, child, 0, options)  # SETOPTIONS
     _ptrace(24, child)  # SYSCALL
-    while True:
-        pid, status = os.waitpid(-1, 0x40000000)  # __WALL, includes threads
-        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-            if pid == child:
-                return status, False
-            if owner == pid:
-                owner = None
-        else:
-            event = status >> 16
-            sig = os.WSTOPSIG(status)
-            if event in (1, 2, 3):
-                descendant = ctypes.c_ulong()
-                _ptrace(0x4201, pid, 0, ctypes.byref(descendant))
-                newborn.add(descendant.value)
-            if sig == (signal.SIGTRAP | 0x80):
-                info = ctypes.create_string_buffer(88)
-                _ptrace(0x420E, pid, 88, ctypes.byref(info))
-                operation = info.raw[0]
-                number = struct.unpack_from("Q", info.raw, 24)[0]
-                if (
-                    operation == 1
-                    and number in calls
-                    and not _is_ipc_output(pid, number, info.raw)
-                    and not _is_nonmutating_open(number, info.raw)
-                ):
-                    if owner is not None and owner != pid:
-                        queued.append(pid)
-                        continue
-                    owner = pid
-                if owner == pid and _work_dir_exceeds_quota(spec):
-                    return None, True
-                if operation == 2 and owner == pid:
-                    owner = None
-                sig = 0
-            elif event:
-                if event == 4 and pid == child:
-                    _report(status_fd, {"started": child})
-                    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    # Blocked SIGCHLD stays pending, so sigtimedwait cannot miss a stop.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+    try:
+        while True:
+            while owner is None and queued:
+                owner = queued.pop(0)
                 if _work_dir_exceeds_quota(spec):
                     return None, True
-                # Exit is held until accounting has run, before fd teardown.
-                if event == 6 and owner == pid:
+                try:
+                    _ptrace(24, owner)
+                    in_flight.add(owner)
+                except ProcessLookupError:
+                    owner = None  # Killed while queued, e.g. by exit_group.
+            if owner is not None and queued:
+                pid, status = os.waitpid(-1, 0x40000000 | os.WNOHANG)
+                if not pid:
+                    # An owner waiting for a peer queued behind it would hold
+                    # the run until timeout; let the queue proceed instead.
+                    timed_out = signal.sigtimedwait({signal.SIGCHLD}, 0.05) is None
+                    if timed_out and _sleeps_interruptibly(owner):
+                        owner = None
+                    continue
+            else:
+                pid, status = os.waitpid(-1, 0x40000000)  # __WALL, threads too
+            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                if pid == child:
+                    return status, False
+                if owner == pid:
                     owner = None
-                sig = 0
-            elif pid in newborn and sig == signal.SIGSTOP:
-                newborn.remove(pid)
-                sig = 0
-            _ptrace(24, pid, 0, sig)
-        if owner is None and queued:
-            owner = queued.pop(0)
-            if _work_dir_exceeds_quota(spec):
-                return None, True
-            _ptrace(24, owner)
+                in_flight.discard(pid)
+                if pid in queued:
+                    queued.remove(pid)
+                continue
+            try:
+                event = status >> 16
+                sig = os.WSTOPSIG(status)
+                if event in (1, 2, 3):
+                    descendant = ctypes.c_ulong()
+                    _ptrace(0x4201, pid, 0, ctypes.byref(descendant))
+                    newborn.add(descendant.value)
+                if sig == (signal.SIGTRAP | 0x80):
+                    info = ctypes.create_string_buffer(88)
+                    _ptrace(0x420E, pid, 88, ctypes.byref(info))
+                    operation = info.raw[0]
+                    number = struct.unpack_from("Q", info.raw, 24)[0]
+                    if (
+                        operation == 1
+                        and number in calls
+                        and not _is_ipc_output(pid, number, info.raw)
+                        and not _is_nonmutating_open(number, info.raw)
+                    ):
+                        if owner is not None and owner != pid:
+                            queued.append(pid)
+                            continue
+                        owner = pid
+                        in_flight.add(pid)
+                        if _work_dir_exceeds_quota(spec):
+                            return None, True
+                    elif operation == 2 and pid in in_flight:
+                        in_flight.discard(pid)
+                        if owner == pid:
+                            owner = None
+                        if _work_dir_exceeds_quota(spec):
+                            return None, True
+                    sig = 0
+                elif event:
+                    if event == 4 and pid == child:
+                        _report(status_fd, {"started": child})
+                        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+                    if _work_dir_exceeds_quota(spec):
+                        return None, True
+                    # Exit is held until accounting has run, before fd teardown.
+                    if event == 6:
+                        in_flight.discard(pid)
+                        if owner == pid:
+                            owner = None
+                    sig = 0
+                elif pid in newborn and sig == signal.SIGSTOP:
+                    newborn.remove(pid)
+                    sig = 0
+                _ptrace(24, pid, 0, sig)
+            except ProcessLookupError:
+                pass  # Killed while stopped; waitpid reports its exit.
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
 
 
 def supervise(spec, status_fd):

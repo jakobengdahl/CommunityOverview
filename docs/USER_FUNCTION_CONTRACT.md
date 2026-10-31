@@ -439,7 +439,9 @@ system that started it.
   deduplicating descriptors by inode; these files add no directory entries.
   The supervisor traces system calls, serializes storage changes, and checks
   usage before storage can be discarded, including at process exit before
-  descriptors close. A detected quota violation takes precedence over a
+  descriptors close. A call that waits for another of the run's processes
+  stops holding back the others, so usage may overshoot until the next check.
+  A detected quota violation takes precedence over a
   function's result. If usage cannot be checked, the run is terminated and
   fails with `runner_lost`. The 16 MiB per-file limit remains in force.
   Operators should also cap the backing container/host storage (see

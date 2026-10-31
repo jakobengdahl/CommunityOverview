@@ -61,15 +61,18 @@ CommunityOverview is packaged as a Docker container that can run on any platform
 
 The hardened-subprocess user-function runner creates private run directories
 under Python's temporary directory (selected by `TMPDIR` at application startup).
-Its supervisor checks work-directory usage every 100 ms and after termination,
-with defaults of 256 MiB and 10,000 entries per run. Exceeding either quota
+Its supervisor traces the run's storage-changing system calls and checks
+work-directory usage around them, at process exit and after termination, with
+defaults of 256 MiB and 10,000 entries per run. Exceeding either quota
 terminates the run with `disk_exceeded`. Integrations can lower these defaults
 through `HardenedSubprocessRunner(max_disk_bytes=..., max_disk_files=...)`;
 the constructor rejects zero, negative, non-integer or above-maximum values
 before any run starts. The per-file 16 MiB `RLIMIT_FSIZE` limit also applies.
 
-Polling is best-effort: a function can overshoot between scans, and temporary
-peaks or unlinked files held open may escape accounting. As defence in depth,
+Checks count unlinked files still held open by the run. Accounting is still
+best-effort: a call that waits for another of the run's processes stops
+holding back the others, so usage can overshoot until the next check, and
+data buffered in FIFOs or pipes is not counted. As defence in depth,
 put the temporary directory on storage with an enforced container/host limit:
 an ephemeral-storage limit where the platform enforces one, a filesystem quota,
 or a size-capped tmpfs with an inode limit. For a container allowing one run at

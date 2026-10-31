@@ -429,7 +429,11 @@ thread.join()
 os.close(write_fd)
 print('complete', flush=True)
 """
-    driver = """
+    final = _run_with_disk_limits(tmp_path, program, transfer)
+    assert final["exit_code"] == 0
+
+
+_DISK_LIMITED_DRIVER = """
 import os, sys
 from backend.functions import sandbox
 status_fd = os.dup(2)  # Standard streams are redirected by the supervisor.
@@ -441,8 +445,12 @@ sandbox.supervise({
 }, status_fd)
 os.close(status_fd)
 """
+
+
+def _run_with_disk_limits(tmp_path, program, case):
+    """Run a traced program within quota; return its final supervisor report."""
     completed = subprocess.run(
-        [sys.executable, "-c", driver, str(tmp_path), program, transfer],
+        [sys.executable, "-c", _DISK_LIMITED_DRIVER, str(tmp_path), program, case],
         capture_output=True,
         text=True,
         timeout=15,
@@ -450,7 +458,56 @@ os.close(status_fd)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "complete\n"
     final = json.loads(completed.stderr.splitlines()[-1])
-    assert final["exit_code"] == 0
     assert final["stopped"] is False
     assert "disk_exceeded" not in final
     assert "monitor_error" not in final
+    return final
+
+
+@pytest.mark.parametrize("wait", ["lock", "fifo_create"])
+def test_serialized_call_waiting_on_a_queued_peer_does_not_stall_the_run(
+    tmp_path, wait
+):
+    program = """
+import fcntl, os, sys, threading, time
+if sys.argv[1] == 'lock':
+    fd = os.open('lock', os.O_RDWR | os.O_CREAT)
+    fcntl.lockf(fd, fcntl.LOCK_EX)
+    pid = os.fork()
+    if pid == 0:
+        fcntl.lockf(os.open('lock', os.O_RDWR), fcntl.LOCK_EX)  # F_SETLKW waits.
+        os._exit(0)
+    time.sleep(0.2)
+    os.write(fd, b'x')  # Queued behind the waiting lock request.
+    fcntl.lockf(fd, fcntl.LOCK_UN)
+    assert os.waitpid(pid, 0)[1] == 0
+else:
+    os.mkfifo('fifo')
+    def reader():
+        time.sleep(0.2)
+        with open('note', 'wb') as note:  # Queued behind the waiting open.
+            note.write(b'x')
+        os.close(os.open('fifo', os.O_RDONLY))
+    thread = threading.Thread(target=reader)
+    thread.start()
+    os.close(os.open('fifo', os.O_WRONLY | os.O_CREAT))
+    thread.join()
+print('complete', flush=True)
+"""
+    assert _run_with_disk_limits(tmp_path, program, wait)["exit_code"] == 0
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_exit_group_killing_queued_threads_keeps_the_exit_status(tmp_path, attempt):
+    program = """
+import os, threading, time
+def churn():
+    while True:
+        os.close(os.open('f%d' % threading.get_ident(), os.O_WRONLY | os.O_CREAT))
+for _ in range(4):
+    threading.Thread(target=churn, daemon=True).start()
+time.sleep(0.05)
+print('complete', flush=True)
+os._exit(0)
+"""
+    assert _run_with_disk_limits(tmp_path, program, "")["exit_code"] == 0

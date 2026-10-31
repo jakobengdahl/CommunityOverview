@@ -105,24 +105,26 @@ that have them), `setsid`, `setpgid`,
 other architectures' system-call conventions outright. It needs no privileges
 and no third-party dependency.
 
-The per-run supervisor also polls the private working directory every 100 ms,
+The per-run supervisor also traces the run's storage-changing system calls,
 with defaults and platform maximums of 256 MiB and 10,000 entries. The runner's
 `max_disk_bytes` and `max_disk_files` constructor settings accept lower quotas
-and reject invalid values at startup. Scans count entries recursively (files
+and reject invalid values at startup. Storage-changing calls are serialized,
+and usage is scanned around each one, at every process exit before descriptors
+close, and once more after termination. Scans count entries recursively (files
 and directories, excluding the root), sum the larger of apparent size and
 allocated bytes per entry, and never follow symbolic links. Exceeding either
 quota terminates the run and its descendants and returns `failed` with
-`disk_exceeded`, even if the function sent a result. A final scan catches usage
-left by runs that finish between polling ticks; scan failures stop the run
+`disk_exceeded`, even if the function sent a result; scan failures stop the run
 with `runner_lost`. Scans also count unlinked regular files held open by the run
 and its descendants, deduplicating descriptors by inode. The 16 MiB
 `RLIMIT_FSIZE` per-file limit remains in place.
 
-This is best-effort accounting, not a filesystem quota: transient peaks between
-scans, including unlinked files closed between scans, may escape it. Operators
-should also limit
-the container/host storage backing the work directory, using an ephemeral-storage
-limit or size-capped tmpfs with an inode limit where supported (see the
+This is best-effort accounting, not a filesystem quota: a call that sleeps
+waiting for another of the run's processes (a lock, a FIFO open) yields the
+serialization so the run cannot stall, so usage may overshoot until the next
+scan; data buffered in FIFOs or pipes is not counted. Operators should also
+limit the container/host storage backing the work directory, using an
+ephemeral-storage limit or size-capped tmpfs with an inode limit where supported (see the
 [Deployment Guide](../DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 
 ### 2. Runners report an isolation level, and instances set a floor
@@ -182,7 +184,7 @@ deployments that run code from mutually untrusted authors.
 Contract §3 now qualifies invariant 2, invariants 4, 6 and 7 insofar as they
 rest on it, and the process-termination part of invariant 5 by isolation level and §3.1 defines the
 levels; §8 allows the memory limit to be an address-space limit and defines
-working-directory byte and entry quotas with best-effort polling; §11 adds the
+working-directory byte and entry quotas with best-effort accounting; §11 adds the
 `isolation` field and the `isolation_below_minimum` and `disk_exceeded` codes;
 invariant 5 now covers every process a run starts; §12 now states that text may be amended
 until a host implements it. No host implements contract version 1 yet, so its
