@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
@@ -12,6 +12,7 @@ import './CreateSubscriptionDialog.css';
  * - delivery: { webhook_url, ignore_origins, ignore_session_ids }
  */
 export default function CreateSubscriptionDialog({ onClose, onSave, initialData }) {
+  const titleId = useId();
   const schema = useGraphStore((state) => state.schema);
   const { t } = useI18n();
 
@@ -149,8 +150,16 @@ export default function CreateSubscriptionDialog({ onClose, onSave, initialData 
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{isEditing ? t('subscription_dialog.title_edit') : t('subscription_dialog.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <h2 id={titleId}>
+          {isEditing ? t('subscription_dialog.title_edit') : t('subscription_dialog.title')}
+        </h2>
         <p className="dialog-description">{t('subscription_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>

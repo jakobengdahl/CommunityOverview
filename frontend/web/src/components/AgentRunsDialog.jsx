@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState, useId } from 'react';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
 import './AgentRunsDialog.css';
@@ -25,6 +25,7 @@ function formatTime(iso) {
  * result. When `agentId` is set the list is scoped to that agent.
  */
 export default function AgentRunsDialog({ agentId = null, onClose }) {
+  const titleId = useId();
   const { t } = useI18n();
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -54,8 +55,14 @@ export default function AgentRunsDialog({ agentId = null, onClose }) {
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('agent_runs.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <h2 id={titleId}>{t('agent_runs.title')}</h2>
         <p className="dialog-description">{t('agent_runs.description')}</p>
 
         <div className="form-section">

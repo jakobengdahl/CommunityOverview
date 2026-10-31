@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css'; // Reuse the same styles
@@ -38,6 +38,7 @@ export default function CreateAgentDialog({
   onViewRuns,
   onViewProposals,
 }) {
+  const titleId = useId();
   const { t } = useI18n();
   const schema = useGraphStore((state) => state.schema);
   const editingAgentId = initialData?.agent?.id || null;
@@ -344,8 +345,14 @@ export default function CreateAgentDialog({
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{initialData ? t('agent_dialog.title_edit') : t('agent_dialog.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <h2 id={titleId}>{initialData ? t('agent_dialog.title_edit') : t('agent_dialog.title')}</h2>
         <p className="dialog-description">{t('agent_dialog.description')}</p>
 
         <form onSubmit={handleSubmit}>
