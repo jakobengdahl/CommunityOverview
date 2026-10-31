@@ -1776,7 +1776,8 @@ def register_mcp_tools(
 
         - ``has_stored_state`` — the session exists in the session store. The
           tools that act on stored state (``add_nodes_to_session``,
-          ``get_visualization_layout``, ``apply_visualization_layout``) work
+          ``remove_nodes_from_session``, ``get_visualization_layout``,
+          ``apply_visualization_layout``) work
           exactly when this is true. A browser sitting on a session it has not
           changed yet has none: the store entry materialises on the first
           change, so those tools report not-found until then.
@@ -1861,8 +1862,9 @@ def register_mcp_tools(
                 "state yet — it materialises on the first change to it. Results "
                 "pushed with the visualization_session_id parameter reach the "
                 "canvas now, while add_nodes_to_session, "
-                "get_visualization_layout and apply_visualization_layout report "
-                "it as not found until it materialises."
+                "remove_nodes_from_session, get_visualization_layout and "
+                "apply_visualization_layout report it as not found until it "
+                "materialises."
             )
         return {
             "connected": True,
