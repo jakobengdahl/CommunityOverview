@@ -131,6 +131,107 @@ def test_bearer_write_with_session_cookie_and_cross_site_metadata(
     assert writes == ([b"payload"] if expected == 200 else [])
 
 
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/sessions/id/ops"),
+        ("PUT", "/api/import/archive"),
+        ("PATCH", "/api/nodes/id/attachments"),
+        ("DELETE", "/api/nodes/id/attachments"),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata,allowed",
+    [
+        ({}, True),
+        ({"Origin": "http://testserver"}, True),
+        ({"Sec-Fetch-Site": "same-origin"}, True),
+        ({"Sec-Fetch-Site": "none"}, True),
+        ({"Origin": "https://foreign.example"}, False),
+        ({"Sec-Fetch-Site": "cross-site"}, False),
+        ({"Sec-Fetch-Site": "same-site"}, False),
+        ({"Sec-Fetch-Site": "cross-site", "X-Requested-With": "fetch"}, True),
+        ({"Sec-Fetch-Site": "cross-site", "X-Requested-With": " "}, False),
+    ],
+)
+def test_session_cookie_raw_writes_require_same_origin_or_custom_header(
+    method, path, metadata, allowed
+):
+    """Unsafe cookie requests cannot reach raw-body handlers from another origin."""
+    app = FastAPI()
+    writes = []
+
+    @app.api_route(path, methods=[method])
+    async def write(request: Request):
+        writes.append(await request.body())
+        return {"success": True}
+
+    config = AppConfig(auth_enabled=True, auth_username="admin", auth_password="secret")
+    add_auth_middleware(app, config)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, mint_session_cookie(config))
+    response = client.request(
+        method,
+        path,
+        content=b"untrusted body",
+        headers={"Content-Type": "text/plain", **metadata},
+    )
+    assert response.status_code == (200 if allowed else 403)
+    assert writes == ([b"untrusted body"] if allowed else [])
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("credential", ["basic", "cookie"])
+def test_authenticated_safe_methods_skip_write_guard(method, credential):
+    """Cross-site metadata alone does not refuse an authenticated safe request."""
+    app = FastAPI()
+
+    @app.api_route("/api/read", methods=[method])
+    async def read():
+        return {"success": True}
+
+    config = AppConfig(auth_enabled=True, auth_username="admin", auth_password="secret")
+    add_auth_middleware(app, config)
+    client = TestClient(app)
+    headers = {"Origin": "https://foreign.example", "Sec-Fetch-Site": "cross-site"}
+    if credential == "basic":
+        headers.update(_auth_header("admin", "secret"))
+    else:
+        client.cookies.set(SESSION_COOKIE_NAME, mint_session_cookie(config))
+    assert client.request(method, "/api/read", headers=headers).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [None, "Basic " + base64.b64encode(b"admin:wrong").decode(), "Bearer wrong"],
+)
+def test_custom_header_does_not_replace_credentials(authorization):
+    """X-Requested-With only satisfies the write guard; it never authenticates."""
+    app = FastAPI()
+    writes = []
+
+    @app.post("/api/write")
+    async def write(request: Request):
+        writes.append(await request.body())
+        return {"success": True}
+
+    add_auth_middleware(
+        app,
+        AppConfig(
+            auth_enabled=True,
+            auth_username="admin",
+            auth_password="secret",
+            auth_bearer_token="api-secret",
+        ),
+    )
+    headers = {"X-Requested-With": "fetch", "Sec-Fetch-Site": "same-origin"}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    response = TestClient(app).post("/api/write", content=b"payload", headers=headers)
+    assert response.status_code == 401
+    assert writes == []
+
+
 class TestMcpBasicAuth:
     """Tests for MCP_BASIC_AUTH mode."""
 

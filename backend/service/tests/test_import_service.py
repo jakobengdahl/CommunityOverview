@@ -257,6 +257,7 @@ class TestImportReplaceFailure:
         )
         assert private_detail in caplog.text
         assert "RuntimeError" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
 
 
 class TestEnqueueOrDrainStartFailureIsNotFatalToTheReplace:
