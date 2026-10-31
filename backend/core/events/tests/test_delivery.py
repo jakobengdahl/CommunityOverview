@@ -1184,13 +1184,17 @@ class TestWebhookRedirectHops:
         assert sent == ["identity", "identity"]
 
     @pytest.mark.parametrize("status", [302, 307])
-    def test_redirect_body_is_closed_without_reading(self, monkeypatch, status):
+    def test_redirect_body_is_read_to_the_cap_and_closed_before_following(
+        self, monkeypatch, status
+    ):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
         closed = []
 
-        class UnreadBody(httpx.SyncByteStream):
+        class Body(httpx.SyncByteStream):
             def __iter__(self):
-                pytest.fail("redirect bodies must not be read")
-                yield b""
+                yield b"x" * cap
+                pytest.fail("read beyond the redirect body cap")
+                yield b"x"
 
             def close(self):
                 closed.append(True)
@@ -1198,7 +1202,7 @@ class TestWebhookRedirectHops:
         def handler(request, index):
             if index == 0:
                 return httpx.Response(
-                    status, headers={"location": "/next"}, stream=UnreadBody()
+                    status, headers={"location": "/next"}, stream=Body()
                 )
             assert closed == [True]
             return httpx.Response(500, content=b"terminal error")
@@ -1207,6 +1211,34 @@ class TestWebhookRedirectHops:
         assert len(seen) == 2
         assert outcome.text == "terminal error"
         assert closed == [True]
+
+    @pytest.mark.parametrize("status", [302, 307])
+    def test_redirect_body_read_error_fails_the_attempt_and_is_retried(
+        self, monkeypatch, status
+    ):
+        seen = []
+
+        class FailingBody(httpx.SyncByteStream):
+            def __iter__(self):
+                raise httpx.ReadError("connection reset")
+                yield b""
+
+        def recording(request):
+            seen.append(request)
+            return httpx.Response(
+                status, headers={"location": "/next"}, stream=FailingBody()
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+        )
+        monkeypatch.setattr(delivery.time, "sleep", lambda s: None)
+        results = []
+        worker = DeliveryWorker(max_attempts=2, on_result=results.append)
+        worker._deliver(DeliveryItem(create_test_event(), "http://a.example.com/h"))
+        assert [r.status for r in results] == [DeliveryStatus.RETRYING]
+        assert len(seen) == 1
+        assert worker._queue.qsize() == 1
 
     @pytest.mark.parametrize("status", [200, 500])
     @pytest.mark.parametrize(
@@ -1271,3 +1303,92 @@ class TestWebhookRedirectHops:
         )
         assert outcome.text == "diagnostic"
         assert outcome.is_closed
+
+
+class _WireBackend:
+    """Stands in for httpcore's SyncBackend: serves canned raw responses, one
+    per request written, and records how many bytes each request read."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.reads = []
+
+    def __call__(self):
+        return self
+
+    def connect_tcp(self, host, port, timeout=None, **kwargs):
+        backend = self
+
+        class Stream:
+            buffer = b""
+
+            def write(self, data, timeout=None):
+                # Request heads end in a blank line; JSON bodies never do.
+                if b"\r\n\r\n" in data and backend.responses:
+                    self.buffer = backend.responses.pop(0)
+                    backend.reads.append(0)
+
+            def read(self, max_bytes, timeout=None):
+                data, self.buffer = self.buffer[:max_bytes], self.buffer[max_bytes:]
+                backend.reads[-1] += len(data)
+                return data
+
+            def close(self):
+                pass
+
+            def get_extra_info(self, info):
+                return None
+
+        return Stream()
+
+
+def _raw_response(status, body, chunked=False, extra_headers=b""):
+    head = b"HTTP/1.1 %d X\r\n" % status + extra_headers
+    if chunked:
+        size = 32 * 1024
+        framed = b"".join(
+            b"%x\r\n" % len(body[i : i + size]) + body[i : i + size] + b"\r\n"
+            for i in range(0, len(body), size)
+        )
+        return head + b"transfer-encoding: chunked\r\n\r\n" + framed + b"0\r\n\r\n"
+    return head + b"content-length: %d\r\n\r\n" % len(body) + body
+
+
+@pytest.mark.usefixtures("_public_dns")
+class TestWebhookWireReadBound:
+    """Through real httpcore/h11, which read up to 64 KiB per socket call."""
+
+    def _post(self, monkeypatch, responses):
+        backend = _WireBackend(responses)
+        monkeypatch.setattr(delivery.httpcore2, "SyncBackend", backend)
+        response = DeliveryWorker()._post_with_redirect_ssrf_check(
+            "http://start.example.com/hook", {"k": "v"}, {}
+        )
+        return backend, response
+
+    @pytest.mark.parametrize("status", [200, 500])
+    @pytest.mark.parametrize("chunked", [False, True], ids=["length", "chunked"])
+    def test_terminal_hop_reads_at_most_the_cap_off_the_wire(
+        self, monkeypatch, status, chunked
+    ):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        body = bytes(range(256)) * (4 * cap // 256)
+        backend, outcome = self._post(
+            monkeypatch, [_raw_response(status, body, chunked)]
+        )
+        assert outcome.status_code == status
+        assert backend.reads[0] <= cap
+        assert 0 < len(outcome.content) <= cap
+        assert body.startswith(outcome.content)
+
+    def test_each_hop_gets_its_own_cap(self, monkeypatch):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        redirect = _raw_response(
+            302, b"r" * (4 * cap), extra_headers=b"location: /next\r\n"
+        )
+        backend, outcome = self._post(
+            monkeypatch, [redirect, _raw_response(500, b"terminal error")]
+        )
+        assert outcome.status_code == 500
+        assert outcome.text == "terminal error"
+        assert backend.reads[0] <= cap
