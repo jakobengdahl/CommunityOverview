@@ -4786,11 +4786,7 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "not_found",
-                "message": (
-                    f"No annotation with id {annotation_id!r} in this session's "
-                    "generic annotation set (note/group ids are managed by their "
-                    "own tools)."
-                ),
+                "message": f"No annotation with id {annotation_id!r} in this session.",
             }
         try:
             patch = build_annotation_patch(
@@ -4937,7 +4933,7 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "not_found",
-                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
             }
         patch = build_annotation_patch(existing, z=z)
         try:
@@ -5072,7 +5068,7 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "not_found",
-                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
             }
         # Locking drops an attached/anchored annotation's binding in the same
         # write (dec-annotation-lock-semantics point 2) — unlocking does not
@@ -5368,7 +5364,7 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "not_found",
-                "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
+                "message": f"No annotation with id {annotation_id!r} in this session.",
             }
         try:
             result = session_manager.delete_annotation(
