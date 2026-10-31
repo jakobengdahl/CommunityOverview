@@ -79,7 +79,7 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 - Residue in the same PR: before merge, and within the round cap, close each
   `test-durability` finding that needs only a few test lines (about 20 or
   fewer). Such test-only additions do not start a new round; one that touches
-  production code does.
+  the production artifact (§2) does.
 - Residue left over goes in the PR body under a **Residue** heading. Only a
   finding that touches a security guarantee (authentication or authorization,
   secrets, egress/SSRF, privacy or erasure, sandboxing) is also filed: appended
