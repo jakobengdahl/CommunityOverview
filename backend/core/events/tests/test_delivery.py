@@ -1381,6 +1381,21 @@ class TestWebhookWireReadBound:
         assert 0 < len(outcome.content) <= cap
         assert body.startswith(outcome.content)
 
+    def test_informational_responses_do_not_spend_the_body_cap(self, monkeypatch):
+        """1xx bytes before the final response neither fail the hop nor shrink
+        the cap on its body."""
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        continues = b"HTTP/1.1 100 Continue\r\n\r\n" * (2 * cap // 25)
+        assert len(continues) > cap
+        body = b"b" * (4 * cap)
+        final = _raw_response(200, body)
+        backend, outcome = self._post(monkeypatch, [continues + final])
+        assert outcome.status_code == 200
+        # Only the read that completed the final head is charged up front.
+        assert cap - 64 * 1024 < len(outcome.content) <= cap
+        head = len(final) - len(body)
+        assert backend.reads[0] - len(continues) - head <= cap
+
     def test_each_hop_gets_its_own_cap(self, monkeypatch):
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
         redirect = _raw_response(

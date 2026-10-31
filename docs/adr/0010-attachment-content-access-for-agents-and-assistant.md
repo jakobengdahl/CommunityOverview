@@ -827,7 +827,7 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   `truncated`), anything else is `failed`, and the character, segment and
   locator caps are enforced again in the parent. The extractor emits at most
   `ATTACHMENT_EXTRACT_MAX_SEGMENTS` segments (beyond it the result is
-  `truncated`), and a locator has one key whose value is either a string of
+  `truncated`), and a locator has at most one key whose value is either a string of
   at most `ATTACHMENT_LOCATOR_MAX_CHARS` (64, a named constant) characters
   or a non-negative integer below 2^53. stderr is never read or logged; the
   log records only the status and the exit code.
@@ -855,7 +855,8 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
 
 Every limit is a setting, except two named constants
 (`ATTACHMENT_LOCATOR_MAX_CHARS` above and `ATTACHMENT_READ_DEFAULT_CHARS`
-in §1) and `ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES`, which is derived; a value
+in §1), the fixed 2^53 bound on locator integers above, and
+`ATTACHMENT_EXTRACT_MAX_OUTPUT_BYTES`, which is derived; a value
 of `0` or less is refused at boot, never read as "unlimited". The one exception is `ATTACHMENT_CHUNK_OVERLAP_CHARS`,
 which may be `0` and must be smaller than `ATTACHMENT_CHUNK_CHARS`, as
 `attachment_retrieval.chunk_segments` requires.

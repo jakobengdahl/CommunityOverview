@@ -157,14 +157,29 @@ class _ReadBudgetSpent(Exception):
 
 
 class _ReadBudget:
-    """Bytes a request may still read off the wire; reset before each request."""
+    """Body bytes a request may still read off the wire.
+
+    reset() before each request opens the header phase, which is not capped:
+    a server may send any number of 1xx responses before the final one, and
+    spending the budget there would turn a delivery into a retry. arm() once
+    the final headers are in starts the cap, charging it for the read that
+    completed them, the only read that can also hold body bytes.
+    """
 
     def __init__(self, limit: int) -> None:
         self.limit = limit
         self.remaining = limit
+        self.armed = False
+        self.last_read = 0
 
     def reset(self) -> None:
         self.remaining = self.limit
+        self.armed = False
+        self.last_read = 0
+
+    def arm(self) -> None:
+        self.remaining = max(0, self.limit - self.last_read)
+        self.armed = True
 
 
 class _BudgetedStream(httpcore2.NetworkStream):
@@ -175,10 +190,15 @@ class _BudgetedStream(httpcore2.NetworkStream):
         self._budget = budget
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        if self._budget.remaining <= 0:
+        budget = self._budget
+        if not budget.armed:
+            data = self._inner.read(max_bytes, timeout)
+            budget.last_read = len(data)
+            return data
+        if budget.remaining <= 0:
             raise _ReadBudgetSpent("Read budget spent")
-        data = self._inner.read(min(max_bytes, self._budget.remaining), timeout)
-        self._budget.remaining -= len(data)
+        data = self._inner.read(min(max_bytes, budget.remaining), timeout)
+        budget.remaining -= len(data)
         return data
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
@@ -665,6 +685,7 @@ class DeliveryWorker:
                     **({"json": payload} if current_method == "POST" else {}),
                     follow_redirects=False,
                 ) as response:
+                    read_budget.arm()
                     body = self._read_bounded_body(response)
                     if not response.is_redirect:
                         response._content = body
