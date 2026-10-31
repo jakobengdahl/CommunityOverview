@@ -416,31 +416,27 @@ TARGETED_TOOLS = {
         ("label", "group"),
         lambda aid: f"No sticky note with id {aid!r} in this session.",
     ),
-    "update_annotation": (
-        "annotation_id",
-        ("note", "group"),
-        lambda aid: (
-            f"No annotation with id {aid!r} in this session's "
-            "generic annotation set (note/group ids are managed by their "
-            "own tools)."
-        ),
-    ),
+    # Same wording as the mid-write not_found these four return in ANNOTATION_TOOLS.
     **{
         tool: (
             "annotation_id",
             ("note", "group"),
-            lambda aid: (
-                f"No annotation with id {aid!r} in this session's "
-                "generic annotation set."
-            ),
+            lambda aid: f"No annotation with id {aid!r} in this session.",
         )
         for tool in (
+            "update_annotation",
             "reorder_annotation",
             "set_annotation_lock",
-            "duplicate_annotation",
             "delete_annotation",
         )
     },
+    "duplicate_annotation": (
+        "annotation_id",
+        ("note", "group"),
+        lambda aid: (
+            f"No annotation with id {aid!r} in this session's generic annotation set."
+        ),
+    ),
     **{
         tool: (
             "group_id",
