@@ -4,6 +4,7 @@ import ctypes
 import io
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -78,6 +79,72 @@ sys.stdin.read()
         assert sandbox._work_dir_exceeds_quota(spec) is True
     finally:
         child.communicate(timeout=5)
+
+
+def test_disk_scan_counts_an_inode_once_across_names_and_unlinked_descriptors(
+    monkeypatch, tmp_path
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    held = work / "held"
+    held.write_bytes(b"x" * 8192)
+    info = held.stat()
+    usage = max(info.st_size, info.st_blocks * 512)
+    os.link(held, work / "alias")
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": usage, "files": 1}}
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+
+    (work / "alias").unlink()
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; f = open(sys.argv[1], 'rb'); print('ready', flush=True); "
+            "sys.stdin.read()",
+            str(held),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    calls = []
+
+    def unlink_after_the_walk(pid):
+        # The file is counted by the walk, then unlinked while still open.
+        if calls:
+            return []
+        calls.append(pid)
+        held.unlink()
+        return [holder.pid]
+
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        monkeypatch.setattr(sandbox, "_children_of", unlink_after_the_walk)
+        assert sandbox._work_dir_exceeds_quota(spec) is False
+    finally:
+        holder.communicate(timeout=5)
+
+
+def test_disk_scan_of_deep_nesting_holds_a_bounded_number_of_descriptors(tmp_path):
+    work = tmp_path / "work"
+    deepest = work.joinpath(*["d"] * 300)
+    deepest.mkdir(parents=True)
+    (deepest / "file").touch()
+    spec = {
+        "work_dir": str(work),
+        "disk_limits": {"bytes": 64 * sandbox.MIB, "files": 301},
+    }
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    # Room for a handful of scan descriptors, far fewer than the depth.
+    highest = max(int(fd) for fd in os.listdir("/proc/self/fd"))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (highest + 16, hard))
+    try:
+        assert sandbox._work_dir_exceeds_quota(spec) is False
+        spec["disk_limits"]["files"] = 300
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
 @pytest.mark.parametrize(

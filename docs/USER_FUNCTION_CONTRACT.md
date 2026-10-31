@@ -435,8 +435,8 @@ system that started it.
   are instance settings, not manifest `limits` fields.
   Each scan sums the larger of apparent size and allocated bytes for each
   entry, including directories, without following symbolic links. Scans also
-  count unlinked regular files held open by the run and its descendants,
-  deduplicating descriptors by inode. The
+  count unlinked regular files held open by the run and its descendants.
+  Each inode counts once per scan, whatever its names and descriptors. The
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. If usage cannot
   be checked, the run is terminated and fails with `runner_lost`.
