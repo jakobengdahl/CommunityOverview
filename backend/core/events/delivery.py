@@ -711,30 +711,34 @@ class DeliveryWorker:
     def _read_bounded_body(response: httpx.Response) -> bytes:
         """Read at most MAX_WEBHOOK_BODY_BYTES of a hop's body, then stop.
 
-        Redirect bodies are read too, so a body that fails to arrive still
-        fails the attempt and it is retried.
+        Every hop's body is read, redirect and encoded ones included, so a
+        body that fails to arrive still fails the attempt and it is retried.
 
         The body is diagnostic only, so an oversized or encoded body never
         changes the delivery outcome; the status code alone decides it.
         """
-        # HTTPX decodes before iter_bytes yields, so even a tiny compressed
-        # chunk can allocate far beyond the cap: leave encoded bodies unread.
         encoding = response.headers.get("content-encoding", "")
-        if encoding.strip().lower() not in ("", "identity"):
-            return b""
+        encoded = encoding.strip().lower() not in ("", "identity")
+        if response.is_stream_consumed:
+            # Already buffered (in-memory responses): nothing left to pull.
+            return b"" if encoded else response.content[:MAX_WEBHOOK_BODY_BYTES]
         chunks = []
         remaining = MAX_WEBHOOK_BODY_BYTES
+        # iter_raw counts wire bytes; HTTPX's decoder (iter_bytes) could turn
+        # a tiny compressed chunk into an allocation far beyond the cap.
         # Check the budget before asking for the next chunk, so nothing is
         # pulled from the stream once the cap is reached.
         try:
-            for chunk in response.iter_bytes():
+            for chunk in response.iter_raw():
                 chunks.append(chunk[:remaining])
                 remaining -= len(chunks[-1])
                 if remaining <= 0:
                     break
         except _ReadBudgetSpent:
             pass
-        return b"".join(chunks)
+        # Undecoded bytes are no use as diagnostics, so encoded bodies are
+        # read but not kept.
+        return b"" if encoded else b"".join(chunks)
 
     def _handle_failure(
         self,

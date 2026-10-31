@@ -34,7 +34,8 @@ from backend.core.events.delivery import (
 
 @contextmanager
 def _mock_stream(response):
-    response.iter_bytes.return_value = iter([b"Server Error"])
+    response.is_stream_consumed = False
+    response.iter_raw.return_value = iter([b"Server Error"])
     yield response
 
 
@@ -1244,20 +1245,23 @@ class TestWebhookRedirectHops:
     @pytest.mark.parametrize(
         "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
     )
-    def test_encoded_terminal_body_is_left_unread_and_status_kept(
+    def test_encoded_terminal_body_is_read_undecoded_to_the_cap_and_status_kept(
         self, monkeypatch, status, encoding
     ):
         import gzip
 
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
         # This tiny wire payload expands to 128 times the response budget.
-        compressed = gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES * 128))
-        assert len(compressed) < delivery.MAX_WEBHOOK_BODY_BYTES
+        compressed = gzip.compress(b"x" * (cap * 128))
+        assert len(compressed) < cap
         closed = []
 
         class CompressedBody(httpx.SyncByteStream):
             def __iter__(self):
-                pytest.fail("encoded terminal bodies must not be read")
                 yield compressed
+                yield b"y" * (cap - len(compressed))
+                pytest.fail("read beyond the terminal body cap")
+                yield b"y"
 
             def close(self):
                 closed.append(True)
@@ -1271,6 +1275,36 @@ class TestWebhookRedirectHops:
         assert outcome.status_code == status
         assert outcome.content == b""
         assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 302])
+    def test_encoded_body_read_error_fails_the_attempt_and_is_retried(
+        self, monkeypatch, status
+    ):
+        seen = []
+
+        class FailingBody(httpx.SyncByteStream):
+            def __iter__(self):
+                raise httpx.ReadError("connection reset")
+                yield b""
+
+        def recording(request):
+            seen.append(request)
+            return httpx.Response(
+                status,
+                headers={"location": "/next", "content-encoding": "gzip"},
+                stream=FailingBody(),
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+        )
+        monkeypatch.setattr(delivery.time, "sleep", lambda s: None)
+        results = []
+        worker = DeliveryWorker(max_attempts=2, on_result=results.append)
+        worker._deliver(DeliveryItem(create_test_event(), "http://a.example.com/h"))
+        assert [r.status for r in results] == [DeliveryStatus.RETRYING]
+        assert len(seen) == 1
+        assert worker._queue.qsize() == 1
 
     def test_gzipped_200_is_a_single_success_not_a_retry(self, monkeypatch):
         import gzip
