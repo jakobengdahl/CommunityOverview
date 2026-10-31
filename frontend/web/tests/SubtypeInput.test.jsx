@@ -16,9 +16,9 @@ describe('SubtypeInput', () => {
       expect(screen.getByText('Subtypes')).toBeInTheDocument();
     });
 
-    it('renders with custom label', () => {
+    it('associates its custom label with the text input', () => {
       render(<SubtypeInput value={[]} onChange={mockOnChange} label="Classification" />);
-      expect(screen.getByText('Classification')).toBeInTheDocument();
+      expect(screen.getByLabelText('Classification')).toHaveAttribute('type', 'text');
     });
 
     it('renders existing subtypes as chips', () => {
