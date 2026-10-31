@@ -545,8 +545,8 @@ class DeliveryWorker:
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": "CommunityGraph-Events/1.0",
-                # Replaces httpx's default gzip/deflate offer: encoded bodies
-                # are left unread, so ask receivers not to send them.
+                # Replaces httpx's default gzip/deflate offer: the body is only
+                # an error excerpt, so ask receivers not to compress it.
                 "Accept-Encoding": "identity",
                 "X-Event-ID": event.event_id,
                 "X-Event-Type": event.event_type.value,
@@ -709,36 +709,49 @@ class DeliveryWorker:
 
     @staticmethod
     def _read_bounded_body(response: httpx.Response) -> bytes:
-        """Read at most MAX_WEBHOOK_BODY_BYTES of a hop's body, then stop.
+        """Read at most MAX_WEBHOOK_BODY_BYTES of a hop's body off the wire,
+        decode it, and keep at most that many decoded bytes.
 
-        Every hop's body is read, redirect and encoded ones included, so a
-        body that fails to arrive still fails the attempt and it is retried.
-
-        The body is diagnostic only, so an oversized or encoded body never
-        changes the delivery outcome; the status code alone decides it.
+        Every hop's body is read and decoded, redirect ones included, so a
+        body that fails to arrive or to decode fails the attempt and it is
+        retried, as a fully read body would. Truncating at the cap is not a
+        failure: an oversized body never changes the delivery outcome.
         """
-        encoding = response.headers.get("content-encoding", "")
-        encoded = encoding.strip().lower() not in ("", "identity")
         if response.is_stream_consumed:
-            # Already buffered (in-memory responses): nothing left to pull.
-            return b"" if encoded else response.content[:MAX_WEBHOOK_BODY_BYTES]
-        chunks = []
-        remaining = MAX_WEBHOOK_BODY_BYTES
-        # iter_raw counts wire bytes; HTTPX's decoder (iter_bytes) could turn
-        # a tiny compressed chunk into an allocation far beyond the cap.
-        # Check the budget before asking for the next chunk, so nothing is
-        # pulled from the stream once the cap is reached.
+            # Already buffered and decoded (in-memory responses).
+            return response.content[:MAX_WEBHOOK_BODY_BYTES]
+        # The decoder HTTPX would apply; it yields bounded pieces, so a tiny
+        # compressed chunk cannot inflate into one oversized allocation.
+        decoder = response._get_content_decoder()
+        kept = []
+        kept_left = MAX_WEBHOOK_BODY_BYTES
+        wire_left = MAX_WEBHOOK_BODY_BYTES
+        complete = True
+
+        def keep(pieces: typing.Iterable[bytes]) -> None:
+            nonlocal kept_left
+            for piece in pieces:
+                if kept_left > 0:
+                    kept.append(piece[:kept_left])
+                    kept_left -= len(kept[-1])
+
+        # iter_raw counts wire bytes. Check the budget before asking for the
+        # next chunk, so nothing is pulled from the stream once the cap is
+        # reached.
         try:
             for chunk in response.iter_raw():
-                chunks.append(chunk[:remaining])
-                remaining -= len(chunks[-1])
-                if remaining <= 0:
+                chunk = chunk[:wire_left]
+                wire_left -= len(chunk)
+                keep(decoder.decode(chunk))
+                if wire_left <= 0:
+                    complete = False
                     break
         except _ReadBudgetSpent:
-            pass
-        # Undecoded bytes are no use as diagnostics, so encoded bodies are
-        # read but not kept.
-        return b"" if encoded else b"".join(chunks)
+            complete = False
+        # A body cut at the cap is incomplete by design, not undecodable.
+        if complete:
+            keep(decoder.flush())
+        return b"".join(kept)
 
     def _handle_failure(
         self,

@@ -10,6 +10,7 @@ import time
 from unittest.mock import patch, Mock
 
 import httpx2 as httpx
+from httpx2._decoders import IdentityDecoder
 import pytest
 
 from backend.core.events.models import (
@@ -36,6 +37,7 @@ from backend.core.events.delivery import (
 def _mock_stream(response):
     response.is_stream_consumed = False
     response.iter_raw.return_value = iter([b"Server Error"])
+    response._get_content_decoder.return_value = IdentityDecoder()
     yield response
 
 
@@ -1243,16 +1245,20 @@ class TestWebhookRedirectHops:
 
     @pytest.mark.parametrize("status", [200, 500])
     @pytest.mark.parametrize(
-        "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
+        "encoding", ["gzip", "GZip", "deflate", "gzip, identity", "br"]
     )
-    def test_encoded_terminal_body_is_read_undecoded_to_the_cap_and_status_kept(
+    def test_encoded_terminal_body_is_read_and_decoded_only_to_the_cap(
         self, monkeypatch, status, encoding
     ):
         import gzip
+        import zlib
 
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        plain = b"x" * (cap * 128)
         # This tiny wire payload expands to 128 times the response budget.
-        compressed = gzip.compress(b"x" * (cap * 128))
+        compressed = (
+            zlib.compress(plain) if encoding == "deflate" else gzip.compress(plain)
+        )
         assert len(compressed) < cap
         closed = []
 
@@ -1273,8 +1279,64 @@ class TestWebhookRedirectHops:
             ),
         )
         assert outcome.status_code == status
-        assert outcome.content == b""
+        # br has no decoder installed, so HTTPX passes it through undecoded.
+        wire = compressed + b"y" * (cap - len(compressed))
+        expected = wire if encoding == "br" else b"x" * cap
+        assert outcome.content == expected
         assert closed == [True]
+
+    @pytest.mark.parametrize("status", [200, 302])
+    def test_undecodable_encoded_body_fails_the_attempt_and_is_retried(
+        self, monkeypatch, status
+    ):
+        seen = []
+
+        class GarbledBody(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"not gzip at all"
+
+        def recording(request):
+            seen.append(request)
+            return httpx.Response(
+                status,
+                headers={"location": "/next", "content-encoding": "gzip"},
+                stream=GarbledBody(),
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+        )
+        monkeypatch.setattr(delivery.time, "sleep", lambda s: None)
+        results = []
+        worker = DeliveryWorker(max_attempts=2, on_result=results.append)
+        worker._deliver(DeliveryItem(create_test_event(), "http://a.example.com/h"))
+        assert [r.status for r in results] == [DeliveryStatus.RETRYING]
+        assert len(seen) == 1
+        assert worker._queue.qsize() == 1
+
+    def test_truncated_encoded_body_cut_by_the_cap_is_not_a_decoding_failure(
+        self, monkeypatch
+    ):
+        import gzip
+        import os
+
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        # Incompressible, so the gzip stream is longer than the cap and the
+        # read stops mid-stream.
+        compressed = gzip.compress(os.urandom(cap * 2))
+
+        class LongBody(httpx.SyncByteStream):
+            def __iter__(self):
+                yield compressed
+
+        _, outcome = self._post(
+            monkeypatch,
+            lambda *a: httpx.Response(
+                200, headers={"content-encoding": "gzip"}, stream=LongBody()
+            ),
+        )
+        assert outcome.status_code == 200
+        assert 0 < len(outcome.content) <= cap
 
     @pytest.mark.parametrize("status", [200, 302])
     def test_encoded_body_read_error_fails_the_attempt_and_is_retried(
