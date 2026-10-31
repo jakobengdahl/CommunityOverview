@@ -707,9 +707,8 @@ class DeliveryWorker:
                         # response.text remains usable after the stream closes.
                         response._content = self._read_bounded_body(response)
                         return response
-                    # A redirect body that fails to arrive or decode fails the
-                    # attempt, so it is retried as a fully read body would be.
-                    self._read_bounded_body(response)
+                    # The redirect body is closed unread, so it can neither
+                    # spend the read cap nor fail an attempt that follows it.
                     location = str(response.headers.get("location", ""))
                     if not location:
                         raise _MalformedRedirect(
@@ -727,47 +726,26 @@ class DeliveryWorker:
 
     @staticmethod
     def _read_bounded_body(response: httpx.Response) -> bytes:
-        """Read at most MAX_WEBHOOK_BODY_BYTES of a hop's body off the wire,
-        decode it, and keep at most that many decoded bytes.
+        """Read at most MAX_WEBHOOK_BODY_BYTES of an identity-encoded body.
 
-        A body that fails to arrive or to decode raises, failing the attempt
-        so it is retried. Truncating at the cap is not a failure: an
-        oversized body never changes the delivery outcome.
+        Truncating at the cap is not a failure: an oversized body never
+        changes the delivery outcome.
         """
         if response.is_stream_consumed:
-            # Already buffered and decoded (in-memory responses).
+            # Already buffered (in-memory responses).
             return response.content[:MAX_WEBHOOK_BODY_BYTES]
-        # The decoder HTTPX would apply; it yields bounded pieces, so a tiny
-        # compressed chunk cannot inflate into one oversized allocation.
-        decoder = response._get_content_decoder()
         kept = []
-        kept_left = MAX_WEBHOOK_BODY_BYTES
-        wire_left = MAX_WEBHOOK_BODY_BYTES
-        complete = True
-
-        def keep(pieces: typing.Iterable[bytes]) -> None:
-            nonlocal kept_left
-            for piece in pieces:
-                if kept_left > 0:
-                    kept.append(piece[:kept_left])
-                    kept_left -= len(kept[-1])
-
-        # iter_raw counts wire bytes. Check the budget before asking for the
-        # next chunk, so nothing is pulled from the stream once the cap is
-        # reached.
+        left = MAX_WEBHOOK_BODY_BYTES
+        # Check the budget before asking for the next chunk, so nothing is
+        # pulled from the stream once the cap is reached.
         try:
             for chunk in response.iter_raw():
-                chunk = chunk[:wire_left]
-                wire_left -= len(chunk)
-                keep(decoder.decode(chunk))
-                if wire_left <= 0:
-                    complete = False
+                kept.append(chunk[:left])
+                left -= len(kept[-1])
+                if left <= 0:
                     break
         except _ReadBudgetSpent:
-            complete = False
-        # A body cut at the cap is incomplete by design, not undecodable.
-        if complete:
-            keep(decoder.flush())
+            pass
         return b"".join(kept)
 
     def _handle_failure(

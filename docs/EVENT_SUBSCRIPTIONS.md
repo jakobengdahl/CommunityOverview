@@ -242,7 +242,8 @@ Failed webhook deliveries are retried with exponential backoff:
 
 Any 2xx response confirms delivery; its body is closed without reading it, so body
 handling cannot cause a retry of an accepted POST. Requests send
-`Accept-Encoding: identity` on every redirect hop. Compressed non-2xx responses
+`Accept-Encoding: identity` on every redirect hop, and redirect bodies are closed
+unread before the redirect is followed. Compressed non-2xx responses
 are retried without reading or decompressing their bodies; uncompressed error
 bodies are capped at 256 KiB for diagnostics.
 
