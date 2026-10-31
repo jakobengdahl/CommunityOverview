@@ -298,13 +298,53 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             ):
                 return await call_next(request)
 
+        # Explicit valid bearer credentials are independent of ambient cookies
+        # and must not be subjected to the browser session write guard.
+        auth_header = request.headers.get("Authorization")
+        scheme, _, credentials = (auth_header or "").partition(" ")
+        bearer_authenticated = False
+        if scheme.lower() == "bearer" and config.auth_bearer_token:
+            try:
+                bearer_authenticated = secrets.compare_digest(
+                    credentials.strip(), config.auth_bearer_token
+                )
+            except TypeError:
+                # Non-ASCII credentials are invalid; retain session fallback.
+                pass
+        if bearer_authenticated:
+            return await call_next(request)
+
         # A valid signed session cookie (issued by POST /auth/login after a
         # successful form login) authenticates the request without the native
         # Basic dialog — the browser-independent path, used by Edge.
         if request_has_valid_session(request, config):
+            # SameSite cookies also accompany requests from sibling origins.
+            # Guard every unsafe route, including multipart/raw-body handlers.
+            # Non-browser clients may omit both browser-controlled headers.
+            origin = request.headers.get("origin")
+            fetch_site = request.headers.get("sec-fetch-site")
+            if (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                and not request.headers.get("x-requested-with", "").strip()
+                and (
+                    (
+                        origin is not None
+                        and origin != f"{request.url.scheme}://{request.url.netloc}"
+                    )
+                    or (
+                        fetch_site is not None
+                        and fetch_site not in {"same-origin", "none"}
+                    )
+                )
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "Session-auth writes require a same-origin request or X-Requested-With"
+                    },
+                )
             return await call_next(request)
 
-        auth_header = request.headers.get("Authorization")
         if not auth_header:
             return _unauthorized(request, "Authentication required")
 
@@ -325,6 +365,20 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 ok_pass = secrets.compare_digest(password, config.auth_password)
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                # Browsers may attach cached Basic credentials to cross-site
+                # forms. Require fetch metadata or a header forms cannot set.
+                if (
+                    request.method not in {"GET", "HEAD", "OPTIONS"}
+                    and request.headers.get("sec-fetch-site")
+                    not in {"same-origin", "none"}
+                    and not request.headers.get("x-requested-with", "").strip()
+                ):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Basic-auth writes require same-origin fetch metadata or X-Requested-With"
+                        },
+                    )
 
             else:
                 raise ValueError(f"unsupported scheme: {scheme}")

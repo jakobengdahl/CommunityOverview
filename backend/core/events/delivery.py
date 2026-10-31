@@ -663,6 +663,8 @@ class DeliveryWorker:
         self, url: str, payload: dict, headers: dict
     ) -> httpx.Response:
         """POST to url, following redirects while re-applying the SSRF check at each hop."""
+        headers = httpx.Headers(headers)
+        headers["Accept-Encoding"] = "identity"
         redirect_headers = {
             key: value
             for key, value in headers.items()
@@ -688,10 +690,26 @@ class DeliveryWorker:
                     follow_redirects=False,
                 ) as response:
                     read_budget.arm()
-                    body = self._read_bounded_body(response)
                     if not response.is_redirect:
-                        response._content = body
+                        if 200 <= response.status_code < 300:
+                            # Status confirms acceptance. Reading an unused body
+                            # could fail and retry an already accepted POST.
+                            return response
+                        # Webhook diagnostics do not require encoded error
+                        # bodies; skip reading and decompressing them.
+                        encoding = response.headers.get("content-encoding", "")
+                        if encoding.strip().lower() not in ("", "identity"):
+                            raise httpx.RequestError(
+                                "Encoded webhook response body is not supported",
+                                request=response.request,
+                            )
+                        # Cache the bytes as Response.read() does, so
+                        # response.text remains usable after the stream closes.
+                        response._content = self._read_bounded_body(response)
                         return response
+                    # A redirect body that fails to arrive or decode fails the
+                    # attempt, so it is retried as a fully read body would be.
+                    self._read_bounded_body(response)
                     location = str(response.headers.get("location", ""))
                     if not location:
                         raise _MalformedRedirect(
@@ -712,10 +730,9 @@ class DeliveryWorker:
         """Read at most MAX_WEBHOOK_BODY_BYTES of a hop's body off the wire,
         decode it, and keep at most that many decoded bytes.
 
-        Every hop's body is read and decoded, redirect ones included, so a
-        body that fails to arrive or to decode fails the attempt and it is
-        retried, as a fully read body would. Truncating at the cap is not a
-        failure: an oversized body never changes the delivery outcome.
+        A body that fails to arrive or to decode raises, failing the attempt
+        so it is retried. Truncating at the cap is not a failure: an
+        oversized body never changes the delivery outcome.
         """
         if response.is_stream_consumed:
             # Already buffered and decoded (in-memory responses).

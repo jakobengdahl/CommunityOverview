@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState, useId } from 'react';
 import * as api from '../services/api';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
@@ -25,6 +25,7 @@ function formatTime(iso) {
  * approving an act_after_approval proposal applies the captured action.
  */
 export default function AgentProposalsDialog({ agentId = null, onClose }) {
+  const titleId = useId();
   const { t } = useI18n();
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -71,8 +72,14 @@ export default function AgentProposalsDialog({ agentId = null, onClose }) {
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('agent_proposals.title')}</h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <h2 id={titleId}>{t('agent_proposals.title')}</h2>
         <p className="dialog-description">{t('agent_proposals.description')}</p>
 
         <div className="form-section">

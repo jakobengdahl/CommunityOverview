@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useId } from 'react';
 import './SubtypeInput.css';
 
 /**
@@ -18,6 +18,7 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
   const wrapperRef = useRef(null);
+  const inputId = useId();
 
   // Filter suggestions based on current input, excluding already-selected values
   const filteredSuggestions = existingSubtypes.filter((s) => {
@@ -111,7 +112,9 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
 
   return (
     <div className="subtype-input-wrapper" ref={wrapperRef}>
-      <label className="subtype-label">{label}</label>
+      <label className="subtype-label" htmlFor={inputId}>
+        {label}
+      </label>
       <div className="subtype-input-container" onClick={() => inputRef.current?.focus()}>
         {value.map((subtype, index) => (
           <span key={index} className="subtype-chip">
@@ -131,6 +134,7 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
           </span>
         ))}
         <input
+          id={inputId}
           ref={inputRef}
           type="text"
           className="subtype-text-input"

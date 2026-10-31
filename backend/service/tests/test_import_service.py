@@ -7,8 +7,12 @@ backend/core/tests/test_graph_replace.py (atomic swap + rollback) for the
 lower layers this builds on.
 """
 
+import io
 import json
 import time
+import zipfile
+
+import pytest
 
 from backend.agents.execution import ExecutionKind, InMemoryExecutionStore
 from backend.core import GraphStorage, Node, NodeType
@@ -177,11 +181,63 @@ class TestImportRequiresFullGraphAccess:
 
 
 class TestImportReplaceFailure:
-    def test_a_replace_failure_is_reported_and_keeps_the_backup_path(
-        self, empty_storage: GraphStorage, monkeypatch
+    @pytest.mark.parametrize("archive", [False, True], ids=["json", "archive"])
+    @pytest.mark.parametrize("partial_cleanup", [False, True])
+    def test_journal_cleanup_failure_preserves_the_previous_durable_graph(
+        self, empty_storage, monkeypatch, caplog, archive, partial_cleanup
     ):
-        def _boom(nodes, edges):
-            raise RuntimeError("disk full")
+        empty_storage.add_nodes(
+            [Node(id="old-1", type=NodeType.ACTOR, name="Pre-existing")], []
+        )
+        backend = empty_storage._persistence_backend
+        empty_storage.save().result()
+        backend.upsert_node(empty_storage.get_node("old-1").to_dict())
+        assert backend.journal_path.stat().st_size > 0
+        generation = empty_storage.generation
+        private_detail = "journal cleanup failed at /private/store"
+
+        def fail_cleanup():
+            if partial_cleanup:
+                backend.journal_path.write_bytes(b"")
+            raise OSError(private_detail)
+
+        monkeypatch.setattr(backend, "_truncate_journal", fail_cleanup)
+        store = InMemoryExecutionStore()
+        if archive:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as zf:
+                zf.writestr("graph.json", json.dumps(_valid_document()))
+            result = import_service.import_graph_archive(
+                empty_storage, DefaultGraphAuthorizationHook(), store, buffer.getvalue()
+            )
+        else:
+            result = import_service.import_graph(
+                empty_storage, DefaultGraphAuthorizationHook(), store, _valid_document()
+            )
+
+        assert result["success"] is False
+        assert result["graph_replaced"] is False
+        assert result["error_code"] == "replace_failed"
+        with open(result["backup_path"]) as fh:
+            assert {n["id"] for n in json.load(fh)["nodes"]} == {"old-1"}
+        assert {n.id for n in empty_storage.get_all_nodes()} == {"old-1"}
+        assert empty_storage.get_all_edges() == []
+        assert empty_storage.generation == generation
+        reloaded = type(backend)(backend.json_path).load_graph_data()
+        assert {n["id"] for n in reloaded["nodes"]} == {"old-1"}
+        assert reloaded["edges"] == []
+        assert store.list_jobs() == []
+        assert private_detail not in json.dumps(result)
+        assert private_detail in caplog.text
+        assert "Traceback" in caplog.text
+
+    def test_a_replace_failure_is_reported_and_keeps_the_backup_path(
+        self, empty_storage: GraphStorage, monkeypatch, caplog
+    ):
+        private_detail = "could not save /private/store/graph.json as database_role"
+
+        def _boom(nodes, edges, **kwargs):
+            raise RuntimeError(private_detail)
 
         monkeypatch.setattr(empty_storage, "replace_all_nodes_and_edges", _boom)
         store = InMemoryExecutionStore()
@@ -195,9 +251,55 @@ class TestImportReplaceFailure:
         assert result["graph_replaced"] is False
         assert result["backup_path"] is not None
         assert store.list_jobs() == []
+        assert private_detail not in json.dumps(result)
+        assert result["message"] == (
+            "Import failed while committing the new graph; the previous graph is unchanged."
+        )
+        assert private_detail in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
 
 
 class TestEnqueueOrDrainStartFailureIsNotFatalToTheReplace:
+    @pytest.mark.parametrize("archive", [False, True], ids=["json", "archive"])
+    @pytest.mark.parametrize(
+        "failure_point", ["_enqueue_embedding_job", "_start_embedding_drain"]
+    )
+    def test_startup_error_details_are_logged_but_not_returned(
+        self, empty_storage, monkeypatch, caplog, archive, failure_point
+    ):
+        private_detail = (
+            "connection to private-db.internal as secret_adapter_role failed"
+        )
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError(private_detail)
+
+        monkeypatch.setattr(import_service, failure_point, _boom)
+        store = InMemoryExecutionStore()
+        if archive:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as zf:
+                zf.writestr("graph.json", json.dumps(_valid_document()))
+            result = import_service.import_graph_archive(
+                empty_storage, DefaultGraphAuthorizationHook(), store, buffer.getvalue()
+            )
+        else:
+            result = import_service.import_graph(
+                empty_storage, DefaultGraphAuthorizationHook(), store, _valid_document()
+            )
+
+        assert result["success"] is True
+        assert result["graph_replaced"] is True
+        assert result["embeddings_status"] == "not_started"
+        assert result["job_id"] is None
+        assert empty_storage.get_node("n1") is not None
+        assert private_detail not in json.dumps(result)
+        assert (
+            "embedding generation could not be started." in result["embeddings_message"]
+        )
+        assert private_detail in caplog.text
+
     def test_a_failure_to_start_embeddings_still_reports_the_replace_as_successful(
         self, empty_storage: GraphStorage, monkeypatch
     ):

@@ -19,6 +19,8 @@ import threading
 from datetime import timedelta
 from typing import Dict, List, Optional, Sequence
 
+from backend.core.actor_attribution import replace_attribution, validate_erasure
+
 from .models import (
     ABANDONED_REASON,
     ExecutionJob,
@@ -44,6 +46,26 @@ class InMemoryExecutionStore:
     # ------------------------------------------------------------------
     # Producer side
     # ------------------------------------------------------------------
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        count = 0
+        with self._lock:
+            for job in self._jobs.values():
+                before = {
+                    "payload": job.payload,
+                    "result": job.result,
+                    "origin": job.origin,
+                }
+                after = replace_attribution(
+                    before, actor_id, replacement_token, envelope="run"
+                )
+                if after != before:
+                    job.payload = after["payload"]
+                    job.result = after["result"]
+                    job.origin = after["origin"]
+                    count += 1
+        return count
 
     def enqueue(self, job: ExecutionJob) -> ExecutionJob:
         with self._lock:

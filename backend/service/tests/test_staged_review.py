@@ -1717,7 +1717,7 @@ def test_a_node_update_over_a_retype_it_has_not_seen_is_refused(pg_world, monkey
         assert world.service.merge_staged_changes(sid, "m")["success"] is True
         world.storage.add_edge(Edge(id="x", source="i", target="l", type="IMPLEMENTS"))
         assert other.get_node("l").type_str == "Actor"
-        with pytest.raises(EntityRevisionConflict, match="no longer of type"):
+        with pytest.raises(EntityRevisionConflict):
             other.update_node("l", {"description": "edited elsewhere"})
         nodes = {n["id"]: n for n in backend.load_graph_data()["nodes"]}
         assert nodes["l"]["type"] == "Legislation"

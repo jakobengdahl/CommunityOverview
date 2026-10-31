@@ -907,3 +907,89 @@ def test_a_driver_refusal_of_any_kind_is_refused_at_once(instances, monkeypatch)
     with pytest.raises(GraphWriteFailed):
         storage.update_node("n", {"name": "x"})
     assert storage.nodes["n"].name == "n"
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target", "self"])
+@pytest.mark.parametrize("edge_first", [True, False])
+def test_direct_subtype_update_orders_against_another_instances_edge(
+    instances, schema, monkeypatch, endpoint, edge_first
+):
+    """Interleave independent stores after validation, before persistence."""
+    from backend.config import config_loader
+
+    monkeypatch.setitem(
+        config_loader._get_loader().config.schema_.relationship_types,
+        "SUBTYPE_LINK",
+        config_loader.RelationshipTypeConfig(
+            source_types=["Agency"] if endpoint != "target" else [],
+            target_types=["Agency"] if endpoint != "source" else [],
+        ),
+    )
+    writer = instances(deaf=True)
+    writer.add_nodes(
+        [
+            Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
+            _node("b"),
+        ],
+        [],
+    )
+    other = instances(deaf=True)
+    edge = Edge(
+        id="ab",
+        type="SUBTYPE_LINK",
+        source="b" if endpoint == "target" else "a",
+        target="b" if endpoint == "source" else "a",
+    )
+    before = writer.nodes["a"].to_dict()
+    events = _events(writer)
+    if edge_first:
+        original = writer._do_apply
+
+        def interleave(*args, **kwargs):
+            other.add_edge(edge)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(writer, "_do_apply", interleave)
+        with pytest.raises(EntityRevisionConflict):
+            writer.update_node("a", {"subtypes": []})
+        assert writer.nodes["a"].to_dict() == before
+        assert events == []
+        assert _stored(schema, "graph_nodes", "a")["subtypes"] == ["Agency"]
+        assert _stored(schema, "graph_edges", "ab") is not None
+    else:
+        writer.update_node("a", {"subtypes": []})
+        with pytest.raises(EntityRevisionConflict):
+            other.add_edge(edge)
+        assert "ab" not in other.edges
+        assert _stored(schema, "graph_edges", "ab") is None
+        assert _stored(schema, "graph_nodes", "a")["subtypes"] == []
+
+
+@pytest.mark.parametrize("scope", [None, "scope-a"])
+def test_a_stale_rename_cannot_remove_subtypes_required_by_a_new_edge(
+    instances, schema, monkeypatch, scope
+):
+    from backend.config import config_loader
+
+    monkeypatch.setitem(
+        config_loader._get_loader().config.schema_.relationship_types,
+        "SUBTYPE_LINK",
+        config_loader.RelationshipTypeConfig(source_types=["Agency"]),
+    )
+    kwargs = {"scope": scope}
+    writer = instances(deaf=True, **kwargs)
+    writer.add_nodes([_node("a"), _node("b")], [])
+    behind = instances(deaf=True, **kwargs)
+    before = behind.nodes["a"].to_dict()
+    events = _events(behind)
+    writer.update_node("a", {"subtypes": ["Agency"]})
+    writer.add_edge(Edge(id="ab", type="SUBTYPE_LINK", source="a", target="b"))
+    stored = _stored(schema, "graph_nodes", "a")
+
+    with pytest.raises(EntityRevisionConflict):
+        behind.update_node("a", {"name": "stale rename"})
+
+    assert behind.nodes["a"].to_dict() == before
+    assert events == []
+    assert _stored(schema, "graph_nodes", "a") == stored
+    assert _stored(schema, "graph_edges", "ab")["type"] == "SUBTYPE_LINK"

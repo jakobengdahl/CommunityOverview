@@ -563,6 +563,26 @@ class TestRequiredChecksInstallFromTheLockfile:
         assert installs == sorted(NODE_INSTALL_BODIES.items())
 
 
+class TestImageTags:
+    @pytest.mark.parametrize("step_id", ["meta-core", "meta-gateway"])
+    def test_latest_tracks_only_the_prod_branch(self, workflow, step_id):
+        """Release tags cannot move latest through metadata-action's auto flavor."""
+        step = next(
+            step
+            for step in workflow["jobs"]["build"]["steps"]
+            if step.get("id") == step_id
+        )
+        assert step["with"].get("flavor") == "latest=false"
+        latest_rules = [
+            line.strip()
+            for line in step["with"]["tags"].splitlines()
+            if "value=latest" in line and not line.strip().startswith("#")
+        ]
+        assert latest_rules == [
+            "type=raw,value=latest,enable=${{ github.ref == 'refs/heads/prod' }}"
+        ]
+
+
 class TestReleaseSbomEvidence:
     @pytest.fixture
     def sbom_run(self, workflow, tmp_path):

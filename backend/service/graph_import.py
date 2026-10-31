@@ -86,7 +86,7 @@ class ImportValidationResult:
 
     @property
     def valid(self) -> bool:
-        return not self.errors
+        return self.error_count == 0 and not self.errors
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -104,7 +104,7 @@ class ImportValidationResult:
 _MAX_ERROR_CHARS = 500
 
 
-def describe_invalid(exc: Exception) -> str:
+def describe_invalid(exc: Exception | str) -> str:
     """A bounded description of why an entity failed to construct: the
     validator's own text, cut. Its first lines name the count and the
     first located failures."""
@@ -204,7 +204,10 @@ def build_document_nodes(
             errors.append(ImportIssue(location, 'a node must have a non-empty "type"'))
         elif not is_valid_node_type(node_type):
             errors.append(
-                ImportIssue(location, f"'{node_type}' is not a configured node type")
+                ImportIssue(
+                    location,
+                    describe_invalid(f"'{node_type}' is not a configured node type"),
+                )
             )
 
         if node_id is not None:
@@ -212,8 +215,10 @@ def build_document_nodes(
                 errors.append(
                     ImportIssue(
                         location,
-                        f"duplicate node id '{node_id}' (first seen at "
-                        f"nodes[{seen_node_ids[node_id]}])",
+                        describe_invalid(
+                            f"duplicate node id '{node_id}' (first seen at "
+                            f"nodes[{seen_node_ids[node_id]}])"
+                        ),
                     )
                 )
             else:
@@ -273,8 +278,10 @@ def check_document_edge_shape(
         errors.append(
             ImportIssue(
                 location,
-                f"duplicate edge id '{edge_id}' (first seen at "
-                f"edges[{seen_edge_ids[edge_id]}])",
+                describe_invalid(
+                    f"duplicate edge id '{edge_id}' (first seen at "
+                    f"edges[{seen_edge_ids[edge_id]}])"
+                ),
             )
         )
     else:
@@ -297,7 +304,10 @@ def check_document_edge_shape(
     ):
         errors.append(
             ImportIssue(
-                location, f"'{edge_type}' is not a configured relationship type"
+                location,
+                describe_invalid(
+                    f"'{edge_type}' is not a configured relationship type"
+                ),
             )
         )
     return True
@@ -338,11 +348,20 @@ def validate_import_document(document: Any) -> ImportValidationResult:
     errors = IssueList()
     built_nodes: List[Node] = []
     node_types: Dict[str, Tuple[str, List[str]]] = {}  # id -> (type_str, subtypes)
+    # Only schema-mentioned subtypes can affect applicability. Narrow once per
+    # node so a large subtype list is never scanned again for every edge.
+    rule_names = set()
+    for rule in config_loader.get_schema()["relationship_types"].values():
+        rule_names.update(rule.get("source_types") or ())
+        rule_names.update(rule.get("target_types") or ())
     # Nodes whose type is not configured: already reported once, so no edge
     # judges (and quotes) that caller-supplied string again.
     unconfigured_ids: set = set()
     for _index, node in build_document_nodes(raw_nodes, errors):
-        node_types[node.id] = (node.type_str, list(node.subtypes))
+        node_types[node.id] = (
+            node.type_str,
+            list(rule_names.intersection(node.subtypes)),
+        )
         if not is_valid_node_type(node.type_str):
             unconfigured_ids.add(node.id)
         built_nodes.append(node)
@@ -364,14 +383,18 @@ def validate_import_document(document: Any) -> ImportValidationResult:
             errors.append(
                 ImportIssue(
                     location,
-                    f"source '{source}' does not reference a node in this document",
+                    describe_invalid(
+                        f"source '{source}' does not reference a node in this document"
+                    ),
                 )
             )
         if isinstance(target, str) and target and target not in node_types:
             errors.append(
                 ImportIssue(
                     location,
-                    f"target '{target}' does not reference a node in this document",
+                    describe_invalid(
+                        f"target '{target}' does not reference a node in this document"
+                    ),
                 )
             )
 
@@ -414,7 +437,7 @@ def validate_import_document(document: Any) -> ImportValidationResult:
         if isinstance(edge_id, str) and seen_edge_ids.get(edge_id) == index:
             built_edges.append(edge)
 
-    if errors:
+    if errors.total:
         return _fail(errors)
 
     return ImportValidationResult(errors=[], nodes=built_nodes, edges=built_edges)

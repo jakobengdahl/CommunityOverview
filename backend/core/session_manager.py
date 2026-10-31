@@ -1651,7 +1651,7 @@ class SessionManager:
         session's revision: when the set adds nothing new the call is a no-op
         that broadcasts nothing.
 
-        Charges ``max(1, len(node_ids))`` to ``_mcp_bucket`` unless
+        Charges ``len(node_ids)`` to ``_mcp_bucket`` unless
         ``precharged`` says the caller already paid through
         ``consume_mcp_rate_budget``; a charge above the bucket's capacity is
         ``OpBatchTooLarge``.
@@ -1669,7 +1669,7 @@ class SessionManager:
         if not precharged:
             self._consume_mcp_budget(
                 self._mcp_rate_limit_key(client_id, rate_limit_label),
-                max(1, len(node_ids)),
+                len(node_ids),
             )
 
         # A held lock means an apply_ops batch is mid-flight for this session
@@ -1749,7 +1749,7 @@ class SessionManager:
         if not precharged:
             self._consume_mcp_budget(
                 self._mcp_rate_limit_key(client_id, rate_limit_label),
-                max(1, len(node_ids)),
+                len(node_ids),
             )
 
         if self._lock(session_id).locked():

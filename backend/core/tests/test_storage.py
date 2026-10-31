@@ -4,6 +4,7 @@ Unit tests for graph_core storage
 
 import pytest
 import tempfile
+import threading
 import os
 import json
 import logging
@@ -318,29 +319,37 @@ class TestGraphStorageCRUD:
 
     @pytest.mark.parametrize("end", ["source", "target"])
     @pytest.mark.parametrize("by_name", [False, True])
+    @pytest.mark.parametrize("same_call", [False, True])
     def test_add_nodes_can_refuse_federated_endpoints_atomically(
-        self, temp_storage, monkeypatch, end, by_name
+        self, temp_storage, monkeypatch, end, by_name, same_call
     ):
         """A restricted write refuses resolved reference ids before adding anything."""
+        embedded = []
         monkeypatch.setattr(
-            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+            temp_storage.vector_store, "update_nodes_embeddings", embedded.append
         )
         reference = Node(id="federated::g2::ref", name="Reference", type="Actor")
-        temp_storage.add_nodes([reference], [])
+        existing = set()
+        if not same_call:
+            temp_storage.add_nodes([reference], [])
+            existing = {reference.id}
+            embedded.clear()
+        supplied = [reference] if same_call else []
         edge = Edge(source="new", target="new", type="RELATES_TO")
         setattr(edge, end, reference.name if by_name else reference.id)
         result = temp_storage.add_nodes(
-            [Node(id="new", name="New", type="Actor")],
+            supplied + [Node(id="new", name="New", type="Actor")],
             [edge],
             allow_federated_endpoints=False,
         )
         assert result.success is False
         assert result.added_node_ids == result.added_edge_ids == []
-        assert set(temp_storage.nodes) == {reference.id}
+        assert set(temp_storage.nodes) == existing
         assert not temp_storage.edges
+        assert embedded == []
 
         allowed = temp_storage.add_nodes(
-            [Node(id="new", name="New", type="Actor")], [edge]
+            supplied + [Node(id="new", name="New", type="Actor")], [edge]
         )
         assert allowed.success is True
         assert getattr(temp_storage.edges[edge.id], end) == reference.id
@@ -350,13 +359,15 @@ class TestGraphStorageCRUD:
         self, temp_storage, monkeypatch, by_name
     ):
         """Storage gives invisible and missing endpoints the same refusal."""
+        embedded = []
         monkeypatch.setattr(
-            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+            temp_storage.vector_store, "update_nodes_embeddings", embedded.append
         )
         hidden = Node(
             id="hidden", name="Hidden", type="Actor", metadata={"origin_graph_id": "g2"}
         )
         temp_storage.add_nodes([hidden], [])
+        embedded.clear()
         results = [
             temp_storage.add_nodes(
                 [Node(id="new", name="New", type="Actor")],
@@ -369,6 +380,65 @@ class TestGraphStorageCRUD:
         assert results[0].message == results[1].message
         assert set(temp_storage.nodes) == {hidden.id}
         assert not temp_storage.edges
+        assert embedded == []
+
+    def test_add_nodes_checks_endpoint_visibility_under_the_insertion_lock(
+        self, temp_storage, monkeypatch
+    ):
+        """No other thread can change the graph between endpoint check and insert."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        temp_storage.add_nodes([Node(id="old", name="Old", type="Actor")], [])
+        lock_free_elsewhere = []
+
+        def visible(node):
+            def probe():
+                acquired = temp_storage._lock.acquire(blocking=False)
+                if acquired:
+                    temp_storage._lock.release()
+                lock_free_elsewhere.append(acquired)
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join()
+            return True
+
+        result = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")],
+            [Edge(source="new", target="old", type="RELATES_TO")],
+            node_visible=visible,
+        )
+        assert result.success is True
+        assert lock_free_elsewhere == [False]
+
+    @pytest.mark.parametrize("hidden_first", [False, True])
+    def test_add_nodes_checks_the_same_duplicate_named_endpoint_it_inserts(
+        self, temp_storage, monkeypatch, hidden_first
+    ):
+        """Visibility is checked on the node a duplicate name later resolves to."""
+        monkeypatch.setattr(
+            temp_storage.vector_store, "update_nodes_embeddings", lambda nodes: None
+        )
+        visible = Node(id="visible", name="Dup", type="Actor")
+        hidden = Node(
+            id="hidden", name="Dup", type="Actor", metadata={"origin_graph_id": "g2"}
+        )
+        temp_storage.add_nodes(
+            [hidden, visible] if hidden_first else [visible, hidden], []
+        )
+        result = temp_storage.add_nodes(
+            [Node(id="new", name="New", type="Actor")],
+            [Edge(source="new", target="Dup", type="RELATES_TO")],
+            node_visible=lambda node: not node.metadata.get("origin_graph_id"),
+        )
+        # The later duplicate wins name resolution; the check must follow it.
+        assert result.success is hidden_first
+        if result.success:
+            assert temp_storage.edges[result.added_edge_ids[0]].target == "visible"
+        else:
+            assert set(temp_storage.nodes) == {"visible", "hidden"}
+            assert not temp_storage.edges
 
     def test_get_node(self, storage_with_data):
         """Test getting a node by ID"""
@@ -1713,6 +1783,46 @@ class TestGraphStorageSubtypes:
         temp_storage.update_node("actor-sub-2", {"subtypes": ["Municipality"]})
         updated = temp_storage.get_node("actor-sub-2")
         assert updated.subtypes == ["Municipality"]
+
+    @pytest.mark.parametrize("endpoint", ["source", "target", "both"])
+    def test_a_subtype_update_cannot_invalidate_incident_edges(
+        self, temp_storage, monkeypatch, endpoint
+    ):
+        """Subtype validation precedes every mutation, including self-loops."""
+        from backend.config import config_loader
+
+        rules = config_loader.RelationshipTypeConfig(
+            source_types=["Agency"] if endpoint != "target" else [],
+            target_types=["Agency"] if endpoint != "source" else [],
+        )
+        monkeypatch.setitem(
+            config_loader._get_loader().config.schema_.relationship_types,
+            "SUBTYPE_LINK",
+            rules,
+        )
+        temp_storage.add_nodes(
+            [
+                Node(id="a", type="Actor", name="A", subtypes=["Agency"]),
+                Node(id="b", type="Actor", name="B"),
+            ],
+            [
+                Edge(
+                    id="ab",
+                    source="a" if endpoint != "target" else "b",
+                    target="a" if endpoint != "source" else "b",
+                    type="SUBTYPE_LINK",
+                )
+            ],
+        )
+        temp_storage.flush()
+        before = temp_storage.get_node("a").to_dict()
+        with pytest.raises(ValueError, match="SUBTYPE_LINK"):
+            temp_storage.update_node("a", {"subtypes": [], "name": "Rejected"})
+        assert temp_storage.get_node("a").to_dict() == before
+        assert temp_storage.edges["ab"].type_str == "SUBTYPE_LINK"
+        assert temp_storage.update_node(
+            "a", {"subtypes": ["Agency", "Municipality"]}
+        ).subtypes == ["Agency", "Municipality"]
 
     def test_get_subtypes_by_node_type(self, temp_storage):
         """Test getting subtypes grouped by node type"""

@@ -48,6 +48,8 @@ from typing import (
 
 from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
 
+from .actor_attribution import validate_erasure
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +64,7 @@ if sys.platform == "win32":
     def _unlock_file(f) -> None:
         """Release file lock on Windows."""
         msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
 else:
     import fcntl
 
@@ -191,6 +194,10 @@ class EntityOperation:
     expected_revision: Optional[int] = None
     expect_absent: bool = False
     endpoint_types: Tuple[Tuple[str, str], ...] = ()
+    # Transaction conditions, never journal data. None means unchecked;
+    # an empty incident tuple requires no incident edges.
+    endpoint_subtypes: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    incident_edge_revisions: Optional[Tuple[Tuple[str, int], ...]] = None
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":
@@ -822,36 +829,41 @@ class FileGraphPersistenceBackend:
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
-            # A pending merge is judged against the graph it was written
-            # against; replacing that graph first would make it unjudgeable.
-            if self._staged_sessions:
-                if not self._mirrored and self.json_path.exists():
-                    self._load_locked()
-                if self._layers_loaded:
-                    self._settle_merge_locked()
+            # Only read the old snapshot when its journal or staged merges
+            # need settling. Ordinary replacement can overwrite an unreadable
+            # snapshot without first loading it.
+            if (
+                not self._mirrored
+                and self.json_path.exists()
+                and (self._staged_sessions or self.journal_path.exists())
+            ):
+                self._load_locked()
+            if self._staged_sessions and self._layers_loaded:
+                self._settle_merge_locked()
             metadata = dict(data.get("metadata") or {})
-            # The file keeps its identity across whole-graph saves: the
-            # journal is truncated in the same call, so the id only has to be
-            # stable, and a mirrored one is what any journal on disk names.
+            prior_id = self._metadata.get("journal_id") if self._mirrored else None
             metadata["journal_id"] = (
-                (self._metadata.get("journal_id") if self._mirrored else None)
-                or metadata.get("journal_id")
-                or _new_journal_id()
+                prior_id or metadata.get("journal_id") or _new_journal_id()
             )
             snapshot = {**data, "metadata": metadata}
-            self._nodes = {n["id"]: n for n in data.get("nodes", [])}
-            self._edges = {e["id"]: e for e in data.get("edges", [])}
-            # The mirror takes the save's metadata now, as it takes its nodes,
-            # but a freshly minted id only once both writes have landed - see
-            # _checkpoint_locked for why.
-            self._metadata = {
-                k: v
-                for k, v in metadata.items()
-                if k != "journal_id" or v == self._metadata.get("journal_id")
-            }
-            self._mirrored = True
-            self._write_snapshot(snapshot)
-            self._truncate_journal()
+            try:
+                # Preserve every old journal write before retiring the journal.
+                # Even a partial cleanup failure must leave the old graph durable.
+                if self.journal_path.exists():
+                    self._checkpoint_locked()
+                self._write_snapshot(snapshot)
+            finally:
+                # A failed save still installs the attempted graph in the live
+                # mirror. Keep its metadata with its nodes, but do not publish
+                # a new journal identity until the save has fully succeeded.
+                self._nodes = {n["id"]: n for n in data.get("nodes", [])}
+                self._edges = {e["id"]: e for e in data.get("edges", [])}
+                self._metadata = {
+                    k: v
+                    for k, v in metadata.items()
+                    if k != "journal_id" or v == prior_id
+                }
+                self._mirrored = True
             self._metadata = metadata
 
     def default_graph_name(self) -> str:
@@ -1937,6 +1949,79 @@ class FileGraphPersistenceBackend:
             else:
                 os.rename(temp_path, target)
         except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
+
+class StagedLayersFile:
+    """Actor erasure over a file backend's layer store sidecars.
+
+    Operator maintenance with writers stopped. Only the `staged_by` of
+    pending layer entries in `<stem>.layers.json` and the merging `actor` of
+    the records in the `<stem>.merges.ndjson` beside it are rewritten; the
+    graph is never loaded and a pending merge is never settled, so nothing
+    else of the store changes.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        suffix = ".layers.json"
+        self.merge_log_path = (
+            self.path.with_name(self.path.name[: -len(suffix)] + ".merges.ndjson")
+            if self.path.name.endswith(suffix)
+            else None
+        )
+
+    def erase_actor(self, actor_id: str, replacement_token: str) -> int:
+        validate_erasure(actor_id, replacement_token)
+        # Both files are read and checked before either is written, so a
+        # malformed one fails the store without a partial rewrite.
+        data = None
+        count = 0
+        if self.path.exists():
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            for session in data["sessions"].values():
+                for entry in session["entries"]:
+                    if entry.get("staged_by") == actor_id:
+                        entry["staged_by"] = replacement_token
+                        count += 1
+        layer_count = count
+        lines = []
+        if self.merge_log_path is not None and self.merge_log_path.exists():
+            raw = self.merge_log_path.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                # An interrupted append; the backend cuts it off at its next
+                # load, after which a rerun can rewrite the log.
+                raise ValueError("merge log ends in an incomplete line")
+            for line in raw.split(b"\n")[:-1] if raw else []:
+                parsed = json.loads(line)
+                record = parsed.get("record")
+                if isinstance(record, dict) and record.get("actor") == actor_id:
+                    record["actor"] = replacement_token
+                    count += 1
+                    # Same serialisation as the backend's append.
+                    line = dumps_storable(parsed).encode("utf-8")
+                lines.append(line + b"\n")
+        if layer_count:
+            FileGraphPersistenceBackend._write_json_atomically(
+                self.path, data, prefix="layers_"
+            )
+        if count > layer_count:
+            self._replace_merge_log(b"".join(lines))
+        return count
+
+    def _replace_merge_log(self, payload: bytes) -> None:
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix=".ndjson", prefix="merges_", dir=self.merge_log_path.parent
+        )
+        try:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.merge_log_path)
+        except BaseException:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
             raise
