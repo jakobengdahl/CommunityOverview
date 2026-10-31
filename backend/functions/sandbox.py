@@ -21,6 +21,7 @@ held, so the runner's reported level is what a run actually gets.
 """
 
 import ctypes
+import errno
 import json
 import os
 import resource
@@ -28,6 +29,7 @@ import signal
 import stat
 import struct
 import sys
+import time
 
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
@@ -576,8 +578,12 @@ def _work_dir_exceeds_quota(spec):
             if stat.S_ISDIR(info.st_mode):
                 try:
                     child = os.open(entry.name, flags, dir_fd=directory)
-                except (FileNotFoundError, NotADirectoryError):
-                    continue
+                except OSError as exc:
+                    # A directory renamed away or exchanged for another entry
+                    # since its stat; the next scan counts its replacement.
+                    if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                        continue
+                    raise
                 push(child)
         # Unlinked open files have no directory entry. Measure before cleanup
         # closes the run's descriptors and releases their storage.
@@ -800,6 +806,13 @@ def _sleeps_interruptibly(pid):
     return stat[stat.rfind(b")") + 2 :].startswith(b"S")
 
 
+# Each scan walks the whole work directory, so scanning at every storage call
+# would cost time quadratic in the entries a run creates. Past a grace period,
+# scans are skipped while they have taken more than this share of the run.
+_SCAN_GRACE_SECONDS = 10.0
+_SCAN_SHARE = 0.1
+
+
 def _trace_quota(spec, child, status_fd):
     """Return the child's wait status, stopping with all descriptors intact.
 
@@ -810,6 +823,20 @@ def _trace_quota(spec, child, status_fd):
     calls = _DISK_SYSCALLS.get(os.uname().machine)
     if calls is None:
         raise OSError("disk enforcement unsupported on this architecture")
+    started = time.monotonic()
+    scanning = 0.0
+
+    def exceeds(force=False):
+        nonlocal scanning
+        now = time.monotonic()
+        budget = _SCAN_GRACE_SECONDS + _SCAN_SHARE * (now - started)
+        if not force and scanning > budget:
+            return False
+        try:
+            return _work_dir_exceeds_quota(spec)
+        finally:
+            scanning += time.monotonic() - now
+
     owner = None
     queued = []
     # Serialized calls resumed and not yet at their exit stop. A former owner
@@ -829,7 +856,7 @@ def _trace_quota(spec, child, status_fd):
         while True:
             while owner is None and queued:
                 owner = queued.pop(0)
-                if _work_dir_exceeds_quota(spec):
+                if exceeds():
                     return None, True
                 try:
                     _ptrace(24, owner)
@@ -879,20 +906,22 @@ def _trace_quota(spec, child, status_fd):
                             continue
                         owner = pid
                         in_flight.add(pid)
-                        if _work_dir_exceeds_quota(spec):
+                        if exceeds():
                             return None, True
                     elif operation == 2 and pid in in_flight:
                         in_flight.discard(pid)
                         if owner == pid:
                             owner = None
-                        if _work_dir_exceeds_quota(spec):
+                        if exceeds():
                             return None, True
                     sig = 0
                 elif event:
                     if event == 4 and pid == child:
                         _report(status_fd, {"started": child})
                         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
-                    if _work_dir_exceeds_quota(spec):
+                    # The function's own exit is its last chance to count
+                    # unlinked files it holds open, so it is never skipped.
+                    if exceeds(force=event == 6 and pid == child):
                         return None, True
                     # Exit is held until accounting has run, before fd teardown.
                     if event == 6:

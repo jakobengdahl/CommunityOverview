@@ -441,6 +441,9 @@ system that started it.
   usage before storage can be discarded, including at process exit before
   descriptors close. A call that waits for another of the run's processes
   stops holding back the others, so usage may overshoot until the next check.
+  Beyond their first ten seconds, checks are skipped while they have taken
+  more than a tenth of the run's time, so a run with many entries is not
+  slowed to its timeout; usage may then also overshoot until the next check.
   A detected quota violation takes precedence over a
   function's result. If usage cannot be checked, the run is terminated and
   fails with `runner_lost`. The 16 MiB per-file limit remains in force.

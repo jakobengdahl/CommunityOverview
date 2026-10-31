@@ -28,6 +28,24 @@ def test_disk_scan_counts_nested_entries_without_following_symlinks(tmp_path):
     assert sandbox._work_dir_exceeds_quota(spec) is True
 
 
+def test_disk_scan_skips_a_directory_exchanged_for_a_symlink_mid_scan(
+    monkeypatch, tmp_path
+):
+    work = tmp_path / "work"
+    (work / "swapped").mkdir(parents=True)
+    real_open = os.open
+
+    def exchange_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == "swapped" and dir_fd is not None:
+            (work / "swapped").rename(tmp_path / "moved")
+            (work / "swapped").symlink_to(tmp_path / "moved")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(sandbox.os, "open", exchange_then_open)
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": 1 << 20, "files": 10}}
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+
+
 @pytest.mark.parametrize("sparse", [False, True])
 def test_disk_scan_counts_both_allocated_and_apparent_bytes(tmp_path, sparse):
     target = tmp_path / "file"
@@ -437,6 +455,7 @@ _DISK_LIMITED_DRIVER = """
 import os, sys
 from backend.functions import sandbox
 status_fd = os.dup(2)  # Standard streams are redirected by the supervisor.
+# setup
 sandbox.confine = lambda spec: None
 sandbox.supervise({
     'host_pid': os.getppid(), 'work_dir': sys.argv[1],
@@ -447,10 +466,11 @@ os.close(status_fd)
 """
 
 
-def _run_with_disk_limits(tmp_path, program, case):
+def _run_with_disk_limits(tmp_path, program, case, setup=""):
     """Run a traced program within quota; return its final supervisor report."""
+    driver = _DISK_LIMITED_DRIVER.replace("# setup", setup)
     completed = subprocess.run(
-        [sys.executable, "-c", _DISK_LIMITED_DRIVER, str(tmp_path), program, case],
+        [sys.executable, "-c", driver, str(tmp_path), program, case],
         capture_output=True,
         text=True,
         timeout=15,
@@ -511,3 +531,23 @@ print('complete', flush=True)
 os._exit(0)
 """
     assert _run_with_disk_limits(tmp_path, program, "")["exit_code"] == 0
+
+
+def test_slow_scans_take_a_bounded_share_of_a_within_quota_run(tmp_path):
+    # Unbudgeted, ~2,400 scan points at 10 ms each outlast the driver timeout.
+    setup = """
+import time
+scan = sandbox._work_dir_exceeds_quota
+def slow_scan(spec):
+    time.sleep(0.01)
+    return scan(spec)
+sandbox._work_dir_exceeds_quota = slow_scan
+sandbox._SCAN_GRACE_SECONDS = 0
+"""
+    program = """
+for _ in range(400):
+    with open('f', 'w') as stream:
+        stream.write('x')
+print('complete', flush=True)
+"""
+    assert _run_with_disk_limits(tmp_path, program, "", setup)["exit_code"] == 0
