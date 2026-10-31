@@ -439,7 +439,8 @@ system that started it.
   Each inode counts once per scan, whatever its names and descriptors. The
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. If usage cannot
-  be checked, the run is terminated and fails with `runner_lost`.
+  be checked, including when directories keep moving during every rescan of
+  a scan, the run is terminated and fails with `runner_lost`.
   Polling is best-effort: usage may overshoot between scans, and transient
   files closed between scans may escape accounting. The 16 MiB
   per-file limit remains in force. Operators should also cap the backing

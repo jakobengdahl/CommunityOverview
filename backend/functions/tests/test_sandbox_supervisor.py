@@ -147,6 +147,33 @@ def test_disk_scan_of_deep_nesting_holds_a_bounded_number_of_descriptors(tmp_pat
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
+@pytest.mark.parametrize("renames", [1, sandbox.DISK_SCAN_ATTEMPTS])
+def test_disk_scan_cannot_be_hidden_by_renaming_a_listed_directory(
+    monkeypatch, tmp_path, renames
+):
+    work = tmp_path / "work"
+    (work / "hidden").mkdir(parents=True)
+    (work / "hidden" / "large").write_bytes(b"x" * 128 * 1024)
+    real_open = os.open
+    names = iter(f"moved{n}" for n in range(renames))
+
+    def rename_before_open(path, flags, *args, dir_fd=None, **kwargs):
+        # Rename the directory after it was listed, before it is opened.
+        if dir_fd is not None and path not in ("..", "large"):
+            target = next(names, None)
+            if target is not None:
+                os.rename(path, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(sandbox.os, "open", rename_before_open)
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
+    if renames < sandbox.DISK_SCAN_ATTEMPTS:
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+    else:
+        with pytest.raises(OSError, match="kept changing"):
+            sandbox._work_dir_exceeds_quota(spec)
+
+
 @pytest.mark.parametrize(
     "abi, filesystem, network, scope, work_rights",
     [
