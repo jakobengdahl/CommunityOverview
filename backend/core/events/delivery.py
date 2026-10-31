@@ -35,7 +35,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_TIMES = [0.5, 2.0, 5.0]  # Seconds between retries
 DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
-# Only a short error excerpt is used; bound decoded error bodies as they arrive.
+# Only a short error excerpt is used. Once a hop's final response head is in,
+# at most this many bytes are read off its connection, counting the read that
+# completed that head; the header phase before it (any 1xx responses and the
+# earlier reads of the final head) is not capped. See _ReadBudget.
 MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 
 
@@ -151,16 +154,88 @@ def _pinned_targets(host: str) -> list[str]:
     return addresses
 
 
+class _ReadBudgetSpent(Exception):
+    """Raised by a budgeted stream asked to read once its budget is spent."""
+
+
+class _ReadBudget:
+    """Body bytes a request may still read off the wire.
+
+    reset() before each request opens the header phase, which is not capped:
+    a server may send any number of 1xx responses before the final one, and
+    spending the budget there would turn a delivery into a retry. arm() once
+    the final headers are in starts the cap, charging it for the read that
+    completed them, the only read that can also hold body bytes.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.remaining = limit
+        self.armed = False
+        self.last_read = 0
+
+    def reset(self) -> None:
+        self.remaining = self.limit
+        self.armed = False
+        self.last_read = 0
+
+    def arm(self) -> None:
+        self.remaining = max(0, self.limit - self.last_read)
+        self.armed = True
+
+
+class _BudgetedStream(httpcore2.NetworkStream):
+    # httpcore reads up to 64 KiB per call whatever the caller still wants, so
+    # the cap must shrink the socket read itself, not slice what it returned.
+    def __init__(self, inner: httpcore2.NetworkStream, budget: _ReadBudget) -> None:
+        self._inner = inner
+        self._budget = budget
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        budget = self._budget
+        if not budget.armed:
+            data = self._inner.read(max_bytes, timeout)
+            budget.last_read = len(data)
+            return data
+        if budget.remaining <= 0:
+            raise _ReadBudgetSpent("Read budget spent")
+        data = self._inner.read(min(max_bytes, budget.remaining), timeout)
+        budget.remaining -= len(data)
+        return data
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._inner.write(buffer, timeout)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def start_tls(
+        self,
+        ssl_context,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore2.NetworkStream:
+        return _BudgetedStream(
+            self._inner.start_tls(ssl_context, server_hostname, timeout),
+            self._budget,
+        )
+
+    def get_extra_info(self, info: str) -> typing.Any:
+        return self._inner.get_extra_info(info)
+
+
 class _PinnedBackend(httpcore2.NetworkBackend):
     """Resolves once per connection, validates every answer, and connects to a
     validated address literal, so the address checked is the address used.
 
     The URL is never rewritten: httpcore still takes the Host header and the
-    TLS server name from the request's own host.
+    TLS server name from the request's own host. With a read budget, every
+    stream it opens stops reading off the wire once that budget is spent.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, read_budget: _ReadBudget | None = None) -> None:
         self._inner = httpcore2.SyncBackend()
+        self._read_budget = read_budget
 
     def connect_tcp(
         self,
@@ -175,7 +250,7 @@ class _PinnedBackend(httpcore2.NetworkBackend):
         # one on a connect failure keeps the fallback a by-name connect had.
         for address in _pinned_targets(host):
             try:
-                return self._inner.connect_tcp(
+                stream = self._inner.connect_tcp(
                     address,
                     port,
                     timeout=timeout,
@@ -184,6 +259,10 @@ class _PinnedBackend(httpcore2.NetworkBackend):
                 )
             except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as exc:
                 last_error = exc
+                continue
+            if self._read_budget is None:
+                return stream
+            return _BudgetedStream(stream, self._read_budget)
         assert last_error is not None
         raise last_error
 
@@ -243,13 +322,13 @@ class _PinnedTransport(httpx.HTTPTransport):
     # defaults it would otherwise use. That attribute is httpx2's own; the
     # rebinding tests in tests/test_pinned_transport.py go through the real
     # transport and fail if a future httpx2 stops using it.
-    def __init__(self) -> None:
+    def __init__(self, read_budget: _ReadBudget | None = None) -> None:
         self._pool = httpcore2.ConnectionPool(
             ssl_context=httpx.create_ssl_context(),
             max_connections=100,
             max_keepalive_connections=20,
             keepalive_expiry=5.0,
-            network_backend=_PinnedBackend(),
+            network_backend=_PinnedBackend(read_budget),
         )
 
 
@@ -264,7 +343,7 @@ class _AsyncPinnedTransport(httpx.AsyncHTTPTransport):
         )
 
 
-def pinned_transport() -> httpx.HTTPTransport:
+def pinned_transport(read_budget: _ReadBudget | None = None) -> httpx.HTTPTransport:
     """A transport for the hop-validating walkers below: it connects only to an
     address it has just resolved and checked, closing the window in which a
     name passes is_safe_url and then resolves elsewhere at connect time.
@@ -272,7 +351,7 @@ def pinned_transport() -> httpx.HTTPTransport:
     An explicit transport also means the client takes no proxy from the
     environment; a proxy would resolve the name itself and undo the pin.
     """
-    return _PinnedTransport()
+    return _PinnedTransport(read_budget)
 
 
 def async_pinned_transport() -> httpx.AsyncHTTPTransport:
@@ -466,6 +545,9 @@ class DeliveryWorker:
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": "CommunityGraph-Events/1.0",
+                # Replaces httpx's default gzip/deflate offer: the body is only
+                # an error excerpt, so ask receivers not to compress it.
+                "Accept-Encoding": "identity",
                 "X-Event-ID": event.event_id,
                 "X-Event-Type": event.event_type.value,
             }
@@ -591,13 +673,15 @@ class DeliveryWorker:
         }
         current_method = "POST"
         current_url = url
+        read_budget = _ReadBudget(MAX_WEBHOOK_BODY_BYTES)
 
         with httpx.Client(
             timeout=self._timeout,
             follow_redirects=False,
-            transport=pinned_transport(),
+            transport=pinned_transport(read_budget),
         ) as client:
             for _ in range(MAX_REDIRECTS):
+                read_budget.reset()
                 with client.stream(
                     current_method,
                     current_url,
@@ -605,35 +689,26 @@ class DeliveryWorker:
                     **({"json": payload} if current_method == "POST" else {}),
                     follow_redirects=False,
                 ) as response:
+                    read_budget.arm()
                     if not response.is_redirect:
                         if 200 <= response.status_code < 300:
                             # Status confirms acceptance. Reading an unused body
                             # could fail and retry an already accepted POST.
                             return response
-                        # HTTPX decodes before iter_bytes yields, so even a tiny
-                        # compressed chunk can allocate far beyond our body cap.
-                        # Webhook diagnostics do not require encoded bodies.
+                        # Webhook diagnostics do not require encoded error
+                        # bodies; skip reading and decompressing them.
                         encoding = response.headers.get("content-encoding", "")
                         if encoding.strip().lower() not in ("", "identity"):
                             raise httpx.RequestError(
                                 "Encoded webhook response body is not supported",
                                 request=response.request,
                             )
-                        chunks = []
-                        total = 0
-                        for chunk in response.iter_bytes():
-                            total += len(chunk)
-                            if total > MAX_WEBHOOK_BODY_BYTES:
-                                raise httpx.RequestError(
-                                    "Webhook response body exceeds "
-                                    f"{MAX_WEBHOOK_BODY_BYTES} bytes",
-                                    request=response.request,
-                                )
-                            chunks.append(chunk)
-                        # Cache the decoded bytes as Response.read() does, so
+                        # Cache the bytes as Response.read() does, so
                         # response.text remains usable after the stream closes.
-                        response._content = b"".join(chunks)
+                        response._content = self._read_bounded_body(response)
                         return response
+                    # The redirect body is closed unread, so it can neither
+                    # spend the read cap nor fail an attempt that follows it.
                     location = str(response.headers.get("location", ""))
                     if not location:
                         raise _MalformedRedirect(
@@ -648,6 +723,30 @@ class DeliveryWorker:
                         current_method = "GET"
                     current_url = next_url
         raise httpx.TooManyRedirects("Exceeded redirect limit", request=None)
+
+    @staticmethod
+    def _read_bounded_body(response: httpx.Response) -> bytes:
+        """Read at most MAX_WEBHOOK_BODY_BYTES of an identity-encoded body.
+
+        Truncating at the cap is not a failure: an oversized body never
+        changes the delivery outcome.
+        """
+        if response.is_stream_consumed:
+            # Already buffered (in-memory responses).
+            return response.content[:MAX_WEBHOOK_BODY_BYTES]
+        kept = []
+        left = MAX_WEBHOOK_BODY_BYTES
+        # Check the budget before asking for the next chunk, so nothing is
+        # pulled from the stream once the cap is reached.
+        try:
+            for chunk in response.iter_raw():
+                kept.append(chunk[:left])
+                left -= len(kept[-1])
+                if left <= 0:
+                    break
+        except _ReadBudgetSpent:
+            pass
+        return b"".join(kept)
 
     def _handle_failure(
         self,

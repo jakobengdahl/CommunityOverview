@@ -784,7 +784,7 @@ def test_g4_locator_strings_are_capped_and_repeated_sheets_read_once():
         "</sheets>", '<sheet name="again" sheetId="9" r:id="rId1"/></sheets>'
     )
     result = extract(_replace_member(data, "xl/workbook.xml", repeated), ae.XLSX)
-    assert result.segments == (ae.Segment("x", {"sheet": "N" * 256}),)
+    assert result.segments == (ae.Segment("x", {"sheet": "N" * 64}),)
 
 
 def _docx_with_body(inner: str) -> bytes:
@@ -869,6 +869,14 @@ def test_g2_total_ratio_is_checked_when_every_member_is_under_the_floor():
     data = _zip({f"m{i}.xml": b"\0" * 600_000 for i in range(5)})
     result = extract(data, ae.ODT)
     assert (result.status, result.detail) == (ae.STATUS_TOO_LARGE, "zip_ratio")
+
+
+def test_g2_total_ratio_has_no_size_floor():
+    data = _zip({"one": b"a" * 250_000, "two": b"a" * 250_000})
+    assert 500_000 < ExtractionLimits().zip_ratio_floor_bytes
+    assert 500_000 / len(data) > ExtractionLimits().max_zip_ratio
+    with pytest.raises(ae._TooLarge, match="zip_ratio"):
+        ae._open_zip(data, ExtractionLimits())
 
 
 def test_g2_member_ratio_is_checked_when_the_total_ratio_is_low():
@@ -1031,12 +1039,23 @@ def test_g1_a_valid_reply_over_the_byte_cap_is_failed():
     assert result == ae.ExtractionResult(ae.STATUS_FAILED, detail="worker_output")
 
 
-def test_g1_a_reply_at_the_locator_and_segment_bounds_fits_the_byte_cap():
+@pytest.mark.parametrize(
+    "locator", [{"paragraph": "\x01" * 64}, {"paragraph": 2**53 - 1}]
+)
+def test_g1_a_reply_at_the_locator_and_segment_bounds_fits_the_byte_cap(locator):
+    import json
+
     limits = ExtractionLimits(max_chars=1000, max_segments=1000)
-    segment = {"text": "\x01", "locator": {"sheet": "\U0001f600" * 256}}
-    reply = ae._to_wire(ae.ExtractionResult("ok", (ae.Segment(**segment),) * 1000))
-    encoded = __import__("json").dumps(reply, ensure_ascii=False).encode()
+    segment = ae.Segment("\x01", locator)
+    reply = ae._to_wire(ae.ExtractionResult("ok", (segment,) * 1000, False, "x"))
+    assert ae._from_wire(reply, limits).segments[0] == segment
+    encoded = json.dumps(reply, ensure_ascii=False).encode()
     assert len(encoded) <= ae._max_reply_bytes(limits)
+
+
+def test_g1_reply_byte_cap_matches_the_adr_formula():
+    # ADR 0010: 6 x chars + 512 x segments, plus constant reply framing.
+    assert ae._max_reply_bytes(ExtractionLimits()) == 11_124_096
 
 
 def test_g1_worker_argv_isolates_the_child_interpreter():
@@ -1066,7 +1085,18 @@ def test_g1_a_child_flooding_stdout_is_stopped_at_the_reply_cap():
 
 
 @pytest.mark.parametrize(
-    "locator", [[], "x", {"page": True}, {"page": 1.5}, {"page": None}]
+    "locator",
+    [
+        [],
+        "x",
+        {"page": True},
+        {"page": 1.5},
+        {"page": None},
+        {"sheet": "n" * 65},
+        {"page": -1},
+        {"page": 2**53},
+        {"page": 1, "sheet": "a"},
+    ],
 )
 def test_g1_parent_rejects_malformed_locators(locator):
     obj = {
@@ -1299,11 +1329,11 @@ def test_g1_a_payload_larger_than_the_pipe_is_never_blocking(code):
     assert time.monotonic() - started < 4
 
 
-@pytest.mark.parametrize("extra", [0, 1, 6204])
+@pytest.mark.parametrize("extra", [0, 1, 4668])
 def test_g1_reply_byte_cap_accepts_exactly_the_limit(extra):
     limits = ExtractionLimits(max_chars=10, max_segments=1)
     cap = ae._max_reply_bytes(limits)
-    assert cap == 6204
+    assert cap == 4668
     code = (
         f"import sys; reply = {_OK_REPLY!r}; "
         f"sys.stdout.write(reply + ' ' * ({cap + extra} - len(reply)))"
@@ -1324,11 +1354,10 @@ def test_g1_reply_byte_cap_accepts_exactly_the_limit(extra):
     ],
 )
 def test_g2_zip_declared_caps_accept_exactly_the_limit(field, detail):
-    data = _zip({"one": b"a" * 250_000, "two": b"a" * 250_000})
+    import os
+
+    data = _zip({"one": os.urandom(250_000), "two": os.urandom(250_000)})
     cap = 2 if field == "max_zip_members" else 500_000
-    # Both the archive and its members compress beyond the ratio cap, but
-    # remain below the floor where a ratio signals a bomb.
-    assert 500_000 / len(data) > ExtractionLimits().max_zip_ratio
     with ae._open_zip(data, ExtractionLimits(**{field: cap})) as archive:
         assert len(archive.infolist()) == 2
     with pytest.raises(ae._TooLarge, match=detail):
