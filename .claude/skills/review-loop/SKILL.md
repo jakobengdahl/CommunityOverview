@@ -11,8 +11,9 @@ round cap, and one blocking label.
 
 ## 1. Write the guarantees
 
-Before the first round, write G1…Gn: what the change must hold true, one
-testable line each. Brief every reviewer, every round, with them, and tell it to
+Before the first round, the worker writes G1…Gn: what the change must hold true,
+one testable line each. Never ask the review engine to draft them from a broad
+context; it reviews against the worker's list and flags nothing outside it. Brief every reviewer, every round, with them, and tell it to
 flag only correctness gaps against them — not style, not hypothetical future
 edits. Every reviewer gets the full diff (`git diff origin/main...HEAD`) and,
 from round 2, a summary of what changed since the last round. Review the fixes,
@@ -43,7 +44,7 @@ ask for the labels (never guess them); the round still counts toward the cap.
 |---|---|---|---|
 | Text & tests | docs-only, test-only, fixture-only, draining a residue node | one correctness reviewer | 2 |
 | Production code | any executable change not in the next tier | finder, then a separate classification step | 4 |
-| Security-sensitive | authorization, SSRF and fetchers, the gateway and authentication, secrets handling | finder + classification + mutation reviewer | 10 |
+| Security-sensitive | authorization, SSRF and fetchers, the gateway and authentication, secrets handling | finder + classification + mutation reviewer | 5 |
 
 - **Correctness reviewer / finder:** reports every issue against G1…Gn with
   file:line, a confidence and a severity. In the first tier it labels its own
@@ -53,12 +54,13 @@ ask for the labels (never guess them); the round still counts toward the cap.
   (local vs. federation) that disagree, pre-filter/scorer mismatches, dead code
   left by a refactor, staged secrets or debug artifacts.
 - **Mutation reviewer** (security tier only): runs with `isolation: "worktree"`,
-  never in the correctness reviewer's checkout. It edits the changed executable
-  code (module, script or config — never prose, never tests or fixtures) to
-  violate a named guarantee, reports which edits the suite lets through, labels
-  each survivor `test-durability` or `unfalsifiable` with what would close it,
-  and reverts every edit. A mutation counts only if it violates a named
-  guarantee; harness identity is out of scope.
+  never in the correctness reviewer's checkout. It edits only executable code
+  this PR changed (module, script or config — never untouched code, prose,
+  tests or fixtures) to violate a named guarantee, reports which edits the
+  suite lets through, labels each survivor `test-durability` or
+  `unfalsifiable` with what would close it, and reverts every edit. A mutation
+  counts only if it violates a named guarantee; harness identity is out of
+  scope.
 
 Reviewer models: correctness reviewer / finder `claude-opus-5-5` at medium
 effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
@@ -66,6 +68,14 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 
 ## 4. Rounds and termination
 
+- **Stop and report, on every tier.** In addition to the tier's cap, stop and
+  report to the owner (never continue silently) when round 5 has been completed,
+  or after round N (N ≥ 4) when each of rounds N-2, N-1 and N reported a
+  `production-defect` count no lower than the round before it, unless the round
+  just completed reported none (the termination bullet below wins and the change
+  proceeds to merge). The no-trend stop fires no earlier than round 4 and
+  overrides the merge-with-a-note in §5: an item stopped by it is reported, not
+  merged.
 - Fix a round's accepted `production-defect` findings as one batch, validate
   locally once, push once, then run the next round.
 - Test fixes follow `CLAUDE.md` Testing: put review residue in the module's
@@ -75,12 +85,29 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
   planning graph. Trim old long docstrings only in files touched anyway; no
   bulk rewrite.
 - **The loop ends at the first round with no `production-defect`.**
-- Residue: every surviving `test-durability` and `unfalsifiable` finding goes
-  into **one** `small-fix`-tagged Task node for the whole residue, with a
-  `PART_OF` parent, and the merge proceeds. If the planning MCP is unreachable,
-  record the residue in the PR body under its own heading and flag it to the
-  owner. Exception: on a first-tier PR that drains a residue node, non-blocking
-  findings are not logged again.
+- Residue in the same PR: before merge, and within the round cap, close each
+  `test-durability` finding that needs only a few test lines (about 20 or
+  fewer). Such test-only additions do not start a new round; one that touches
+  the production artifact (§2) does.
+- Residue left over goes in the PR body under a **Residue** heading. Only a
+  finding that touches a security guarantee (authentication or authorization,
+  secrets, egress/SSRF, privacy or erasure, sandboxing) is also filed: appended
+  to the repo's one rolling residue node in the planning graph (ask the graph
+  for it), never a new node per PR. Each appended entry names its PR, the
+  finding's file:line and a one-line issue, so `/small-fix-session` can list
+  and mark it resolved on its own. Everything else is dropped after the PR
+  body lists it. `unfalsifiable` findings are only ever listed in the PR body.
+  If the planning MCP is unreachable, flag the security residue to the owner.
+- Test volume follows `CLAUDE.md` Testing: one test per guarantee, a second
+  only to falsify it. If added test lines exceed about twice the added
+  production lines, do one trim pass before merge (residue-bundle PRs are
+  exempt).
+
+CI and workflow validators are not a tier of their own: a change to one is in the
+production tier (4 rounds). For `test-durability` residue targeting such a
+validator, read `production-defect` as a break a realistic contributor edit could
+cause, not an adversarial edit of the workflow file or a gap in emulating the
+runner.
 
 ## 5. At the cap
 

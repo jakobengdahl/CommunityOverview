@@ -158,3 +158,59 @@ def test_mcp_attachment_tools_require_authenticated_paths(monkeypatch, bypass):
     )
     with pytest.raises(ValueError, match="authenticated MCP paths"):
         create_app(config)
+
+
+def test_assistant_attachment_off_leaves_rest_attachments_available_and_authorized(
+    app_config, monkeypatch, tmp_path
+):
+    """ASSISTANT_ATTACHMENT_ACCESS=off governs chat only; REST keeps its own checks."""
+    import dataclasses
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from backend.api_host.server import create_app
+    from backend.config import config_loader
+    from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
+
+    schema = tmp_path / "schema_config.json"
+    schema.write_text(
+        json.dumps(
+            {
+                "schema": {
+                    "node_types": {
+                        "Document": {"fields": ["name"], "allows_attachments": True}
+                    }
+                }
+            }
+        )
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"nodes": [{"id": "doc", "type": "Document", "name": "D"}]})
+    )
+    monkeypatch.setenv("SCHEMA_FILE", str(schema))
+    config_loader.reset_loader()
+    try:
+        config = dataclasses.replace(
+            app_config, graph_file=str(graph), assistant_attachment_access="off"
+        )
+        client = TestClient(create_app(config))
+        assert client.app.state.chat_service._assistant_attachment_access == "off"
+
+        url = "/api/nodes/doc/attachments?filename=a.txt"
+        upload = client.post(
+            url, content=b"hello", headers={"content-type": "text/plain"}
+        )
+        assert upload.status_code == 201, upload.text
+        listed = client.get("/api/nodes/doc/attachments")
+        assert listed.status_code == 200
+        assert [a["filename"] for a in listed.json()["attachments"]] == ["a.txt"]
+
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+        denied = client.post(url, content=b"x", headers={"content-type": "text/plain"})
+        assert denied.status_code == 403
+        assert len(client.get("/api/nodes/doc/attachments").json()["attachments"]) == 1
+    finally:
+        monkeypatch.delenv("SCHEMA_FILE")
+        config_loader.reset_loader()

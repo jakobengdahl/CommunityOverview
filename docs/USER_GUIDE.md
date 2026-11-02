@@ -906,14 +906,18 @@ with it; graph history is the permanent audit trail.
 **Operator maintenance: replacing actor attribution.**
 `ActorErasureService.erase_actor(actor_id, replacement_token)` in
 `backend/service/actor_erasure.py` replaces matching structured actor identifiers
-in mutation history, nested run-history attribution, proposal `decided_by`, and
-session activity (including sessions not currently loaded). Supply the optional
+in mutation history, nested run-history attribution, proposal `decided_by` and
+the attribution in applied proposal results, session activity (including sessions not currently loaded), the `staged_by` of pending entries in
+staged sessions' layers and the merging `actor` of staged-merge records. Supply the optional
 stores to its constructor. An absent store returns zero; PostgreSQL graph storage
 has no mutation-history sidecar, so omit that store. Graph nodes and edges are
 never written. Record IDs, timestamps, decision status and unrelated actors are
 preserved. This replaces attribution, including actor/delegation objects,
-staging actors, client IDs and matching `agent:<id>` origins; it does not search
-free text or erase graph content.
+`staged_by` in event origins and activity records, client IDs and matching
+`agent:<id>` origins; it does not search free text or erase graph content.
+The CLI reaches the layers of the file graph backend (`<graph>.layers.json`
+next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`); layers held in PostgreSQL graph storage are not local
+files, so merge or discard open staged sessions there before maintenance.
 
 Stop application processes, workers and other writers before maintenance, and
 use a non-personal replacement token that does not contain the original actor
@@ -925,7 +929,8 @@ python -m backend.service.actor_erasure \
   --history-path /path/to/graph.history.ndjson \
   --run-history-db /path/to/runs.db \
   --governance-db /path/to/proposals.db \
-  --sessions-dir /path/to/sessions
+  --sessions-dir /path/to/sessions \
+  --layers-path /path/to/graph.layers.json
 ```
 
 The database flags default to `AGENTS_RUN_HISTORY_DB` and
@@ -933,10 +938,14 @@ The database flags default to `AGENTS_RUN_HISTORY_DB` and
 not created. Output contains only per-store changed-record `counts` and
 `failed_stores`, never actor identifiers, replacement tokens or source data.
 Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
+A path of the wrong kind (a file given as `--sessions-dir`, or a database that
+is not a current-schema store of that flag's kind, or a path that cannot be
+read) is an invocation error: no store is opened or migrated. Start the application once to migrate an older
+database before running maintenance.
 A failed store has a `null` count because partial changes may have happened;
 other stores are still processed. Repair any reported store failure and rerun
-with the same inputs: already replaced records count as zero. Damaged history
-or session records are reported as failures. The operation does not coordinate
+with the same inputs: already replaced records count as zero. Damaged history,
+session or layer records are reported as failures. The operation does not coordinate
 backups, external copies or future writes.
 
 ![Recent activity panel](images/recent-activity.png)

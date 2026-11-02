@@ -260,6 +260,10 @@ describe('file upload', () => {
     api.setSessionStaged('1111-2222-3333-4444', true);
     await api.uploadFile(file, true);
     expect(headerOf(calls[0])).toBe('1111-2222-3333-4444');
+    // The session header joins the write marker; the form sets its own type.
+    expect(calls[0].options.headers['X-Requested-With']).toBe('XMLHttpRequest');
+    expect(calls[0].options.headers['Content-Type']).toBeUndefined();
+    expect(calls[0].options.body).toBeInstanceOf(FormData);
     // Extraction only changes nothing: no header.
     await api.uploadFile(file, false);
     expect(headerOf(calls[1])).toBeUndefined();

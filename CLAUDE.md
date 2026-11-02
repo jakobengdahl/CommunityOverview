@@ -15,9 +15,10 @@ server is configured in the session, skip this section.
   this repo's issues and open PRs. Plan in the graph, attaching every item in the
   write that creates it: a Task gets a `PART_OF` parent (the larger work item or
   body of work it serves — create that node if missing); a capability is attached
-  to the value it delivers. Small fixes and review residue attach to the graph's
-  standing maintenance bucket (ask the graph for it). If nothing fits, the item is
-  a feature request: name the capability it delivers and create that too.
+  to the value it delivers. Small fixes attach to the graph's standing
+  maintenance bucket (ask the graph for it); filed review residue goes on the
+  repo's one rolling residue node (see `/review-loop`). If nothing fits, the
+  item is a feature request: name the capability it delivers and create that too.
 - Write PR, commit SHA and verification evidence back onto the graph nodes; link
   ADRs and contracts kept here from the graph.
 - No secrets in the graph; use correlation IDs on writes, avoid event loops. If
@@ -95,7 +96,8 @@ skip and their gates fail on purpose, mailing the owner on every push; never
 "fix" that in the workflow — the PR belongs in ready-for-review.
 
 **Done:** local checks pass; CI green on the merging head; review loop ended per
-its skill, residue logged; docs updated in the same PR; scope stated in the PR body.
+its skill, residue closed or listed per that skill; docs updated in the same PR;
+scope stated in the PR body.
 
 **CI red:** read the output first. Your code → fix, verify, push. Infrastructure
 (flaky runner, network, unrelated dependency) → PR comment for the owner; no merge.
@@ -138,6 +140,11 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
 - Review residue becomes a case in the module's existing test file, never a
   file named after the review round (`*_r4.py`). Don't add a test file under
   ~100 lines when a sibling test file for the same module exists.
+- Test volume: tests target the change's guarantees G1…Gn (`/review-loop`) —
+  normally one test per guarantee, a second only when needed to falsify it.
+  Prefer extending an existing test over adding a new one. A PR whose added test
+  lines exceed about twice its added production lines gets one trim pass before
+  merge (a residue-bundle PR is exempt).
 - Don't test what cannot fail. Ranking/scoring logic gets cross-tier tests (can a
   secondary signal beat a stronger primary one?), not just happy-path order.
 - Async tests use `pytest-asyncio`; LLM calls are mocked, never a real key. CI

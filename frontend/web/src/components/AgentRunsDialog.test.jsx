@@ -65,6 +65,24 @@ describe('AgentRunsDialog', () => {
     expect(global.fetch).toHaveBeenCalledWith('/agents/runs');
   });
 
+  it('exposes each mounted instance as a modal dialog named by its own title', async () => {
+    global.fetch.mockResolvedValue({ ok: true, json: async () => [] });
+
+    render(
+      <>
+        <AgentRunsDialog onClose={() => {}} />
+        <AgentRunsDialog onClose={() => {}} />
+      </>
+    );
+    const dialogs = screen.getAllByRole('dialog', { name: 'agent_runs.title' });
+    expect(dialogs).toHaveLength(2);
+    expect(dialogs[0]).toHaveAttribute('aria-modal', 'true');
+    expect(dialogs[0].getAttribute('aria-labelledby')).not.toBe(
+      dialogs[1].getAttribute('aria-labelledby')
+    );
+    await waitFor(() => expect(screen.getAllByText('agent_runs.empty')).toHaveLength(2));
+  });
+
   it('shows an error when the request fails', async () => {
     global.fetch.mockResolvedValue({ ok: false, status: 500 });
 

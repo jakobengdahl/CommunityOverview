@@ -538,55 +538,129 @@ def _work_dir_exceeds_quota(spec):
     """Count entries and bytes without following links; stop at the quota.
 
     Directory descriptors keep renames and symlink swaps from redirecting the
-    scan outside the work directory. Disappearing entries are normal during a
-    run; other scan failures must stop it rather than disable enforcement.
+    scan outside the work directory; at most a few are open at once, so depth
+    cannot exhaust the supervisor's descriptors. Each inode counts once, so an
+    entry moved or unlinked during the scan is not counted twice. Disappearing
+    entries are normal during a run; other scan failures must stop it rather
+    than disable enforcement.
     """
     limits = spec.get("disk_limits")
     if limits is None:
         return False
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    stack = []
+    seen = set()
+    totals = [0, 0]  # bytes, entries
 
-    def push(fd):
+    def exceeds(info):
+        identity = (info.st_dev, info.st_ino)
+        if identity in seen:
+            return False
+        seen.add(identity)
+        # Count sparse files by apparent size and preallocated files by
+        # allocation, including filesystem block rounding and metadata.
+        totals[0] += max(info.st_size, info.st_blocks * 512)
+        totals[1] += 1
+        return totals[0] > limits["bytes"] or totals[1] > limits["files"]
+
+    def identity_of(fd):
+        info = os.fstat(fd)
+        return (info.st_dev, info.st_ino)
+
+    def list_subdirectories(fd):
+        """Count a directory's entries; return its new subdirectories, or
+        None once the quota is exceeded."""
+        subdirectories = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if (info.st_dev, info.st_ino) in seen:
+                    continue
+                if exceeds(info):
+                    return None
+                if stat.S_ISDIR(info.st_mode):
+                    subdirectories.append((entry.name, (info.st_dev, info.st_ino)))
+        return subdirectories
+
+    def open_verified(name, identity, parent):
         try:
-            entries = os.scandir(fd)
+            fd = os.open(name, flags, dir_fd=parent)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        try:
+            matches = identity_of(fd) == identity
         except BaseException:
             os.close(fd)
             raise
-        stack.append((fd, entries))
+        if not matches:
+            os.close(fd)
+            return None
+        return fd
 
-    push(os.open(spec["work_dir"], flags))
-    total_bytes = 0
-    total_files = 0
+    root = os.open(spec["work_dir"], flags)
+    current = root
+    # Descriptors opened by the walk-down fallback that `current` does not own
+    # yet; the finally closes them if an exception (including one raised by a
+    # signal handler) arrives while they are held.
+    walking = []
     try:
+        seen.add(identity_of(root))
+        pending = list_subdirectories(root)
+        if pending is None:
+            return True
+        # Frames hold names and identities, not descriptors.
+        stack = [(None, None, pending)]
         while stack:
-            directory, entries = stack[-1]
-            entry = next(entries, None)
-            if entry is None:
-                entries.close()
-                os.close(directory)
-                stack.pop()
+            pending = stack[-1][2]
+            if pending:
+                name, identity = pending.pop()
+                child = open_verified(name, identity, current)
+                if child is None:
+                    continue  # Moved or replaced since it was listed.
+                # Rebind before closing: an exception raised by a signal
+                # between the two must not make the finally close it twice.
+                previous, current = current, child
+                if previous != root:
+                    os.close(previous)
+                pending = list_subdirectories(current)
+                if pending is None:
+                    return True
+                stack.append((name, identity, pending))
                 continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            total_files += 1
-            # Count sparse files by apparent size and preallocated files by
-            # allocation, including filesystem block rounding and metadata.
-            total_bytes += max(info.st_size, info.st_blocks * 512)
-            if total_bytes > limits["bytes"] or total_files > limits["files"]:
-                return True
-            if stat.S_ISDIR(info.st_mode):
+            stack.pop()
+            if not stack:
+                break
+            if len(stack) == 1:
+                parent = root
+            else:
                 try:
-                    child = os.open(entry.name, flags, dir_fd=directory)
-                except (FileNotFoundError, NotADirectoryError):
-                    continue
-                push(child)
+                    parent = open_verified("..", stack[-1][1], current)
+                except OSError:
+                    parent = None
+            if parent is None:
+                # The directory moved; walk back down from the root as far as
+                # the path still leads to the same directories.
+                parent = root
+                for depth in range(1, len(stack)):
+                    name, identity, _ = stack[depth]
+                    child = open_verified(name, identity, parent)
+                    if child is None:
+                        del stack[depth:]
+                        break
+                    walking.append(child)
+                    previous_parent, parent = parent, child
+                    if previous_parent != root:
+                        walking.remove(previous_parent)
+                        os.close(previous_parent)
+            previous, current = current, parent
+            walking.clear()
+            if previous != root:
+                os.close(previous)
         # Unlinked open files have no directory entry. Measure before cleanup
         # closes the run's descriptors and releases their storage.
         pending = _children_of(os.getpid())
-        seen = set()
         while pending:
             pid = pending.pop()
             pending.extend(_children_of(pid))
@@ -609,23 +683,18 @@ def _work_dir_exceeds_quota(spec):
                     if _wait_for_process_exit(pid):
                         break
                     raise
-                identity = (info.st_dev, info.st_ino)
-                if (
-                    info.st_nlink != 0
-                    or not stat.S_ISREG(info.st_mode)
-                    or identity in seen
-                ):
+                if info.st_nlink != 0 or not stat.S_ISREG(info.st_mode):
                     continue
-                seen.add(identity)
-                total_files += 1
-                total_bytes += max(info.st_size, info.st_blocks * 512)
-                if total_bytes > limits["bytes"] or total_files > limits["files"]:
+                if exceeds(info):
                     return True
         return False
     finally:
-        for directory, entries in reversed(stack):
-            entries.close()
-            os.close(directory)
+        for descriptor in walking:
+            if descriptor != current:
+                os.close(descriptor)
+        if current != root:
+            os.close(current)
+        os.close(root)
 
 
 class _DiskScanTimeout(Exception):

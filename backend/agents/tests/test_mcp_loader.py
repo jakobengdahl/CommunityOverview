@@ -661,24 +661,41 @@ class TestMCPLoaderLifecycle:
         assert (outside / "a.txt").read_text(encoding="utf-8") == "outside"
 
     @pytest.mark.parametrize(
-        ("tool_name", "path", "reason"),
+        ("tool_name", "path"),
         [
-            ("read_file", "missing.txt", "No such file or directory"),
-            ("read_file", "notes", "Is a directory"),
-            ("write_file", "notes", "Is a directory"),
-            ("list_directory", "missing", "No such file or directory"),
+            ("read_file", "missing.txt"),
+            ("read_file", "notes"),
+            ("write_file", "notes"),
+            ("list_directory", "missing"),
         ],
     )
     def test_execute_fs_tool_errors_only_name_workspace_relative_paths(
-        self, workspace, tool_name, path, reason
+        self, workspace, tool_name, path
     ):
-        """OS failures describe the relative target without the service user's home."""
+        """OS failures expose only the relative target and a generic message."""
         (workspace / "notes").mkdir()
 
         result = MCPLoader([])._execute_fs_tool(tool_name, {"path": path})
 
-        assert result == {"error": f"{path}: {reason}"}
+        assert result == {"error": f"{path}: Filesystem operation failed"}
         assert str(workspace.parent) not in json.dumps(result)
+
+    @pytest.mark.parametrize("errno", [None, 13])
+    def test_execute_fs_tool_redacts_os_error_details(
+        self, workspace, monkeypatch, errno
+    ):
+        real_open = os.open
+
+        def fail_file_open(path, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None:
+                raise OSError(errno, "private OS error details", str(workspace / path))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", fail_file_open)
+
+        assert MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"}) == {
+            "error": "a.txt: Filesystem operation failed"
+        }
 
     @pytest.mark.parametrize("tool_name", ["read_file", "write_file", "list_directory"])
     def test_execute_fs_tool_uses_the_validated_root_after_path_replacement(

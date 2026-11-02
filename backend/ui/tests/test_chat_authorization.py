@@ -433,18 +433,25 @@ def test_ui_chat_accepts_valid_credentials_when_auth_enabled(auth_enabled_app):
         "delete_node_attachment",
     ],
 )
-async def test_chat_attachment_hook_sees_request_actor(chat_service, path, name):
+async def test_chat_attachment_hook_sees_request_actor(
+    chat_service, graph_storage, path, name
+):
     """Each chat route binds the user before an attachment tool checks the hook."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
     from starlette.requests import Request
     from backend.ui.rest_api import ChatRequest, SimpleChatRequest
 
-    service, llm = chat_service
-    service._assistant_attachment_access = "read_write"
+    _, llm = chat_service
     hook = MagicMock()
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=False)
-    service._processor._authorization_hook = hook
+    # The hook reaches the processor only through the service's own wiring.
+    service = ChatService(
+        GraphService(graph_storage, authorization_hook=hook),
+        assistant_attachment_access="read_write",
+    )
+    service._processor.provider_type = "mock"
+    service._processor.default_api_key = "test-key"
     raw = MagicMock()
     service._processor.tools_map[name] = raw
     service._processor.tool_definitions.append({"name": name})

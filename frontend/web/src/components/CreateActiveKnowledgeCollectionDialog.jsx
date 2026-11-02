@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { ClipboardFill } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
@@ -62,6 +62,7 @@ function filterExcludedPermissions(nodeTypePermissions = {}) {
  *   2. Full App URL (/web/?akc={shortName}) — full graph with special AI
  */
 export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave, initialData }) {
+  const titleId = useId();
   const schema = useGraphStore((state) => state.schema);
   const { t } = useI18n();
 
@@ -260,8 +261,11 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
         className="dialog-content subscription-dialog"
         style={{ maxWidth: '680px' }}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
       >
-        <h2>
+        <h2 id={titleId}>
           {initialData
             ? t('active_data_collection.title_edit')
             : t('active_data_collection.title_create')}

@@ -1644,7 +1644,7 @@ function GraphCanvasInner({
     // replace deliberately dropped.
     const contentReplaced = sessionChanged || clearRaised;
     if (contentReplaced) preFocusRef.current = null;
-    const snapshot = contentReplaced ? null : preFocusRef.current;
+    const snapshot = preFocusRef.current;
     if (leavingFocus) preFocusRef.current = null;
     setNodes((nds) => {
       // A session switch drops the previous session's manual annotations too:

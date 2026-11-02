@@ -1093,9 +1093,6 @@ class MCPLoader:
                         return {"path": path, "written": len(content)}
                     return {"path": path, "content": f.read()}
 
-            except OSError as e:
-                reason = os.strerror(e.errno) if e.errno else type(e).__name__
-                return {"error": f"{relative_path}: {reason}"}
             except Exception:
                 return {"error": f"{relative_path}: Filesystem operation failed"}
 

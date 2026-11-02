@@ -10,6 +10,7 @@ import time
 from unittest.mock import patch, Mock
 
 import httpx2 as httpx
+from httpx2._decoders import IdentityDecoder
 import pytest
 
 from backend.core.events.models import (
@@ -34,7 +35,9 @@ from backend.core.events.delivery import (
 
 @contextmanager
 def _mock_stream(response):
-    response.iter_bytes.return_value = iter([b"Server Error"])
+    response.is_stream_consumed = False
+    response.iter_raw.return_value = iter([b"Server Error"])
+    response._get_content_decoder.return_value = IdentityDecoder()
     yield response
 
 
@@ -1135,7 +1138,8 @@ class TestWebhookRedirectHops:
 
     @pytest.mark.parametrize("status", [400, 500])
     @pytest.mark.parametrize("extra", [0, 1])
-    def test_terminal_body_is_bounded_incrementally(self, monkeypatch, status, extra):
+    def test_terminal_body_stops_reading_at_the_cap(self, monkeypatch, status, extra):
+        """No chunk is requested once the cap is reached; the status still decides."""
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
         assert cap == 256 * 1024
         closed = []
@@ -1147,31 +1151,67 @@ class TestWebhookRedirectHops:
                     read.append(i)
                     yield b"x" * (cap // 4)
                 if extra:
-                    read.append(4)
-                    yield b"x"
                     pytest.fail("read beyond the terminal body cap")
+                    yield b"x"
 
             def close(self):
                 closed.append(True)
 
         _, outcome = self._post(
-            monkeypatch, lambda *a: httpx.Response(status, stream=Body())
+            monkeypatch,
+            lambda *a: httpx.Response(
+                status, headers={"content-length": str(cap + extra)}, stream=Body()
+            ),
         )
         assert closed == [True]
-        if extra:
-            assert isinstance(outcome, httpx.RequestError)
-            assert "response body exceeds" in str(outcome)
-            assert read == [0, 1, 2, 3, 4]
-        else:
-            assert outcome.status_code == status
-            assert outcome.text == "x" * cap
-            assert outcome.is_closed
+        assert read == [0, 1, 2, 3]
+        assert outcome.status_code == status
+        assert outcome.text == "x" * cap
+        assert outcome.is_closed
+
+    def test_chunk_crossing_the_cap_is_truncated_and_reading_stops(self, monkeypatch):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+
+        class Body(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"a" * (cap - 1)
+                yield b"bc"
+                pytest.fail("read beyond the terminal body cap")
+                yield b"d"
+
+        _, outcome = self._post(
+            monkeypatch, lambda *a: httpx.Response(500, stream=Body())
+        )
+        assert outcome.status_code == 500
+        assert outcome.content == b"a" * (cap - 1) + b"b"
+
+    def test_every_hop_offers_only_identity_encoding(self, monkeypatch):
+        sent = []
+
+        def recording(request):
+            sent.append(request.headers.get("accept-encoding"))
+            if len(sent) == 1:
+                return httpx.Response(302, headers={"location": "/next"})
+            return httpx.Response(200)
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+        )
+        DeliveryWorker()._deliver(
+            DeliveryItem(create_test_event(), "http://a.example.com/h")
+        )
+        assert sent == ["identity", "identity"]
 
     @pytest.mark.parametrize("status", [302, 307])
-    def test_redirect_body_is_closed_without_reading(self, monkeypatch, status):
+    @pytest.mark.parametrize("encoding", ["identity", "gzip"])
+    def test_redirect_body_is_closed_unread_and_followed(
+        self, monkeypatch, status, encoding
+    ):
+        """As on main, a redirect body that would reset or fail to decode
+        cannot fail the attempt: it is never read."""
         closed = []
 
-        class UnreadBody(httpx.SyncByteStream):
+        class FailingBody(httpx.SyncByteStream):
             def __iter__(self):
                 pytest.fail("redirect bodies must not be read")
                 yield b""
@@ -1182,35 +1222,66 @@ class TestWebhookRedirectHops:
         def handler(request, index):
             if index == 0:
                 return httpx.Response(
-                    status, headers={"location": "/next"}, stream=UnreadBody()
+                    status,
+                    headers={"location": "/next", "content-encoding": encoding},
+                    stream=FailingBody(),
                 )
             assert closed == [True]
-            return httpx.Response(500, content=b"terminal error")
+            return httpx.Response(200)
 
         seen, outcome = self._post(monkeypatch, handler)
         assert len(seen) == 2
-        assert outcome.text == "terminal error"
-        assert closed == [True]
+        assert outcome.status_code == 200
+
+    def test_gzipped_200_is_a_single_success_not_a_retry(self, monkeypatch):
+        import gzip
+
+        seen = []
+
+        def recording(request):
+            seen.append(request)
+            return httpx.Response(
+                200,
+                headers={"content-encoding": "gzip"},
+                content=gzip.compress(b"ok"),
+            )
+
+        monkeypatch.setattr(
+            delivery, "httpx", _StubHttpxModule(httpx.MockTransport(recording))
+        )
+        results = []
+        worker = DeliveryWorker(max_attempts=3, on_result=results.append)
+        worker._deliver(DeliveryItem(create_test_event(), "http://a.example.com/h"))
+        assert [r.status for r in results] == [DeliveryStatus.SUCCESS]
+        assert len(seen) == 1
 
     @pytest.mark.parametrize("status", [200, 500])
     @pytest.mark.parametrize(
-        "encoding", ["gzip", "GZip", "deflate", "br", "gzip, identity"]
+        "encoding", ["gzip", "GZip", "deflate", "gzip, identity", "br"]
     )
     def test_encoded_terminal_body_is_unread_regardless_of_status(
         self, monkeypatch, status, encoding
     ):
         """A 32 MiB gzip bomb is never read, including on accepted deliveries."""
         import gzip
+        import zlib
 
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        plain = b"x" * (cap * 128)
         # This tiny wire payload expands to 128 times the response budget.
-        compressed = gzip.compress(b"x" * (delivery.MAX_WEBHOOK_BODY_BYTES * 128))
-        assert len(compressed) < delivery.MAX_WEBHOOK_BODY_BYTES
+        compressed = (
+            zlib.compress(plain) if encoding == "deflate" else gzip.compress(plain)
+        )
+        assert len(compressed) < cap
         closed = []
 
         class CompressedBody(httpx.SyncByteStream):
             def __iter__(self):
                 pytest.fail("encoded terminal bodies must not be read")
                 yield compressed
+                yield b"y" * (cap - len(compressed))
+                pytest.fail("read beyond the terminal body cap")
+                yield b"y"
 
             def close(self):
                 closed.append(True)
@@ -1307,3 +1378,130 @@ class TestWebhookRedirectHops:
         )
         assert outcome.text == "diagnostic"
         assert outcome.is_closed
+
+
+class _WireBackend:
+    """Stands in for httpcore's SyncBackend: serves canned raw responses, one
+    per request written, and records how many bytes each request read, in
+    total and per socket read."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.reads = []
+        self.read_sizes = []
+
+    def __call__(self):
+        return self
+
+    def connect_tcp(self, host, port, timeout=None, **kwargs):
+        backend = self
+
+        class Stream:
+            buffer = b""
+
+            def write(self, data, timeout=None):
+                # Request heads end in a blank line; JSON bodies never do.
+                if b"\r\n\r\n" in data and backend.responses:
+                    self.buffer = backend.responses.pop(0)
+                    backend.reads.append(0)
+                    backend.read_sizes.append([])
+
+            def read(self, max_bytes, timeout=None):
+                data, self.buffer = self.buffer[:max_bytes], self.buffer[max_bytes:]
+                backend.reads[-1] += len(data)
+                backend.read_sizes[-1].append(len(data))
+                return data
+
+            def close(self):
+                pass
+
+            def get_extra_info(self, info):
+                return None
+
+        return Stream()
+
+
+def _raw_response(status, body, chunked=False, extra_headers=b""):
+    head = b"HTTP/1.1 %d X\r\n" % status + extra_headers
+    if chunked:
+        size = 32 * 1024
+        framed = b"".join(
+            b"%x\r\n" % len(body[i : i + size]) + body[i : i + size] + b"\r\n"
+            for i in range(0, len(body), size)
+        )
+        return head + b"transfer-encoding: chunked\r\n\r\n" + framed + b"0\r\n\r\n"
+    return head + b"content-length: %d\r\n\r\n" % len(body) + body
+
+
+@pytest.mark.usefixtures("_public_dns")
+class TestWebhookWireReadBound:
+    """Through real httpcore/h11, which read up to 64 KiB per socket call."""
+
+    def _post(self, monkeypatch, responses):
+        backend = _WireBackend(responses)
+        monkeypatch.setattr(delivery.httpcore2, "SyncBackend", backend)
+        response = DeliveryWorker()._post_with_redirect_ssrf_check(
+            "http://start.example.com/hook", {"k": "v"}, {}
+        )
+        return backend, response
+
+    @pytest.mark.parametrize("status", [400, 500])
+    @pytest.mark.parametrize("chunked", [False, True], ids=["length", "chunked"])
+    def test_terminal_hop_reads_at_most_the_cap_off_the_wire(
+        self, monkeypatch, status, chunked
+    ):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        body = bytes(range(256)) * (4 * cap // 256)
+        backend, outcome = self._post(
+            monkeypatch, [_raw_response(status, body, chunked)]
+        )
+        assert outcome.status_code == status
+        assert backend.reads[0] <= cap
+        assert 0 < len(outcome.content) <= cap
+        assert body.startswith(outcome.content)
+
+    def test_informational_responses_do_not_spend_the_body_cap(self, monkeypatch):
+        """1xx bytes before the final response neither fail the hop nor shrink
+        the cap on its body."""
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        continues = b"HTTP/1.1 100 Continue\r\n\r\n" * (2 * cap // 25)
+        assert len(continues) > cap
+        body = b"b" * (4 * cap)
+        final = _raw_response(500, body)
+        backend, outcome = self._post(monkeypatch, [continues + final])
+        assert outcome.status_code == 500
+        # Only the read that completed the final head is charged up front.
+        assert cap - 64 * 1024 < len(outcome.content) <= cap
+        head = len(final) - len(body)
+        assert backend.reads[0] - len(continues) - head <= cap
+
+    def test_cap_counts_from_the_read_that_completes_the_final_head(self, monkeypatch):
+        """Reads before the one completing the final head are free; that read
+        and every later one together stay within the cap."""
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        continues = b"HTTP/1.1 100 Continue\r\n\r\n" * (2 * cap // 25)
+        body = b"b" * (4 * cap)
+        final = _raw_response(500, body)
+        backend, outcome = self._post(monkeypatch, [continues + final])
+        assert outcome.status_code == 500
+        head_end = len(continues) + len(final) - len(body)
+        sizes = backend.read_sizes[0]
+        read_so_far = 0
+        for index, size in enumerate(sizes):
+            read_so_far += size
+            if read_so_far >= head_end:
+                break
+        assert sum(sizes[:index]) > cap
+        assert sum(sizes[index:]) <= cap
+
+    def test_each_hop_gets_its_own_cap(self, monkeypatch):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        redirect = _raw_response(
+            302, b"r" * (4 * cap), extra_headers=b"location: /next\r\n"
+        )
+        backend, outcome = self._post(
+            monkeypatch, [redirect, _raw_response(500, b"terminal error")]
+        )
+        assert outcome.status_code == 500
+        assert outcome.text == "terminal error"
+        assert backend.reads[0] <= cap

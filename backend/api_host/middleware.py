@@ -298,6 +298,22 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             ):
                 return await call_next(request)
 
+        # Explicit valid bearer credentials are independent of ambient cookies
+        # and must not be subjected to the browser session write guard.
+        auth_header = request.headers.get("Authorization")
+        scheme, _, credentials = (auth_header or "").partition(" ")
+        bearer_authenticated = False
+        if scheme.lower() == "bearer" and config.auth_bearer_token:
+            try:
+                bearer_authenticated = secrets.compare_digest(
+                    credentials.strip(), config.auth_bearer_token
+                )
+            except TypeError:
+                # Non-ASCII credentials are invalid; retain session fallback.
+                pass
+        if bearer_authenticated:
+            return await call_next(request)
+
         # A valid signed session cookie (issued by POST /auth/login after a
         # successful form login) authenticates the request without the native
         # Basic dialog — the browser-independent path, used by Edge.
@@ -329,7 +345,6 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 )
             return await call_next(request)
 
-        auth_header = request.headers.get("Authorization")
         if not auth_header:
             return _unauthorized(request, "Authentication required")
 

@@ -231,6 +231,64 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('shape-1')).toBe(false);
   });
 
+  // Every array/object prop the node memo reads is pinned, so a rerender that
+  // changes only the clear signal leaves reactFlowNodes' identity alone and the
+  // reconcile effect re-runs through that signal's own dependency or not at all.
+  const STABLE_NODES = [{ id: 'node-a', name: 'A', type: 'Actor', description: 'a' }];
+  const STABLE_PROPS = {
+    nodes: STABLE_NODES,
+    edges: [],
+    highlightedNodeIds: [],
+    hiddenNodeIds: [],
+    hiddenEdgeIds: [],
+    dimmedNodeIds: [],
+    dimmedEdgeIds: [],
+    nodeMarks: {},
+    pulsedNodeIds: {},
+    sessionKey: 's1',
+  };
+
+  it.each([
+    [
+      'only canvasBaselineEpoch moves while clearGroupsFlag stays raised',
+      { canvasBaselineEpoch: 1, clearGroupsFlag: true },
+      { canvasBaselineEpoch: 2, clearGroupsFlag: true },
+    ],
+    [
+      'only clearGroupsFlag rises',
+      { canvasBaselineEpoch: 1, clearGroupsFlag: false },
+      { canvasBaselineEpoch: 1, clearGroupsFlag: true },
+    ],
+  ])('drops the overlays when %s and nothing else changes', (_label, before, cleared) => {
+    const groups = GROUPS_TO_RESTORE.map((g) => ({ ...g }));
+    const annotations = ANNOTATIONS_TO_RESTORE.map((a) => ({ ...a }));
+    const { rerender } = render(
+      <GraphCanvas
+        {...STABLE_PROPS}
+        {...before}
+        groupsToRestore={groups}
+        annotationsToRestore={annotations}
+      />
+    );
+    expectOverlaysPresent();
+
+    act(() => {
+      rerender(
+        <GraphCanvas
+          {...STABLE_PROPS}
+          {...cleared}
+          groupsToRestore={groups}
+          annotationsToRestore={annotations}
+        />
+      );
+    });
+    const ids = manualNodeIds();
+    expect(ids.has('g1')).toBe(false);
+    expect(ids.has('note-1')).toBe(false);
+    expect(ids.has('label-1')).toBe(false);
+    expect(ids.has('shape-1')).toBe(false);
+  });
+
   it('keeps the overlays when canvasBaselineEpoch moves without clearGroupsFlag', () => {
     // A host may move the epoch only to drop the undo history on a new result.
     const nodeA = { id: 'node-a', name: 'A', type: 'Actor', description: 'a' };

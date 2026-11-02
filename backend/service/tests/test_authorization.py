@@ -650,7 +650,7 @@ class TestMutationScopeNarrowing:
     def test_add_nodes_accepts_visible_and_same_call_endpoints(
         self, empty_storage, by_name
     ):
-        """Narrowing permits visible existing nodes and nodes created in this call."""
+        """Narrowing permits visible nodes from any allowed graph and same-call nodes."""
         empty_storage.add_nodes(
             [
                 Node(
@@ -658,14 +658,21 @@ class TestMutationScopeNarrowing:
                     name="Visible",
                     type="Actor",
                     metadata={"origin_graph_id": "graph-alpha"},
-                )
+                ),
+                Node(
+                    id="other",
+                    name="Other",
+                    type="Actor",
+                    metadata={"origin_graph_id": "graph-gamma"},
+                ),
             ],
             [],
         )
         service = GraphService(
             empty_storage,
             authorization_hook=FixedNarrowingHook(
-                allow_local_graph=False, include_graph_ids=("graph-alpha",)
+                allow_local_graph=False,
+                include_graph_ids=("graph-alpha", "graph-gamma"),
             ),
         )
         result = service.add_nodes(
@@ -675,12 +682,19 @@ class TestMutationScopeNarrowing:
                     "source": "New" if by_name else "new",
                     "target": "Visible" if by_name else "visible",
                     "type": "RELATES_TO",
-                }
+                },
+                {
+                    "source": "Visible" if by_name else "visible",
+                    "target": "Other" if by_name else "other",
+                    "type": "RELATES_TO",
+                },
             ],
         )
         assert result["success"] is True
-        edge = empty_storage.edges[result["added_edge_ids"][0]]
-        assert (edge.source, edge.target) == ("new", "visible")
+        assert [
+            (empty_storage.edges[eid].source, empty_storage.edges[eid].target)
+            for eid in result["added_edge_ids"]
+        ] == [("new", "visible"), ("visible", "other")]
 
     def test_standalone_default_hook_mutates_graph_tagged_entities(self, tmp_path):
         # With the default (permissive, narrowing-disabled) hook, a node/edge

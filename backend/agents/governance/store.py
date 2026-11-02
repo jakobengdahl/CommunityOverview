@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
-from backend.core.actor_attribution import validate_erasure
+from backend.core.actor_attribution import replace_attribution, validate_erasure
 
 from .models import Proposal, ProposalStatus, utcnow
 
@@ -183,8 +183,11 @@ class InMemoryProposalStore:
         count = 0
         with self._lock:
             for item in self._items.values():
-                if item.decided_by == actor_id:
-                    item.decided_by = replacement_token
+                erased = _erase_proposal_actor(
+                    item.decided_by, item.apply_result, actor_id, replacement_token
+                )
+                if erased != (item.decided_by, item.apply_result):
+                    item.decided_by, item.apply_result = erased
                     count += 1
         return count
 
@@ -197,6 +200,28 @@ class InMemoryProposalStore:
                     del self._items[proposal_id]
                     count += 1
         return count
+
+
+def _erase_proposal_actor(
+    decided_by: Optional[str],
+    apply_result: Optional[dict],
+    actor_id: str,
+    replacement_token: str,
+) -> tuple:
+    """Replace the decider and the mutation attribution an applied result carries."""
+    if decided_by == actor_id:
+        decided_by = replacement_token
+    if isinstance(apply_result, dict) and "attribution" in apply_result:
+        apply_result = {
+            **apply_result,
+            "attribution": replace_attribution(
+                apply_result["attribution"],
+                actor_id,
+                replacement_token,
+                envelope="attribution",
+            ),
+        }
+    return decided_by, apply_result
 
 
 def is_redacted(p: Proposal) -> bool:
@@ -418,10 +443,31 @@ class SqliteProposalStore:
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:
         validate_erasure(actor_id, replacement_token)
-        return self._write_many(
-            "UPDATE proposals SET decided_by = ? WHERE decided_by = ?",
-            [(replacement_token, actor_id)],
-        )
+        params = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, decided_by, apply_result FROM proposals"
+            ).fetchall()
+            for row in rows:
+                before = (
+                    row["decided_by"],
+                    json.loads(row["apply_result"]) if row["apply_result"] else None,
+                )
+                after = _erase_proposal_actor(*before, actor_id, replacement_token)
+                if after != before:
+                    params.append(
+                        (
+                            after[0],
+                            row["apply_result"]
+                            if after[1] == before[1]
+                            else json.dumps(after[1]),
+                            row["id"],
+                        )
+                    )
+            return self._write_many(
+                "UPDATE proposals SET decided_by = ?, apply_result = ? WHERE id = ?",
+                params,
+            )
 
     def purge(self, proposal_ids: Sequence[str]) -> int:
         params = [

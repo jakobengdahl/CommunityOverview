@@ -454,6 +454,73 @@ describe('mobile focus view', () => {
     expect(restored.some((n) => n.id === 'note-1' || n.id === 'group-1')).toBe(false);
   });
 
+  // A clear under the same sessionKey (a resync from the server, a saved view
+  // applied in place) replaces the contents just as a switch does.
+  it.each([
+    ['clearGroupsFlag rises', {}, { clearGroupsFlag: true }],
+    [
+      'canvasBaselineEpoch moves while clearGroupsFlag stays raised',
+      { clearGroupsFlag: true, canvasBaselineEpoch: 1 },
+      { clearGroupsFlag: true, canvasBaselineEpoch: 2 },
+    ],
+  ])(
+    'drops the pre-focus snapshot when %s under the same sessionKey',
+    (_label, before, cleared) => {
+      const liveNodes = seededLiveNodes();
+      const { rerender } = render(
+        <GraphCanvas nodes={nodes} edges={edges} compactMode="on" sessionKey="a" {...before} />
+      );
+      hoisted.liveNodes = liveNodes;
+      selectNodes([{ id: 'node-1', type: 'custom' }]);
+      click(focusButton());
+
+      rerender(
+        <GraphCanvas nodes={nodes} edges={edges} compactMode="on" sessionKey="a" {...cleared} />
+      );
+
+      hoisted.setNodes.mockClear();
+      click(exitFocusButton());
+      const restored = foldSetNodes(hoisted.flowProps.nodes);
+
+      const staleById = new Map(liveNodes.map((n) => [n.id, n.position]));
+      for (const node of restored) {
+        expect(node.position).not.toEqual(staleById.get(node.id));
+      }
+      expect(restored.some((n) => n.id === 'note-1' || n.id === 'group-1')).toBe(false);
+    }
+  );
+
+  it('restores the pre-focus snapshot while clearGroupsFlag is still raised from an earlier clear', () => {
+    const liveNodes = seededLiveNodes();
+    render(
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        compactMode="on"
+        sessionKey="a"
+        clearGroupsFlag
+        canvasBaselineEpoch={1}
+      />
+    );
+    hoisted.liveNodes = liveNodes;
+    selectNodes([{ id: 'node-1', type: 'custom' }]);
+
+    hoisted.setNodes.mockClear();
+    click(focusButton());
+    const focused = foldSetNodes(liveNodes);
+
+    hoisted.liveNodes = focused;
+    hoisted.setNodes.mockClear();
+    click(exitFocusButton());
+    const restored = foldSetNodes(focused);
+
+    const byId = new Map(restored.map((n) => [n.id, n]));
+    for (const live of liveNodes) {
+      expect(byId.get(live.id).position).toEqual(live.position);
+    }
+    expect(byId.get('node-2').parentId).toBe('group-1');
+  });
+
   it('does not offer focus for an annotation, which has no graph neighbours', () => {
     render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
 

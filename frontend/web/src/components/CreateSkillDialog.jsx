@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import { useI18n } from '../i18n';
 import './CreateSubscriptionDialog.css';
 
 export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave, initialData }) {
+  const titleId = useId();
   const { t } = useI18n();
   const isEditing = !!initialData;
 
@@ -79,8 +80,14 @@ export default function CreateSkillDialog({ nodeType = 'Skill', onClose, onSave,
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content subscription-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>
+      <div
+        className="dialog-content subscription-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <h2 id={titleId}>
           {isEditing
             ? t('skill_dialog.title_edit', { type: nodeType })
             : t('skill_dialog.title', { type: nodeType })}

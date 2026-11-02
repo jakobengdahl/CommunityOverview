@@ -68,8 +68,10 @@ through `HardenedSubprocessRunner(max_disk_bytes=..., max_disk_files=...)`;
 the constructor rejects zero, negative, non-integer or above-maximum values
 before any run starts. The per-file 16 MiB `RLIMIT_FSIZE` limit also applies.
 
-Polling is best-effort: a function can overshoot between scans, and temporary
-peaks or unlinked files held open may escape accounting. As defence in depth,
+Polling is best-effort: a function can overshoot between scans. Transient
+files closed between scans, memory-mapped files, FIFO or pipe transfers, and
+directories renamed or moved while a scan runs may escape accounting; unlinked
+regular files the run still holds open are counted once per inode. As defence in depth,
 put the temporary directory on storage with an enforced container/host limit:
 an ephemeral-storage limit where the platform enforces one, a filesystem quota,
 or a size-capped tmpfs with an inode limit. For a container allowing one run at
@@ -495,6 +497,26 @@ Owner promotes preview → prod  → same flow with channel=prod, floating tag: 
 ```
 
 See [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md) for the full artifact interface specification.
+
+### Before Promoting preview → prod
+
+Promotion stays a manual, owner-only merge. Before making it, look at these
+and record what each shows (they are what the owner decides on, not an
+automatic gate):
+
+- **Preview healthy.** The preview instance answers `/health` (liveness) and
+  its readiness path. `/health` does not report the version, so confirm the
+  running image separately: the preview deployment's image tag or the deploy
+  run must show the candidate's `sha-<commit>`. Note how long the candidate
+  has run in preview; no minimum soak time is mandated.
+- **SBOM produced.** The `release-evidence-<commit_sha>-<run_id>-<run_attempt>`
+  artifact of the push-to-`preview` CI run that built the candidate holds the
+  SPDX and CycloneDX files for both images (see "Release SBOM Evidence" in
+  [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md)).
+- **No open critical vulnerability.** On the repository's Actions page, the
+  latest `Security Scan` run (pull request or weekly) and the latest nightly
+  `Gateway Dependency Audit` run are green, CodeQL shows no open critical
+  alert, and no critical finding is otherwise known against the candidate.
 
 ---
 
