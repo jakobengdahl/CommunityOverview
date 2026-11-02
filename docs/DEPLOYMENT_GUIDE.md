@@ -498,6 +498,23 @@ Owner promotes preview → prod  → same flow with channel=prod, floating tag: 
 
 See [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md) for the full artifact interface specification.
 
+### Before Promoting preview → prod
+
+Promotion stays a manual, owner-only merge. Before making it, look at these
+and record what each shows (they are what the owner decides on, not an
+automatic gate):
+
+- **Preview healthy.** The preview instance runs the candidate image
+  (`sha-<commit>`) and its `/health` endpoint answers. Note for how long the
+  candidate has run in preview; no minimum soak time is mandated.
+- **SBOM produced.** The `release-evidence-<commit_sha>-<run_id>-<run_attempt>`
+  artifact of the CI run that built the candidate holds the SPDX and CycloneDX
+  files for both images (see *Release SBOM Evidence*).
+- **No open critical vulnerability.** The `Secret and SAST` and dependency
+  audit jobs (`pip-audit`, `npm audit`, and the gateway dependency audit) are
+  green on the candidate commit, CodeQL shows no open critical alert, and no
+  critical finding is otherwise known against the candidate.
+
 ---
 
 ## 6. Updates & Maintenance
