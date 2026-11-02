@@ -536,11 +536,13 @@ _NO_ANSWER_AFTER_TOOLS_MESSAGE = (
 
 
 def _response_text(response) -> str:
-    """Join the text blocks of an LLMResponse."""
+    """Join the text blocks of an LLMResponse; non-string text is not usable text."""
     return "".join(
-        block.get("text", "")
+        block["text"]
         for block in response.content
-        if isinstance(block, dict) and block.get("type") == "text"
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
     )
 
 
@@ -554,6 +556,18 @@ def _log_empty_reply(response, stage: str) -> None:
     reasoning = getattr(message, "reasoning_content", None) or getattr(
         message, "reasoning", None
     )
+    blocks = getattr(raw, "content", None)
+    if reasoning is None and isinstance(blocks, list):
+        # Anthropic reports reasoning as thinking blocks, not on a message field.
+        reasoning = (
+            "".join(
+                block.thinking
+                for block in blocks
+                if getattr(block, "type", None) == "thinking"
+                and isinstance(getattr(block, "thinking", None), str)
+            )
+            or None
+        )
     logger.warning(
         "Empty %s reply: stop_reason=%r finish_reason=%r completion_tokens=%r "
         "reasoning_length=%r",
@@ -583,11 +597,11 @@ def _answer_after_empty_reply(
             tools=[],
             max_tokens=4096,
         )
+        text = _response_text(retry)
     except Exception as e:
         logger.warning("Retry after empty reply failed: %s", type(e).__name__)
         return _NO_ANSWER_AFTER_TOOLS_MESSAGE
 
-    text = _response_text(retry)
     if text.strip():
         return text
     _log_empty_reply(retry, "retry")

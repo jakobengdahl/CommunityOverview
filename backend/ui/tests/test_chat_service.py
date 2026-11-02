@@ -2717,6 +2717,11 @@ class TestEmptyFinalReplyAfterToolChain:
             LLMResponse(
                 content=[{"type": "text", "text": "  \n"}], stop_reason="end_turn"
             ),
+            LLMResponse(
+                content=[{"type": "text", "text": [{"type": "text", "text": "x"}]}],
+                stop_reason="end_turn",
+            ),
+            LLMResponse(content=None, stop_reason="end_turn"),
         ],
     )
     def test_failed_retry_reports_no_answer_and_keeps_tool_results(
@@ -2743,6 +2748,41 @@ class TestEmptyFinalReplyAfterToolChain:
         assert f"reasoning_length={len(self.REASONING)}" in caplog.text
         assert self.REASONING not in caplog.text
         assert self.REASONING not in json.dumps(result, default=str)
+
+    def test_anthropic_thinking_blocks_are_logged_by_length_only(
+        self, chat_service, sample_nodes, caplog
+    ):
+        reply = LLMResponse(
+            content=[],
+            stop_reason="max_tokens",
+            raw_response=SimpleNamespace(
+                content=[SimpleNamespace(type="thinking", thinking=self.REASONING)],
+                usage=SimpleNamespace(output_tokens=4096),
+            ),
+        )
+
+        with caplog.at_level("WARNING", logger="backend.ui.chat_logic"):
+            result, _, _ = self._run(chat_service, reply, self._text_reply("Done."))
+
+        assert result["content"] == "Done."
+        assert "stop_reason='max_tokens'" in caplog.text
+        assert "completion_tokens=4096" in caplog.text
+        assert f"reasoning_length={len(self.REASONING)}" in caplog.text
+        assert self.REASONING not in caplog.text
+
+    def test_non_string_text_in_final_reply_counts_as_empty_and_keeps_tool_results(
+        self, chat_service, sample_nodes
+    ):
+        reply = LLMResponse(
+            content=[{"type": "text", "text": [{"type": "text", "text": "x"}]}],
+            stop_reason="end_turn",
+        )
+
+        result, calls, _ = self._run(chat_service, reply, self._text_reply("Done."))
+
+        assert result["content"] == "Done."
+        assert len(calls) == 3
+        assert result["toolResult"]["nodes"]
 
     def test_final_reply_with_text_makes_no_extra_call(
         self, chat_service, sample_nodes
