@@ -2744,6 +2744,54 @@ class TestEmptyFinalReplyAfterToolChain:
         assert self.REASONING not in caplog.text
         assert self.REASONING not in json.dumps(result, default=str)
 
+    @pytest.mark.parametrize(
+        "reasoning_only",
+        [
+            f"<think>{REASONING}",
+            f"\n<think>{REASONING}</think>\n",
+            f"<THINKING>{REASONING}</THINKING>",
+            f"{REASONING}</think>",
+        ],
+    )
+    def test_reasoning_inlined_in_content_counts_as_no_answer(
+        self, chat_service, sample_nodes, caplog, reasoning_only
+    ):
+        with caplog.at_level("WARNING", logger="backend.ui.chat_logic"):
+            answered, calls, _ = self._run(
+                chat_service,
+                self._text_reply(reasoning_only),
+                self._text_reply("Two nodes found."),
+            )
+            unanswered, _, _ = self._run(
+                chat_service,
+                self._text_reply(reasoning_only),
+                self._text_reply(reasoning_only),
+            )
+
+        assert answered["content"] == "Two nodes found."
+        assert len(calls) == 3
+        assert calls[-1]["tools"] == []
+        assert "No answer was produced" in unanswered["content"]
+        assert self.REASONING not in json.dumps(unanswered, default=str)
+        assert self.REASONING not in caplog.text
+        assert f"reasoning_length={len(reasoning_only.strip())}" in caplog.text
+
+    @pytest.mark.parametrize(
+        "text, content",
+        [
+            (f"<think>{REASONING}</think>\n\nDone.", "Done."),
+            (f"{REASONING}</think>Done.", "Done."),
+            ("Wrap it in <think> and </think>. ", "Wrap it in <think> and </think>. "),
+        ],
+    )
+    def test_answer_text_survives_inline_reasoning_without_extra_call(
+        self, chat_service, sample_nodes, text, content
+    ):
+        result, calls, _ = self._run(chat_service, self._text_reply(text))
+
+        assert result["content"] == content
+        assert len(calls) == 2
+
     def test_final_reply_with_text_makes_no_extra_call(
         self, chat_service, sample_nodes
     ):
