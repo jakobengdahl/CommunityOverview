@@ -11,8 +11,9 @@ round cap, and one blocking label.
 
 ## 1. Write the guarantees
 
-Before the first round, write G1…Gn: what the change must hold true, one
-testable line each. Brief every reviewer, every round, with them, and tell it to
+Before the first round, the worker writes G1…Gn: what the change must hold true,
+one testable line each. Never ask the review engine to draft them from a broad
+context; it reviews against the worker's list and flags nothing outside it. Brief every reviewer, every round, with them, and tell it to
 flag only correctness gaps against them — not style, not hypothetical future
 edits. Every reviewer gets the full diff (`git diff origin/main...HEAD`) and,
 from round 2, a summary of what changed since the last round. Review the fixes,
@@ -43,7 +44,7 @@ ask for the labels (never guess them); the round still counts toward the cap.
 |---|---|---|---|
 | Text & tests | docs-only, test-only, fixture-only, draining a residue node | one correctness reviewer | 2 |
 | Production code | any executable change not in the next tier | finder, then a separate classification step | 4 |
-| Security-sensitive | authorization, SSRF and fetchers, the gateway and authentication, secrets handling | finder + classification + mutation reviewer | 10 |
+| Security-sensitive | authorization, SSRF and fetchers, the gateway and authentication, secrets handling | finder + classification + mutation reviewer | 5 |
 
 - **Correctness reviewer / finder:** reports every issue against G1…Gn with
   file:line, a confidence and a severity. In the first tier it labels its own
@@ -67,6 +68,14 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 
 ## 4. Rounds and termination
 
+- **Stop and report, on every tier.** In addition to the tier's cap, stop and
+  report to the owner (never continue silently) when round 5 has been completed,
+  or after round N (N ≥ 4) when each of rounds N-2, N-1 and N reported a
+  `production-defect` count no lower than the round before it, unless the round
+  just completed reported none (the first bullet below wins and the change
+  proceeds to merge). The no-trend stop fires no earlier than round 4 and
+  overrides the merge-with-a-note in §5: an item stopped by it is reported, not
+  merged.
 - Fix a round's accepted `production-defect` findings as one batch, validate
   locally once, push once, then run the next round.
 - Test fixes follow `CLAUDE.md` Testing: put review residue in the module's
@@ -93,6 +102,12 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
   only to falsify it. If added test lines exceed about twice the added
   production lines, do one trim pass before merge (residue-bundle PRs are
   exempt).
+
+CI and workflow validators are not a tier of their own: a change to one is in the
+production tier (4 rounds). For `test-durability` residue targeting such a
+validator, read `production-defect` as a break a realistic contributor edit could
+cause, not an adversarial edit of the workflow file or a gap in emulating the
+runner.
 
 ## 5. At the cap
 
