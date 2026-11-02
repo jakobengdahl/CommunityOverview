@@ -2660,9 +2660,9 @@ class TestEmptyFinalReplyAfterToolChain:
         )
 
     @staticmethod
-    def _text_reply(text):
+    def _text_reply(text, stop_reason="end_turn"):
         return LLMResponse(
-            content=[{"type": "text", "text": text}], stop_reason="end_turn"
+            content=[{"type": "text", "text": text}], stop_reason=stop_reason
         )
 
     @staticmethod
@@ -2745,28 +2745,25 @@ class TestEmptyFinalReplyAfterToolChain:
         assert self.REASONING not in json.dumps(result, default=str)
 
     @pytest.mark.parametrize(
-        "reasoning_only",
+        "reasoning_only, stop_reason",
         [
-            f"<think>{REASONING}",
-            f"\n<think>{REASONING}</think>\n",
-            f"<THINKING>{REASONING}</THINKING>",
-            f"{REASONING}</think>",
+            (f"<think>{REASONING}", "max_tokens"),
+            (f"\n<think>{REASONING}</think>\n", "end_turn"),
+            (f"<THINKING>{REASONING}</THINKING>", "end_turn"),
+            (f"{REASONING}</think>", "end_turn"),
+            (f"{REASONING}\n</think>\n", "end_turn"),
+            (f"{REASONING}</think><think>{REASONING}", "max_tokens"),
         ],
     )
     def test_reasoning_inlined_in_content_counts_as_no_answer(
-        self, chat_service, sample_nodes, caplog, reasoning_only
+        self, chat_service, sample_nodes, caplog, reasoning_only, stop_reason
     ):
+        reply = self._text_reply(reasoning_only, stop_reason)
         with caplog.at_level("WARNING", logger="backend.ui.chat_logic"):
             answered, calls, _ = self._run(
-                chat_service,
-                self._text_reply(reasoning_only),
-                self._text_reply("Two nodes found."),
+                chat_service, reply, self._text_reply("Two nodes found.")
             )
-            unanswered, _, _ = self._run(
-                chat_service,
-                self._text_reply(reasoning_only),
-                self._text_reply(reasoning_only),
-            )
+            unanswered, _, _ = self._run(chat_service, reply, reply)
 
         assert answered["content"] == "Two nodes found."
         assert len(calls) == 3
@@ -2777,19 +2774,48 @@ class TestEmptyFinalReplyAfterToolChain:
         assert f"reasoning_length={len(reasoning_only.strip())}" in caplog.text
 
     @pytest.mark.parametrize(
-        "text, content",
+        "text, stop_reason, content",
         [
-            (f"<think>{REASONING}</think>\n\nDone.", "Done."),
-            (f"{REASONING}</think>Done.", "Done."),
-            ("Wrap it in <think> and </think>. ", "Wrap it in <think> and </think>. "),
+            (f"<think>{REASONING}</think>\n\nDone.", "end_turn", "Done."),
+            (f"{REASONING}</think>Done.", "end_turn", "Done."),
+            (
+                f"{REASONING}</think><think>{REASONING}</think>Done.",
+                "end_turn",
+                "Done.",
+            ),
+            (
+                f"<think>{REASONING}</think>Do<think>{REASONING}</think>ne.",
+                "end_turn",
+                "Done.",
+            ),
+            (f"<think>a</think>Done.<think>{REASONING}", "max_tokens", "Done."),
         ],
     )
     def test_answer_text_survives_inline_reasoning_without_extra_call(
-        self, chat_service, sample_nodes, text, content
+        self, chat_service, sample_nodes, text, stop_reason, content
     ):
-        result, calls, _ = self._run(chat_service, self._text_reply(text))
+        result, calls, _ = self._run(chat_service, self._text_reply(text, stop_reason))
 
         assert result["content"] == content
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize(
+        "text, stop_reason",
+        [
+            ("Wrap it in <think> and </think>. ", "end_turn"),
+            ("<think> tags wrap reasoning.", "end_turn"),
+            ("Close the block with </think> at the end.", "end_turn"),
+            ("Use </think>", "end_turn"),
+            ("Use `</think>` last.", "end_turn"),
+            ("Use <think> tags", "max_tokens"),
+        ],
+    )
+    def test_answer_mentioning_reasoning_tags_is_unchanged_without_extra_call(
+        self, chat_service, sample_nodes, text, stop_reason
+    ):
+        result, calls, _ = self._run(chat_service, self._text_reply(text, stop_reason))
+
+        assert result["content"] == text
         assert len(calls) == 2
 
     def test_final_reply_with_text_makes_no_extra_call(
