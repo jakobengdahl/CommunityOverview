@@ -2,7 +2,6 @@ from typing import List, Dict, Callable, Optional
 import os
 import json
 import logging
-import re
 from dotenv import load_dotenv
 import inspect
 from backend.llm.llm_providers import (
@@ -536,31 +535,13 @@ _NO_ANSWER_AFTER_TOOLS_MESSAGE = (
 )
 
 
-# Servers without a reasoning parser put reasoning in the content: a leading
-# block (unterminated if the token limit cut it off), or only its closing tag
-# when the chat template pre-fills the opening one. A tag mentioned later in an
-# answer is left alone.
-_INLINE_REASONING = re.compile(
-    r"\A(?:"
-    r"(?:\s*<(think(?:ing)?)>.*?(?:</\1>|\Z))+"
-    r"|(?:(?!<think(?:ing)?>).)*?</think(?:ing)?>"
-    r")\s*",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _joined_text(response) -> str:
+def _response_text(response) -> str:
     """Join the text blocks of an LLMResponse."""
     return "".join(
         block.get("text", "")
         for block in response.content
         if isinstance(block, dict) and block.get("type") == "text"
     )
-
-
-def _response_text(response) -> str:
-    """The answer text of an LLMResponse, without reasoning inlined in the content."""
-    return _INLINE_REASONING.sub("", _joined_text(response), count=1)
 
 
 def _log_empty_reply(response, stage: str) -> None:
@@ -570,12 +551,8 @@ def _log_empty_reply(response, stage: str) -> None:
     choice = choices[0] if isinstance(choices, list) and choices else None
     message = getattr(choice, "message", None)
     usage = getattr(raw, "usage", None)
-    # Only called when the answer text is blank, so any joined text is reasoning.
-    reasoning = (
-        getattr(message, "reasoning_content", None)
-        or getattr(message, "reasoning", None)
-        or _joined_text(response).strip()
-        or None
+    reasoning = getattr(message, "reasoning_content", None) or getattr(
+        message, "reasoning", None
     )
     logger.warning(
         "Empty %s reply: stop_reason=%r finish_reason=%r completion_tokens=%r "
