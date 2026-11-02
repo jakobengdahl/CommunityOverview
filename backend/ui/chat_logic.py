@@ -536,19 +536,17 @@ _NO_ANSWER_AFTER_TOOLS_MESSAGE = (
 )
 
 
-# Servers without a reasoning parser put reasoning in the content: leading
-# blocks, or only a closing tag when the chat template pre-fills the opening one.
-# That closing tag must be the first tag and touch the reasoning or start a line;
-# an answer that mentions it writes it as a separate or quoted word.
-_LEADING_REASONING = re.compile(
+# Servers without a reasoning parser put reasoning in the content: a leading
+# block (unterminated if the token limit cut it off), or only its closing tag
+# when the chat template pre-fills the opening one. A tag mentioned later in an
+# answer is left alone.
+_INLINE_REASONING = re.compile(
     r"\A(?:"
-    r"\s*<(think(?:ing)?)>.*?</\1>"
-    r"|(?:(?!</?think(?:ing)?>).)*?(?<![ \t`'\"(\[])</think(?:ing)?>"
-    r")+\s*",
+    r"(?:\s*<(think(?:ing)?)>.*?(?:</\1>|\Z))+"
+    r"|(?:(?!<think(?:ing)?>).)*?</think(?:ing)?>"
+    r")\s*",
     re.IGNORECASE | re.DOTALL,
 )
-_REASONING_BLOCK = re.compile(r"<(think(?:ing)?)>.*?</\1>", re.IGNORECASE | re.DOTALL)
-_REASONING_OPENER = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
 
 
 def _joined_text(response) -> str:
@@ -562,20 +560,7 @@ def _joined_text(response) -> str:
 
 def _response_text(response) -> str:
     """The answer text of an LLMResponse, without reasoning inlined in the content."""
-    text = _joined_text(response)
-    answer = _LEADING_REASONING.sub("", text, count=1)
-    # Leading reasoning shows the model emits these tags, so later ones are not
-    # mentions. Without it, tags after answer text are left alone.
-    emits_tags = answer != text
-    if emits_tags:
-        answer = _REASONING_BLOCK.sub("", answer)
-    # An open block is only reasoning if the token limit cut it off; otherwise the
-    # output ended normally and the tag is part of the answer.
-    if response.stop_reason == "max_tokens":
-        opener = _REASONING_OPENER.search(answer)
-        if opener and (emits_tags or not answer[: opener.start()].strip()):
-            answer = answer[: opener.start()]
-    return answer
+    return _INLINE_REASONING.sub("", _joined_text(response), count=1)
 
 
 def _log_empty_reply(response, stage: str) -> None:
