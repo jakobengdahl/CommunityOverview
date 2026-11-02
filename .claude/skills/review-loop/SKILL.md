@@ -72,7 +72,7 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
   report to the owner (never continue silently) when round 5 has been completed,
   or after round N (N ≥ 4) when each of rounds N-2, N-1 and N reported a
   `production-defect` count no lower than the round before it, unless the round
-  just completed reported none (the first bullet below wins and the change
+  just completed reported none (the termination bullet below wins and the change
   proceeds to merge). The no-trend stop fires no earlier than round 4 and
   overrides the merge-with-a-note in §5: an item stopped by it is reported, not
   merged.
