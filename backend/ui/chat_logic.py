@@ -536,91 +536,46 @@ _NO_ANSWER_AFTER_TOOLS_MESSAGE = (
 )
 
 
-# Servers without a reasoning parser put reasoning in the content: blocks anywhere,
-# or only a closing tag when the chat template pre-fills the opening one. An answer
-# that mentions a tag quotes it, fences it, or writes it as a separate word.
-_REASONING_TAG = re.compile(r"</?think(?:ing)?>", re.IGNORECASE)
-_REASONING_CLOSER = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
-_TAG_QUOTES = {
-    "`": "`",
-    '"': '"',
-    "'": "'",
-    "*": "*",
-    "_": "_",
-    "~": "~",
-    "(": ")",
-    "[": "]",
-    "\u201c": "\u201d",
-    "\u2018": "\u2019",
-    "\u00ab": "\u00bb",
-}
-_BEFORE_SEPARATE_TAG = " \t([\u201c\u2018\u00ab"
-_AFTER_SEPARATE_TAG = " \t.,;:!?)]}\"'`*\u201d\u2019\u00bb"
-
-
-def _is_quoted_tag(text: str, tag: re.Match) -> bool:
-    """Whether the tag sits inside matching quotes or a closed code fence."""
-    before = text[tag.start() - 1 : tag.start()]
-    if before and _TAG_QUOTES.get(before) == text[tag.end() : tag.end() + 1]:
-        return True
-    return text.count("```", 0, tag.start()) % 2 == 1 and "```" in text[tag.end() :]
-
-
-def _is_tag_mention(text: str, tag: re.Match, stop_reason: str) -> bool:
-    """Whether an unquoted tag outside a reasoning block is prose, not a delimiter."""
-    after = text[tag.end() : tag.end() + 1]
-    if not text[: tag.start()].strip():
-        # A leading opener only counts as prose if nothing ever closes it, the
-        # output ended normally and a word follows it.
-        return (
-            not tag.group().startswith("</")
-            and stop_reason != "max_tokens"
-            and after in (" ", "\t")
-            and not _REASONING_CLOSER.search(text, tag.end())
-        )
-    return (
-        text[tag.start() - 1] in _BEFORE_SEPARATE_TAG and after in _AFTER_SEPARATE_TAG
-    )
+# Servers without a reasoning parser put reasoning in the content: leading
+# blocks, or only a closing tag when the chat template pre-fills the opening one.
+# That closing tag must be the first tag and touch the reasoning or start a line;
+# an answer that mentions it writes it as a separate or quoted word.
+_LEADING_REASONING = re.compile(
+    r"\A(?:"
+    r"\s*<(think(?:ing)?)>.*?</\1>"
+    r"|(?:(?!</?think(?:ing)?>).)*?(?<![ \t`'\"(\[])</think(?:ing)?>"
+    r")+\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+_REASONING_BLOCK = re.compile(r"<(think(?:ing)?)>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_REASONING_OPENER = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
 
 
 def _joined_text(response) -> str:
     """Join the text blocks of an LLMResponse."""
     return "".join(
-        block["text"]
+        block.get("text", "")
         for block in response.content
-        if isinstance(block, dict)
-        and block.get("type") == "text"
-        and isinstance(block.get("text"), str)
+        if isinstance(block, dict) and block.get("type") == "text"
     )
 
 
 def _response_text(response) -> str:
     """The answer text of an LLMResponse, without reasoning inlined in the content."""
     text = _joined_text(response)
-    answer = ""
-    cursor = 0
-    in_block = False
-    found_reasoning = False
-    for tag in _REASONING_TAG.finditer(text):
-        if _is_quoted_tag(text, tag):
-            continue
-        closing = tag.group().startswith("</")
-        if in_block:
-            if closing:
-                in_block = False
-                cursor = tag.end()
-        elif not _is_tag_mention(text, tag, response.stop_reason):
-            found_reasoning = True
-            if closing:
-                # No block is open, so the opener was pre-filled: all before is reasoning.
-                answer = ""
-                cursor = tag.end()
-            else:
-                answer += text[cursor : tag.start()]
-                in_block = True
-    if not found_reasoning:
-        return text
-    return (answer if in_block else answer + text[cursor:]).lstrip()
+    answer = _LEADING_REASONING.sub("", text, count=1)
+    # Leading reasoning shows the model emits these tags, so later ones are not
+    # mentions. Without it, tags after answer text are left alone.
+    emits_tags = answer != text
+    if emits_tags:
+        answer = _REASONING_BLOCK.sub("", answer)
+    # An open block is only reasoning if the token limit cut it off; otherwise the
+    # output ended normally and the tag is part of the answer.
+    if response.stop_reason == "max_tokens":
+        opener = _REASONING_OPENER.search(answer)
+        if opener and (emits_tags or not answer[: opener.start()].strip()):
+            answer = answer[: opener.start()]
+    return answer
 
 
 def _log_empty_reply(response, stage: str) -> None:
@@ -666,11 +621,11 @@ def _answer_after_empty_reply(
             tools=[],
             max_tokens=4096,
         )
-        text = _response_text(retry)
     except Exception as e:
         logger.warning("Retry after empty reply failed: %s", type(e).__name__)
         return _NO_ANSWER_AFTER_TOOLS_MESSAGE
 
+    text = _response_text(retry)
     if text.strip():
         return text
     _log_empty_reply(retry, "retry")
