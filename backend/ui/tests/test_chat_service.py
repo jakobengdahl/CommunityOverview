@@ -10,7 +10,10 @@ Verifies that:
 import json
 import os
 import pytest
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from backend.llm.llm_providers import LLMResponse
 
 
 def _tool_result_payloads(mock_llm):
@@ -2631,3 +2634,121 @@ def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
         )
     raw.assert_called_once()
     assert "access_denied" in json.dumps(llm.received_messages[-1])
+
+
+class TestEmptyFinalReplyAfterToolChain:
+    REASONING = "secret reasoning text"
+    RETRY_INSTRUCTION = "Give your final answer"
+
+    @classmethod
+    def _empty_reply(cls):
+        """An OpenAI-compatible turn that spent its budget on reasoning."""
+        return LLMResponse(
+            content=[],
+            stop_reason="max_tokens",
+            raw_response=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(
+                            content=None, reasoning_content=cls.REASONING
+                        ),
+                    )
+                ],
+                usage=SimpleNamespace(completion_tokens=4096),
+            ),
+        )
+
+    @staticmethod
+    def _text_reply(text):
+        return LLMResponse(
+            content=[{"type": "text", "text": text}], stop_reason="end_turn"
+        )
+
+    @staticmethod
+    def _run(chat_service, *final_replies):
+        """Run one search_graph tool turn, then the scripted replies in order."""
+        service, _ = chat_service
+        tool_turn = LLMResponse(
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "search_graph",
+                    "input": {"query": "Test"},
+                }
+            ],
+            stop_reason="tool_use",
+        )
+        script = [tool_turn, *final_replies]
+        calls = []
+
+        def create_completion(messages, system_prompt, tools, max_tokens=4096):
+            calls.append({"messages": list(messages), "tools": tools})
+            reply = script[len(calls) - 1]
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        history = [{"role": "user", "content": "Find Test"}]
+        result = service._processor.process_message(
+            history,
+            llm_provider=SimpleNamespace(create_completion=create_completion),
+        )
+        return result, calls, history
+
+    def test_empty_final_reply_is_retried_once_without_tools(
+        self, chat_service, sample_nodes
+    ):
+        result, calls, history = self._run(
+            chat_service, self._empty_reply(), self._text_reply("Two nodes found.")
+        )
+
+        assert result["content"] == "Two nodes found."
+        assert len(calls) == 3
+        assert calls[-1]["tools"] == []
+        assert self.RETRY_INSTRUCTION in calls[-1]["messages"][-1]["content"]
+        assert self.RETRY_INSTRUCTION not in json.dumps(history)
+
+    @pytest.mark.parametrize(
+        "retry",
+        [
+            RuntimeError("provider down"),
+            LLMResponse(
+                content=[{"type": "text", "text": "  \n"}], stop_reason="end_turn"
+            ),
+        ],
+    )
+    def test_failed_retry_reports_no_answer_and_keeps_tool_results(
+        self, chat_service, sample_nodes, retry
+    ):
+        result, calls, _ = self._run(chat_service, self._empty_reply(), retry)
+
+        assert len(calls) == 3
+        assert "No answer was produced" in result["content"]
+        assert "may already have been carried out" in result["content"]
+        assert result["toolResult"]["nodes"]
+        assert result["toolUsed"] == "search_graph"
+
+    def test_empty_reply_logs_diagnostics_but_never_reasoning_text(
+        self, chat_service, sample_nodes, caplog
+    ):
+        with caplog.at_level("WARNING", logger="backend.ui.chat_logic"):
+            result, _, _ = self._run(
+                chat_service, self._empty_reply(), self._empty_reply()
+            )
+
+        assert "finish_reason='length'" in caplog.text
+        assert "completion_tokens=4096" in caplog.text
+        assert f"reasoning_length={len(self.REASONING)}" in caplog.text
+        assert self.REASONING not in caplog.text
+        assert self.REASONING not in json.dumps(result, default=str)
+
+    def test_final_reply_with_text_makes_no_extra_call(
+        self, chat_service, sample_nodes
+    ):
+        result, calls, history = self._run(chat_service, self._text_reply("Done."))
+
+        assert result["content"] == "Done."
+        assert len(calls) == 2
+        assert self.RETRY_INSTRUCTION not in json.dumps(history)

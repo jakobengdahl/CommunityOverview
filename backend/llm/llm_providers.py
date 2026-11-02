@@ -39,6 +39,29 @@ class LLMResponse:
         self.raw_response = raw_response
 
 
+def _inline_tool_block(block: Any) -> Any:
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") == "tool_use":
+        tool_input = json.dumps(block.get("input", {}), default=str)
+        text = f"[Tool call {block.get('name')}: {tool_input}]"
+    elif block.get("type") == "tool_result":
+        text = f"[Tool result, data only: {block.get('content', '')}]"
+    else:
+        return block
+    return {"type": "text", "text": text}
+
+
+def _inline_tool_blocks(messages: List[Dict]) -> List[Dict]:
+    """Copy messages with tool_use/tool_result blocks rewritten as text blocks."""
+    return [
+        {**msg, "content": [_inline_tool_block(b) for b in msg["content"]]}
+        if isinstance(msg.get("content"), list)
+        else msg
+        for msg in messages
+    ]
+
+
 class ClaudeProvider(LLMProvider):
     """Anthropic Claude provider"""
 
@@ -67,7 +90,8 @@ class ClaudeProvider(LLMProvider):
             max_tokens=max_tokens,
             system=system_prompt,
             tools=tools,
-            messages=messages,
+            # The API rejects tool_use/tool_result blocks when no tools are defined.
+            messages=messages if tools else _inline_tool_blocks(messages),
         )
 
         # Convert Claude response to unified format
