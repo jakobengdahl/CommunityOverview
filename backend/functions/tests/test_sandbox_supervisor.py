@@ -242,14 +242,16 @@ def test_disk_scan_of_deep_nesting_holds_a_bounded_number_of_descriptors(tmp_pat
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
-@pytest.mark.parametrize("failing", ["open", "fstat", "open_timeout", "fstat_timeout"])
+@pytest.mark.parametrize(
+    "failing", ["open", "fstat", "open_timeout", "fstat_timeout", "close_timeout"]
+)
 def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
     monkeypatch, tmp_path, failing
 ):
     work = tmp_path / "work"
     (work / "a" / "b" / "c").mkdir(parents=True)
-    real_open, real_fstat = os.open, os.fstat
-    state = {"moved": False}
+    real_open, real_fstat, real_close = os.open, os.fstat, os.close
+    state = {"moved": False, "fired": False}
 
     def open_fails(path, flags, *args, dir_fd=None, **kw):
         if path == "..":
@@ -268,8 +270,15 @@ def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
             raise sandbox._DiskScanTimeout("timed out")
         return real_fstat(fd)
 
+    def close_fails(fd):
+        real_close(fd)
+        if state["moved"] and failing == "close_timeout" and not state["fired"]:
+            state["fired"] = True  # A signal lands right after the walk-down close.
+            raise sandbox._DiskScanTimeout("timed out")
+
     monkeypatch.setattr(sandbox.os, "open", open_fails)
     monkeypatch.setattr(sandbox.os, "fstat", fstat_fails)
+    monkeypatch.setattr(sandbox.os, "close", close_fails)
     spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
     before = len(os.listdir("/proc/self/fd"))
     with pytest.raises((OSError, sandbox._DiskScanTimeout)):

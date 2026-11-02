@@ -601,6 +601,10 @@ def _work_dir_exceeds_quota(spec):
 
     root = os.open(spec["work_dir"], flags)
     current = root
+    # Descriptors opened by the walk-down fallback that `current` does not own
+    # yet; the finally closes them if an exception (including one raised by a
+    # signal handler) arrives while they are held.
+    walking = []
     try:
         seen.add(identity_of(root))
         pending = list_subdirectories(root)
@@ -641,19 +645,17 @@ def _work_dir_exceeds_quota(spec):
                 parent = root
                 for depth in range(1, len(stack)):
                     name, identity, _ = stack[depth]
-                    try:
-                        child = open_verified(name, identity, parent)
-                    except BaseException:
-                        if parent != root:
-                            os.close(parent)
-                        raise
+                    child = open_verified(name, identity, parent)
                     if child is None:
                         del stack[depth:]
                         break
+                    walking.append(child)
                     previous_parent, parent = parent, child
                     if previous_parent != root:
+                        walking.remove(previous_parent)
                         os.close(previous_parent)
             previous, current = current, parent
+            walking.clear()
             if previous != root:
                 os.close(previous)
         # Unlinked open files have no directory entry. Measure before cleanup
@@ -687,6 +689,9 @@ def _work_dir_exceeds_quota(spec):
                     return True
         return False
     finally:
+        for descriptor in walking:
+            if descriptor != current:
+                os.close(descriptor)
         if current != root:
             os.close(current)
         os.close(root)
