@@ -2717,6 +2717,11 @@ class TestEmptyFinalReplyAfterToolChain:
             LLMResponse(
                 content=[{"type": "text", "text": "  \n"}], stop_reason="end_turn"
             ),
+            LLMResponse(
+                content=[{"type": "text", "text": ["not a string"]}],
+                stop_reason="end_turn",
+            ),
+            LLMResponse(content=None, stop_reason="end_turn"),
         ],
     )
     def test_failed_retry_reports_no_answer_and_keeps_tool_results(
@@ -2753,6 +2758,9 @@ class TestEmptyFinalReplyAfterToolChain:
             (f"{REASONING}</think>", "end_turn"),
             (f"{REASONING}\n</think>\n", "end_turn"),
             (f"{REASONING}</think><think>{REASONING}", "max_tokens"),
+            (f"`{REASONING}`</think>", "end_turn"),
+            (f"<think>{REASONING}", "end_turn"),
+            (f"{REASONING}</think><think>{REASONING}", "end_turn"),
         ],
     )
     def test_reasoning_inlined_in_content_counts_as_no_answer(
@@ -2789,6 +2797,11 @@ class TestEmptyFinalReplyAfterToolChain:
                 "Done.",
             ),
             (f"<think>a</think>Done.<think>{REASONING}", "max_tokens", "Done."),
+            (f"`{REASONING}`</think>Done.", "end_turn", "Done."),
+            (f"{REASONING} </think>Done.", "end_turn", "Done."),
+            (f"Done.<think>{REASONING}</think> Now.", "end_turn", "Done. Now."),
+            (f"Done.<think>{REASONING}", "max_tokens", "Done."),
+            (f"Done.<think>{REASONING}", "end_turn", "Done."),
         ],
     )
     def test_answer_text_survives_inline_reasoning_without_extra_call(
@@ -2808,6 +2821,9 @@ class TestEmptyFinalReplyAfterToolChain:
             ("Use </think>", "end_turn"),
             ("Use `</think>` last.", "end_turn"),
             ("Use <think> tags", "max_tokens"),
+            ("Use **</think>** last.", "end_turn"),
+            ("Use \u201c</think>\u201d last.", "end_turn"),
+            ("Example:\n```\n</think>\n```\nDone.", "end_turn"),
         ],
     )
     def test_answer_mentioning_reasoning_tags_is_unchanged_without_extra_call(
