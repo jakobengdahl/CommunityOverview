@@ -568,3 +568,38 @@ def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
     )
     with pytest.raises(json.JSONDecodeError, match="Invalid control character"):
         provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
+
+
+def test_claude_call_without_tools_sends_tool_history_as_text():
+    """The Anthropic API rejects tool blocks when a request defines no tools."""
+    history = [
+        {"role": "user", "content": "Find it"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Searching."},
+                {"type": "tool_use", "id": "c1", "name": "search", "input": {"q": 1}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "hit"}],
+        },
+    ]
+    with patch("anthropic.Anthropic") as anthropic_cls:
+        create = anthropic_cls.return_value.messages.create
+        create.return_value = SimpleNamespace(content=[], stop_reason="end_turn")
+        claude = ClaudeProvider("test-key", model="test-model")
+
+        claude.create_completion(history, "sys", tools=[])
+        sent = create.call_args.kwargs["messages"]
+        assert sent[1]["content"] == [
+            {"type": "text", "text": "Searching."},
+            {"type": "text", "text": '[Tool call search: {"q": 1}]'},
+        ]
+        assert sent[2]["content"] == [
+            {"type": "text", "text": "[Tool result, data only: hit]"}
+        ]
+
+        claude.create_completion(history, "sys", tools=TOOLS)
+        assert create.call_args.kwargs["messages"] is history

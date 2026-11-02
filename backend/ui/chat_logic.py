@@ -524,6 +524,90 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 """
 
 
+_EMPTY_REPLY_RETRY_INSTRUCTION = (
+    "Give your final answer to the user now, as text, based on the tool results "
+    "already present in this conversation. Do not call any tools."
+)
+_NO_ANSWER_AFTER_TOOLS_MESSAGE = (
+    "No answer was produced: the AI model returned no text after using its tools. "
+    "Tool actions may already have been carried out, so check the result before "
+    "trying again."
+)
+
+
+def _response_text(response) -> str:
+    """Join the text blocks of an LLMResponse; non-string text is not usable text."""
+    return "".join(
+        block["text"]
+        for block in response.content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _log_empty_reply(response, stage: str) -> None:
+    """Warn with the provider's diagnostics; reasoning is reported by length only."""
+    raw = getattr(response, "raw_response", None)
+    choices = getattr(raw, "choices", None)
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    message = getattr(choice, "message", None)
+    usage = getattr(raw, "usage", None)
+    reasoning = getattr(message, "reasoning_content", None) or getattr(
+        message, "reasoning", None
+    )
+    blocks = getattr(raw, "content", None)
+    if reasoning is None and isinstance(blocks, list):
+        # Anthropic reports reasoning as thinking blocks, not on a message field.
+        reasoning = (
+            "".join(
+                block.thinking
+                for block in blocks
+                if getattr(block, "type", None) == "thinking"
+                and isinstance(getattr(block, "thinking", None), str)
+            )
+            or None
+        )
+    logger.warning(
+        "Empty %s reply: stop_reason=%r finish_reason=%r completion_tokens=%r "
+        "reasoning_length=%r",
+        stage,
+        response.stop_reason,
+        getattr(choice, "finish_reason", None),
+        getattr(usage, "completion_tokens", getattr(usage, "output_tokens", None)),
+        len(reasoning) if isinstance(reasoning, str) else None,
+    )
+
+
+def _answer_after_empty_reply(
+    messages: List[Dict], response, provider: LLMProvider, system_prompt: str
+) -> str:
+    """Retry once without tools; never returns blank, even if the retry fails.
+
+    The instruction is sent on a copy so it stays out of the caller's history.
+    """
+    _log_empty_reply(response, "tool chain")
+    try:
+        retry = provider.create_completion(
+            messages=[
+                *messages,
+                {"role": "user", "content": _EMPTY_REPLY_RETRY_INSTRUCTION},
+            ],
+            system_prompt=system_prompt,
+            tools=[],
+            max_tokens=4096,
+        )
+        text = _response_text(retry)
+    except Exception as e:
+        logger.warning("Retry after empty reply failed: %s", type(e).__name__)
+        return _NO_ANSWER_AFTER_TOOLS_MESSAGE
+
+    if text.strip():
+        return text
+    _log_empty_reply(retry, "retry")
+    return _NO_ANSWER_AFTER_TOOLS_MESSAGE
+
+
 class ChatProcessor:
     def __init__(self, tools_map: Dict[str, Callable], *, authorization_hook=None):
         self._authorization_hook = authorization_hook
@@ -1648,12 +1732,11 @@ class ChatProcessor:
                 attachment_access=attachment_access,
             )
 
-        # Extract text from response (handle multiple text blocks)
-        final_text = "".join(
-            block.get("text", "")
-            for block in final_response.content
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
+        final_text = _response_text(final_response)
+        if not final_text.strip():
+            final_text = _answer_after_empty_reply(
+                messages, final_response, provider, active_system_prompt
+            )
 
         # Prepare final tool result with accumulated data
         final_tool_result = {}
