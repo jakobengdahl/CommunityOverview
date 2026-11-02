@@ -242,7 +242,7 @@ def test_disk_scan_of_deep_nesting_holds_a_bounded_number_of_descriptors(tmp_pat
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
-@pytest.mark.parametrize("failing", ["open", "fstat"])
+@pytest.mark.parametrize("failing", ["open", "fstat", "open_timeout", "fstat_timeout"])
 def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
     monkeypatch, tmp_path, failing
 ):
@@ -257,18 +257,22 @@ def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
             raise FileNotFoundError(path)
         if state["moved"] and failing == "open" and path == "b":
             raise PermissionError(errno.EACCES, "denied")
+        if state["moved"] and failing == "open_timeout" and path == "b":
+            raise sandbox._DiskScanTimeout("timed out")
         return real_open(path, flags, *args, dir_fd=dir_fd, **kw)
 
     def fstat_fails(fd):
         if state["moved"] and failing == "fstat":
             raise OSError(errno.EIO, "I/O error")
+        if state["moved"] and failing == "fstat_timeout":
+            raise sandbox._DiskScanTimeout("timed out")
         return real_fstat(fd)
 
     monkeypatch.setattr(sandbox.os, "open", open_fails)
     monkeypatch.setattr(sandbox.os, "fstat", fstat_fails)
     spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
     before = len(os.listdir("/proc/self/fd"))
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, sandbox._DiskScanTimeout)):
         sandbox._work_dir_exceeds_quota(spec)
     state["moved"] = False  # os.fstat is global; stop failing for pytest itself
     assert len(os.listdir("/proc/self/fd")) == before

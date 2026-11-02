@@ -650,9 +650,9 @@ def _work_dir_exceeds_quota(spec):
                     if child is None:
                         del stack[depth:]
                         break
-                    if parent != root:
-                        os.close(parent)
-                    parent = child
+                    previous_parent, parent = parent, child
+                    if previous_parent != root:
+                        os.close(previous_parent)
             previous, current = current, parent
             if previous != root:
                 os.close(previous)
