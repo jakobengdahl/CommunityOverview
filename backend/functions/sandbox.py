@@ -589,7 +589,12 @@ def _work_dir_exceeds_quota(spec):
             fd = os.open(name, flags, dir_fd=parent)
         except (FileNotFoundError, NotADirectoryError):
             return None
-        if identity_of(fd) != identity:
+        try:
+            matches = identity_of(fd) == identity
+        except BaseException:
+            os.close(fd)
+            raise
+        if not matches:
             os.close(fd)
             return None
         return fd
@@ -610,9 +615,11 @@ def _work_dir_exceeds_quota(spec):
                 child = open_verified(name, identity, current)
                 if child is None:
                     continue  # Moved or replaced since it was listed.
-                if current != root:
-                    os.close(current)
-                current = child
+                # Rebind before closing: an exception raised by a signal
+                # between the two must not make the finally close it twice.
+                previous, current = current, child
+                if previous != root:
+                    os.close(previous)
                 pending = list_subdirectories(current)
                 if pending is None:
                     return True
@@ -634,16 +641,21 @@ def _work_dir_exceeds_quota(spec):
                 parent = root
                 for depth in range(1, len(stack)):
                     name, identity, _ = stack[depth]
-                    child = open_verified(name, identity, parent)
+                    try:
+                        child = open_verified(name, identity, parent)
+                    except BaseException:
+                        if parent != root:
+                            os.close(parent)
+                        raise
                     if child is None:
                         del stack[depth:]
                         break
                     if parent != root:
                         os.close(parent)
                     parent = child
-            if current != root:
-                os.close(current)
-            current = parent
+            previous, current = current, parent
+            if previous != root:
+                os.close(previous)
         # Unlinked open files have no directory entry. Measure before cleanup
         # closes the run's descriptors and releases their storage.
         pending = _children_of(os.getpid())

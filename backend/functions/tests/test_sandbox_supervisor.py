@@ -1,6 +1,7 @@
 """Landlock ABI rules and the real supervisor's status protocol."""
 
 import ctypes
+import errno
 import io
 import json
 import os
@@ -239,6 +240,38 @@ def test_disk_scan_of_deep_nesting_holds_a_bounded_number_of_descriptors(tmp_pat
         assert sandbox._work_dir_exceeds_quota(spec) is True
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.parametrize("failing", ["open", "fstat"])
+def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
+    monkeypatch, tmp_path, failing
+):
+    work = tmp_path / "work"
+    (work / "a" / "b" / "c").mkdir(parents=True)
+    real_open, real_fstat = os.open, os.fstat
+    state = {"moved": False}
+
+    def open_fails(path, flags, *args, dir_fd=None, **kw):
+        if path == "..":
+            state["moved"] = True  # Force the walk-down fallback.
+            raise FileNotFoundError(path)
+        if state["moved"] and failing == "open" and path == "b":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kw)
+
+    def fstat_fails(fd):
+        if state["moved"] and failing == "fstat":
+            raise OSError(errno.EIO, "I/O error")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(sandbox.os, "open", open_fails)
+    monkeypatch.setattr(sandbox.os, "fstat", fstat_fails)
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
+    before = len(os.listdir("/proc/self/fd"))
+    with pytest.raises(OSError):
+        sandbox._work_dir_exceeds_quota(spec)
+    state["moved"] = False  # os.fstat is global; stop failing for pytest itself
+    assert len(os.listdir("/proc/self/fd")) == before
 
 
 @pytest.mark.parametrize(
