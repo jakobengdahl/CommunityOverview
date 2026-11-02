@@ -504,16 +504,19 @@ Promotion stays a manual, owner-only merge. Before making it, look at these
 and record what each shows (they are what the owner decides on, not an
 automatic gate):
 
-- **Preview healthy.** The preview instance runs the candidate image
-  (`sha-<commit>`) and its `/health` endpoint answers. Note for how long the
-  candidate has run in preview; no minimum soak time is mandated.
+- **Preview healthy.** The preview instance answers `/health` (liveness) and
+  its readiness path. `/health` does not report the version, so confirm the
+  running image separately: the preview deployment's image tag or the deploy
+  run must show the candidate's `sha-<commit>`. Note how long the candidate
+  has run in preview; no minimum soak time is mandated.
 - **SBOM produced.** The `release-evidence-<commit_sha>-<run_id>-<run_attempt>`
-  artifact of the CI run that built the candidate holds the SPDX and CycloneDX
-  files for both images (see *Release SBOM Evidence*).
-- **No open critical vulnerability.** The `Secret and SAST` and dependency
-  audit jobs (`pip-audit`, `npm audit`, and the gateway dependency audit) are
-  green on the candidate commit, CodeQL shows no open critical alert, and no
-  critical finding is otherwise known against the candidate.
+  artifact of the push-to-`preview` CI run that built the candidate holds the
+  SPDX and CycloneDX files for both images (see "Release SBOM Evidence" in
+  [DEPLOYMENT_CONTRACT.md](./DEPLOYMENT_CONTRACT.md)).
+- **No open critical vulnerability.** On the repository's Actions page, the
+  latest `Security Scan` run (pull request or weekly) and the latest nightly
+  `Gateway Dependency Audit` run are green, CodeQL shows no open critical
+  alert, and no critical finding is otherwise known against the candidate.
 
 ---
 
