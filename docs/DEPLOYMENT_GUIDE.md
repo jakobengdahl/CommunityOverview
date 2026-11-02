@@ -68,8 +68,10 @@ through `HardenedSubprocessRunner(max_disk_bytes=..., max_disk_files=...)`;
 the constructor rejects zero, negative, non-integer or above-maximum values
 before any run starts. The per-file 16 MiB `RLIMIT_FSIZE` limit also applies.
 
-Polling is best-effort: a function can overshoot between scans, and temporary
-peaks or unlinked files held open may escape accounting. As defence in depth,
+Polling is best-effort: a function can overshoot between scans. Transient
+files closed between scans, memory-mapped files, FIFO or pipe transfers, and
+directories renamed or moved while a scan runs may escape accounting; unlinked
+regular files the run still holds open are counted once per inode. As defence in depth,
 put the temporary directory on storage with an enforced container/host limit:
 an ephemeral-storage limit where the platform enforces one, a filesystem quota,
 or a size-capped tmpfs with an inode limit. For a container allowing one run at

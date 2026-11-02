@@ -438,16 +438,18 @@ system that started it.
   are instance settings, not manifest `limits` fields.
   Each scan sums the larger of apparent size and allocated bytes for each
   entry, including directories, without following symbolic links. Scans also
-  count unlinked regular files held open by the run and its descendants,
-  deduplicating descriptors by inode. The
+  count unlinked regular files held open by the run and its descendants.
+  Each inode counts once per scan, whatever its names and descriptors. The
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. Each scan has a
   one-second deadline so it cannot indefinitely delay supervision or the final
   report. If usage cannot be checked, including a scan timeout, the run is
   terminated and fails with `disk_check_failed`.
-  Polling is best-effort: usage may overshoot between scans, and transient
-  files closed between scans may escape accounting. The 16 MiB
-  per-file limit remains in force. Operators should also cap the backing
+  Polling is best-effort: usage may overshoot between scans. Transient files
+  closed between scans, memory-mapped files, FIFO or pipe transfers, and
+  directories renamed or moved while a scan runs may escape accounting;
+  unlinked regular files the run still holds open are counted once per inode.
+  The 16 MiB per-file limit remains in force. Operators should also cap the backing
   container/host storage (see [Deployment Guide](DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 - Termination is forced. The runner does not wait for the function to clean up,
   and writes the function made before it was terminated stay in the graph.
