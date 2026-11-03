@@ -150,7 +150,8 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   exemption. A test file covers the modules in a `# covers: <path>, <path>` header
   in its first 10 lines (`// covers:` in JS), else the module matching
   `test_<name>.py` by the longest name prefix (`test_x_guards.py` covers `x.py`). A
-  changed file with neither must add the header. A `# ratio-exempt: <reason>` header
+  changed file with neither must add the header. A file covering several modules
+  counts towards each in proportion to the module's lines. A `# ratio-exempt: <reason>` header
   skips the file and the script prints it; adding one needs the owner's approval.
   Untouched files are left alone; no bulk trim. `scripts/check_test_ratio.py` checks
   this, in CI as the non-required `Test volume (per-file limit)`.

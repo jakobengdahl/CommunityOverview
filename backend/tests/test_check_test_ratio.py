@@ -111,29 +111,68 @@ def test_an_unchanged_sibling_counts_towards_the_total_but_is_not_reported(tmp_p
     assert [item.path for item in report.over] == [changed]
     item = report.over[0]
     assert (item.lines, item.total_lines, item.test_files) == (1, 16, 2)
-    assert (item.modules, item.module_lines) == (["mod.py"], 10)
+    assert (item.module, item.module_lines) == ("mod.py", 10)
 
 
-def test_test_files_sharing_a_module_are_held_against_all_their_modules(tmp_path):
+def test_naming_a_large_module_adds_no_room_to_a_small_one(tmp_path):
     wide, narrow = "tests/test_wide.py", "tests/test_mod.py"
     report = _check(
         tmp_path,
         {
             "mod.py": _lines(10),
-            "big.py": _lines(10),
-            wide: "# covers: mod.py, big.py\n" + _lines(14),
-            narrow: _lines(15),
+            "big.py": _lines(1000),
+            wide: "# covers: mod.py, big.py\n",
+            narrow: _lines(501),
         },
-        [wide],
+        [wide, narrow],
     )
-    assert report.over == []
+    assert {(item.path, item.module) for item in report.over} == {
+        (wide, "mod.py"),
+        (narrow, "mod.py"),
+    }
+
+
+def test_a_file_covering_several_modules_counts_in_proportion_to_their_lines(tmp_path):
+    wide, narrow = "tests/test_wide.py", "tests/test_mod.py"
+    files = {
+        "mod.py": _lines(10),
+        "big.py": _lines(30),
+        wide: "# covers: mod.py, big.py\n" + _lines(39),
+    }
+    assert _check(tmp_path, {**files, narrow: _lines(5)}, [wide]).over == []
+    assert len(_check(tmp_path, {**files, narrow: _lines(6)}, [wide]).over) == 1
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"tests/test_a.py": "# covers: mod.py, ./mod.py\n" + _lines(15)},
+        {
+            "tests/test_a.py": "# covers: ./mod.py\n" + _lines(7),
+            "tests/test_b.py": "# covers: mod.py\n" + _lines(7),
+        },
+    ],
+)
+def test_spellings_of_one_covers_path_count_as_one_module(tmp_path, files):
+    report = _check(tmp_path, {"mod.py": _lines(10), **files}, files)
+    assert [item.module for item in report.over] == ["mod.py"] * len(files)
+    assert report.over[0].total_lines == 16
+
+
+def test_a_test_file_covering_only_empty_modules_is_over_the_limit(tmp_path):
+    test = "tests/test_a.py"
+    files = {"a.py": "", "b.py": "", test: "# covers: a.py, b.py\n"}
+    assert {item.module for item in _check(tmp_path, files, [test]).over} == {
+        "a.py",
+        "b.py",
+    }
 
 
 def test_the_longest_name_prefix_wins(tmp_path):
     test = "tests/test_mod_extra_guards.py"
     files = {"mod.py": _lines(100), "mod_extra.py": _lines(10), test: _lines(16)}
     report = _check(tmp_path, files, [test])
-    assert report.over[0].modules == ["mod_extra.py"]
+    assert report.over[0].module == "mod_extra.py"
 
 
 def test_a_test_file_outside_tests_matches_the_module_beside_it(repo):

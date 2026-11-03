@@ -3,10 +3,11 @@
 
 Whole files count, not the lines the branch added: every test file covering the
 same module counts towards its total, changed or not, but only changed files are
-reported. Test files sharing a module are held together against all their modules.
+reported.
 
 A test file covers the modules, repo-relative, in a header comment within its first
-10 lines; several modules count together:
+10 lines; its lines count towards each in proportion to that module's lines, so
+naming a large module adds no room to a small one:
 
     # covers: backend/core/storage.py, backend/core/storage_backends.py
 
@@ -24,9 +25,13 @@ Exit status: 0 within the limit, 1 a file is over it or covers nothing, 2 git fa
 """
 
 import argparse
+import math
+import posixpath
 import re
 import subprocess
 import sys
+from collections import defaultdict
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set
 
@@ -44,7 +49,7 @@ class Overage(NamedTuple):
     lines: int
     total_lines: int
     test_files: int
-    modules: List[str]
+    module: str
     module_lines: int
 
 
@@ -94,27 +99,12 @@ def _header(root: Path, test_path: str, pattern: re.Pattern) -> Optional[str]:
 
 def _covered(root: Path, test_path: str) -> List[str]:
     header = _header(root, test_path, COVERS_HEADER) or ""
-    named = [part.strip() for part in header.split(",") if part.strip()]
-    return named or _name_match(root, test_path)
-
-
-def _groups(coverage: Dict[str, List[str]]) -> List[tuple]:
-    """Merge test files into (tests, modules) groups that share a covered module."""
-    groups: List[tuple] = []
-    for test, covered in coverage.items():
-        tests, modules, separate = {test}, set(covered), []
-        for group in groups:
-            if group[1] & modules:
-                tests |= group[0]
-                modules |= group[1]
-            else:
-                separate.append(group)
-        groups = [*separate, (tests, modules)]
-    return groups
+    named = [posixpath.normpath(p.strip()) for p in header.split(",") if p.strip()]
+    return list(dict.fromkeys(named)) or _name_match(root, test_path)
 
 
 def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
-    """Hold each changed test file's group of test files to the limit."""
+    """Hold each module covered by a changed test file to the limit."""
     report = Report([], {}, {})
     coverage: Dict[str, List[str]] = {}
     for path in tracked:
@@ -141,23 +131,34 @@ def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
                 f"covers header names missing files: {', '.join(missing)}"
             )
 
-    for tests, modules in _groups(coverage):
-        changed_tests = sorted(tests & changed)
-        if not changed_tests:
-            continue
-        total_lines = sum(_line_count(root / test) for test in tests)
-        module_lines = sum(_line_count(root / module) for module in modules)
-        if total_lines > MAX_RATIO * module_lines:
+    totals: Dict[str, Fraction] = defaultdict(Fraction)
+    tests_of: Dict[str, List[str]] = defaultdict(list)
+    for test, modules in coverage.items():
+        test_lines = _line_count(root / test)
+        covered_lines = sum(_line_count(root / module) for module in modules)
+        for module in modules:
+            # An all-empty set of modules has no proportions; each takes the whole file.
+            share = (
+                Fraction(_line_count(root / module), covered_lines)
+                if covered_lines
+                else Fraction(1)
+            )
+            totals[module] += test_lines * share
+            tests_of[module].append(test)
+
+    for module, tests in tests_of.items():
+        module_lines = _line_count(root / module)
+        if totals[module] > Fraction(MAX_RATIO) * module_lines:
             report.over.extend(
                 Overage(
                     path,
                     _line_count(root / path),
-                    total_lines,
+                    math.ceil(totals[module]),
                     len(tests),
-                    sorted(modules),
+                    module,
                     module_lines,
                 )
-                for path in changed_tests
+                for path in sorted(set(tests) & changed)
             )
     return report
 
@@ -186,7 +187,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(
             f"{item.path}: {item.lines} lines; {item.total_lines} across "
             f"{item.test_files} test file(s) against {item.module_lines} in "
-            f"{', '.join(item.modules)}; the limit is {MAX_RATIO}x"
+            f"{item.module}; the limit is {MAX_RATIO}x"
         )
     return 1 if report.over or report.unresolved else 0
 
