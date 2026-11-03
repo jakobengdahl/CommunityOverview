@@ -568,13 +568,14 @@ class TestMCPLoaderLifecycle:
         """A legitimate write/read pair still works, so the guard is not vacuous."""
         loader = MCPLoader([])
 
+        content = "  hello\n\tworld \n\n"
         written = loader._execute_fs_tool(
-            "write_file", {"path": "notes/a.txt", "content": "hello"}
+            "write_file", {"path": "notes/a.txt", "content": content}
         )
-        assert written == {"path": "notes/a.txt", "written": 5}
+        assert written == {"path": "notes/a.txt", "written": len(content)}
         assert loader._execute_fs_tool("read_file", {"path": "notes/a.txt"}) == {
             "path": "notes/a.txt",
-            "content": "hello",
+            "content": content,
         }
         assert loader._execute_fs_tool("list_directory", {"path": "notes"}) == {
             "path": "notes",
@@ -923,9 +924,7 @@ class TestMCPLoaderLifecycle:
 
         result = MCPLoader([])._execute_fs_tool("read_file", {"path": "a.txt"})
 
-        assert "error" in result
-        assert "workspace" in result["error"].lower()
-        assert str(tmp_path) not in json.dumps(result)
+        assert result == {"error": "Agent workspace unavailable"}
 
 
 class _StubHttpxModule:

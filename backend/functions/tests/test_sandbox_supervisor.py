@@ -1,5 +1,6 @@
 """Landlock ABI rules and the real supervisor's status protocol."""
 
+import contextlib
 import ctypes
 import errno
 import io
@@ -285,6 +286,151 @@ def test_disk_scan_closes_every_descriptor_when_the_ascent_fails_unexpectedly(
         sandbox._work_dir_exceeds_quota(spec)
     state["moved"] = False  # os.fstat is global; stop failing for pytest itself
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_disk_scan_skips_an_entry_that_vanishes_before_its_stat(monkeypatch, tmp_path):
+    (tmp_path / "gone").touch()
+    (tmp_path / "kept").touch()
+    real_scandir = os.scandir
+
+    @contextlib.contextmanager
+    def unlinking_scandir(fd):
+        def entries(listing):
+            for entry in listing:
+                if entry.name == "gone":
+                    (tmp_path / "gone").unlink()
+                yield entry
+
+        with real_scandir(fd) as listing:
+            yield entries(listing)
+
+    monkeypatch.setattr(sandbox.os, "scandir", unlinking_scandir)
+    monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 64 * 1024, "files": 1}}
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+
+
+@pytest.mark.parametrize("change", ["vanished", "file", "other_directory"])
+def test_disk_scan_skips_a_directory_changed_between_listing_and_open(
+    monkeypatch, tmp_path, change
+):
+    """The replacement is not scanned and its descriptor is not left open."""
+    work = tmp_path / "work"
+    listed = work / "listed"
+    listed.mkdir(parents=True)
+    real_open = os.open
+
+    def change_then_open(path, flags, *args, dir_fd=None, **kw):
+        if path == "listed":
+            # Renamed, not removed: a freed inode could be reused by the new one.
+            listed.rename(tmp_path / "moved")
+            if change == "file":
+                listed.touch()
+            elif change == "other_directory":
+                listed.mkdir()
+                (listed / "uncounted").touch()
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kw)
+
+    monkeypatch.setattr(sandbox.os, "open", change_then_open)
+    monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
+    spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 1}}
+    before = len(os.listdir("/proc/self/fd"))
+    assert sandbox._work_dir_exceeds_quota(spec) is False
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+@pytest.mark.parametrize(
+    "moved, counted, sibling_scanned",
+    [
+        (["a/b/c"], 8, True),
+        (["a/b/c", "a/b"], 7, False),
+    ],
+    ids=["walk_down_reaches_the_parent", "walk_down_stops_at_a_moved_ancestor"],
+)
+@pytest.mark.parametrize("over_quota", [False, True], ids=["fits", "over"])
+def test_disk_scan_completes_a_walk_down_with_exact_totals_and_descriptors(
+    monkeypatch, tmp_path, moved, counted, sibling_scanned, over_quota
+):
+    """After a mid-scan move the scan resumes in the right directory, drops only
+    the frames that moved, and holds no descriptor it walked through."""
+    work = tmp_path / "work"
+    for directory in ("a/b/c", "a/b/d", "a/s"):
+        (work / directory).mkdir(parents=True)
+        (work / directory / "file").touch()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_open, real_scandir = os.open, os.scandir
+    opened_after_move = []
+
+    def open_and_move(path, flags, *args, dir_fd=None, **kw):
+        if opened_after_move or path == "..":
+            opened_after_move.append(path)
+        if path == ".." and len(opened_after_move) == 1:
+            for index, relative in enumerate(moved):
+                os.rename(work / relative, outside / str(index))
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kw)
+
+    @contextlib.contextmanager
+    def ordered_scandir(fd):
+        # Pending directories pop from the end: c before d, b before s.
+        with real_scandir(fd) as entries:
+            yield sorted(entries, key=lambda entry: entry.name, reverse=True)
+
+    monkeypatch.setattr(sandbox.os, "open", open_and_move)
+    monkeypatch.setattr(sandbox.os, "scandir", ordered_scandir)
+    monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
+    limit = counted - 1 if over_quota else counted
+    spec = {
+        "work_dir": str(work),
+        "disk_limits": {"bytes": 64 * sandbox.MIB, "files": limit},
+    }
+    before = len(os.listdir("/proc/self/fd"))
+    assert sandbox._work_dir_exceeds_quota(spec) is over_quota
+    assert len(os.listdir("/proc/self/fd")) == before
+    assert ("d" in opened_after_move) is sibling_scanned
+
+
+def test_unlinked_descriptor_pass_ignores_linked_and_non_regular_files(
+    monkeypatch, tmp_path
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    linked = tmp_path / "linked"
+    linked.write_bytes(b"x" * 128 * 1024)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, sys
+linked = open(sys.argv[1], 'rb')
+os.mkfifo(sys.argv[2])
+fifo = os.open(sys.argv[2], os.O_RDWR)
+os.unlink(sys.argv[2])
+print(fifo, flush=True)
+sys.stdin.read()
+""",
+            str(linked),
+            str(tmp_path / "fifo"),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        fifo = holder.stdout.readline().strip()
+        # The FIFO passes the link-count filter, so only S_ISREG can exclude it.
+        assert os.stat(f"/proc/{holder.pid}/fd/{fifo}").st_nlink == 0
+        monkeypatch.setattr(
+            sandbox,
+            "_children_of",
+            lambda pid: [holder.pid] if pid == os.getpid() else [],
+        )
+        spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 0}}
+        assert sandbox._work_dir_exceeds_quota(spec) is False
+    finally:
+        holder.communicate(timeout=5)
 
 
 @pytest.mark.parametrize(
