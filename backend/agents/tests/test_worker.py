@@ -10,7 +10,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from backend.agents.config import AgentConfig, AgentsSettings, AgentPrompts
-from backend.agents.worker import AgentWorker, ProcessingResult
+from backend.agents.worker import AgentWorker, ProcessingResult, _run_failure_text
 from backend.agents.tests.conftest import MockNode
 from backend.skills.loader import SkillDefinition, SkillsConfig, SkillsLoader
 
@@ -111,6 +111,38 @@ class TestAgentWorker:
         assert worker.config.name == "Updated Agent"
         assert worker.config.prompts.task_prompt == "New task prompt."
         assert worker.config.mcp_integration_ids == ["GRAPH", "WEB"]
+
+
+def test_failed_run_keeps_actions_that_ran_and_not_the_cut_off_ones(
+    agent_config, agent_settings
+):
+    worker = AgentWorker(
+        config=agent_config,
+        settings=agent_settings,
+        mcp_loader=None,
+        graph_service=MagicMock(),
+    )
+
+    result = worker._parse_agent_response(
+        "e1",
+        {
+            "success": False,
+            "error": "hit the token limit",
+            "turns": 2,
+            "trace": [
+                {"tool_calls": [{"name": "first", "input": {"a": 1}}]},
+                {
+                    "tool_calls": [],
+                    "tool_calls_not_run": [{"name": "second", "input": {}}],
+                },
+            ],
+        },
+        0.0,
+    )
+
+    assert result.success is False
+    assert result.actions == [{"tool": "first", "input": {"a": 1}}]
+    assert _run_failure_text(result) == "hit the token limit (1 earlier action(s) ran.)"
 
 
 class TestProcessingResult:

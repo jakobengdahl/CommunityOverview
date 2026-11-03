@@ -77,6 +77,23 @@ class ProcessingResult:
     turns_used: int = 0
 
 
+def _traced_actions(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The tool calls an LLM result's trace records as run."""
+    return [
+        {"tool": tc.get("name"), "input": tc.get("input")}
+        for turn in llm_result.get("trace", [])
+        for tc in turn.get("tool_calls", [])
+    ]
+
+
+def _run_failure_text(result: ProcessingResult) -> str:
+    """Failure text for run history, which stores no structured failure result."""
+    text = result.error or result.summary or "processing failed"
+    if result.actions:
+        return f"{text} ({len(result.actions)} earlier action(s) ran.)"
+    return text
+
+
 class AgentWorker:
     """
     Background worker that processes events for a single agent.
@@ -673,10 +690,7 @@ class AgentWorker:
                 )
             else:
                 self._run_recorder.record_failure(
-                    run_id,
-                    processing_result.error
-                    or processing_result.summary
-                    or "processing failed",
+                    run_id, _run_failure_text(processing_result)
                 )
 
         # Notify callback if set
@@ -744,6 +758,7 @@ class AgentWorker:
                 success=False,
                 handled=False,
                 summary=llm_result.get("error", "Unknown error"),
+                actions=_traced_actions(llm_result),
                 error=llm_result.get("error"),
                 processing_time_ms=processing_time_ms,
                 turns_used=llm_result.get("turns", 0),
@@ -776,15 +791,7 @@ class AgentWorker:
             pass
 
         # Extract actions from trace
-        trace = llm_result.get("trace", [])
-        for turn in trace:
-            for tc in turn.get("tool_calls", []):
-                actions.append(
-                    {
-                        "tool": tc.get("name"),
-                        "input": tc.get("input"),
-                    }
-                )
+        actions.extend(_traced_actions(llm_result))
 
         return ProcessingResult(
             event_id=event_id,

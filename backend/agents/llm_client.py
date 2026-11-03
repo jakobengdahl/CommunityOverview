@@ -216,8 +216,11 @@ class LLMClient:
             trace.append(turn_record)
 
             # A batch at the token limit may be partial, so none of it runs. The
-            # trace keeps what earlier turns did.
+            # trace keeps what earlier turns did; "tool_calls" lists only calls
+            # that ran, since the worker reports those as actions.
             if turn.stop_reason == "max_tokens" and turn.tool_calls:
+                turn_record["tool_calls_not_run"] = turn_record["tool_calls"]
+                turn_record["tool_calls"] = []
                 logger.warning(
                     "Reply hit the token limit; tool calls not run: %s",
                     [tc.name for tc in turn.tool_calls],

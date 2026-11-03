@@ -274,3 +274,6 @@ def test_tool_calls_at_the_token_limit_run_nothing_and_keep_the_trace(caplog):
     assert [turn["turn"] for turn in result["trace"]] == [1, 2]
     assert limits == [16000, 16000]
     assert "tool calls not run: ['second']" in caplog.text
+    assert [tc["name"] for tc in result["trace"][0]["tool_calls"]] == ["first"]
+    assert result["trace"][1]["tool_calls"] == []
+    assert result["trace"][1]["tool_calls_not_run"][0]["name"] == "second"

@@ -30,6 +30,9 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SECRET_LOOKING_OPTION_KEY_RE = re.compile(
     r"(api[_-]?key|secret|token|password|credential)", re.IGNORECASE
 )
+# A completion token count, not an auth token: a bad value falls back with a
+# warning in resolve_max_tokens rather than failing the whole schema config.
+_NON_SECRET_OPTION_KEYS = {"max_tokens"}
 
 
 class ModelProfile(BaseModel):
@@ -74,6 +77,7 @@ class ModelProfile(BaseModel):
             if (
                 isinstance(value, str)
                 and value
+                and key not in _NON_SECRET_OPTION_KEYS
                 and _SECRET_LOOKING_OPTION_KEY_RE.search(key)
             ):
                 raise ValueError(

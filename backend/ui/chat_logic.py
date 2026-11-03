@@ -535,6 +535,7 @@ _NO_ANSWER_MESSAGE = (
     "those actions may already have been carried out, so check the result before "
     "trying again."
 )
+_NO_TEXT_WITH_TOOL_CALLS_MESSAGE = "No text response from AI"
 
 
 def _response_text(response) -> str:
@@ -1468,7 +1469,9 @@ class ChatProcessor:
 
             # Just text response
             text_content = _response_text(response)
-            if not text_content.strip():
+            if not text_content.strip() and _tool_names(response):
+                text_content = _NO_TEXT_WITH_TOOL_CALLS_MESSAGE
+            elif not text_content.strip():
                 text_content = _answer_after_empty_reply(
                     messages,
                     response,

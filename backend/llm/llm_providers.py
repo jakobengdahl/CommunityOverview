@@ -31,17 +31,20 @@ def resolve_max_tokens(options: Optional[Dict[str, Any]] = None) -> int:
     An invalid or non-positive value falls back to the default with a warning.
     """
     option = options.get("max_tokens") if isinstance(options, dict) else None
-    source = "model profile option max_tokens"
-    value = option
     if option is None:
         source = "LLM_MAX_TOKENS"
         value = os.getenv("LLM_MAX_TOKENS", "").strip()
         if not value:
             return DEFAULT_MAX_TOKENS
-    try:
-        limit = None if isinstance(value, bool) else int(str(value).strip())
-    except ValueError:
-        limit = None
+        try:
+            limit = int(value)
+        except ValueError:
+            limit = None
+    else:
+        source = "model profile option max_tokens"
+        # The options secret check exempts this key, so a string is not echoed.
+        value = "<string>" if isinstance(option, str) else option
+        limit = option if type(option) is int else None
     if limit is None or limit <= 0:
         logger.warning(
             "Ignoring invalid %s=%r; using %d", source, value, DEFAULT_MAX_TOKENS

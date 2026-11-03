@@ -619,6 +619,8 @@ def test_claude_call_without_tools_sends_tool_history_as_text():
         ({"max_tokens": -1}, "2000", 16000, True),
         ({"max_tokens": True}, "2000", 16000, True),
         ({"max_tokens": 1.5}, "2000", 16000, True),
+        ({"max_tokens": "abc"}, "2000", 16000, True),
+        ({"max_tokens": "3000"}, "2000", 16000, True),
     ],
 )
 def test_token_limit_prefers_profile_then_env_and_rejects_invalid_values(

@@ -2854,6 +2854,20 @@ class TestEmptyFinalReplyAfterToolChain:
             assert "No answer was produced" in result["content"]
             assert len(calls) == 2
 
+    def test_first_reply_with_complete_tool_calls_and_no_text_makes_no_extra_call(
+        self, chat_service
+    ):
+        result, calls = self._run_first_turn(
+            chat_service,
+            LLMResponse(
+                content=[{"type": "tool_use", "id": "c1", "name": "x", "input": {}}],
+                stop_reason="end_turn",
+            ),
+        )
+
+        assert result["content"] == "No text response from AI"
+        assert len(calls) == 1
+
     def test_first_reply_with_text_makes_no_extra_call(self, chat_service):
         result, calls = self._run_first_turn(chat_service, self._text_reply("Hello."))
 
