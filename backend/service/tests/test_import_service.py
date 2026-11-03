@@ -191,7 +191,8 @@ class TestImportReplaceFailure:
         )
         backend = empty_storage._persistence_backend
         empty_storage.save().result()
-        backend.upsert_node(empty_storage.get_node("old-1").to_dict())
+        journaled = {**empty_storage.get_node("old-1").to_dict(), "name": "Journaled"}
+        backend.upsert_node(journaled)
         assert backend.journal_path.stat().st_size > 0
         generation = empty_storage.generation
         private_detail = "journal cleanup failed at /private/store"
@@ -224,12 +225,48 @@ class TestImportReplaceFailure:
         assert empty_storage.get_all_edges() == []
         assert empty_storage.generation == generation
         reloaded = type(backend)(backend.json_path).load_graph_data()
-        assert {n["id"] for n in reloaded["nodes"]} == {"old-1"}
+        assert [(n["id"], n["name"]) for n in reloaded["nodes"]] == [
+            ("old-1", "Journaled")
+        ]
         assert reloaded["edges"] == []
         assert store.list_jobs() == []
         assert private_detail not in json.dumps(result)
         assert private_detail in caplog.text
         assert "Traceback" in caplog.text
+
+    @pytest.mark.parametrize("failing_write", [1, 2], ids=["checkpoint", "replacement"])
+    def test_snapshot_failure_preserves_acknowledged_journal_only_data(
+        self, empty_storage, monkeypatch, failing_write
+    ):
+        empty_storage.add_nodes(
+            [Node(id="old-1", type=NodeType.ACTOR, name="Pre-existing")], []
+        )
+        backend = empty_storage._persistence_backend
+        empty_storage.save().result()
+        journal_only = Node(id="old-2", type=NodeType.ACTOR, name="Journaled")
+        backend.upsert_node(journal_only.to_dict())
+        real_write = backend._write_snapshot
+        writes = []
+
+        def fail_one_write(data):
+            writes.append(data)
+            if len(writes) == failing_write:
+                raise OSError("disk full")
+            real_write(data)
+
+        monkeypatch.setattr(backend, "_write_snapshot", fail_one_write)
+
+        result = import_service.import_graph(
+            empty_storage,
+            DefaultGraphAuthorizationHook(),
+            InMemoryExecutionStore(),
+            _valid_document(),
+        )
+
+        assert result["error_code"] == "replace_failed"
+        assert len(writes) == failing_write
+        reloaded = type(backend)(backend.json_path).load_graph_data()
+        assert {n["id"] for n in reloaded["nodes"]} == {"old-1", "old-2"}
 
     def test_a_replace_failure_is_reported_and_keeps_the_backup_path(
         self, empty_storage: GraphStorage, monkeypatch, caplog

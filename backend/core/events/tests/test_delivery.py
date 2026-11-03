@@ -1383,12 +1383,15 @@ class TestWebhookRedirectHops:
 class _WireBackend:
     """Stands in for httpcore's SyncBackend: serves canned raw responses, one
     per request written, and records how many bytes each request read, in
-    total and per socket read."""
+    total and per socket read. first_read shortens each request's first read,
+    as a socket may; tls_hosts records every TLS upgrade."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, first_read=None):
         self.responses = list(responses)
+        self.first_read = first_read
         self.reads = []
         self.read_sizes = []
+        self.tls_hosts = []
 
     def __call__(self):
         return self
@@ -1407,6 +1410,8 @@ class _WireBackend:
                     backend.read_sizes.append([])
 
             def read(self, max_bytes, timeout=None):
+                if backend.first_read and not backend.read_sizes[-1]:
+                    max_bytes = min(max_bytes, backend.first_read)
                 data, self.buffer = self.buffer[:max_bytes], self.buffer[max_bytes:]
                 backend.reads[-1] += len(data)
                 backend.read_sizes[-1].append(len(data))
@@ -1414,6 +1419,10 @@ class _WireBackend:
 
             def close(self):
                 pass
+
+            def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+                backend.tls_hosts.append(server_hostname)
+                return self
 
             def get_extra_info(self, info):
                 return None
@@ -1437,12 +1446,12 @@ def _raw_response(status, body, chunked=False, extra_headers=b""):
 class TestWebhookWireReadBound:
     """Through real httpcore/h11, which read up to 64 KiB per socket call."""
 
-    def _post(self, monkeypatch, responses):
-        backend = _WireBackend(responses)
+    def _post(
+        self, monkeypatch, responses, url="http://start.example.com/hook", **wire
+    ):
+        backend = _WireBackend(responses, **wire)
         monkeypatch.setattr(delivery.httpcore2, "SyncBackend", backend)
-        response = DeliveryWorker()._post_with_redirect_ssrf_check(
-            "http://start.example.com/hook", {"k": "v"}, {}
-        )
+        response = DeliveryWorker()._post_with_redirect_ssrf_check(url, {"k": "v"}, {})
         return backend, response
 
     @pytest.mark.parametrize("status", [400, 500])
@@ -1459,6 +1468,27 @@ class TestWebhookWireReadBound:
         assert backend.reads[0] <= cap
         assert 0 < len(outcome.content) <= cap
         assert body.startswith(outcome.content)
+
+    def test_https_hop_reads_at_most_the_cap_off_the_wire(self, monkeypatch):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        backend, outcome = self._post(
+            monkeypatch,
+            [_raw_response(500, b"b" * (4 * cap))],
+            url="https://start.example.com/hook",
+        )
+        assert backend.tls_hosts == ["start.example.com"]
+        assert outcome.status_code == 500
+        assert backend.reads[0] <= cap
+
+    def test_last_read_is_clamped_to_what_the_cap_has_left(self, monkeypatch):
+        """A short read leaves the budget off the 64 KiB grid, so an unclamped
+        final socket read would overshoot the cap."""
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        backend, outcome = self._post(
+            monkeypatch, [_raw_response(500, b"b" * (4 * cap))], first_read=4096
+        )
+        assert outcome.status_code == 500
+        assert backend.reads[0] == cap
 
     def test_informational_responses_do_not_spend_the_body_cap(self, monkeypatch):
         """1xx bytes before the final response neither fail the hop nor shrink
@@ -1495,13 +1525,18 @@ class TestWebhookWireReadBound:
         assert sum(sizes[index:]) <= cap
 
     def test_each_hop_gets_its_own_cap(self, monkeypatch):
+        """The hop after a redirect starts in an uncapped header phase and with
+        a full body cap, whatever the previous hop did to the budget."""
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
         redirect = _raw_response(
             302, b"r" * (4 * cap), extra_headers=b"location: /next\r\n"
         )
+        continues = b"HTTP/1.1 100 Continue\r\n\r\n" * (2 * cap // 25)
+        assert len(continues) > cap
+        body = b"b" * (4 * cap)
         backend, outcome = self._post(
-            monkeypatch, [redirect, _raw_response(500, b"terminal error")]
+            monkeypatch, [redirect, continues + _raw_response(500, body)]
         )
         assert outcome.status_code == 500
-        assert outcome.text == "terminal error"
+        assert cap - 64 * 1024 < len(outcome.content) <= cap
         assert backend.reads[0] <= cap
