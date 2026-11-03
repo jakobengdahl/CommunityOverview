@@ -12,7 +12,7 @@ from backend.agents.governance import (
     InMemoryProposalStore,
 )
 from backend.agents.llm_client import LLMClient
-from backend.llm.llm_providers import LLMResponse
+from backend.llm.llm_providers import LLMResponse, TOOL_CALLS_NOT_RUN_MESSAGE
 
 
 class FakeLoader:
@@ -244,3 +244,26 @@ def test_the_trace_records_each_turn_with_its_tool_call_inputs():
             },
         ],
     }
+
+
+def test_tool_calls_at_the_token_limit_run_nothing_and_keep_the_trace(caplog):
+    def tool_turn(name, stop_reason):
+        block = {"type": "tool_use", "id": name, "name": name, "input": {}}
+        return LLMResponse(content=[block], stop_reason=stop_reason)
+
+    create = MagicMock(
+        side_effect=[tool_turn("first", "tool_use"), tool_turn("second", "max_tokens")]
+    )
+    executor = MagicMock(return_value={"ok": True})
+    result = LLMClient(
+        llm_provider=SimpleNamespace(create_completion=create)
+    ).execute_with_tools("sys", "go", [], executor)
+
+    executor.assert_called_once_with("first", {})
+    assert result["success"] is False
+    assert result["error"] == TOOL_CALLS_NOT_RUN_MESSAGE
+    assert [c.kwargs["max_tokens"] for c in create.call_args_list] == [16000, 16000]
+    assert [r.args for r in caplog.records] == [(["second"],)]
+    assert [tc["name"] for tc in result["trace"][0]["tool_calls"]] == ["first"]
+    assert result["trace"][1]["tool_calls"] == []
+    assert result["trace"][1]["tool_calls_not_run"][0]["name"] == "second"

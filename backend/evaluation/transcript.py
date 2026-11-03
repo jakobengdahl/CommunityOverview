@@ -178,6 +178,10 @@ class RecordingProvider(LLMProvider):
     def inner(self) -> LLMProvider:
         return self._inner
 
+    @property
+    def options(self) -> Dict[str, Any]:
+        return getattr(self._inner, "options", {})
+
     def create_completion(
         self,
         messages: List[Dict],
@@ -225,7 +229,8 @@ class RecordingProvider(LLMProvider):
         for block in response.content or []:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use":
+            # A tool call in a reply at the token limit is never run.
+            if block.get("type") == "tool_use" and response.stop_reason != "max_tokens":
                 self.transcript.tool_calls.append(
                     ToolCall(
                         name=block.get("name", ""),

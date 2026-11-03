@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 from backend.agents.config import AgentConfig, AgentsSettings, AgentPrompts
 from backend.agents.worker import AgentWorker, ProcessingResult
+from backend.agents.worker import RUN_FAILURE_WITH_ACTIONS, _run_failure_text
 from backend.agents.tests.conftest import MockNode
 from backend.skills.loader import SkillDefinition, SkillsConfig, SkillsLoader
 
@@ -111,6 +112,69 @@ class TestAgentWorker:
         assert worker.config.name == "Updated Agent"
         assert worker.config.prompts.task_prompt == "New task prompt."
         assert worker.config.mcp_integration_ids == ["GRAPH", "WEB"]
+
+
+@pytest.fixture
+def parse_reply(agent_config, agent_settings):
+    worker = AgentWorker(
+        config=agent_config,
+        settings=agent_settings,
+        mcp_loader=None,
+        graph_service=MagicMock(),
+    )
+    return lambda llm_result: worker._parse_agent_response("e1", llm_result, 0.0)
+
+
+@pytest.mark.parametrize(
+    "last_turn, actions, failure_text",
+    [
+        (
+            {"tool_calls": [], "tool_calls_not_run": [{"name": "second", "input": {}}]},
+            [{"tool": "first", "input": {"a": 1}}],
+            RUN_FAILURE_WITH_ACTIONS.format(text="failed", count=1),
+        ),
+        ({"tool_calls": []}, [], "failed"),
+    ],
+)
+def test_failed_run_reports_only_calls_that_ran_and_only_at_the_token_limit(
+    parse_reply, last_turn, actions, failure_text
+):
+    first_turn = {"tool_calls": [{"name": "first", "input": {"a": 1}}]}
+
+    result = parse_reply(
+        {"success": False, "error": "failed", "trace": [first_turn, last_turn]}
+    )
+
+    assert result.success is False
+    assert result.actions == actions
+    assert _run_failure_text(result) == failure_text
+
+
+@pytest.mark.parametrize("value", ['"none"', '{"a": 1}', "null", "3"])
+@pytest.mark.parametrize(
+    "trace, traced",
+    [
+        ([], []),
+        (
+            [{"tool_calls": [{"name": "first", "input": {}}]}],
+            [{"tool": "first", "input": {}}],
+        ),
+    ],
+)
+def test_non_list_actions_in_the_final_reply_do_not_fail_the_run(
+    parse_reply, value, trace, traced
+):
+    result = parse_reply(
+        {
+            "success": True,
+            "final_response": f'{{"summary": "done", "actions": {value}}}',
+            "trace": trace,
+        }
+    )
+
+    assert result.success is True
+    assert result.summary == "done"
+    assert result.actions == traced
 
 
 class TestProcessingResult:
