@@ -114,7 +114,20 @@ def test_an_unchanged_sibling_counts_towards_the_total_but_is_not_reported(tmp_p
     assert (item.module, item.module_lines) == ("mod.py", 10)
 
 
-def test_naming_a_large_module_adds_no_room_to_a_small_one(tmp_path):
+def test_a_large_file_covering_a_large_module_charges_a_small_one_only_its_share(
+    tmp_path,
+):
+    test = "tests/test_wide.py"
+    files = {"mod.py": _lines(10), "big.py": _lines(1000)}
+    both = {**files, test: "# covers: mod.py, big.py\n" + _lines(999)}
+    only_mod = {**files, test: "# covers: mod.py\n" + _lines(999)}
+    assert _check(tmp_path, both, [test]).over == []
+    assert [item.module for item in _check(tmp_path, only_mod, [test]).over] == [
+        "mod.py"
+    ]
+
+
+def test_a_small_modules_limit_is_not_pooled_with_a_large_one_a_sibling_names(tmp_path):
     wide, narrow = "tests/test_wide.py", "tests/test_mod.py"
     report = _check(
         tmp_path,
@@ -192,6 +205,17 @@ def test_a_covers_header_naming_anything_but_a_module_is_unresolved(tmp_path, ta
     report = _check(root, files, [test])
     assert list(report.unresolved) == [test]
     assert report.over == []
+
+
+@pytest.mark.parametrize(
+    "target", ["hooks/check.sh", "workflows/ci.yml", "Dockerfile", "app/Dockerfile"]
+)
+def test_a_covers_header_may_name_a_shell_workflow_or_docker_source(tmp_path, target):
+    test = "tests/test_a.py"
+    files = {target: _lines(10), test: f"# covers: {target}\n" + _lines(15)}
+    report = _check(tmp_path, files, [test])
+    assert report.unresolved == {}
+    assert [item.module for item in report.over] == [target]
 
 
 def test_the_longest_name_prefix_wins(tmp_path):

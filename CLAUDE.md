@@ -151,8 +151,8 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   in its first 10 lines (`// covers:` in JS), else the module matching
   `test_<name>.py` by the longest name prefix (`test_x_guards.py` covers `x.py`). A
   changed file with neither must add the header, and a header may name only
-  modules: tracked source files that are not test files or under a `tests/`
-  directory. A file covering several modules
+  modules: tracked code, shell, YAML or Dockerfile sources that are not test files
+  or under a `tests/` directory. A file covering several modules
   counts towards each in proportion to the module's lines. A `# ratio-exempt: <reason>` header
   skips the file and the script prints it; adding one needs the owner's approval.
   Untouched files are left alone; no bulk trim. `scripts/check_test_ratio.py` checks

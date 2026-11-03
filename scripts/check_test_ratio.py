@@ -6,13 +6,15 @@ same module counts towards its total, changed or not, but only changed files are
 reported.
 
 A test file covers the modules, repo-relative, in a header comment within its first
-10 lines; its lines count towards each in proportion to that module's lines, so
-naming a large module adds no room to a small one:
+10 lines; its lines count towards each in proportion to that module's lines, so a
+file alone is held to 1.5x their summed lines and a header should name only what the
+file really tests:
 
     # covers: backend/core/storage.py, backend/core/storage_backends.py
 
-A module is a tracked source file that is neither a test file nor under a ``tests/``
-directory; a changed file whose header names anything else fails.
+A module is a tracked code, shell, YAML or Dockerfile source that is neither a test
+file nor under a ``tests/`` directory; a changed file whose header names anything
+else, such as docs or data, fails.
 
 Without a header, ``test_<name>.py`` covers the module matching the longest prefix
 of ``<name>`` at a ``_`` boundary (``tests/test_x_guards.py`` covers ``x.py``), one
@@ -45,7 +47,7 @@ EXEMPT_HEADER = re.compile(r"^(?:#|//)\s*ratio-exempt:\s*(.+)$")
 PY_TEST = re.compile(r"^(?P<dir>(?:.*/)?)test_(?P<name>[^/]+)\.py$")
 JS_TEST = re.compile(r"^(?P<stem>.+)\.test\.[jt]sx?$")
 JS_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
-MODULE_SUFFIXES = (".py", *JS_SUFFIXES)
+MODULE_SUFFIXES = (".py", *JS_SUFFIXES, ".mjs", ".cjs", ".sh", ".yml", ".yaml")
 
 
 class Overage(NamedTuple):
@@ -80,7 +82,7 @@ def _line_count(path: Path) -> int:
 def _is_module(root: Path, path: str, tracked: Set[str]) -> bool:
     return (
         path in tracked
-        and path.endswith(MODULE_SUFFIXES)
+        and (path.endswith(MODULE_SUFFIXES) or posixpath.basename(path) == "Dockerfile")
         and not _is_test_file(path)
         and "tests" not in path.split("/")[:-1]
         and (root / path).is_file()
