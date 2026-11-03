@@ -173,6 +173,42 @@ def test_failed_run_not_at_the_token_limit_reports_no_actions(
     assert _run_failure_text(result) == "Max turns (1) reached without completion"
 
 
+@pytest.mark.parametrize("value", ['"none"', '{"a": 1}', "null", "3"])
+@pytest.mark.parametrize(
+    "trace, traced",
+    [
+        ([], []),
+        (
+            [{"tool_calls": [{"name": "first", "input": {}}]}],
+            [{"tool": "first", "input": {}}],
+        ),
+    ],
+)
+def test_non_list_actions_in_the_final_reply_do_not_fail_the_run(
+    agent_config, agent_settings, value, trace, traced
+):
+    worker = AgentWorker(
+        config=agent_config,
+        settings=agent_settings,
+        mcp_loader=None,
+        graph_service=MagicMock(),
+    )
+
+    result = worker._parse_agent_response(
+        "e1",
+        {
+            "success": True,
+            "final_response": f'{{"summary": "done", "actions": {value}}}',
+            "trace": trace,
+        },
+        0.0,
+    )
+
+    assert result.success is True
+    assert result.summary == "done"
+    assert result.actions == traced
+
+
 class TestProcessingResult:
     """Tests for ProcessingResult dataclass."""
 

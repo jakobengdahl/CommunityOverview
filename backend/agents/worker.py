@@ -799,6 +799,10 @@ class AgentWorker:
             # Not valid JSON, use raw response
             pass
 
+        # The final response is model output: its "actions" may not be a list
+        if not isinstance(actions, list):
+            actions = []
+
         # Extract actions from trace
         actions.extend(_traced_actions(llm_result))
 
