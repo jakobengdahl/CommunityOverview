@@ -145,6 +145,15 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   Prefer extending an existing test over adding a new one. A PR whose added test
   lines exceed about twice its added production lines gets one trim pass before
   merge (a residue-bundle PR is exempt).
+- Per file: a test file a PR changes must end up, as a whole, at most 1.5x the
+  lines of the module it covers, with no residue-bundle exemption. A file with no
+  module of the same name names what it covers in a `# covers: <path>, <path>`
+  header (`// covers:` in JS) when first changed. Untouched files are left alone;
+  no bulk trim. `scripts/check_test_ratio.py` checks this, in CI as the non-required
+  `Test volume (per-file limit)`.
+- Tests assert behaviour, not wording: no assertions on message wording, log text
+  or substrings of serialized data. Assert constants, structured fields or record
+  attributes instead.
 - Don't test what cannot fail. Ranking/scoring logic gets cross-tier tests (can a
   secondary signal beat a stronger primary one?), not just happy-path order.
 - Async tests use `pytest-asyncio`; LLM calls are mocked, never a real key. CI

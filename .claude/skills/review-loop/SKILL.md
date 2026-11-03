@@ -101,7 +101,11 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 - Test volume follows `CLAUDE.md` Testing: one test per guarantee, a second
   only to falsify it. If added test lines exceed about twice the added
   production lines, do one trim pass before merge (residue-bundle PRs are
-  exempt).
+  exempt). Every test file the PR changes must also end within 1.5x its covered
+  module, residue-bundle PRs included: run `scripts/check_test_ratio.py`.
+- Tests assert behaviour, not wording. A reviewer flags an assertion on message
+  wording, log text or a substring of serialized data as a test defect, labelled
+  per §2; the fix asserts a constant, structured field or record attribute.
 
 CI and workflow validators are not a tier of their own: a change to one is in the
 production tier (4 rounds). For `test-durability` residue targeting such a
