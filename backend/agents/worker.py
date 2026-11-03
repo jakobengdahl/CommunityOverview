@@ -77,6 +77,9 @@ class ProcessingResult:
     turns_used: int = 0
 
 
+RUN_FAILURE_WITH_ACTIONS = "{text} ({count} earlier tool call(s) attempted.)"
+
+
 def _traced_actions(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The tool calls an LLM result's trace records as attempted.
 
@@ -97,7 +100,7 @@ def _run_failure_text(result: ProcessingResult) -> str:
     """Failure text for run history, which stores no structured failure result."""
     text = result.error or result.summary or "processing failed"
     if result.actions:
-        return f"{text} ({len(result.actions)} earlier tool call(s) attempted.)"
+        return RUN_FAILURE_WITH_ACTIONS.format(text=text, count=len(result.actions))
     return text
 
 

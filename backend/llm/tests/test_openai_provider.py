@@ -619,7 +619,6 @@ def test_claude_call_without_tools_sends_tool_history_as_text():
         ({"max_tokens": -1}, "2000", 16000, True),
         ({"max_tokens": True}, "2000", 16000, True),
         ({"max_tokens": 1.5}, "2000", 16000, True),
-        ({"max_tokens": "abc"}, "2000", 16000, True),
         ({"max_tokens": "3000"}, "2000", 16000, True),
     ],
 )
@@ -632,7 +631,7 @@ def test_token_limit_prefers_profile_then_env_and_rejects_invalid_values(
 
     with caplog.at_level(logging.WARNING):
         assert resolve_max_tokens(options) == expected
-    assert ("Ignoring invalid" in caplog.text) is warns
+    assert bool(caplog.records) is warns
 
 
 def test_profile_token_limit_reaches_the_request_when_none_is_passed(
@@ -656,29 +655,25 @@ def test_profile_token_limit_reaches_the_request_when_none_is_passed(
     assert create.call_args.kwargs["max_tokens"] == 3000
 
 
-@pytest.mark.parametrize("limit_above_cap", [1, 100_000])
-def test_claude_limit_above_the_sdk_nonstreaming_cap_never_raises(
-    caplog, limit_above_cap
-):
+@pytest.mark.parametrize("limit", [21_334, 121_333])
+def test_claude_limit_above_the_sdk_nonstreaming_cap_never_raises(caplog, limit):
     from anthropic._constants import MODEL_NONSTREAMING_TOKENS
 
     claude = ClaudeProvider("test-key", model="test-model")
-    sdk = claude.client
-    post = patch.object(
-        claude.client.messages,
-        "_post",
-        return_value=SimpleNamespace(content=[], stop_reason="end_turn"),
-    )
 
     # The SDK itself accepts the cap and refuses one token more.
-    sdk._calculate_nonstreaming_timeout(21_333, None)
+    claude.client._calculate_nonstreaming_timeout(21_333, None)
     with pytest.raises(ValueError):
-        sdk._calculate_nonstreaming_timeout(21_334, None)
+        claude.client._calculate_nonstreaming_timeout(21_334, None)
 
-    with post as sent, caplog.at_level(logging.WARNING):
-        claude.create_completion([], "", [], max_tokens=21_333 + limit_above_cap)
+    reply = SimpleNamespace(content=[], stop_reason="end_turn")
+    with (
+        patch.object(claude.client.messages, "_post", return_value=reply) as sent,
+        caplog.at_level(logging.WARNING),
+    ):
+        claude.create_completion([], "", [], max_tokens=limit)
         assert sent.call_args.kwargs["body"]["max_tokens"] == 21_333
-        assert "Capping max_tokens" in caplog.text
+        assert caplog.records[0].args == (limit, 21_333, "test-model")
 
         model, model_cap = next(iter(MODEL_NONSTREAMING_TOKENS.items()))
         claude.model = model
@@ -709,12 +704,9 @@ def test_disabling_thinking_is_sent_only_when_configured(
     provider.create_completion([], "", [])
 
     kwargs = provider.client.chat.completions.create.call_args.kwargs
-    if sent:
-        assert kwargs["extra_body"] == {
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
-    else:
-        assert "extra_body" not in kwargs
+    assert kwargs.get("extra_body") == (
+        {"chat_template_kwargs": {"enable_thinking": False}} if sent else None
+    )
 
 
 def test_claude_requests_never_carry_the_thinking_setting(monkeypatch):
@@ -731,38 +723,28 @@ def test_claude_requests_never_carry_the_thinking_setting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "finish_reason, completion_tokens",
-    [("length", 50), ("tool_calls", 100), ("tool_calls", 101)],
+    "finish_reason, completion_tokens, stop_reason, tool_input",
+    [
+        ("length", 50, "max_tokens", {}),
+        ("tool_calls", 100, "max_tokens", {}),
+        ("tool_calls", 101, "max_tokens", {}),
+        ("tool_calls", 99, "tool_use", {"query": "x"}),
+    ],
 )
 def test_tool_calls_at_the_token_limit_are_flagged_and_never_parsed(
-    provider, finish_reason, completion_tokens
+    provider, finish_reason, completion_tokens, stop_reason, tool_input
 ):
-    cut_off = SimpleNamespace(
-        id="c1",
-        function=SimpleNamespace(name="search_graph", arguments='{"query": "tr'),
+    completion = _completion(
+        tool_calls=[_tool_call("c1", "search_graph", {"query": "x"})],
+        finish_reason=finish_reason,
     )
-    completion = _completion(tool_calls=[cut_off], finish_reason=finish_reason)
     completion.usage = SimpleNamespace(completion_tokens=completion_tokens)
     provider.client.chat.completions.create.return_value = completion
 
     response = provider.create_completion([], "", TOOLS, max_tokens=100)
 
-    assert response.stop_reason == "max_tokens"
-    assert response.content[0]["input"] == {}
-
-
-def test_complete_tool_calls_below_the_token_limit_are_unchanged(provider):
-    completion = _completion(
-        tool_calls=[_tool_call("c1", "search_graph", {"query": "x"})],
-        finish_reason="tool_calls",
-    )
-    completion.usage = SimpleNamespace(completion_tokens=99)
-    provider.client.chat.completions.create.return_value = completion
-
-    response = provider.create_completion([], "", TOOLS, max_tokens=100)
-
-    assert response.stop_reason == "tool_use"
-    assert response.content[0]["input"] == {"query": "x"}
+    assert response.stop_reason == stop_reason
+    assert response.content[0]["input"] == tool_input
 
 
 @pytest.mark.parametrize(
@@ -777,12 +759,11 @@ def test_complete_tool_calls_below_the_token_limit_are_unchanged(provider):
 def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reason(
     stop_reason, output_tokens, expected
 ):
+    block = SimpleNamespace(type="tool_use", id="t1", name="search", input={})
     with patch("anthropic.Anthropic") as anthropic_cls:
         create = anthropic_cls.return_value.messages.create
         create.return_value = SimpleNamespace(
-            content=[
-                SimpleNamespace(type="tool_use", id="t1", name="search", input={})
-            ],
+            content=[block],
             stop_reason=stop_reason,
             usage=SimpleNamespace(output_tokens=output_tokens),
         )

@@ -13,7 +13,9 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from backend.llm.llm_providers import LLMResponse
+from backend.llm.llm_providers import LLMResponse, TOOL_CALLS_NOT_RUN_MESSAGE
+from backend.ui.chat_logic import _EMPTY_REPLY_RETRY_INSTRUCTION, _NO_ANSWER_MESSAGE
+from backend.ui.chat_logic import _NO_TEXT_WITH_TOOL_CALLS_MESSAGE
 
 
 def _tool_result_payloads(mock_llm):
@@ -417,21 +419,15 @@ class TestChatServiceConversation:
 
     def test_propose_nodes_uses_the_resolved_token_limit(self, chat_service):
         service, _ = chat_service
-        complete = MagicMock(
-            return_value=LLMResponse(
-                content=[{"type": "text", "text": "[]"}], stop_reason="end_turn"
-            )
-        )
-        provider = SimpleNamespace(
-            create_completion=complete, options={"max_tokens": 5}
-        )
+        create = MagicMock(return_value=LLMResponse([], "end_turn"))
+        provider = SimpleNamespace(create_completion=create, options={"max_tokens": 5})
 
         with patch.object(
             service._processor, "_resolve_llm_provider", return_value=(provider, None)
         ):
             service.propose_nodes_from_text(text="Agency X.")
 
-        assert complete.call_args.kwargs["max_tokens"] == 5
+        assert create.call_args.kwargs["max_tokens"] == 5
 
     def test_propose_nodes_uses_model_profile_resolution(self, chat_service):
         """Node proposal extraction should use configured model profiles, not only legacy env keys."""
@@ -2656,7 +2652,11 @@ def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
 
 class TestEmptyFinalReplyAfterToolChain:
     REASONING = "secret reasoning text"
-    RETRY_INSTRUCTION = "Give your final answer"
+    ROLES_AFTER_TOOL_TURN = ["user", "assistant", "user"]
+
+    @staticmethod
+    def _logged(caplog):
+        return [r.args for r in caplog.records if r.name == "backend.ui.chat_logic"]
 
     @classmethod
     def _empty_reply(cls):
@@ -2684,8 +2684,8 @@ class TestEmptyFinalReplyAfterToolChain:
         )
 
     @staticmethod
-    def _run(chat_service, *final_replies):
-        """Run one search_graph tool turn, then the scripted replies in order."""
+    def _run(chat_service, *final_replies, first_turn=False):
+        """Run one search_graph tool turn unless first_turn, then the replies in order."""
         service, _ = chat_service
         tool_turn = LLMResponse(
             content=[
@@ -2698,11 +2698,13 @@ class TestEmptyFinalReplyAfterToolChain:
             ],
             stop_reason="tool_use",
         )
-        script = [tool_turn, *final_replies]
+        script = list(final_replies) if first_turn else [tool_turn, *final_replies]
         calls = []
 
         def create_completion(messages, system_prompt, tools, max_tokens=4096):
-            calls.append({"messages": list(messages), "tools": tools})
+            calls.append(
+                {"messages": list(messages), "tools": tools, "max_tokens": max_tokens}
+            )
             reply = script[len(calls) - 1]
             if isinstance(reply, Exception):
                 raise reply
@@ -2711,7 +2713,9 @@ class TestEmptyFinalReplyAfterToolChain:
         history = [{"role": "user", "content": "Find Test"}]
         result = service._processor.process_message(
             history,
-            llm_provider=SimpleNamespace(create_completion=create_completion),
+            llm_provider=SimpleNamespace(
+                create_completion=create_completion, options={"max_tokens": 777}
+            ),
         )
         return result, calls, history
 
@@ -2725,8 +2729,8 @@ class TestEmptyFinalReplyAfterToolChain:
         assert result["content"] == "Two nodes found."
         assert len(calls) == 3
         assert calls[-1]["tools"] == []
-        assert self.RETRY_INSTRUCTION in calls[-1]["messages"][-1]["content"]
-        assert self.RETRY_INSTRUCTION not in json.dumps(history)
+        assert calls[-1]["messages"][-1]["content"] == _EMPTY_REPLY_RETRY_INSTRUCTION
+        assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
 
     @pytest.mark.parametrize(
         "retry",
@@ -2748,8 +2752,7 @@ class TestEmptyFinalReplyAfterToolChain:
         result, calls, _ = self._run(chat_service, self._empty_reply(), retry)
 
         assert len(calls) == 3
-        assert "No answer was produced" in result["content"]
-        assert "may already have been carried out" in result["content"]
+        assert result["content"] == _NO_ANSWER_MESSAGE
         assert result["toolResult"]["nodes"]
         assert result["toolUsed"] == "search_graph"
 
@@ -2761,11 +2764,12 @@ class TestEmptyFinalReplyAfterToolChain:
                 chat_service, self._empty_reply(), self._empty_reply()
             )
 
-        assert "finish_reason='length'" in caplog.text
-        assert "completion_tokens=4096" in caplog.text
-        assert f"reasoning_length={len(self.REASONING)}" in caplog.text
-        assert self.REASONING not in caplog.text
-        assert self.REASONING not in json.dumps(result, default=str)
+        diagnostics = ("max_tokens", "length", 4096, len(self.REASONING))
+        assert self._logged(caplog) == [
+            ("tool chain", *diagnostics),
+            ("retry", *diagnostics),
+        ]
+        assert result["content"] == _NO_ANSWER_MESSAGE
 
     def test_anthropic_thinking_blocks_are_logged_by_length_only(
         self, chat_service, sample_nodes, caplog
@@ -2783,10 +2787,9 @@ class TestEmptyFinalReplyAfterToolChain:
             result, _, _ = self._run(chat_service, reply, self._text_reply("Done."))
 
         assert result["content"] == "Done."
-        assert "stop_reason='max_tokens'" in caplog.text
-        assert "completion_tokens=4096" in caplog.text
-        assert f"reasoning_length={len(self.REASONING)}" in caplog.text
-        assert self.REASONING not in caplog.text
+        assert self._logged(caplog) == [
+            ("tool chain", "max_tokens", None, 4096, len(self.REASONING))
+        ]
 
     def test_non_string_text_in_final_reply_counts_as_empty_and_keeps_tool_results(
         self, chat_service, sample_nodes
@@ -2802,110 +2805,84 @@ class TestEmptyFinalReplyAfterToolChain:
         assert len(calls) == 3
         assert result["toolResult"]["nodes"]
 
-    @staticmethod
-    def _run_first_turn(chat_service, *replies):
-        service, _ = chat_service
-        calls = []
-
-        def create_completion(messages, system_prompt, tools, max_tokens):
-            calls.append({"tools": tools, "max_tokens": max_tokens})
-            return replies[len(calls) - 1]
-
-        result = service._processor.process_message(
-            [{"role": "user", "content": "Hi"}],
-            llm_provider=SimpleNamespace(
-                create_completion=create_completion,
-                options={"max_tokens": 777},
-            ),
-        )
-        return result, calls
-
-    @staticmethod
-    def _cut_off_reply():
-        return LLMResponse(
-            content=[
-                {"type": "text", "text": "Adding the nodes."},
-                {
-                    "type": "tool_use",
-                    "id": "cut_off_call",
-                    "name": "add_nodes",
-                    "input": {},
-                },
-            ],
-            stop_reason="max_tokens",
-        )
-
+    @pytest.mark.parametrize("first_stop_reason", ["max_tokens", "tool_use"])
+    @pytest.mark.parametrize(
+        "retry_text, expected", [("Hello.", "Hello."), ("", _NO_ANSWER_MESSAGE)]
+    )
     def test_empty_first_reply_is_retried_once_without_tools(
-        self, chat_service, caplog
+        self, chat_service, caplog, first_stop_reason, retry_text, expected
     ):
-        result, calls = self._run_first_turn(
-            chat_service, self._empty_reply(), self._text_reply("Hello.")
+        result, calls, _ = self._run(
+            chat_service,
+            LLMResponse(content=[], stop_reason=first_stop_reason),
+            self._text_reply(retry_text),
+            first_turn=True,
         )
 
-        assert result["content"] == "Hello."
+        assert result["content"] == expected
         assert [bool(call["tools"]) for call in calls] == [True, False]
         assert [call["max_tokens"] for call in calls] == [777, 777]
-        assert "Empty first turn reply" in caplog.text
+        assert self._logged(caplog)[0][0] == "first turn"
 
-    def test_empty_first_reply_with_empty_retry_reports_no_answer(self, chat_service):
-        for first in (
-            self._empty_reply(),
-            LLMResponse(content=[], stop_reason="tool_use"),
-        ):
-            result, calls = self._run_first_turn(
-                chat_service, first, self._empty_reply()
-            )
-
-            assert "No answer was produced" in result["content"]
-            assert len(calls) == 2
-
-    def test_first_reply_with_complete_tool_calls_and_no_text_makes_no_extra_call(
-        self, chat_service
-    ):
-        result, calls = self._run_first_turn(
-            chat_service,
-            LLMResponse(
-                content=[{"type": "tool_use", "id": "c1", "name": "x", "input": {}}],
-                stop_reason="end_turn",
+    @pytest.mark.parametrize(
+        "content, expected",
+        [
+            (
+                [{"type": "tool_use", "id": "c1", "name": "x", "input": {}}],
+                _NO_TEXT_WITH_TOOL_CALLS_MESSAGE,
             ),
+            ([{"type": "text", "text": "Hello."}], "Hello."),
+        ],
+    )
+    def test_first_reply_with_text_or_tool_calls_makes_no_extra_call(
+        self, chat_service, content, expected
+    ):
+        result, calls, _ = self._run(
+            chat_service,
+            LLMResponse(content=content, stop_reason="end_turn"),
+            first_turn=True,
         )
 
-        assert result["content"] == "No text response from AI"
+        assert result["content"] == expected
         assert len(calls) == 1
 
-    def test_first_reply_with_text_makes_no_extra_call(self, chat_service):
-        result, calls = self._run_first_turn(chat_service, self._text_reply("Hello."))
-
-        assert result["content"] == "Hello."
-        assert len(calls) == 1
-
-    def test_tool_calls_at_the_limit_on_the_first_turn_run_nothing(
-        self, chat_service, caplog
+    @pytest.mark.parametrize(
+        "first_turn, call_count, tool_used, roles",
+        [
+            (True, 1, None, ["user"]),
+            (False, 2, "search_graph", ROLES_AFTER_TOOL_TURN),
+        ],
+    )
+    def test_tool_calls_at_the_limit_run_nothing_and_keep_earlier_results(
+        self,
+        chat_service,
+        sample_nodes,
+        caplog,
+        first_turn,
+        call_count,
+        tool_used,
+        roles,
     ):
-        result, calls = self._run_first_turn(chat_service, self._cut_off_reply())
-
-        assert "token limit" in result["content"]
-        assert "not run" in result["content"]
-        assert result["toolResult"] is None
-        assert len(calls) == 1
-        assert "tool calls not run: ['add_nodes']" in caplog.text
-
-    def test_tool_calls_at_the_limit_stop_the_chain_and_keep_earlier_results(
-        self, chat_service, sample_nodes, caplog
-    ):
-        service, graph_service = chat_service
+        service, _ = chat_service
         add_nodes = MagicMock()
         service._processor.tools_map["add_nodes"] = add_nodes
 
-        result, calls, history = self._run(chat_service, self._cut_off_reply())
+        cut_off = LLMResponse(
+            content=[
+                {"type": "text", "text": "Adding the nodes."},
+                {"type": "tool_use", "id": "c2", "name": "add_nodes", "input": {}},
+            ],
+            stop_reason="max_tokens",
+        )
+        result, calls, history = self._run(chat_service, cut_off, first_turn=first_turn)
 
         add_nodes.assert_not_called()
-        assert len(calls) == 2
-        assert "token limit" in result["content"]
-        assert result["toolResult"]["nodes"]
-        assert result["toolUsed"] == "search_graph"
-        assert "cut_off_call" not in json.dumps(history)
-        assert "tool calls not run" in caplog.text
+        assert len(calls) == call_count
+        assert result["content"] == TOOL_CALLS_NOT_RUN_MESSAGE
+        assert result["toolUsed"] == tool_used
+        assert bool((result["toolResult"] or {}).get("nodes")) is not first_turn
+        assert [m["role"] for m in history] == roles
+        assert self._logged(caplog) == [(["add_nodes"],)]
 
     def test_final_reply_with_text_makes_no_extra_call(
         self, chat_service, sample_nodes
@@ -2914,4 +2891,4 @@ class TestEmptyFinalReplyAfterToolChain:
 
         assert result["content"] == "Done."
         assert len(calls) == 2
-        assert self.RETRY_INSTRUCTION not in json.dumps(history)
+        assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
