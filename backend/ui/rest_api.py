@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.runtime.authorization import use_request_authorization
 
+from .chat_logic import run_chat_off_event_loop
 from .chat_service import ChatService
 from .document_service import DocumentService
 
@@ -196,7 +197,8 @@ def create_ui_router(
             messages = [msg.model_dump() for msg in request.messages]
 
             with use_request_authorization(headers=http_request.headers):
-                result = chat_service.process_message(
+                result = await run_chat_off_event_loop(
+                    chat_service.process_message,
                     messages=messages,
                     api_key=request.api_key,
                     provider=request.provider,
@@ -236,7 +238,8 @@ def create_ui_router(
         """
         try:
             with use_request_authorization(headers=http_request.headers):
-                result = chat_service.process_chat_request(
+                result = await run_chat_off_event_loop(
+                    chat_service.process_chat_request,
                     user_message=request.message,
                     api_key=request.api_key,
                     provider=request.provider,

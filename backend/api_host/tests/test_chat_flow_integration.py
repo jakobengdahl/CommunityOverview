@@ -9,6 +9,163 @@ These tests verify the complete chat workflow:
 5. Node appears in search results
 """
 
+import asyncio
+import threading
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+
+from backend.llm.llm_providers import LLMResponse
+from backend.runtime.authorization import get_current_request_authorization_inputs
+from backend.runtime.request_context import ACTOR_ID_HEADER
+from backend.ui.chat_logic import run_chat_off_event_loop, run_on_event_loop
+
+_WAIT_S = 5
+_MESSAGES = [{"role": "user", "content": "x"}]
+
+
+class _GatedLLM:
+    """Holds each chat's first call until released, then asks for one search and
+    answers once it has the result."""
+
+    def __init__(self, app):
+        self.release = threading.Event()
+        self.threads = []
+        self.released_in_time = []
+        processor = app.state.chat_service._processor
+        processor._resolve_llm_provider = lambda *_: (self, None)
+
+    def create_completion(self, messages, **_):
+        self.threads.append(threading.get_ident())
+        if isinstance(messages[-1]["content"], list):
+            text = {"type": "text", "text": "done"}
+            return LLMResponse(content=[text], stop_reason="end_turn")
+        self.released_in_time.append(self.release.wait(_WAIT_S))
+        call = {"type": "tool_use", "id": "t1", "name": "search_graph"}
+        call["input"] = {"query": "x"}
+        return LLMResponse(content=[call], stop_reason="tool_use")
+
+
+def _http(app):
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _record_searches(app):
+    seen = []
+
+    def search(**kwargs):
+        headers = get_current_request_authorization_inputs()["headers"]
+        seen.append((headers[ACTOR_ID_HEADER], kwargs["federation_depth"]))
+        return {"nodes": []}
+
+    app.state.chat_service.graph_service.search_graph = search
+    return seen
+
+
+async def _until(condition):
+    async with asyncio.timeout(_WAIT_S * 2):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_health_and_writes_answered_while_concurrent_chats_stay_isolated(
+    test_app_with_mock,
+):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    seen = _record_searches(app)
+    node = {"name": "Written mid-chat", "type": "Actor", "description": "d"}
+    chats = [
+        ("/ui/chat", {"messages": _MESSAGES, "federation_depth": 1}, "a"),
+        ("/ui/chat/simple", {"message": "x", "federation_depth": 2}, "b"),
+    ]
+    async with _http(app) as http:
+        tasks = [
+            asyncio.create_task(http.post(p, json=b, headers={ACTOR_ID_HEADER: a}))
+            for p, b, a in chats
+        ]
+        await _until(lambda: len(llm.threads) == 2)
+        health = await http.get("/health")
+        write = await http.post("/api/nodes", json={"nodes": [node], "edges": []})
+        llm.release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), _WAIT_S * 2)
+
+    assert health.status_code == 200 and write.status_code == 200
+    assert llm.released_in_time == [True, True]
+    assert sorted(seen) == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.asyncio
+async def test_all_graph_access_runs_on_the_loop_thread_and_llm_calls_off_it(
+    test_app_with_mock,
+):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    llm.release.set()
+    service = app.state.chat_service
+    akc = {
+        "short_name": "kiosk",
+        "tool_allowlist": ["read_node_attachment", "search_graph"],
+    }
+    service.graph_service.add_nodes(
+        nodes=[{"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}],
+        edges=[],
+    )
+    # An advertised attachment tool makes the chat re-read the collection's grant.
+    service._processor.tool_definitions.append({"name": "read_node_attachment"})
+    hook = service.graph_service._authorization_hook
+    evaluate, hook_threads = hook.evaluate, []
+    hook.evaluate = lambda c: hook_threads.append(threading.get_ident()) or evaluate(c)
+    body = {"messages": _MESSAGES, "collection_short_name": "kiosk"}
+
+    async with _http(app) as http:
+        assert (await http.post("/ui/chat", json=body)).status_code == 200
+
+    loop_thread = threading.get_ident()
+    assert len(hook_threads) == 3 and set(hook_threads) == {loop_thread}
+    assert llm.threads and loop_thread not in llm.threads
+
+
+@pytest.mark.asyncio
+async def test_hop_copies_its_result_and_other_callers_run_in_place():
+    live = {"nodes": []}
+
+    hopped = await run_chat_off_event_loop(lambda: run_on_event_loop(lambda: live))
+
+    assert hopped == live and hopped["nodes"] is not live["nodes"]
+    assert run_on_event_loop(lambda: live) is live
+
+
+@pytest.mark.asyncio
+async def test_cancelled_or_failing_chats_keep_their_outcomes(test_app_with_mock):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    seen = _record_searches(app)
+    service, failure = app.state.chat_service, RuntimeError("failed")
+
+    def chat(http):
+        body, headers = {"messages": _MESSAGES}, {ACTOR_ID_HEADER: "a"}
+        return http.post("/ui/chat", json=body, headers=headers)
+
+    async with _http(app) as http:
+        cancelled = asyncio.create_task(chat(http))
+        await _until(lambda: llm.threads)
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        llm.release.set()
+        await _until(lambda: len(llm.threads) == 2)
+        service._processor.tools_map["search_graph"] = MagicMock(side_effect=failure)
+        tool_error = await chat(http)
+        service.process_message = MagicMock(side_effect=failure)
+        chat_error = await chat(http)
+
+    assert seen == [("a", None)]
+    assert tool_error.json()["toolResult"] == {"error": str(failure)}
+    assert chat_error.status_code == 500
+
 
 class TestChatFlowIntegration:
     """Integration tests for complete chat workflows."""

@@ -1,8 +1,13 @@
-from typing import List, Dict, Callable, Optional
+from typing import Any, List, Dict, Callable, Optional
+import copy
+import functools
 import os
 import json
 import logging
+import threading
+from anyio import from_thread
 from dotenv import load_dotenv
+from starlette.concurrency import run_in_threadpool
 import inspect
 from backend.llm.llm_providers import (
     create_provider,
@@ -524,6 +529,39 @@ User: "Lagg till ett nytt projekt om cybersakerhet" (CREATE new node)
 
 Always be helpful, transparent, and data-driven in your responses while minimizing API calls.
 """
+
+
+_chat_worker = threading.local()
+
+
+async def run_chat_off_event_loop(func: Callable, /, **kwargs) -> Any:
+    """Run a chat on a worker thread so the event loop serves requests during LLM waits.
+
+    The chat reaches the graph only through run_on_event_loop, and holds no lock
+    across a hop, so graph access stays single-threaded.
+    """
+
+    def chat_on_worker():
+        _chat_worker.active = True
+        try:
+            return func(**kwargs)
+        finally:
+            _chat_worker.active = False
+
+    return await run_in_threadpool(chat_on_worker)
+
+
+def run_on_event_loop(func: Callable, /, *args, **kwargs) -> Any:
+    """Call func on the event loop from a chat worker; elsewhere call it in place.
+
+    The hop carries the worker's contextvars, so the request's authorization
+    context reaches func. The result is copied on the loop because the worker
+    must not iterate live graph state while the loop may be changing it.
+    """
+    call = functools.partial(func, *args, **kwargs)
+    if getattr(_chat_worker, "active", False):
+        return from_thread.run_sync(lambda: copy.deepcopy(call()))
+    return call()
 
 
 _EMPTY_REPLY_RETRY_INSTRUCTION = (
@@ -1605,7 +1643,8 @@ class ChatProcessor:
                 continue
 
             if tool_name in ATTACHMENT_TOOLS:
-                refused = attachment_tool_refusal(
+                refused = run_on_event_loop(
+                    attachment_tool_refusal,
                     tool_name,
                     attachment_access(tool_name) if attachment_access else "off",
                     self._authorization_hook,
@@ -1671,7 +1710,7 @@ class ChatProcessor:
                         k: v for k, v in tool_input.items() if k in sig.parameters
                     }
 
-                    tool_result = func(**valid_args)
+                    tool_result = run_on_event_loop(func, **valid_args)
                 except Exception as e:
                     tool_result = {"error": str(e)}
             else:

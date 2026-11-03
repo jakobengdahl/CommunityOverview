@@ -1887,6 +1887,11 @@ own.
 | GET | `/ui/supported-formats` | Get supported document formats |
 | GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
 
+`/ui/chat` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
+event loop keeps answering `/health` and other requests during a chat. Their tool
+calls and every other graph access hop back to the event loop thread, carrying
+the request's context, so graph access stays single-threaded.
+
 The routes that reach the graph (`/ui/chat`, `/ui/chat/simple`,
 `/ui/propose-nodes`, `/ui/upload`, `/ui/info`) bind the caller's request
 authorization exactly like the REST graph routes, so the service authorization

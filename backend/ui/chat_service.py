@@ -13,6 +13,7 @@ consistency and proper validation.
 
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
+import contextvars
 import logging
 import json
 import re
@@ -20,12 +21,17 @@ from datetime import datetime, timezone
 
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.llm.llm_providers import provider_max_tokens
-from backend.ui.chat_logic import ChatProcessor
+from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 from backend.runtime.attachment_access import validate_attachment_setting
 
 logger = logging.getLogger(__name__)
+
+# Per request: concurrent chats share one ChatService.
+_request_federation_depth: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar("chat_request_federation_depth", default=None)
+)
 
 
 class ChatService:
@@ -66,7 +72,6 @@ class ChatService:
         self._processor = ChatProcessor(
             self._tools_map, authorization_hook=graph_service.authorization_hook
         )
-        self._current_federation_depth: Optional[int] = None
         # Cache for resolved AKC configs — avoids repeated 500-node scans within a session.
         # Keyed by short_name; value is (prefix, perms, collect_responses) from
         # _resolve_collection.
@@ -133,7 +138,7 @@ class ChatService:
         effective_depth = (
             federation_depth
             if federation_depth is not None
-            else self._current_federation_depth
+            else _request_federation_depth.get()
         )
         return self._graph_service.search_graph(
             query=query,
@@ -325,12 +330,20 @@ class ChatService:
                 meta = node.get("metadata") or {}
                 if meta.get("short_name") == short_name:
                     found = True
+                    # Whether the CollectionResponse should be linked to every node
+                    # created or updated during a run. Consumed by the collection
+                    # response tool (via _collection_nodes), not by process_message,
+                    # so it is stored alongside the collection identity rather than
+                    # returned in the resolution tuple. Set in one step: a concurrent
+                    # chat's worker thread reads this entry.
+                    link_results = meta.get("link_results", True)
                     self._collection_nodes[short_name] = {
                         "id": node.get("id"),
                         "name": node.get("name") or short_name,
                         "tool_allowlist": self._normalize_tool_allowlist(
                             meta.get("tool_allowlist")
                         ),
+                        "link_results": link_results is None or bool(link_results),
                     }
                     raw_perms = meta.get("node_type_permissions") or {}
                     # Guard against individual null entries in the permissions dict
@@ -371,18 +384,6 @@ class ChatService:
                     collect_responses = meta.get("collect_responses", True)
                     if collect_responses is None:
                         collect_responses = True
-
-                    # Whether the CollectionResponse should be linked to every node
-                    # created or updated during a run. Consumed by the collection
-                    # response tool (via _collection_nodes), not by process_message,
-                    # so it is stored alongside the collection identity rather than
-                    # returned in the resolution tuple.
-                    link_results = meta.get("link_results", True)
-                    if link_results is None:
-                        link_results = True
-                    self._collection_nodes[short_name]["link_results"] = bool(
-                        link_results
-                    )
 
                     lines.append("")
                     if collect_responses:
@@ -816,12 +817,12 @@ class ChatService:
             - toolResult: Result from the tool (if any)
         """
         effective_prefix, collection_perms, collect_responses = (
-            self._resolve_collection(collection_short_name)
+            run_on_event_loop(self._resolve_collection, collection_short_name)
             if collection_short_name
             else (None, None, True)
         )
 
-        self._current_federation_depth = federation_depth
+        federation_depth_token = _request_federation_depth.set(federation_depth)
         try:
             expert_context = (
                 self._build_expert_context(expert_agent_id) if expert_agent_id else None
@@ -895,7 +896,9 @@ class ChatService:
                 if not node_id or node_id.startswith("federated::"):
                     return "off"
                 try:
-                    result = self._graph_service.get_node_details(node_id)
+                    result = run_on_event_loop(
+                        self._graph_service.get_node_details, node_id
+                    )
                     node = result.get("node") or {}
                     names = self._normalize_tool_allowlist(
                         (node.get("metadata") or {}).get("tool_allowlist")
@@ -928,7 +931,7 @@ class ChatService:
                 attachment_access=attachment_access,
             )
         finally:
-            self._current_federation_depth = None
+            _request_federation_depth.reset(federation_depth_token)
 
     def process_chat_request(
         self,
