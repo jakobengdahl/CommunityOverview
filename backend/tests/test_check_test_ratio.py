@@ -1,5 +1,5 @@
 # covers: scripts/check_test_ratio.py
-"""A changed test file must stay within 1.5x the lines of what it covers."""
+"""Changed test files must stay, with their siblings, within 1.5x what they cover."""
 
 import subprocess
 import sys
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.check_test_ratio import main  # noqa: E402
+from scripts.check_test_ratio import check, main  # noqa: E402
 
 
 def _lines(count):
@@ -82,6 +82,86 @@ def test_a_covers_header_sums_its_modules_and_wins_over_a_name_match(repo):
     header = "# covers: mod.py, extra.py\n"
     assert _commit(repo, {"tests/test_mod.py": header + _lines(29)}) == 0
     assert _commit(repo, {"tests/test_mod.py": header + _lines(30)}) == 1
+
+
+def _check(root, files, changed):
+    for name, text in files.items():
+        (root / name).parent.mkdir(exist_ok=True)
+        (root / name).write_text(text)
+    return check(root, list(files), set(changed))
+
+
+def _printed_paths(capsys):
+    return {line.split(":")[0] for line in capsys.readouterr().out.splitlines()}
+
+
+def test_changed_files_covering_one_module_are_held_to_the_limit_together(repo, capsys):
+    a, b = "tests/test_mod.py", "tests/test_mod_guards.py"
+    assert _commit(repo, {a: _lines(15), b: _lines(15)}) == 1
+    assert _printed_paths(capsys) == {a, b}
+
+
+def test_an_unchanged_sibling_counts_towards_the_total_but_is_not_reported(tmp_path):
+    changed, sibling = "tests/test_mod.py", "tests/test_mod_guards.py"
+    report = _check(
+        tmp_path,
+        {"mod.py": _lines(10), changed: _lines(1), sibling: _lines(15)},
+        [changed],
+    )
+    assert [item.path for item in report.over] == [changed]
+    item = report.over[0]
+    assert (item.lines, item.total_lines, item.test_files) == (1, 16, 2)
+    assert (item.modules, item.module_lines) == (["mod.py"], 10)
+
+
+def test_test_files_sharing_a_module_are_held_against_all_their_modules(tmp_path):
+    wide, narrow = "tests/test_wide.py", "tests/test_mod.py"
+    report = _check(
+        tmp_path,
+        {
+            "mod.py": _lines(10),
+            "big.py": _lines(10),
+            wide: "# covers: mod.py, big.py\n" + _lines(14),
+            narrow: _lines(15),
+        },
+        [wide],
+    )
+    assert report.over == []
+
+
+def test_the_longest_name_prefix_wins(tmp_path):
+    test = "tests/test_mod_extra_guards.py"
+    files = {"mod.py": _lines(100), "mod_extra.py": _lines(10), test: _lines(16)}
+    report = _check(tmp_path, files, [test])
+    assert report.over[0].modules == ["mod_extra.py"]
+
+
+def test_a_test_file_outside_tests_matches_the_module_beside_it(repo):
+    (repo / "svc").mkdir()
+    (repo / "svc/flow.py").write_text(_lines(10))
+    assert _commit(repo, {"svc/test_flow.py": _lines(15)}) == 0
+    assert _commit(repo, {"svc/test_flow.py": _lines(16)}) == 1
+    assert _commit(repo, {"svc/test_other.py": _lines(1)}) == 1
+
+
+def test_a_ratio_exempt_file_is_skipped_printed_and_left_out_of_totals(repo, capsys):
+    exempt = "tests/test_mod_big.py"
+    header = "# ratio-exempt: generated matrix\n"
+    assert _commit(repo, {exempt: header + _lines(99)}) == 0
+    assert _printed_paths(capsys) == {exempt}
+    assert _commit(repo, {"tests/test_mod.py": _lines(15)}) == 0
+
+
+def test_a_ratio_exempt_header_without_a_reason_does_not_exempt(repo):
+    assert _commit(repo, {"tests/test_mod.py": "# ratio-exempt:\n" + _lines(99)}) == 1
+
+
+def test_an_unchanged_exempt_file_is_not_printed(repo, capsys):
+    exempt = "tests/test_mod_big.py"
+    _commit(repo, {exempt: "# ratio-exempt: generated matrix\n"})
+    capsys.readouterr()
+    assert main(["--base", "work"]) == 0
+    assert _printed_paths(capsys) == set()
 
 
 def test_a_base_ref_git_cannot_resolve_is_an_error_not_a_pass(repo):
