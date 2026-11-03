@@ -480,7 +480,9 @@ jobs:
   # ---------------------------------------------------------------------------
   mobile-e2e:
     name: Mobile e2e (non-required)
-    runs-on: ubuntu-latest
+    # Temporary: Playwright has no chromium for ubuntu-26.04, which ubuntu-latest
+    # now resolves to. Back to ubuntu-latest once Playwright supports that image.
+    runs-on: ubuntu-24.04
     needs: detect-changes
     # A browser job has more ways to wedge than a unit-test job. Bounded so a
     # hung step fails in minutes instead of holding a runner for the default six
@@ -551,7 +553,8 @@ jobs:
   # ---------------------------------------------------------------------------
   desktop-e2e:
     name: Desktop e2e (non-required)
-    runs-on: ubuntu-latest
+    # Temporary, for the reason given on mobile-e2e.
+    runs-on: ubuntu-24.04
     needs: detect-changes
     timeout-minutes: 20
     if: >-
