@@ -1525,6 +1525,18 @@ class TestWebhookWireReadBound:
         assert sum(sizes[index:]) <= cap
 
     def test_each_hop_gets_its_own_cap(self, monkeypatch):
+        cap = delivery.MAX_WEBHOOK_BODY_BYTES
+        redirect = _raw_response(
+            302, b"r" * (4 * cap), extra_headers=b"location: /next\r\n"
+        )
+        backend, outcome = self._post(
+            monkeypatch, [redirect, _raw_response(500, b"terminal error")]
+        )
+        assert outcome.status_code == 500
+        assert outcome.text == "terminal error"
+        assert backend.reads[0] <= cap
+
+    def test_hop_after_a_redirect_starts_with_a_fresh_read_budget(self, monkeypatch):
         """The hop after a redirect starts in an uncapped header phase and with
         a full body cap, whatever the previous hop did to the budget."""
         cap = delivery.MAX_WEBHOOK_BODY_BYTES
@@ -1539,4 +1551,5 @@ class TestWebhookWireReadBound:
         )
         assert outcome.status_code == 500
         assert cap - 64 * 1024 < len(outcome.content) <= cap
+        assert body.startswith(outcome.content)
         assert backend.reads[0] <= cap
