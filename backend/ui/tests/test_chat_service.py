@@ -2825,7 +2825,12 @@ class TestEmptyFinalReplyAfterToolChain:
         return LLMResponse(
             content=[
                 {"type": "text", "text": "Adding the nodes."},
-                {"type": "tool_use", "id": "c9", "name": "add_nodes", "input": {}},
+                {
+                    "type": "tool_use",
+                    "id": "cut_off_call",
+                    "name": "add_nodes",
+                    "input": {},
+                },
             ],
             stop_reason="max_tokens",
         )
@@ -2899,7 +2904,7 @@ class TestEmptyFinalReplyAfterToolChain:
         assert "token limit" in result["content"]
         assert result["toolResult"]["nodes"]
         assert result["toolUsed"] == "search_graph"
-        assert "c9" not in json.dumps(history)
+        assert "cut_off_call" not in json.dumps(history)
         assert "tool calls not run" in caplog.text
 
     def test_final_reply_with_text_makes_no_extra_call(
