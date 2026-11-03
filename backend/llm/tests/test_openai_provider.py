@@ -765,16 +765,29 @@ def test_complete_tool_calls_below_the_token_limit_are_unchanged(provider):
     assert response.content[0]["input"] == {"query": "x"}
 
 
-def test_claude_tool_use_at_the_token_limit_is_flagged():
+@pytest.mark.parametrize(
+    "stop_reason, output_tokens, expected",
+    [
+        ("tool_use", 100, "max_tokens"),
+        ("end_turn", 100, "max_tokens"),
+        ("tool_use", 99, "tool_use"),
+        ("end_turn", 99, "end_turn"),
+    ],
+)
+def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reason(
+    stop_reason, output_tokens, expected
+):
     with patch("anthropic.Anthropic") as anthropic_cls:
         create = anthropic_cls.return_value.messages.create
         create.return_value = SimpleNamespace(
-            content=[],
-            stop_reason="tool_use",
-            usage=SimpleNamespace(output_tokens=100),
+            content=[
+                SimpleNamespace(type="tool_use", id="t1", name="search", input={})
+            ],
+            stop_reason=stop_reason,
+            usage=SimpleNamespace(output_tokens=output_tokens),
         )
         claude = ClaudeProvider("test-key", model="test-model")
 
         response = claude.create_completion([], "", TOOLS, max_tokens=100)
 
-    assert response.stop_reason == "max_tokens"
+    assert response.stop_reason == expected

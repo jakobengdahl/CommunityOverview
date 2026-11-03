@@ -78,7 +78,10 @@ class ProcessingResult:
 
 
 def _traced_actions(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The tool calls an LLM result's trace records as run."""
+    """The tool calls an LLM result's trace records as attempted.
+
+    A call can still have been refused for bad input or blocked by the executor.
+    """
     return [
         {"tool": tc.get("name"), "input": tc.get("input")}
         for turn in llm_result.get("trace", [])
@@ -86,11 +89,15 @@ def _traced_actions(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _stopped_at_token_limit(llm_result: Dict[str, Any]) -> bool:
+    return any("tool_calls_not_run" in turn for turn in llm_result.get("trace", []))
+
+
 def _run_failure_text(result: ProcessingResult) -> str:
     """Failure text for run history, which stores no structured failure result."""
     text = result.error or result.summary or "processing failed"
     if result.actions:
-        return f"{text} ({len(result.actions)} earlier action(s) ran.)"
+        return f"{text} ({len(result.actions)} earlier tool call(s) attempted.)"
     return text
 
 
@@ -758,7 +765,9 @@ class AgentWorker:
                 success=False,
                 handled=False,
                 summary=llm_result.get("error", "Unknown error"),
-                actions=_traced_actions(llm_result),
+                actions=_traced_actions(llm_result)
+                if _stopped_at_token_limit(llm_result)
+                else [],
                 error=llm_result.get("error"),
                 processing_time_ms=processing_time_ms,
                 turns_used=llm_result.get("turns", 0),

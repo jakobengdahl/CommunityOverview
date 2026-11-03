@@ -196,8 +196,10 @@ class ClaudeProvider(LLMProvider):
                     }
                 )
 
+        # Compatible endpoints may end a batch at the limit with another stop
+        # reason, and the agent loop runs tool calls whatever the stop reason.
         stop_reason = response.stop_reason
-        if stop_reason == "tool_use" and _reached_limit(
+        if any(block["type"] == "tool_use" for block in content) and _reached_limit(
             response, "output_tokens", max_tokens
         ):
             stop_reason = "max_tokens"

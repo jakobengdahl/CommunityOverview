@@ -142,7 +142,35 @@ def test_failed_run_keeps_actions_that_ran_and_not_the_cut_off_ones(
 
     assert result.success is False
     assert result.actions == [{"tool": "first", "input": {"a": 1}}]
-    assert _run_failure_text(result) == "hit the token limit (1 earlier action(s) ran.)"
+    assert (
+        _run_failure_text(result)
+        == "hit the token limit (1 earlier tool call(s) attempted.)"
+    )
+
+
+def test_failed_run_not_at_the_token_limit_reports_no_actions(
+    agent_config, agent_settings
+):
+    worker = AgentWorker(
+        config=agent_config,
+        settings=agent_settings,
+        mcp_loader=None,
+        graph_service=MagicMock(),
+    )
+
+    result = worker._parse_agent_response(
+        "e1",
+        {
+            "success": False,
+            "error": "Max turns (1) reached without completion",
+            "turns": 1,
+            "trace": [{"tool_calls": [{"name": "first", "input": {}}]}],
+        },
+        0.0,
+    )
+
+    assert result.actions == []
+    assert _run_failure_text(result) == "Max turns (1) reached without completion"
 
 
 class TestProcessingResult:
