@@ -7,6 +7,8 @@ import inspect
 from backend.llm.llm_providers import (
     create_provider,
     LLMProvider,
+    provider_max_tokens,
+    TOOL_CALLS_NOT_RUN_MESSAGE,
     tool_input_type_error,
 )
 from backend.config import config_loader
@@ -528,9 +530,9 @@ _EMPTY_REPLY_RETRY_INSTRUCTION = (
     "Give your final answer to the user now, as text, based on the tool results "
     "already present in this conversation. Do not call any tools."
 )
-_NO_ANSWER_AFTER_TOOLS_MESSAGE = (
-    "No answer was produced: the AI model returned no text after using its tools. "
-    "Tool actions may already have been carried out, so check the result before "
+_NO_ANSWER_MESSAGE = (
+    "No answer was produced: the AI model returned no text. If it used tools, "
+    "those actions may already have been carried out, so check the result before "
     "trying again."
 )
 
@@ -539,11 +541,35 @@ def _response_text(response) -> str:
     """Join the text blocks of an LLMResponse; non-string text is not usable text."""
     return "".join(
         block["text"]
-        for block in response.content
+        for block in response.content or []
         if isinstance(block, dict)
         and block.get("type") == "text"
         and isinstance(block.get("text"), str)
     )
+
+
+def _tool_names(response) -> List[str]:
+    return [
+        block.get("name")
+        for block in response.content or []
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+
+
+def _wants_tools(response) -> bool:
+    return response.stop_reason == "tool_use" and bool(_tool_names(response))
+
+
+def _tool_calls_cut_off(response) -> bool:
+    """A reply at the token limit may hold a partial batch, so none of it runs."""
+    return response.stop_reason == "max_tokens" and bool(_tool_names(response))
+
+
+def _tool_calls_not_run(response) -> str:
+    logger.warning(
+        "Reply hit the token limit; tool calls not run: %s", _tool_names(response)
+    )
+    return TOOL_CALLS_NOT_RUN_MESSAGE
 
 
 def _log_empty_reply(response, stage: str) -> None:
@@ -580,13 +606,17 @@ def _log_empty_reply(response, stage: str) -> None:
 
 
 def _answer_after_empty_reply(
-    messages: List[Dict], response, provider: LLMProvider, system_prompt: str
+    messages: List[Dict],
+    response,
+    provider: LLMProvider,
+    system_prompt: str,
+    stage: str = "tool chain",
 ) -> str:
     """Retry once without tools; never returns blank, even if the retry fails.
 
     The instruction is sent on a copy so it stays out of the caller's history.
     """
-    _log_empty_reply(response, "tool chain")
+    _log_empty_reply(response, stage)
     try:
         retry = provider.create_completion(
             messages=[
@@ -595,17 +625,17 @@ def _answer_after_empty_reply(
             ],
             system_prompt=system_prompt,
             tools=[],
-            max_tokens=4096,
+            max_tokens=provider_max_tokens(provider),
         )
         text = _response_text(retry)
     except Exception as e:
         logger.warning("Retry after empty reply failed: %s", type(e).__name__)
-        return _NO_ANSWER_AFTER_TOOLS_MESSAGE
+        return _NO_ANSWER_MESSAGE
 
     if text.strip():
         return text
     _log_empty_reply(retry, "retry")
-    return _NO_ANSWER_AFTER_TOOLS_MESSAGE
+    return _NO_ANSWER_MESSAGE
 
 
 class ChatProcessor:
@@ -1413,11 +1443,18 @@ class ChatProcessor:
                 messages=messages,
                 system_prompt=active_system_prompt,
                 tools=active_tool_definitions,
-                max_tokens=4096,
+                max_tokens=provider_max_tokens(llm_provider),
             )
 
+            if _tool_calls_cut_off(response):
+                return {
+                    "content": _tool_calls_not_run(response),
+                    "toolUsed": None,
+                    "toolResult": None,
+                }
+
             # Check if tool use
-            if response.stop_reason == "tool_use":
+            if _wants_tools(response):
                 return self._handle_tool_use(
                     messages,
                     response,
@@ -1430,15 +1467,18 @@ class ChatProcessor:
                 )
 
             # Just text response
-            # Extract text from content blocks
-            text_content = "".join(
-                block.get("text", "")
-                for block in response.content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
+            text_content = _response_text(response)
+            if not text_content.strip():
+                text_content = _answer_after_empty_reply(
+                    messages,
+                    response,
+                    llm_provider,
+                    active_system_prompt,
+                    stage="first turn",
+                )
 
             return {
-                "content": text_content if text_content else "No text response from AI",
+                "content": text_content,
                 "toolUsed": None,
                 "toolResult": None,
             }
@@ -1710,11 +1750,11 @@ class ChatProcessor:
             messages=messages,
             system_prompt=active_system_prompt,
             tools=active_tool_definitions,
-            max_tokens=4096,
+            max_tokens=provider_max_tokens(provider),
         )
 
         # Check if LLM wants to use another tool (tool chaining)
-        if final_response.stop_reason == "tool_use":
+        if _wants_tools(final_response):
             # LLM wants to use another tool - continue recursively with accumulated data
             return self._handle_tool_use(
                 messages,
@@ -1732,7 +1772,11 @@ class ChatProcessor:
                 attachment_access=attachment_access,
             )
 
-        final_text = _response_text(final_response)
+        final_text = (
+            _tool_calls_not_run(final_response)
+            if _tool_calls_cut_off(final_response)
+            else _response_text(final_response)
+        )
         if not final_text.strip():
             final_text = _answer_after_empty_reply(
                 messages, final_response, provider, active_system_prompt

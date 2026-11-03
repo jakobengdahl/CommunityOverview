@@ -275,13 +275,17 @@ def create_provider_from_profile(
 
     provider_id = profile.provider.lower()
     if provider_id in ("claude", "anthropic"):
-        return ClaudeProvider(
+        provider = ClaudeProvider(
             api_key=api_key, model=profile.model, base_url=profile.endpoint
         )
+        provider.options = profile.options
+        return provider
     if provider_id == "openai":
-        return OpenAIProvider(
+        provider = OpenAIProvider(
             api_key=api_key, model=profile.model, base_url=profile.endpoint
         )
+        provider.options = profile.options
+        return provider
     raise ValueError(
         f"Model profile '{profile.id}' uses unsupported provider '{profile.provider}'. "
         "Supported providers: 'claude', 'openai' (OpenAI-compatible endpoints, e.g. "

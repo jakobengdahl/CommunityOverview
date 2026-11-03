@@ -61,6 +61,21 @@ export OPENAI_MODEL=gpt-4-turbo
 export OPENAI_BASE_URL=http://localhost:11434/v1
 ```
 
+**Optional: Completion token limit (default 16000):**
+```bash
+# Applies to chat and agent calls with both providers. A model profile's
+# options.max_tokens takes precedence (see docs/PROFILES.md). Lower it for a
+# model that rejects the default as too large.
+export LLM_MAX_TOKENS=16000
+```
+
+**Optional: Turn off reasoning on OpenAI-compatible models:**
+```bash
+# Sends chat_template_kwargs enable_thinking=false; unset leaves requests unchanged.
+# A model profile's options.enable_thinking takes precedence.
+export LLM_ENABLE_THINKING=false
+```
+
 **Optional: Disable tool/function calling (for models that don't support it):**
 ```bash
 export OPENAI_TOOL_CALLING=false

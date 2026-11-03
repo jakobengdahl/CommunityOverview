@@ -244,3 +244,33 @@ def test_the_trace_records_each_turn_with_its_tool_call_inputs():
             },
         ],
     }
+
+
+def test_tool_calls_at_the_token_limit_run_nothing_and_keep_the_trace(caplog):
+    replies = [
+        LLMResponse(
+            content=[{"type": "tool_use", "id": "t0", "name": "first", "input": {}}],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(
+            content=[{"type": "tool_use", "id": "t1", "name": "second", "input": {}}],
+            stop_reason="max_tokens",
+        ),
+    ]
+    limits = []
+
+    def create_completion(messages, system_prompt, tools, max_tokens):
+        limits.append(max_tokens)
+        return replies[len(limits) - 1]
+
+    executor = MagicMock(return_value={"ok": True})
+    result = LLMClient(
+        llm_provider=SimpleNamespace(create_completion=create_completion)
+    ).execute_with_tools("sys", "go", [], executor)
+
+    executor.assert_called_once_with("first", {})
+    assert result["success"] is False
+    assert "token limit" in result["error"]
+    assert [turn["turn"] for turn in result["trace"]] == [1, 2]
+    assert limits == [16000, 16000]
+    assert "tool calls not run: ['second']" in caplog.text

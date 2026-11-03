@@ -231,6 +231,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (for chat) |
 | `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
+| `LLM_MAX_TOKENS` | `16000` | Completion token limit for chat and agents (a model profile's `options.max_tokens` takes precedence) |
+| `LLM_ENABLE_THINKING` | - | `false` sends `chat_template_kwargs` `enable_thinking=false` on OpenAI-compatible requests |
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
 | `AGENTS_SCHEDULER_ENABLED` | `false` | Enable in-process time-based scheduler (off for scale-to-zero) |

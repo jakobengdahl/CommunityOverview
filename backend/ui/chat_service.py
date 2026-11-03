@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
+from backend.llm.llm_providers import provider_max_tokens
 from backend.ui.chat_logic import ChatProcessor
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
@@ -1084,7 +1085,7 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 messages=messages,
                 system_prompt="You are a precise entity extraction assistant. Extract entities from text and return them as a JSON array.",
                 tools=[],
-                max_tokens=4096,
+                max_tokens=provider_max_tokens(llm_provider),
             )
 
             # Extract JSON from response

@@ -6,12 +6,72 @@ Supports both Claude (Anthropic) and OpenAI APIs.
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import json
+import logging
 import os
 from backend.runtime.extensions import get_runtime_extensions, runtime_context
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_TOKENS = 16000
+
+# The anthropic SDK refuses a non-streaming request it expects to run over 10
+# minutes, which it estimates as max_tokens / 128,000 of an hour.
+_CLAUDE_NONSTREAMING_MAX_TOKENS = 21_333
+
+TOOL_CALLS_NOT_RUN_MESSAGE = (
+    "The AI model's reply hit the token limit, so the actions it requested were "
+    "not run. Any results from earlier steps are kept. Try a smaller request, or "
+    "raise the limit with LLM_MAX_TOKENS or the model profile's max_tokens option."
+)
+
+
+def resolve_max_tokens(options: Optional[Dict[str, Any]] = None) -> int:
+    """Completion token limit: profile option, then LLM_MAX_TOKENS, then the default.
+
+    An invalid or non-positive value falls back to the default with a warning.
+    """
+    option = options.get("max_tokens") if isinstance(options, dict) else None
+    source = "model profile option max_tokens"
+    value = option
+    if option is None:
+        source = "LLM_MAX_TOKENS"
+        value = os.getenv("LLM_MAX_TOKENS", "").strip()
+        if not value:
+            return DEFAULT_MAX_TOKENS
+    try:
+        limit = None if isinstance(value, bool) else int(str(value).strip())
+    except ValueError:
+        limit = None
+    if limit is None or limit <= 0:
+        logger.warning(
+            "Ignoring invalid %s=%r; using %d", source, value, DEFAULT_MAX_TOKENS
+        )
+        return DEFAULT_MAX_TOKENS
+    return limit
+
+
+def provider_max_tokens(provider: Any) -> int:
+    """Resolve the token limit for a provider, honouring its profile options."""
+    return resolve_max_tokens(getattr(provider, "options", None))
+
+
+def thinking_disabled(options: Optional[Dict[str, Any]] = None) -> bool:
+    """True when profile option enable_thinking, else LLM_ENABLE_THINKING, is false."""
+    option = options.get("enable_thinking") if isinstance(options, dict) else None
+    value = os.getenv("LLM_ENABLE_THINKING", "") if option is None else option
+    return str(value).strip().lower() == "false"
+
+
+def _reached_limit(response: Any, usage_field: str, max_tokens: int) -> bool:
+    tokens = getattr(getattr(response, "usage", None), usage_field, None)
+    return isinstance(tokens, int) and tokens >= max_tokens
 
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers"""
+
+    # Model profile options; create_provider_from_profile sets them per instance.
+    options: Dict[str, Any] = {}
 
     @abstractmethod
     def create_completion(
@@ -19,7 +79,7 @@ class LLMProvider(ABC):
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ) -> "LLMResponse":
         """Create a completion with the LLM"""
         pass
@@ -76,14 +136,38 @@ class ClaudeProvider(LLMProvider):
         self.client = Anthropic(api_key=api_key, base_url=base_url)
         self.model = model or "claude-sonnet-4-5"
 
+    def _cap_nonstreaming(self, max_tokens: int) -> int:
+        """Keep a limit within what the installed SDK allows without streaming."""
+        try:
+            from anthropic._constants import MODEL_NONSTREAMING_TOKENS
+        except ImportError:  # older SDKs have no per-model table
+            MODEL_NONSTREAMING_TOKENS = {}
+
+        cap = min(
+            _CLAUDE_NONSTREAMING_MAX_TOKENS,
+            MODEL_NONSTREAMING_TOKENS.get(self.model, _CLAUDE_NONSTREAMING_MAX_TOKENS),
+        )
+        if max_tokens > cap:
+            logger.warning(
+                "Capping max_tokens %d to %d, the non-streaming limit for model %s",
+                max_tokens,
+                cap,
+                self.model,
+            )
+            return cap
+        return max_tokens
+
     def create_completion(
         self,
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Create completion using Claude API"""
+        max_tokens = self._cap_nonstreaming(
+            resolve_max_tokens(self.options) if max_tokens is None else max_tokens
+        )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.messages.create(
             model=self.model,
@@ -109,8 +193,14 @@ class ClaudeProvider(LLMProvider):
                     }
                 )
 
+        stop_reason = response.stop_reason
+        if stop_reason == "tool_use" and _reached_limit(
+            response, "output_tokens", max_tokens
+        ):
+            stop_reason = "max_tokens"
+
         return LLMResponse(
-            content=content, stop_reason=response.stop_reason, raw_response=response
+            content=content, stop_reason=stop_reason, raw_response=response
         )
 
     def format_tool_definitions(self, tools: List[Dict]) -> List[Dict]:
@@ -141,9 +231,11 @@ class OpenAIProvider(LLMProvider):
         messages: List[Dict],
         system_prompt: str,
         tools: List[Dict],
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Create completion using OpenAI API"""
+        if max_tokens is None:
+            max_tokens = resolve_max_tokens(self.options)
 
         # Convert messages to OpenAI format
         openai_messages = self._convert_messages_to_openai(messages, system_prompt)
@@ -151,6 +243,11 @@ class OpenAIProvider(LLMProvider):
         # Format tools for OpenAI (skip if tool calling is disabled for this endpoint)
         openai_tools = self.format_tool_definitions(tools) if self._tool_calling else []
 
+        extra = (
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+            if thinking_disabled(self.options)
+            else {}
+        )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
         response = self.client.chat.completions.create(
             model=self.model,
@@ -158,11 +255,21 @@ class OpenAIProvider(LLMProvider):
             messages=openai_messages,
             tools=openai_tools if openai_tools else None,
             tool_choice="auto" if openai_tools else None,
+            **extra,
         )
 
         # Convert OpenAI response to unified format
         message = response.choices[0].message
         content = []
+        finish_reason = response.choices[0].finish_reason
+
+        # Some servers still say finish_reason=tool_calls when a batch stops at
+        # the limit. Its arguments may be cut off, so they are never parsed and
+        # stop_reason tells callers not to run the calls.
+        cut_off = bool(message.tool_calls) and (
+            finish_reason == "length"
+            or _reached_limit(response, "completion_tokens", max_tokens)
+        )
 
         # Add text content if present
         if message.content:
@@ -176,14 +283,16 @@ class OpenAIProvider(LLMProvider):
                         "type": "tool_use",
                         "id": tool_call.id,
                         "name": tool_call.function.name,
-                        "input": self._parse_tool_arguments(
-                            tool_call.function.arguments
-                        ),
+                        "input": {}
+                        if cut_off
+                        else self._parse_tool_arguments(tool_call.function.arguments),
                     }
                 )
 
         # Map finish_reason to stop_reason
-        stop_reason = self._map_finish_reason(response.choices[0].finish_reason)
+        stop_reason = (
+            "max_tokens" if cut_off else self._map_finish_reason(finish_reason)
+        )
 
         return LLMResponse(
             content=content, stop_reason=stop_reason, raw_response=response

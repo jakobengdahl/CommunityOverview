@@ -11,7 +11,7 @@ import json
 import os
 import pytest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from backend.llm.llm_providers import LLMResponse
 
@@ -414,6 +414,24 @@ class TestChatServiceConversation:
         user_msg = next(msg for msg in last_messages if msg.get("role") == "user")
         assert "Document content" in user_msg["content"]
         assert "AI and machine learning" in user_msg["content"]
+
+    def test_propose_nodes_uses_the_resolved_token_limit(self, chat_service):
+        service, _ = chat_service
+        complete = MagicMock(
+            return_value=LLMResponse(
+                content=[{"type": "text", "text": "[]"}], stop_reason="end_turn"
+            )
+        )
+        provider = SimpleNamespace(
+            create_completion=complete, options={"max_tokens": 5}
+        )
+
+        with patch.object(
+            service._processor, "_resolve_llm_provider", return_value=(provider, None)
+        ):
+            service.propose_nodes_from_text(text="Agency X.")
+
+        assert complete.call_args.kwargs["max_tokens"] == 5
 
     def test_propose_nodes_uses_model_profile_resolution(self, chat_service):
         """Node proposal extraction should use configured model profiles, not only legacy env keys."""
@@ -2783,6 +2801,92 @@ class TestEmptyFinalReplyAfterToolChain:
         assert result["content"] == "Done."
         assert len(calls) == 3
         assert result["toolResult"]["nodes"]
+
+    @staticmethod
+    def _run_first_turn(chat_service, *replies):
+        service, _ = chat_service
+        calls = []
+
+        def create_completion(messages, system_prompt, tools, max_tokens):
+            calls.append({"tools": tools, "max_tokens": max_tokens})
+            return replies[len(calls) - 1]
+
+        result = service._processor.process_message(
+            [{"role": "user", "content": "Hi"}],
+            llm_provider=SimpleNamespace(
+                create_completion=create_completion,
+                options={"max_tokens": 777},
+            ),
+        )
+        return result, calls
+
+    @staticmethod
+    def _cut_off_reply():
+        return LLMResponse(
+            content=[
+                {"type": "text", "text": "Adding the nodes."},
+                {"type": "tool_use", "id": "c9", "name": "add_nodes", "input": {}},
+            ],
+            stop_reason="max_tokens",
+        )
+
+    def test_empty_first_reply_is_retried_once_without_tools(
+        self, chat_service, caplog
+    ):
+        result, calls = self._run_first_turn(
+            chat_service, self._empty_reply(), self._text_reply("Hello.")
+        )
+
+        assert result["content"] == "Hello."
+        assert [bool(call["tools"]) for call in calls] == [True, False]
+        assert [call["max_tokens"] for call in calls] == [777, 777]
+        assert "Empty first turn reply" in caplog.text
+
+    def test_empty_first_reply_with_empty_retry_reports_no_answer(self, chat_service):
+        for first in (
+            self._empty_reply(),
+            LLMResponse(content=[], stop_reason="tool_use"),
+        ):
+            result, calls = self._run_first_turn(
+                chat_service, first, self._empty_reply()
+            )
+
+            assert "No answer was produced" in result["content"]
+            assert len(calls) == 2
+
+    def test_first_reply_with_text_makes_no_extra_call(self, chat_service):
+        result, calls = self._run_first_turn(chat_service, self._text_reply("Hello."))
+
+        assert result["content"] == "Hello."
+        assert len(calls) == 1
+
+    def test_tool_calls_at_the_limit_on_the_first_turn_run_nothing(
+        self, chat_service, caplog
+    ):
+        result, calls = self._run_first_turn(chat_service, self._cut_off_reply())
+
+        assert "token limit" in result["content"]
+        assert "not run" in result["content"]
+        assert result["toolResult"] is None
+        assert len(calls) == 1
+        assert "tool calls not run: ['add_nodes']" in caplog.text
+
+    def test_tool_calls_at_the_limit_stop_the_chain_and_keep_earlier_results(
+        self, chat_service, sample_nodes, caplog
+    ):
+        service, graph_service = chat_service
+        add_nodes = MagicMock()
+        service._processor.tools_map["add_nodes"] = add_nodes
+
+        result, calls, history = self._run(chat_service, self._cut_off_reply())
+
+        add_nodes.assert_not_called()
+        assert len(calls) == 2
+        assert "token limit" in result["content"]
+        assert result["toolResult"]["nodes"]
+        assert result["toolUsed"] == "search_graph"
+        assert "c9" not in json.dumps(history)
+        assert "tool calls not run" in caplog.text
 
     def test_final_reply_with_text_makes_no_extra_call(
         self, chat_service, sample_nodes
