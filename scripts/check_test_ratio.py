@@ -11,6 +11,9 @@ naming a large module adds no room to a small one:
 
     # covers: backend/core/storage.py, backend/core/storage_backends.py
 
+A module is a tracked source file that is neither a test file nor under a ``tests/``
+directory; a changed file whose header names anything else fails.
+
 Without a header, ``test_<name>.py`` covers the module matching the longest prefix
 of ``<name>`` at a ``_`` boundary (``tests/test_x_guards.py`` covers ``x.py``), one
 directory up from ``tests/`` and beside the test anywhere else; ``x.test.jsx``
@@ -42,6 +45,7 @@ EXEMPT_HEADER = re.compile(r"^(?:#|//)\s*ratio-exempt:\s*(.+)$")
 PY_TEST = re.compile(r"^(?P<dir>(?:.*/)?)test_(?P<name>[^/]+)\.py$")
 JS_TEST = re.compile(r"^(?P<stem>.+)\.test\.[jt]sx?$")
 JS_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
+MODULE_SUFFIXES = (".py", *JS_SUFFIXES)
 
 
 class Overage(NamedTuple):
@@ -73,17 +77,27 @@ def _line_count(path: Path) -> int:
     return len(path.read_bytes().splitlines())
 
 
-def _name_match(root: Path, test_path: str) -> List[str]:
+def _is_module(root: Path, path: str, tracked: Set[str]) -> bool:
+    return (
+        path in tracked
+        and path.endswith(MODULE_SUFFIXES)
+        and not _is_test_file(path)
+        and "tests" not in path.split("/")[:-1]
+        and (root / path).is_file()
+    )
+
+
+def _name_match(root: Path, test_path: str, tracked: Set[str]) -> List[str]:
     py = PY_TEST.match(test_path)
     if not py:
         stem = JS_TEST.match(test_path)["stem"]
         candidates = [stem + suffix for suffix in JS_SUFFIXES]
-        return [path for path in candidates if (root / path).is_file()]
+        return [path for path in candidates if _is_module(root, path, tracked)]
     directory = re.sub(r"(^|/)tests/$", r"\1", py["dir"])
     parts = py["name"].split("_")
     for end in range(len(parts), 0, -1):
         path = f"{directory}{'_'.join(parts[:end])}.py"
-        if (root / path).is_file():
+        if _is_module(root, path, tracked):
             return [path]
     return []
 
@@ -97,16 +111,17 @@ def _header(root: Path, test_path: str, pattern: re.Pattern) -> Optional[str]:
     return None
 
 
-def _covered(root: Path, test_path: str) -> List[str]:
+def _covered(root: Path, test_path: str, tracked: Set[str]) -> List[str]:
     header = _header(root, test_path, COVERS_HEADER) or ""
     named = [posixpath.normpath(p.strip()) for p in header.split(",") if p.strip()]
-    return list(dict.fromkeys(named)) or _name_match(root, test_path)
+    return list(dict.fromkeys(named)) or _name_match(root, test_path, tracked)
 
 
 def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
     """Hold each module covered by a changed test file to the limit."""
     report = Report([], {}, {})
     coverage: Dict[str, List[str]] = {}
+    known = set(tracked)
     for path in tracked:
         if not _is_test_file(path) or not (root / path).is_file():
             continue
@@ -115,20 +130,20 @@ def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
             if path in changed:
                 report.exempt[path] = reason
             continue
-        covered = _covered(root, path)
-        existing = [module for module in covered if (root / module).is_file()]
-        if existing:
-            coverage[path] = existing
+        covered = _covered(root, path, known)
+        modules = [module for module in covered if _is_module(root, module, known)]
+        if modules:
+            coverage[path] = modules
         if path not in changed:
             continue
         if not covered:
             report.unresolved[path] = (
                 "no module matches its name; add a '# covers: <path>' header"
             )
-        elif len(existing) < len(covered):
-            missing = sorted(set(covered) - set(existing))
+        elif len(modules) < len(covered):
+            rejected = sorted(set(covered) - set(modules))
             report.unresolved[path] = (
-                f"covers header names missing files: {', '.join(missing)}"
+                f"covers header names non-modules: {', '.join(rejected)}"
             )
 
     totals: Dict[str, Fraction] = defaultdict(Fraction)

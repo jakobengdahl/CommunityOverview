@@ -105,7 +105,8 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
   total at most 1.5x its lines, residue-bundle PRs included: run
   `scripts/check_test_ratio.py`. A test file covers what its `# covers: <path>,
   <path>` header names, else the module matching `test_<name>.py` by the longest
-  name prefix; a file covering several counts towards each in proportion to the
+  name prefix; a header may name only tracked source files outside test files and
+  `tests/` directories; a file covering several counts towards each in proportion to the
   module's lines. `# ratio-exempt: <reason>` skips a file and needs the owner's approval.
 - Tests assert behaviour, not wording. A reviewer flags an assertion on message
   wording, log text or a substring of serialized data; the fix asserts a constant,

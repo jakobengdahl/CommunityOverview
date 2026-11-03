@@ -168,6 +168,32 @@ def test_a_test_file_covering_only_empty_modules_is_over_the_limit(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "tests/test_a.py",
+        "tests/helpers.py",
+        "notes.md",
+        "../outside.py",
+        "untracked.py",
+    ],
+)
+def test_a_covers_header_naming_anything_but_a_module_is_unresolved(tmp_path, target):
+    root = tmp_path / "repo"
+    root.mkdir()
+    test = "tests/test_a.py"
+    (tmp_path / "outside.py").write_text(_lines(1000))
+    (root / "untracked.py").write_text(_lines(1000))
+    files = {
+        "tests/helpers.py": _lines(1000),
+        "notes.md": _lines(1000),
+        test: f"# covers: {target}\n",
+    }
+    report = _check(root, files, [test])
+    assert list(report.unresolved) == [test]
+    assert report.over == []
+
+
 def test_the_longest_name_prefix_wins(tmp_path):
     test = "tests/test_mod_extra_guards.py"
     files = {"mod.py": _lines(100), "mod_extra.py": _lines(10), test: _lines(16)}
