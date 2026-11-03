@@ -145,6 +145,23 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   Prefer extending an existing test over adding a new one. A PR whose added test
   lines exceed about twice its added production lines gets one trim pass before
   merge (a residue-bundle PR is exempt).
+- Per file: once a PR changes a test file, all test files covering its module,
+  counted whole, must total at most 1.5x the module's lines, with no residue-bundle
+  exemption. A test file covers the modules in a `# covers: <path>, <path>` header
+  in its first 10 lines (`// covers:` in JS), else the module matching
+  `test_<name>.py` by the longest name prefix (`test_x_guards.py` covers `x.py`). A
+  changed file with neither must add the header, and a header may name only
+  modules: tracked code, shell, YAML or Dockerfile sources that are not test files
+  or under a `tests/` directory. A file covering several modules
+  counts towards each in proportion to the module's lines. A `# ratio-exempt: <reason>` header
+  skips the file and the script prints it; adding one needs the owner's approval.
+  Untouched files are left alone; no bulk trim. `scripts/check_test_ratio.py` checks
+  this, in CI as the non-required `Test volume (per-file limit)`.
+- Tests assert behaviour, not wording: no assertions on message wording, log text
+  or substrings of serialized data. Assert constants, structured fields, mock
+  arguments or record attributes instead. A test that only passes through such a
+  check is a `production-defect` in a test-only change and otherwise a
+  `test-durability` finding.
 - Don't test what cannot fail. Ranking/scoring logic gets cross-tier tests (can a
   secondary signal beat a stronger primary one?), not just happy-path order.
 - Async tests use `pytest-asyncio`; LLM calls are mocked, never a real key. CI

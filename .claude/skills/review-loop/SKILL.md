@@ -101,7 +101,18 @@ effort; mutation reviewer and classification/triage `claude-sonnet-5-5` or
 - Test volume follows `CLAUDE.md` Testing: one test per guarantee, a second
   only to falsify it. If added test lines exceed about twice the added
   production lines, do one trim pass before merge (residue-bundle PRs are
-  exempt).
+  exempt). All test files covering a module the PR's test files cover must also
+  total at most 1.5x its lines, residue-bundle PRs included: run
+  `scripts/check_test_ratio.py`. A test file covers what its `# covers: <path>,
+  <path>` header names, else the module matching `test_<name>.py` by the longest
+  name prefix; a header may name only tracked code, shell, YAML or Dockerfile
+  sources outside test files and `tests/` directories; a file covering several counts towards each in proportion to the
+  module's lines. `# ratio-exempt: <reason>` skips a file and needs the owner's approval.
+- Tests assert behaviour, not wording. A reviewer flags an assertion on message
+  wording, log text or a substring of serialized data; the fix asserts a constant,
+  structured field, mock argument or record attribute. A test that only passes
+  through such a check is a `production-defect` in a test-only change and otherwise
+  a `test-durability` finding.
 
 CI and workflow validators are not a tier of their own: a change to one is in the
 production tier (4 rounds). For `test-durability` residue targeting such a
