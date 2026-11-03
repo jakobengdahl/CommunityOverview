@@ -6,6 +6,8 @@ not capture is the harness's foundation: a dropped tool result would silently
 turn an ID-resolution pass into a failure.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from backend.evaluation.scoring import score_tool_calls_valid
@@ -15,6 +17,7 @@ from backend.evaluation.transcript import (
     extract_usage,
 )
 from backend.evaluation.tests.conftest import ScriptedProvider, _RawResponse
+from backend.llm.llm_providers import LLMResponse, provider_max_tokens
 
 
 class TestExtractUsage:
@@ -59,6 +62,21 @@ class TestTokenUsageTotals:
 
 
 class TestRecordingProvider:
+    def test_exposes_inner_options_and_skips_tool_calls_cut_off_at_the_limit(self):
+        inner = SimpleNamespace(
+            options={"max_tokens": 5},
+            create_completion=lambda **_: LLMResponse(
+                content=[{"type": "tool_use", "id": "c", "name": "x", "input": {}}],
+                stop_reason="max_tokens",
+            ),
+        )
+        recorder = RecordingProvider(inner)
+
+        recorder.create_completion([], "sys", [])
+
+        assert provider_max_tokens(recorder) == 5
+        assert recorder.transcript.tool_calls == []
+
     def test_records_requested_tool_calls_in_order(self):
         inner = ScriptedProvider(
             [

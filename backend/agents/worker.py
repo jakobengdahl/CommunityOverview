@@ -77,6 +77,33 @@ class ProcessingResult:
     turns_used: int = 0
 
 
+RUN_FAILURE_WITH_ACTIONS = "{text} ({count} earlier tool call(s) attempted.)"
+
+
+def _traced_actions(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The tool calls an LLM result's trace records as attempted.
+
+    A call can still have been refused for bad input or blocked by the executor.
+    """
+    return [
+        {"tool": tc.get("name"), "input": tc.get("input")}
+        for turn in llm_result.get("trace", [])
+        for tc in turn.get("tool_calls", [])
+    ]
+
+
+def _stopped_at_token_limit(llm_result: Dict[str, Any]) -> bool:
+    return any("tool_calls_not_run" in turn for turn in llm_result.get("trace", []))
+
+
+def _run_failure_text(result: ProcessingResult) -> str:
+    """Failure text for run history, which stores no structured failure result."""
+    text = result.error or result.summary or "processing failed"
+    if result.actions:
+        return RUN_FAILURE_WITH_ACTIONS.format(text=text, count=len(result.actions))
+    return text
+
+
 class AgentWorker:
     """
     Background worker that processes events for a single agent.
@@ -673,10 +700,7 @@ class AgentWorker:
                 )
             else:
                 self._run_recorder.record_failure(
-                    run_id,
-                    processing_result.error
-                    or processing_result.summary
-                    or "processing failed",
+                    run_id, _run_failure_text(processing_result)
                 )
 
         # Notify callback if set
@@ -744,6 +768,9 @@ class AgentWorker:
                 success=False,
                 handled=False,
                 summary=llm_result.get("error", "Unknown error"),
+                actions=_traced_actions(llm_result)
+                if _stopped_at_token_limit(llm_result)
+                else [],
                 error=llm_result.get("error"),
                 processing_time_ms=processing_time_ms,
                 turns_used=llm_result.get("turns", 0),
@@ -775,16 +802,12 @@ class AgentWorker:
             # Not valid JSON, use raw response
             pass
 
+        # The final response is model output: its "actions" may not be a list
+        if not isinstance(actions, list):
+            actions = []
+
         # Extract actions from trace
-        trace = llm_result.get("trace", [])
-        for turn in trace:
-            for tc in turn.get("tool_calls", []):
-                actions.append(
-                    {
-                        "tool": tc.get("name"),
-                        "input": tc.get("input"),
-                    }
-                )
+        actions.extend(_traced_actions(llm_result))
 
         return ProcessingResult(
             event_id=event_id,

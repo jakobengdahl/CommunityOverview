@@ -30,6 +30,9 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SECRET_LOOKING_OPTION_KEY_RE = re.compile(
     r"(api[_-]?key|secret|token|password|credential)", re.IGNORECASE
 )
+# A completion token count, not an auth token: a bad value falls back with a
+# warning in resolve_max_tokens rather than failing the whole schema config.
+_NON_SECRET_OPTION_KEYS = {"max_tokens"}
 
 
 class ModelProfile(BaseModel):
@@ -74,6 +77,7 @@ class ModelProfile(BaseModel):
             if (
                 isinstance(value, str)
                 and value
+                and key not in _NON_SECRET_OPTION_KEYS
                 and _SECRET_LOOKING_OPTION_KEY_RE.search(key)
             ):
                 raise ValueError(
@@ -275,13 +279,17 @@ def create_provider_from_profile(
 
     provider_id = profile.provider.lower()
     if provider_id in ("claude", "anthropic"):
-        return ClaudeProvider(
+        provider = ClaudeProvider(
             api_key=api_key, model=profile.model, base_url=profile.endpoint
         )
+        provider.options = profile.options
+        return provider
     if provider_id == "openai":
-        return OpenAIProvider(
+        provider = OpenAIProvider(
             api_key=api_key, model=profile.model, base_url=profile.endpoint
         )
+        provider.options = profile.options
+        return provider
     raise ValueError(
         f"Model profile '{profile.id}' uses unsupported provider '{profile.provider}'. "
         "Supported providers: 'claude', 'openai' (OpenAI-compatible endpoints, e.g. "
