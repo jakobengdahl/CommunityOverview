@@ -68,6 +68,7 @@
     "privacy_notice": "**NOTE:** Do not handle personal data in this service."
   },
   "chat": {
+    "reasoning_round": "Reasoning · round {round}",
     "progress_label": "Chat progress",
     "progress_llm_started": "LLM round {round} started",
     "progress_tool_started": "Tool started: {tool}",

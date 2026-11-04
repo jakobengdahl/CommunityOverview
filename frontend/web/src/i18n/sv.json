@@ -68,6 +68,7 @@
     "privacy_notice": "**OBS:** Hantera inte personuppgifter i denna tjänst."
   },
   "chat": {
+    "reasoning_round": "Resonemang · omgång {round}",
     "progress_label": "Chattförlopp",
     "progress_llm_started": "LLM-omgång {round} startad",
     "progress_tool_started": "Verktyg startat: {tool}",

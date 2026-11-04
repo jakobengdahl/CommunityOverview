@@ -897,3 +897,14 @@
 .chat-progress [aria-current='step'] {
   font-weight: 600;
 }
+
+.chat-reasoning summary {
+  cursor: pointer;
+}
+
+.chat-reasoning div {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 18rem;
+  overflow-y: auto;
+}
