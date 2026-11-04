@@ -1,3 +1,4 @@
+# covers: backend/ui/chat_logic.py, backend/ui/chat_service.py, backend/ui/rest_api.py
 """
 Integration tests for full chat flows.
 
