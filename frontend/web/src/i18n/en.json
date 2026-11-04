@@ -68,6 +68,13 @@
     "privacy_notice": "**NOTE:** Do not handle personal data in this service."
   },
   "chat": {
+    "progress_label": "Chat progress",
+    "progress_llm_started": "LLM round {round} started",
+    "progress_tool_started": "Tool started: {tool}",
+    "progress_tool_finished": "Tool finished: {tool}",
+    "progress_chat_finished": "Chat finished",
+    "progress_error": "Chat failed",
+    "progress_interrupted": "Chat connection interrupted",
     "placeholder": "Ask a question or request an action...",
     "placeholder_with_file": "Describe what you want to do with the document...",
     "send": "Send",

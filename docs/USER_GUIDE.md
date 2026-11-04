@@ -662,6 +662,10 @@ Type any question in natural language. The assistant has full access to the grap
 > *"Show me the production solutions for economic statistics."*
 > *"What is the data structure for the employment dataset?"*
 
+While a request runs, an animation and progress list show each LLM round and
+each tool starting and finishing, including its name. The final answer appears
+when the chat finishes. Progress does not include reasoning text.
+
 The assistant responds in whatever language you write in — switch mid-conversation freely.
 
 Responses support **Markdown**: bold text, bullet lists, tables, and inline code are

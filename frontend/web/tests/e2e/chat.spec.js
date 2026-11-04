@@ -4,7 +4,7 @@ import { canvasNode, uniqueToken } from './helpers';
 /**
  * Desktop chat panel ("Graph assistant").
  *
- * No request reaches an LLM provider: every test answers POST /ui/chat itself
+ * No request reaches an LLM provider: every test answers POST /ui/chat/stream itself
  * through page.route, so the replies are fixed and the tests check what the
  * panel does with them — what it sends, what it renders, and what a reply's
  * tool result does to the canvas. The panel is mounted only because the
@@ -12,7 +12,7 @@ import { canvasNode, uniqueToken } from './helpers';
  * playwright.config.js).
  */
 
-const CHAT_URL = '**/ui/chat';
+const CHAT_URL = '**/ui/chat/stream';
 
 /**
  * Answers every chat request with `reply(body, index)` and records the parsed
@@ -26,10 +26,18 @@ async function mockChat(page, reply = () => ({ content: 'Mocked reply' })) {
     const answer = await reply(body, requests.length - 1);
     await route.fulfill({
       status: answer.status ?? 200,
-      contentType: 'application/json',
-      body: JSON.stringify(
-        answer.status ? answer.body : { toolUsed: null, toolResult: null, ...answer }
-      ),
+      contentType: answer.status ? 'application/json' : 'text/event-stream',
+      body: answer.status
+        ? JSON.stringify(answer.body)
+        : [
+            { kind: 'llm_started', round: 1 },
+            {
+              kind: 'chat_finished',
+              response: { toolUsed: null, toolResult: null, ...answer },
+            },
+          ]
+            .map((step) => `data: ${JSON.stringify(step)}\n\n`)
+            .join(''),
     });
   });
   return requests;
@@ -85,6 +93,12 @@ test.describe('chat panel', () => {
     // The reply is rendered as Markdown, not shown as raw asterisks.
     await expect(assistantMessages(page).last().locator('strong')).toHaveText('three');
     await expect(input(page)).toHaveValue('');
+    await expect(assistantMessages(page).last().locator('.chat-progress')).toContainText(
+      'LLM round 1 started'
+    );
+    await expect(assistantMessages(page).last().locator('.chat-progress')).toContainText(
+      'Chat finished'
+    );
 
     expect(requests).toHaveLength(1);
     // The welcome message is UI-only and never part of the conversation sent.

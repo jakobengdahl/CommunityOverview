@@ -64,6 +64,7 @@ _HOST_SESSION_AWARE: Sequence[Tuple[str, str]] = (
     ("POST", r"/execute_tool"),
     ("GET", r"/export_graph"),
     ("POST", r"/ui/chat"),
+    ("POST", r"/ui/chat/stream"),
     ("POST", r"/ui/chat/simple"),
     ("POST", r"/agents/proposals/[^/]+/approve"),
     ("*", r"/mcp(/.*)?"),

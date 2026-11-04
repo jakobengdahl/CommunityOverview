@@ -1,3 +1,4 @@
+# covers: backend/ui/rest_api.py, backend/ui/chat_service.py
 """Authorization of the assistant's UI routes.
 
 The assistant reads and writes the graph through its tools, so its routes must
@@ -485,3 +486,20 @@ async def test_chat_attachment_hook_sees_request_actor(
     hook.evaluate.assert_called_once()
     assert hook.evaluate.call_args.args[0].actor["actor_id"] == "outsider"
     assert "access_denied" in json.dumps(llm.received_messages[-1])
+
+
+def test_stream_tool_authorization_keeps_requesting_actor(hooked_client):
+    """Streaming tools retain the caller's authorization on event-loop hops."""
+    client, llm, graph_service, hook = hooked_client
+    llm.mock_tool_calls = [
+        {"name": "add_nodes", "input": {"nodes": [_NEW_NODE], "edges": []}}
+    ]
+    response = _chat(client, "viewer", "/ui/chat/stream")
+    steps = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps[-1]["response"]["toolResult"]["error_code"] == "access_denied"
+    assert hook.seen_actor_ids and set(hook.seen_actor_ids) == {"viewer"}
+    assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False

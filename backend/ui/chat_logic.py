@@ -1,5 +1,7 @@
 from typing import Any, List, Dict, Callable, Optional
 import functools
+import contextvars
+from contextlib import contextmanager
 import os
 import json
 import logging
@@ -531,6 +533,33 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 """
 
 
+# Context is copied into the worker; shared processors never hold request progress.
+_chat_progress = contextvars.ContextVar("chat_progress", default=None)
+
+
+@contextmanager
+def report_chat_progress(callback):
+    token = _chat_progress.set({"callback": callback, "round": 0})
+    try:
+        yield
+    finally:
+        _chat_progress.reset(token)
+
+
+def _report_step(kind, **fields):
+    progress = _chat_progress.get()
+    if progress is not None:
+        run_on_event_loop(progress["callback"], {"kind": kind, **fields})
+
+
+def _chat_completion(provider, **kwargs):
+    progress = _chat_progress.get()
+    if progress is not None:
+        progress["round"] += 1
+        _report_step("llm_started", round=progress["round"])
+    return provider.create_completion(**kwargs)
+
+
 _chat_worker = threading.local()
 
 
@@ -658,7 +687,8 @@ def _answer_after_empty_reply(
     """
     _log_empty_reply(response, stage)
     try:
-        retry = provider.create_completion(
+        retry = _chat_completion(
+            provider,
             messages=[
                 *messages,
                 {"role": "user", "content": _EMPTY_REPLY_RETRY_INSTRUCTION},
@@ -1479,7 +1509,8 @@ class ChatProcessor:
             )
 
             # First call to LLM
-            response = llm_provider.create_completion(
+            response = _chat_completion(
+                llm_provider,
                 messages=messages,
                 system_prompt=active_system_prompt,
                 tools=active_tool_definitions,
@@ -1661,6 +1692,8 @@ class ChatProcessor:
                 )
                 continue
 
+            _report_step("tool_started", tool=tool_name)
+
             # Execute the tool
             tool_result = None
 
@@ -1716,6 +1749,8 @@ class ChatProcessor:
                     tool_result = {"error": str(e)}
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
+
+            _report_step("tool_finished", tool=tool_name)
 
             # Accumulate nodes and edges from tools that return them
             if tool_result and isinstance(tool_result, dict):
@@ -1789,7 +1824,8 @@ class ChatProcessor:
             }
         )
 
-        final_response = provider.create_completion(
+        final_response = _chat_completion(
+            provider,
             messages=messages,
             system_prompt=active_system_prompt,
             tools=active_tool_definitions,
