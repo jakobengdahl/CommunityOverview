@@ -40,6 +40,7 @@ from backend.runtime import session_context
 
 from . import access, attachments, queries, mutations, views, import_service
 from . import staged_review
+from .attachment_tools import AttachmentReadTools, ATTACHMENT_READ_DEFAULT_CHARS
 from .attachments import AttachmentSettings
 from .composed import annotate_staged_state
 from .staging import SessionGate, StagedWrite, refusal_result
@@ -95,6 +96,7 @@ class GraphService:
         # None leaves the node attachment routes answering
         # ``attachments_unavailable``; see backend/api_host/attachments.py.
         self._attachment_settings = attachment_settings
+        self._attachment_read_tools = AttachmentReadTools(self)
         # Which session a call acts in, and whether its writes stage
         # (docs/SESSION_OVERLAY_CONTRACT.md §9). Until sessions are attached,
         # a call naming a session is refused, never handled as a direct one.
@@ -596,6 +598,28 @@ class GraphService:
 
     # ==================== Node Attachments ====================
     # See backend/service/attachments.py and ADR 0008.
+
+    def attachment_tool_list(self, node_id: str):
+        return self._attachment_read_tools.list(node_id=node_id)
+
+    def attachment_tool_read(
+        self,
+        node_id: str,
+        attachment_id: str,
+        offset=0,
+        max_chars=ATTACHMENT_READ_DEFAULT_CHARS,
+    ):
+        return self._attachment_read_tools.read(
+            node_id=node_id,
+            attachment_id=attachment_id,
+            offset=offset,
+            max_chars=max_chars,
+        )
+
+    def attachment_tool_search(self, query: str, node_ids: list[str], top_k=8):
+        return self._attachment_read_tools.search(
+            query=query, node_ids=node_ids, top_k=top_k
+        )
 
     def list_node_attachments(self, node_id: str) -> Dict[str, Any]:
         return attachments.list_node_attachments(

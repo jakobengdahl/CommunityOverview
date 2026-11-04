@@ -1,3 +1,4 @@
+# covers: backend/service/attachments.py, backend/service/attachment_tools.py
 """
 Node attachment routes and service functions (ADR 0008 sections 4-8).
 
@@ -1798,3 +1799,229 @@ def test_mcp_attachment_registration_filters_map_and_mount(
         result = tools[name]()
         assert result.get("error_code") == ("access_denied" if deny else None)
     assert len(calls) == (0 if deny else len(expected))
+
+
+# ADR 0010: the tool shape remains separate from REST attachment responses.
+def test_attachment_tools_hide_missing_and_invisible_nodes(service, storage):
+    """G1: invisible and missing nodes have identical tool responses."""
+
+    class NarrowHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing(enabled=True)
+            )
+
+    service._authorization_hook = NarrowHook()
+    for method, args in (
+        (service.attachment_tool_list, {}),
+        (service.attachment_tool_read, {"attachment_id": "a" * 32}),
+    ):
+        assert method(node_id="foreign", **args) == method(node_id="missing", **args)
+    result = service.attachment_tool_search(
+        "policy", ["foreign", "missing", FEDERATED_ID]
+    )
+    assert result["unresolved_node_ids"] == ["foreign", "missing"]
+    assert result["files"] == result["passages"] == []
+
+
+def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, caplog):
+    """G2: every passage identifies its source; audit counts only returned text."""
+    from backend.runtime.authorization import use_request_authorization
+
+    record = _upload(client, "doc", b"policy human review").json()
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        use_request_authorization(actor_id="reader"),
+    ):
+        result = service.attachment_tool_search("policy", ["doc"])
+    passage = result["passages"][0]
+    assert (passage["node_id"], passage["attachment_id"], passage["filename"]) == (
+        "doc",
+        record["id"],
+        record["filename"],
+    )
+    assert passage["locator"]
+    assert result["untrusted_content"] is True
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    assert audits[0].chars == len(passage["text"])
+    assert audits[0].sha256 == record["sha256"]
+    assert audits[0].actor == {"type": "user", "id": "reader"}
+
+
+@pytest.mark.parametrize(
+    "status", ["no_text_layer", "unsupported_type", "too_large", "timeout", "failed"]
+)
+def test_attachment_tool_reports_unreadable_and_budget_skips(
+    service, client, monkeypatch, status
+):
+    """G3: every file not searched in full is reported with its status."""
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult
+    from backend.service import attachment_tools
+
+    first = _upload(client, "doc", b"policy").json()
+    second = _upload(client, "doc", b"more policy").json()
+    tools = service._attachment_read_tools
+    tools.limits = replace(tools.limits, search_max_files=1)
+    monkeypatch.setattr(
+        attachment_tools.extraction, "extract", lambda *a: ExtractionResult(status)
+    )
+    result = service.attachment_tool_search("policy", ["doc"])
+    assert {f["attachment_id"] for f in result["files"]} == {first["id"], second["id"]}
+    assert {f["status"] for f in result["files"]} == {status, "skipped_budget"}
+    assert result["passages"] == []
+    assert service.attachment_tool_search("policy", ["doc"])["files"] == result["files"]
+
+
+def test_attachment_tool_enforces_budgets_and_read_windows(
+    service, client, monkeypatch
+):
+    """G4: passage text and read windows never exceed their character caps."""
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.service import attachment_tools
+
+    record = _upload(client, "doc", b"policy").json()
+    monkeypatch.setattr(
+        attachment_tools.extraction,
+        "extract",
+        lambda *a: ExtractionResult(
+            "ok",
+            (
+                Segment("policy " * 30, {"page": 1}),
+                Segment("policy " * 30, {"page": 2}),
+            ),
+        ),
+    )
+    tools = service._attachment_read_tools
+    tools.limits = replace(
+        tools.limits,
+        chunk_chars=30,
+        chunk_overlap_chars=0,
+        result_max_chars=35,
+        read_max_chars=15,
+    )
+    result = service.attachment_tool_search("policy", ["doc"], top_k=20)
+    assert 0 < sum(len(p["text"]) for p in result["passages"]) <= 35
+    assert result["passages_truncated"] is True
+    window = service.attachment_tool_read("doc", record["id"], offset=205, max_chars=50)
+    assert window["returned_chars"] == 15
+    assert [s["locator"] for s in window["segments"]] == [{"page": 1}, {"page": 2}]
+    assert window["next_offset"] == 220
+    assert (
+        service.attachment_tool_read("doc", record["id"], offset=420)["segments"] == []
+    )
+    assert (
+        service.attachment_tool_search("policy", ["doc"] * 21)["error_code"]
+        == "too_many_nodes"
+    )
+    assert (
+        service.attachment_tool_read("doc", record["id"], offset=-1)["error_code"]
+        == "invalid_arguments"
+    )
+
+
+def test_attachment_text_cache_is_bounded_ephemeral_and_reauthorized(
+    service, client, monkeypatch
+):
+    """G5: caches are bounded memory only and never bypass authorization."""
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.service import attachment_tools
+
+    record = _upload(client, "doc", b"policy").json()
+    calls = []
+
+    def extract(*args):
+        calls.append(None)
+        return ExtractionResult("ok", (Segment("policy", {"line": 1}),))
+
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    tools = service._attachment_read_tools
+    tools.limits = replace(tools.limits, text_cache_max_chars=400)
+    service.attachment_tool_read("doc", record["id"])
+    service.attachment_tool_read("doc", record["id"])
+    assert len(calls) == 1
+    other = _upload(client, "doc", b"policy", filename="other.txt").json()
+    service.attachment_tool_read("doc", other["id"])
+    service.attachment_tool_read("doc", record["id"])
+    assert len(calls) == 3  # The least recently used entry was evicted.
+    assert tools.cache_chars <= 400
+    fresh = GraphService(
+        service.storage, attachment_settings=service.attachment_settings
+    )
+    assert not fresh._attachment_read_tools.cache
+    fresh.attachment_tool_read("doc", record["id"])
+    assert len(calls) == 4
+
+    class DenyHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=context.target != "get_node_attachment"
+            )
+
+    service._authorization_hook = DenyHook()
+    assert (
+        service.attachment_tool_read("doc", record["id"])["error_code"]
+        == "access_denied"
+    )
+    assert len(calls) == 4
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "off")
+    assert fresh.attachment_tool_list("doc")["error_code"] == "access_denied"
+    assert (
+        fresh.attachment_tool_read("doc", record["id"])["error_code"] == "access_denied"
+    )
+    assert (
+        fresh.attachment_tool_search("policy", ["doc"])["error_code"] == "access_denied"
+    )
+    assert len(calls) == 4
+
+
+def test_attachment_read_dispatchers_use_tool_wrappers(service, client, caplog):
+    """All dispatchers use envelopes, and Agent dispatch cannot reach REST reads."""
+    from unittest.mock import MagicMock
+    from backend.agents.mcp_loader import MCPLoader
+    from backend.service.mcp_tools import register_mcp_tools
+    from backend.ui.chat_service import ChatService
+
+    record = _upload(client, "doc", b"policy").json()
+    mcp = MagicMock()
+    registered = {}
+
+    def register(func):
+        registered[func.__name__] = func
+        return func
+
+    mcp.tool.return_value = register
+    tools = register_mcp_tools(mcp, service, attachment_access="read")
+    chat = ChatService.__new__(ChatService)
+    chat._graph_service = service
+    chat_tools = chat._build_tools_map()
+    loader = MCPLoader([])
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        for name, args in (
+            ("list_node_attachments", {"node_id": "doc"}),
+            ("read_node_attachment", {"node_id": "doc", "attachment_id": record["id"]}),
+            ("search_node_attachments", {"query": "policy", "node_ids": ["doc"]}),
+        ):
+            assert tools[name](**args)["untrusted_content"] is True
+            assert asyncio.run(registered[name](**args))["untrusted_content"] is True
+            assert chat_tools[name](**args)["untrusted_content"] is True
+            assert (
+                loader._execute_graph_tool(name, args, service, "agent")[
+                    "untrusted_content"
+                ]
+                is True
+            )
+    assert {
+        r.actor["type"] for r in caplog.records if r.name == "attachments.audit"
+    } == {"mcp", "user", "agent"}
+    for name in ("open_node_attachment", "get_node_attachment_record"):
+        result = loader._execute_graph_tool(name, {}, service, "agent")
+        assert set(result) == {"error"}
+    assert "read_node_attachment" not in register_mcp_tools(mcp, service)
+    empty = GraphService(service.storage)
+    assert "list_node_attachments" not in register_mcp_tools(
+        mcp, empty, attachment_access="read"
+    )
