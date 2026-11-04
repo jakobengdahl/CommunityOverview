@@ -33,6 +33,7 @@ openai>=1.0.0
 # Core Server
 python-dotenv>=1.0.0
 fastapi>=0.100.0
+anyio>=4.0.0
 uvicorn>=0.20.0
 
 # String similarity (MIT-licensed, C++ optimized)

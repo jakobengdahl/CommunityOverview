@@ -1,3 +1,4 @@
+# covers: backend/api_host/mcp_mount.py, backend/api_host/tool_routes.py
 """
 MCP integration tests for app_host.
 
@@ -551,6 +552,62 @@ class TestMCPBrowserHandlerRouting:
         }
         assert set(payload["streamable_http_endpoints"]) == {"POST /mcp", "GET /mcp"}
         assert payload["available_tools"] == ["tool_a"]
+
+
+class TestSSEClientDisconnect:
+    def test_client_disconnect_ends_the_request_without_a_second_response(self):
+        """A client closing the real SSE stream gets one response and no app error."""
+        from fastapi import FastAPI
+        from mcp.server.fastmcp import FastMCP
+
+        from backend.api_host.mcp_mount import mount_mcp
+
+        app = FastAPI()
+        mount_mcp(app, FastMCP("disconnect-test", host="0.0.0.0"), {})
+        http = TestMCPBrowserHandlerRouting._http
+        scope = {**http("GET", "/mcp/sse", "text/event-stream"), "root_path": ""}
+        sent = []
+
+        async def run():
+            first_event = anyio.Event()
+            inbound = iter([{"type": "http.request", "body": b""}])
+
+            async def receive():
+                if (request := next(inbound, None)) is not None:
+                    return request
+                await first_event.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                sent.append(message)
+                if message.get("body"):
+                    first_event.set()
+
+            with anyio.fail_after(10):
+                await app(scope, receive, send)
+
+        anyio.run(run)
+
+        assert [m["status"] for m in sent if "status" in m] == [200]
+
+    def test_only_messages_from_a_second_response_start_on_are_dropped(self):
+        from backend.api_host.mcp_mount import drop_response_after_sse_disconnect
+
+        start = {"type": "http.response.start", "status": 200, "headers": []}
+        chunk = {"type": "http.response.body", "body": b"x", "more_body": True}
+        sent = []
+
+        async def inner(scope, receive, send):
+            for message in (start, chunk, start, chunk):
+                await send(message)
+
+        async def send(message):
+            sent.append(message)
+
+        wrapped = drop_response_after_sse_disconnect(inner)
+        anyio.run(wrapped, {"type": "http"}, None, send)
+
+        assert sent == [start, chunk]
 
 
 class TestMountRelativePath:

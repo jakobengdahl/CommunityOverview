@@ -1,3 +1,4 @@
+# covers: backend/ui/chat_logic.py, backend/ui/chat_service.py, backend/ui/rest_api.py
 """
 Integration tests for full chat flows.
 
@@ -8,6 +9,149 @@ These tests verify the complete chat workflow:
 4. Node is created in the graph
 5. Node appears in search results
 """
+
+import asyncio
+import threading
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+
+from backend.core.models import MAX_METADATA_DEPTH
+from backend.llm.llm_providers import LLMResponse
+from backend.runtime.authorization import get_current_request_authorization_inputs
+from backend.runtime.request_context import ACTOR_ID_HEADER
+from backend.ui.chat_logic import run_chat_off_event_loop, run_on_event_loop
+
+_WAIT_S = 5
+_MESSAGES = [{"role": "user", "content": "x"}]
+
+
+class _GatedLLM:
+    """Holds each chat's first call until released, then searches and answers."""
+
+    def __init__(self, app):
+        self.release = threading.Event()
+        self.threads, self.released_in_time = [], []
+        processor = app.state.chat_service._processor
+        processor._resolve_llm_provider = lambda *_: (self, None)
+
+    def create_completion(self, messages, **_):
+        self.threads.append(threading.get_ident())
+        if isinstance(messages[-1]["content"], list):
+            text = {"type": "text", "text": "done"}
+            return LLMResponse(content=[text], stop_reason="end_turn")
+        self.released_in_time.append(self.release.wait(_WAIT_S))
+        call = dict(type="tool_use", id="t1", name="search_graph", input={"query": "x"})
+        return LLMResponse(content=[call], stop_reason="tool_use")
+
+
+def _http(app):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test")
+
+
+def _record_searches(app):
+    seen = []
+
+    def search(**kwargs):
+        headers = get_current_request_authorization_inputs()["headers"]
+        seen.append((headers[ACTOR_ID_HEADER], kwargs["federation_depth"]))
+        return {"nodes": []}
+
+    app.state.chat_service.graph_service.search_graph = search
+    return seen
+
+
+async def _until(condition):
+    async with asyncio.timeout(_WAIT_S * 2):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_requests_answered_during_isolated_concurrent_chats(test_app_with_mock):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    seen = _record_searches(app)
+    node = {"name": "Written mid-chat", "type": "Actor", "description": "d"}
+    chats = [
+        ("/ui/chat", {"messages": _MESSAGES, "federation_depth": 1}, "a"),
+        ("/ui/chat/simple", {"message": "x", "federation_depth": 2}, "b"),
+    ]
+    async with _http(app) as http:
+        tasks = [
+            asyncio.create_task(http.post(p, json=b, headers={ACTOR_ID_HEADER: a}))
+            for p, b, a in chats
+        ]
+        await _until(lambda: len(llm.threads) == 2)
+        health = await http.get("/health")
+        write = await http.post("/api/nodes", json={"nodes": [node], "edges": []})
+        llm.release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), _WAIT_S * 2)
+
+    assert health.status_code == 200 and write.status_code == 200
+    assert llm.released_in_time == [True, True]
+    assert sorted(seen) == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.asyncio
+async def test_graph_access_on_the_loop_thread_and_llm_calls_off_it(test_app_with_mock):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    llm.release.set()
+    service = app.state.chat_service
+    allowlist = ["read_node_attachment", "search_graph"]
+    akc = {"short_name": "kiosk", "tool_allowlist": allowlist}
+    node = {"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}
+    service.graph_service.add_nodes(nodes=[node], edges=[])
+    # An advertised attachment tool makes the chat re-read the collection's grant.
+    service._processor.tool_definitions.append({"name": "read_node_attachment"})
+    hook = service.graph_service._authorization_hook
+    evaluate, hook_threads = hook.evaluate, []
+    hook.evaluate = lambda c: hook_threads.append(threading.get_ident()) or evaluate(c)
+    body = {"messages": _MESSAGES, "collection_short_name": "kiosk"}
+    async with _http(app) as http:
+        assert (await http.post("/ui/chat", json=body)).status_code == 200
+
+    loop_thread = threading.get_ident()
+    assert len(hook_threads) == 3 and set(hook_threads) == {loop_thread}
+    assert llm.threads and loop_thread not in llm.threads
+
+
+@pytest.mark.asyncio
+async def test_hop_copies_depth_capped_results_and_other_callers_run_in_place():
+    deep = {}
+    for _ in range(MAX_METADATA_DEPTH - 1):
+        deep = {"k": deep}
+    live = {"nodes": [], "deep": deep}
+    hopped = await run_chat_off_event_loop(lambda: run_on_event_loop(lambda: live))
+
+    assert hopped == live and hopped["nodes"] is not live["nodes"]
+    assert run_on_event_loop(lambda: live) is live
+
+
+@pytest.mark.asyncio
+async def test_cancelled_or_failing_chats_keep_their_outcomes(test_app_with_mock):
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    seen = _record_searches(app)
+    service, failure = app.state.chat_service, RuntimeError("failed")
+    request = {"json": {"messages": _MESSAGES}, "headers": {ACTOR_ID_HEADER: "a"}}
+    async with _http(app) as http:
+        cancelled = asyncio.create_task(http.post("/ui/chat", **request))
+        await _until(lambda: llm.threads)
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        llm.release.set()
+        await _until(lambda: len(llm.threads) == 2)
+        service._processor.tools_map["search_graph"] = MagicMock(side_effect=failure)
+        tool_error = await http.post("/ui/chat", **request)
+        service.process_message = MagicMock(side_effect=failure)
+        chat_error = await http.post("/ui/chat", **request)
+
+    assert seen == [("a", None)]
+    assert tool_error.json()["toolResult"] == {"error": str(failure)}
+    assert chat_error.status_code == 500
 
 
 class TestChatFlowIntegration:

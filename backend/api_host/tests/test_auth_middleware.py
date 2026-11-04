@@ -105,6 +105,7 @@ def test_basic_auth_raw_writes_require_fetch_metadata_or_custom_header(
         ("bEaReR api-secret", 200),
         ("Bearer wrong-token", 403),
         ("Bearer", 403),
+        ("Bearer tökén".encode(), 403),
         (None, 403),
     ],
 )
@@ -129,6 +130,27 @@ def test_bearer_write_with_session_cookie_and_cross_site_metadata(
     response = client.post("/api/write", content=b"payload", headers=headers)
     assert response.status_code == expected
     assert writes == ([b"payload"] if expected == 200 else [])
+
+
+def test_non_ascii_bearer_keeps_the_session_cookie_fallback():
+    app = FastAPI()
+
+    @app.post("/api/write")
+    async def write():
+        return {"success": True}
+
+    config = AppConfig(auth_enabled=True, auth_bearer_token="api-secret")
+    add_auth_middleware(app, config)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE_NAME, mint_session_cookie(config))
+    response = client.post(
+        "/api/write",
+        headers={
+            "Authorization": "Bearer tökén".encode(),
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize(

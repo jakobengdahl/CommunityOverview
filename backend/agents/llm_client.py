@@ -19,6 +19,8 @@ from backend.llm.llm_providers import (
     LLMResponse,
     ClaudeProvider,
     OpenAIProvider,
+    provider_max_tokens,
+    TOOL_CALLS_NOT_RUN_MESSAGE,
     tool_input_type_error,
 )
 
@@ -102,7 +104,7 @@ class LLMClient:
         system_prompt: str,
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ) -> AgentTurn:
         """
         Run a single agent turn.
@@ -111,7 +113,8 @@ class LLMClient:
             system_prompt: System prompt including base agent prompt and task
             messages: Conversation history
             tools: Tool definitions in Claude format
-            max_tokens: Maximum tokens for response
+            max_tokens: Maximum tokens for response (default: resolved from
+                the provider's profile options, LLM_MAX_TOKENS or the default)
 
         Returns:
             AgentTurn with response and any tool calls
@@ -121,7 +124,9 @@ class LLMClient:
                 messages=messages,
                 system_prompt=system_prompt,
                 tools=tools,
-                max_tokens=max_tokens,
+                max_tokens=provider_max_tokens(self._provider)
+                if max_tokens is None
+                else max_tokens,
             )
 
             return self._parse_response(response)
@@ -164,7 +169,7 @@ class LLMClient:
         tools: List[Dict[str, Any]],
         tool_executor: Callable[[str, Dict[str, Any]], Any],
         max_turns: int = 10,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Execute a complete agent interaction with tool calling.
@@ -209,6 +214,24 @@ class LLMClient:
                 "stop_reason": turn.stop_reason,
             }
             trace.append(turn_record)
+
+            # A batch at the token limit may be partial, so none of it runs. The
+            # trace keeps what earlier turns did; "tool_calls" lists only calls
+            # handed to dispatch, since the worker reports those as actions.
+            if turn.stop_reason == "max_tokens" and turn.tool_calls:
+                turn_record["tool_calls_not_run"] = turn_record["tool_calls"]
+                turn_record["tool_calls"] = []
+                logger.warning(
+                    "Reply hit the token limit; tool calls not run: %s",
+                    [tc.name for tc in turn.tool_calls],
+                )
+                return {
+                    "success": False,
+                    "error": TOOL_CALLS_NOT_RUN_MESSAGE,
+                    "final_response": turn.text_response,
+                    "turns": turn_count,
+                    "trace": trace,
+                }
 
             # If no tool calls, we're done
             if turn.is_complete:

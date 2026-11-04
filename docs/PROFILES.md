@@ -280,6 +280,8 @@ Rules:
 - `credential_ref` is an environment variable name, never an inline API key
 - the public capabilities API only exposes enabled profile id/name/provider/model/default, never credentials or endpoints
 - `provider: "openai"` supports OpenAI-compatible endpoints via `endpoint`
+- `options.max_tokens` (a JSON integer) sets the completion token limit for chat and agent calls with this profile. It takes precedence over the `LLM_MAX_TOKENS` environment variable, which takes precedence over the default of 16000. An invalid or non-positive value falls back to the default with a warning. Lower it for a model that rejects the default as too large. The Claude provider caps the limit to what the installed Anthropic SDK allows without streaming, with a warning
+- `options.enable_thinking: false` sends `chat_template_kwargs: {"enable_thinking": false}` on requests to an OpenAI-compatible model that would otherwise spend its token limit on reasoning. It takes precedence over the `LLM_ENABLE_THINKING` environment variable, so `true` here keeps thinking on for this profile. The Claude provider never sends it
 
 #### Skills configuration
 

@@ -48,6 +48,15 @@ def test_model_profile_rejects_inline_secret_like_credential_ref():
         )
 
 
+def test_string_max_tokens_option_is_not_rejected_as_a_secret_but_auth_token_is():
+    fields = {"id": "p", "name": "P", "provider": "openai", "model": "m"}
+
+    assert ModelProfile(**fields, options={"max_tokens": "abc"})
+    with pytest.raises(ValidationError) as rejected:
+        ModelProfile(**fields, options={"auth_token": "abc"})
+    assert rejected.value.errors()[0]["loc"] == ("options",)
+
+
 def test_resolve_profile_reference_inherits_default_and_rejects_disabled():
     profiles = [
         ModelProfile(
