@@ -3458,6 +3458,10 @@ class GraphStorage:
         a real generation from before the crash, and comparing it against an
         in-memory counter that forgot everything on restart would make every
         such job look superseded even when no later import ever happened.
+
+        Compared for equality only. A replace moves it by one, except on a
+        store whose backend implements ``reserve_generation``, where the value
+        is the store's.
         """
         with self._lock:
             return self._generation
@@ -3583,6 +3587,17 @@ class GraphStorage:
                 for entity in [*nodes, *edges]:
                     entity.revision = 0
 
+            # A store others replace too hands out the value, so two replaces
+            # from one generation never read as the same graph.
+            reserve_generation = getattr(
+                self._persistence_backend, "reserve_generation", None
+            )
+            next_generation = (
+                self._io_executor.submit(reserve_generation).result()
+                if callable(reserve_generation)
+                else previous_generation + 1
+            )
+
             new_nodes = {node.id: node for node in nodes}
             new_edges = {edge.id: edge for edge in edges}
 
@@ -3603,7 +3618,7 @@ class GraphStorage:
             # stamped with it is wrongly treated as superseded.
             new_metadata = {
                 **previous_metadata,
-                "graph_generation": previous_generation + 1,
+                "graph_generation": next_generation,
             }
 
             # From here on every assignment is a single atomic pointer swap —
@@ -3618,7 +3633,7 @@ class GraphStorage:
             # IMPORT) regenerates them against the new content; nothing here
             # regenerates them synchronously.
             self.vector_store.load_vectors({})
-            self._generation += 1
+            self._generation = next_generation
 
             try:
                 self.save().result()
@@ -3708,7 +3723,8 @@ class GraphStorage:
         batch, so that node is dropped and the rest re-issued.
 
         Returns how many vectors landed; a node left out still has no vector,
-        for the caller's next pass. None means a replace superseded
+        here or in the store, for the caller's next pass, also when this
+        raises because the commit failed. None means a replace superseded
         ``generation``, here or in a store others write to.
         """
         with self._lock:
@@ -3734,11 +3750,20 @@ class GraphStorage:
                         conditions={"expected_generation": generation},
                     )
                     return len(pending)
-                except GraphGenerationMoved:
-                    return None
-                except EntityRevisionConflict as conflict:
+                except GraphWriteOutcomeUnknown:
+                    raise
+                except Exception as exc:
+                    # With a model loaded _undo regenerates a vector for each
+                    # restored node, in memory only and from the text it holds
+                    # now, which would pass the node off as embedded.
+                    self.vector_store.remove_nodes_embeddings(list(pending))
+                    if isinstance(exc, GraphGenerationMoved):
+                        return None
                     # _commit has undone memory, so the nodes are read again.
-                    if pending.pop(conflict.entity_id, None) is None:
+                    if (
+                        not isinstance(exc, EntityRevisionConflict)
+                        or pending.pop(exc.entity_id, None) is None
+                    ):
                         raise
             return 0
 

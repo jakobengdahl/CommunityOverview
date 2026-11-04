@@ -241,7 +241,9 @@ the decisions above:
   detached copies, so the text recorded is the text encoded, and commits
   through `GraphStorage.commit_merge_embeddings`: under the lock a vector is
   dropped if its node is gone, has a vector, or has other embedding text. A
-  node the store refuses is dropped and the batch re-issued. The worker then
+  node the store refuses is dropped and the batch re-issued. A commit that
+  fails leaves its nodes with no vector in memory either, where undoing it would
+  otherwise regenerate one the store lacks and hide the node. The worker then
   reads what is still without a vector again, for at most three passes; if
   nodes are still moving the job fails and retries with backoff, and the drain
   that failed it waits out the delay and claims it again, as nothing polls the
@@ -255,7 +257,11 @@ the decisions above:
   `graph_metadata`, which needs no row lock as a replace's save takes the save
   lock this batch holds in SHARE mode. A failure answers `import_plan_stale`.
   The embedding commit carries the generation too: after a replace an entity
-  reads revision 0 before and after, so its expectation alone would pass.
+  reads revision 0 before and after, so its expectation alone would pass. For
+  the comparison to mean anything, a replace on PostgreSQL takes its generation
+  from the store's revision counter instead of adding one to its own: two
+  instances replacing from one generation would otherwise store one value, and
+  the one whose content lost would pass the check against the other's graph.
 - **Absences stay ordinary concurrent writes.** A row a read found absent
   cannot be held, so one inserted after the check lands beside the merge, and
   a duplicate triple another instance adds is not seen, as §4 allows. Incident

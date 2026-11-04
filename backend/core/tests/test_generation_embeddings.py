@@ -3,6 +3,7 @@
 # covers: backend/core/storage.py
 
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,7 +14,11 @@ from backend.core import (
     GraphStorage,
     Node,
 )
-from backend.core.storage_backends import GraphGenerationMoved
+from backend.core.storage_backends import (
+    GraphGenerationMoved,
+    GraphWriteFailed,
+    WriteRefusedByStore,
+)
 from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
 
 
@@ -265,3 +270,55 @@ def test_a_replace_only_the_store_has_seen_supersedes_a_merge_embedding_commit(s
     assert committed is None
     assert not storage.vector_store.has_embedding("a")
     assert not backend._store["nodes"]["a"].get("embedding")
+
+
+def test_two_replaces_from_one_generation_store_different_generations(storage):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires a store that assigns revisions")
+    reserved = iter([70, 80])
+    storage._persistence_backend.reserve_generation = lambda: next(reserved)
+    backend = storage._persistence_backend
+
+    storage.replace_all_nodes_and_edges([], [])
+    assert storage.generation == 70
+    assert backend._store["metadata"]["graph_generation"] == 70
+    storage._generation = 1
+    storage.replace_all_nodes_and_edges([], [])
+    assert storage.generation == 80
+    assert backend._store["metadata"]["graph_generation"] == 80
+
+
+@pytest.mark.parametrize("failure", ["refused", "conflict"])
+def test_a_failed_merge_vector_commit_leaves_no_regenerated_vector(
+    storage, monkeypatch, failure
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    undo_vector = [9.0, 9.0]
+    monkeypatch.setattr(
+        storage.vector_store,
+        "update_nodes_embeddings",
+        lambda nodes: storage.vector_store.absorb_embeddings(
+            {node.id: undo_vector for node in nodes}
+        ),
+    )
+    texts = _texts(storage)
+    vectors = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
+
+    if failure == "refused":
+        monkeypatch.setattr(
+            backend,
+            "apply_batch",
+            Mock(side_effect=WriteRefusedByStore("refused")),
+        )
+        with pytest.raises(GraphWriteFailed):
+            storage.commit_merge_embeddings(storage.generation, vectors, texts)
+        assert {node.id for node in storage.nodes_without_embedding()} == {"a", "b"}
+        return
+
+    backend._store["nodes"]["b"].update(name="Remote edit", revision=100)
+    assert storage.commit_merge_embeddings(storage.generation, vectors, texts) == 1
+    assert [node.id for node in storage.nodes_without_embedding()] == ["b"]
+    assert storage.vector_store.get_vector_list("a") == [1.0, 0.0]
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]

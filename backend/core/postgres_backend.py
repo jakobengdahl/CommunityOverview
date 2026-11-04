@@ -1657,6 +1657,48 @@ class PostgresGraphPersistenceBackend:
                 self._announce(conn, operations)
                 return revisions
 
+    def _stored_generation(self, conn) -> int:
+        row = conn.execute(
+            sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(
+                self._table("graph_metadata")
+            )
+        ).fetchone()
+        try:
+            return int(row[0]) if row and row[0] is not None else 0
+        except ValueError:
+            # As GraphStorage.load() reads it.
+            return 0
+
+    def reserve_generation(self) -> int:
+        """A `graph_generation` for one replace, shared with no other replace.
+
+        Two instances replacing from one generation must not store one value:
+        the one whose content lost would pass a batch's `expected_generation`
+        against the other's graph. From the revision counter, as nextval hands
+        a value out once, raised past the stored generation first because a
+        store can hold a generation above its counter. Read-then-set is safe
+        under the save lock held exclusively, as in `save_graph_data`.
+        """
+        self._ensure_schema()
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                self._bind_scope(conn)
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
+                conn.execute(
+                    sql.SQL(
+                        "SELECT setval(%s::regclass, GREATEST("
+                        "(SELECT last_value FROM {}), %s))"
+                    ).format(self._table(REVISION_SEQUENCE)),
+                    (self._sequence_regclass(), self._stored_generation(conn)),
+                )
+                row = conn.execute(
+                    "SELECT nextval(%s::regclass)", (self._sequence_regclass(),)
+                ).fetchone()
+                return int(row[0])
+
     def _verify_batch_conditions(
         self, conn, operations: Sequence[EntityOperation]
     ) -> None:
@@ -1670,16 +1712,7 @@ class PostgresGraphPersistenceBackend:
         """
         for operation in operations:
             if operation.expected_generation is not None:
-                row = conn.execute(
-                    sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(
-                        self._table("graph_metadata")
-                    )
-                ).fetchone()
-                try:
-                    stored = int(row[0]) if row and row[0] is not None else 0
-                except ValueError:
-                    # As GraphStorage.load() reads it.
-                    stored = 0
+                stored = self._stored_generation(conn)
                 if stored != operation.expected_generation:
                     raise GraphGenerationMoved(operation.expected_generation, stored)
             for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):

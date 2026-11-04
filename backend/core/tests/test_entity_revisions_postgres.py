@@ -1,3 +1,5 @@
+# covers: backend/core/postgres_backend.py
+
 """Entity revisions in a shared store (docs/SESSION_OVERLAY_CONTRACT.md §4.4).
 
 PostgreSQL assigns every revision from one sequence, checks each expectation
@@ -238,6 +240,22 @@ def test_a_merge_decided_before_a_replace_elsewhere_is_refused(instances, schema
         importing.apply_import_merge(lambda: MergeWrites(node_creates=[_node("new")]))
 
     assert _stored(schema, "graph_nodes", "new") is None
+
+
+def test_a_merge_on_the_losing_side_of_two_replaces_is_refused(instances, schema):
+    first = instances(deaf=True)
+    first.add_nodes([_node("kept")], [])
+    second = instances(deaf=True)
+    second.load()
+    first.replace_all_nodes_and_edges([_node("kept", "first")], [])
+    second.replace_all_nodes_and_edges([_node("kept", "second")], [])
+
+    with pytest.raises(GraphGenerationMoved):
+        first.apply_import_merge(lambda: MergeWrites(node_creates=[_node("new")]))
+
+    assert _stored(schema, "graph_nodes", "new") is None
+    second.apply_import_merge(lambda: MergeWrites(node_creates=[_node("new")]))
+    assert _stored(schema, "graph_nodes", "new") is not None
 
 
 def test_a_merge_takes_a_subtype_change_with_a_new_incident_edge(instances, schema):

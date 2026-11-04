@@ -1,5 +1,7 @@
 """PostgreSQL revision orchestration that needs no running server."""
 
+# covers: backend/core/postgres_backend.py
+
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -11,6 +13,7 @@ from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core.postgres_backend import (  # noqa: E402
     EVIDENCE_CONNECT_TIMEOUT_SECONDS,
+    SAVE_LOCK_KEY,
     PostgresGraphPersistenceBackend,
 )
 from backend.core.storage_backends import (  # noqa: E402
@@ -257,3 +260,24 @@ def test_a_never_replaced_store_is_at_generation_zero(backend):
     backend._verify_batch_conditions(
         _reading([None]), _conditions(expected_generation=0)
     )
+
+
+def test_a_reserved_generation_is_drawn_above_the_stored_one_under_the_save_lock(
+    backend,
+):
+    backend._sequence_regclass = lambda: "seq"
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.side_effect = [("41",), (42,)]
+    backend._pool = MagicMock()
+    backend._pool.connection.return_value.__enter__.return_value = conn
+
+    assert backend.reserve_generation() == 42
+
+    params = [
+        call.args[1] for call in conn.execute.call_args_list if len(call.args) > 1
+    ]
+    assert params == [
+        (SAVE_LOCK_KEY, backend.schema),
+        ("seq", 41),
+        ("seq",),
+    ]
