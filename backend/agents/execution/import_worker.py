@@ -19,9 +19,11 @@ job any caller of ``claim_next`` on this seam will ever see today.
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from .models import ExecutionKind
+from .models import ExecutionKind, ExecutionState, utcnow
 from .store import ExecutionStore
 
 if TYPE_CHECKING:
@@ -76,17 +78,9 @@ def _embed_merged_nodes(
     vectors landed, or None when a later replace superseded the job. Nodes
     still moving after the last pass raise, so the job retries with backoff.
     """
-
-    def without_vector():
-        return [
-            node.model_copy()
-            for node in list(storage.nodes.values())
-            if not storage.vector_store.has_embedding(node.id)
-        ]
-
     embedded = 0
     for _ in range(MERGE_EMBEDDING_PASSES):
-        nodes = without_vector()
+        nodes = storage.nodes_without_embedding()
         if not nodes:
             return embedded
         committed = storage.commit_merge_embeddings(
@@ -97,14 +91,15 @@ def _embed_merged_nodes(
         if committed is None:
             return None
         embedded += committed
-    if without_vector():
+    if storage.nodes_without_embedding():
         raise RuntimeError("nodes kept changing while they were embedded")
     return embedded
 
 
 def _run_one_import_job(
     store: ExecutionStore, storage: "GraphStorage", job: "ExecutionJob"
-) -> None:
+) -> Optional[datetime]:
+    """Run one job. Returns when a merge job this attempt rescheduled is due."""
     # The generation the graph was at right after THIS job's import replaced
     # it (see backend/service/import_service.py). A job enqueued before this
     # field existed carries None, which always commits — nothing to compare
@@ -116,19 +111,19 @@ def _run_one_import_job(
     job_generation = job.payload.get("graph_generation")
     if job_generation is not None and storage.generation != job_generation:
         _mark_superseded(store, job)
-        return
+        return None
 
     try:
         if job.payload.get("mode") == "merge":
             embedded = _embed_merged_nodes(storage, job_generation)
             if embedded is None:
                 _mark_superseded(store, job)
-                return
+                return None
             store.complete(
                 job.id,
                 result={"embeddings_status": "succeeded", "embedded_count": embedded},
             )
-            return
+            return None
         nodes = [
             node
             for node in storage.nodes.values()
@@ -144,7 +139,7 @@ def _run_one_import_job(
         vectors = storage.vector_store.compute_node_embeddings(nodes) if nodes else {}
         if not storage.commit_generation_embeddings(job_generation, vectors):
             _mark_superseded(store, job)
-            return
+            return None
         store.complete(
             job.id,
             result={
@@ -185,7 +180,13 @@ def _run_one_import_job(
         # scripts/generate_embeddings.py by hand. The graph replace itself is
         # NOT rolled back: it already committed and is valid data.
         logger.warning("Import job %s: embedding generation failed: %s", job.id, exc)
-        store.fail(job.id, error=str(exc))
+        failed = store.fail(job.id, error=str(exc))
+        if (
+            job.payload.get("mode") == "merge"
+            and failed.state == ExecutionState.PENDING
+        ):
+            return failed.run_at
+    return None
 
 
 def drain_import_jobs(
@@ -200,13 +201,22 @@ def drain_import_jobs(
 
     Safe to call concurrently and repeatedly: ``claim_next`` is atomic, so two
     callers draining the same store split the work rather than double-process
-    a job. Returns the number of jobs processed.
+    a job. Returns the number of attempts made.
+
+    A merge job this drain rescheduled is waited out and claimed again, as
+    nothing polls the queue: otherwise its retry would wait for a later import
+    or a restart, and its nodes would stay without a vector until then.
     """
     processed = 0
+    retry_at: Optional[datetime] = None
     while True:
         job = store.claim_next(worker_id, lease_seconds=lease_seconds)
         if job is None:
-            return processed
+            if retry_at is None:
+                return processed
+            time.sleep(max((retry_at - utcnow()).total_seconds(), 0.0))
+            retry_at = None
+            continue
         if job.kind != ExecutionKind.IMPORT:
             # Defensive only: nothing else in this codebase enqueues a
             # PENDING job today (see module docstring). Refuse to process
@@ -220,7 +230,9 @@ def drain_import_jobs(
             )
             store.fail(job.id, error="claimed by the import embeddings worker")
             continue
-        _run_one_import_job(store, storage, job)
+        due = _run_one_import_job(store, storage, job)
+        if due is not None:
+            retry_at = due if retry_at is None else max(retry_at, due)
         processed += 1
 
 

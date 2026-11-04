@@ -3681,6 +3681,17 @@ class GraphStorage:
                     self.save().result()
             return True
 
+    def nodes_without_embedding(self) -> List[Node]:
+        """Copies of the nodes with no vector. Under the lock, as a reload
+        empties ``nodes`` in place before refilling it, and a read in that gap
+        would report nothing left to embed."""
+        with self._lock:
+            return [
+                node.model_copy()
+                for node in self.nodes.values()
+                if not self.vector_store.has_embedding(node.id)
+            ]
+
     def commit_merge_embeddings(
         self,
         generation: Optional[int],

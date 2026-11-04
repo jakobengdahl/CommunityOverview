@@ -243,8 +243,9 @@ the decisions above:
   dropped if its node is gone, has a vector, or has other embedding text. A
   node the store refuses is dropped and the batch re-issued. The worker then
   reads what is still without a vector again, for at most three passes; if
-  nodes are still moving the job fails and retries with backoff. A replace's
-  job is unchanged.
+  nodes are still moving the job fails and retries with backoff, and the drain
+  that failed it waits out the delay and claims it again, as nothing polls the
+  queue. A replace's job is unchanged.
 - **§3's checks reach the store as batch conditions.** Slice 2's comparison
   under `_lock` proves nothing about another instance's writes. The locked
   plan's recorded reads go with the batch as `read_revisions`, less those an
