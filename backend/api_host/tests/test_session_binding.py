@@ -1,3 +1,4 @@
+# covers: backend/api_host/session_binding.py
 """Acting in a session over HTTP and MCP (docs/SESSION_OVERLAY_CONTRACT.md
 §16.1): the header is bound for every request, never ignored, and a staged
 session's writes never reach the graph.
@@ -1225,3 +1226,36 @@ def test_a_typed_interface_path_takes_the_header_only_on_get():
     response = typed.post("/api/actors", headers={SESSION_ID_HEADER: UNKNOWN})
     assert response.status_code == 400
     assert response.json()["detail"]["error"] == "session_not_supported"
+
+
+def test_streaming_chat_writes_stay_in_the_requested_staged_session(
+    client, mock_llm_provider
+):
+    """Streaming chat honors the same session binding as other graph writes."""
+    sid = _staged(client)
+    client.app.state.chat_service._processor.default_api_key = "test-key"
+    mock_llm_provider.mock_tool_calls = [
+        {
+            "name": "add_nodes",
+            "input": {
+                "nodes": [{"id": "streamed", "type": "Actor", "name": "streamed"}],
+                "edges": [],
+            },
+        }
+    ]
+    response = client.post(
+        "/ui/chat/stream",
+        headers={SESSION_ID_HEADER: sid},
+        json={"messages": [{"role": "user", "content": "add"}]},
+    )
+    assert response.status_code == 200
+    steps = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps[-1]["kind"] == "chat_finished"
+    assert _node(client, "streamed") is None
+    staged_node = client.get("/api/nodes/streamed", headers={SESSION_ID_HEADER: sid})
+    assert staged_node.status_code == 200
+    assert staged_node.json()["node"]["id"] == "streamed"

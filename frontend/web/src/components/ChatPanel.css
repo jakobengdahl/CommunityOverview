@@ -886,3 +886,25 @@
     min-height: 44px;
   }
 }
+
+.chat-progress {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+
+.chat-progress [aria-current='step'] {
+  font-weight: 600;
+}
+
+.chat-reasoning summary {
+  cursor: pointer;
+}
+
+.chat-reasoning div {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 18rem;
+  overflow-y: auto;
+}

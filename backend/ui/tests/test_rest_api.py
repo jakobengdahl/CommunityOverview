@@ -1,3 +1,4 @@
+# covers: backend/ui/rest_api.py, backend/ui/chat_logic.py
 """
 Tests for UI Backend REST API.
 
@@ -8,6 +9,7 @@ Verifies that:
 """
 
 import io
+import pytest
 
 
 class TestChatEndpoint:
@@ -443,3 +445,263 @@ class TestVisualizationContextEndpoint:
         assert response.status_code == 200
         assert mock_llm.received_system_prompts, "LLM was never called"
         assert "CURRENT VISUALIZATION STATE" not in mock_llm.received_system_prompts[0]
+
+
+def test_stream_reports_rounds_and_tools_without_intermediate_content(
+    fastapi_test_client,
+):
+    """Progress exposes only step metadata, followed by the ordinary response."""
+    import json
+
+    client, llm, _ = fastapi_test_client
+    llm.mock_tool_calls = [{"name": "search_graph", "input": {"query": "example"}}]
+    response = client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": "search"}]}
+    )
+    steps = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps[:-1] == [
+        {"kind": "llm_started", "round": 1},
+        {"kind": "tool_started", "tool": "search_graph"},
+        {"kind": "tool_finished", "tool": "search_graph"},
+        {"kind": "llm_started", "round": 2},
+    ]
+    assert steps[-1]["kind"] == "chat_finished"
+    assert steps[-1]["response"]["content"] == llm.mock_text_response
+    assert steps[-1]["response"]["toolUsed"] == "search_graph"
+
+
+def test_stream_encodes_tool_results_like_non_streaming_chat():
+    """Nested datetime and UUID tool values retain the ordinary JSON encoding."""
+    import json
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.ui.rest_api import create_ui_router
+
+    result = {
+        "content": "Found the record.",
+        "toolUsed": "search_graph",
+        "toolResult": {
+            "records": [
+                {
+                    "created": datetime(2026, 11, 4, 12, 30, tzinfo=timezone.utc),
+                    "id": UUID("12345678-1234-5678-1234-567812345678"),
+                }
+            ]
+        },
+    }
+    app = FastAPI()
+    app.include_router(
+        create_ui_router(SimpleNamespace(process_message=lambda **kwargs: result))
+    )
+    with TestClient(app) as client:
+        payload = {"messages": [{"role": "user", "content": "search"}]}
+        ordinary = client.post("/chat", json=payload)
+        streamed = client.post("/chat/stream", json=payload)
+
+    assert ordinary.status_code == streamed.status_code == 200
+    steps = [
+        json.loads(line[6:])
+        for line in streamed.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps == [{"kind": "chat_finished", "response": ordinary.json()}]
+    assert steps[0]["response"]["toolResult"]["records"] == [
+        {
+            "created": "2026-11-04T12:30:00Z",
+            "id": "12345678-1234-5678-1234-567812345678",
+        }
+    ]
+
+
+@pytest.mark.parametrize("after_progress", [False, True])
+@pytest.mark.parametrize("failure", ["runtime", "http"])
+def test_stream_error_preserves_non_streaming_status_and_payload(
+    after_progress, failure
+):
+    """Failures before or after progress retain the ordinary endpoint's error."""
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from backend.ui.chat_logic import _report_step
+    from backend.ui.rest_api import create_ui_router
+
+    def process_message(**kwargs):
+        if after_progress:
+            _report_step("llm_started", round=1)
+            _report_step("tool_started", tool="search_graph")
+        if failure == "http":
+            raise HTTPException(status_code=403, detail="private tool detail")
+        raise RuntimeError("private provider detail")
+
+    app = FastAPI()
+    app.include_router(
+        create_ui_router(SimpleNamespace(process_message=process_message))
+    )
+    with TestClient(app) as client:
+        payload = {"messages": [{"role": "user", "content": "search"}]}
+        ordinary = client.post("/chat", json=payload)
+        streamed = client.post("/chat/stream", json=payload)
+    steps = [
+        json.loads(line[6:])
+        for line in streamed.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert ordinary.status_code == 500
+    assert ordinary.json() == {"detail": "Internal server error"}
+    assert steps[-1] == {
+        "kind": "error",
+        "status": ordinary.status_code,
+        "response": ordinary.json(),
+    }
+    assert steps[:-1] == (
+        [
+            {"kind": "llm_started", "round": 1},
+            {"kind": "tool_started", "tool": "search_graph"},
+        ]
+        if after_progress
+        else []
+    )
+    assert "private" not in streamed.text
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_loop_live_and_worker_finishes_after_disconnect(monkeypatch):
+    """Idle streams send heartbeats and disconnects leave the worker running."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+    from backend.ui.rest_api import ChatRequest, create_ui_router
+
+    release = threading.Event()
+    finished = threading.Event()
+
+    def process_message(**kwargs):
+        try:
+            assert release.wait(3)
+            return {"content": "answer"}
+        finally:
+            finished.set()
+
+    monkeypatch.setattr("backend.ui.rest_api.CHAT_KEEPALIVE_SECONDS", 0.01)
+    router = create_ui_router(SimpleNamespace(process_message=process_message))
+    endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/chat/stream"
+    )
+    response = await endpoint(
+        ChatRequest(messages=[]), Request({"type": "http", "headers": []})
+    )
+    iterator = response.body_iterator
+    try:
+        await anext(iterator)
+        await asyncio.wait_for(anext(iterator), 1)
+        assert not finished.is_set()
+        await iterator.aclose()
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_streams_only_receive_their_own_steps():
+    """Concurrent chats on one service isolate progress callbacks."""
+    import asyncio
+    import json
+    import threading
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+    from backend.ui.chat_logic import _report_step
+    from backend.ui.rest_api import ChatRequest, create_ui_router
+
+    barrier = threading.Barrier(2, timeout=3)
+
+    def process_message(messages, **kwargs):
+        barrier.wait()
+        _report_step("tool_started", tool=messages[0]["content"])
+        return {"content": "answer"}
+
+    router = create_ui_router(SimpleNamespace(process_message=process_message))
+    endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/chat/stream"
+    )
+
+    async def collect(name):
+        response = await endpoint(
+            ChatRequest(messages=[{"role": "user", "content": name}]),
+            Request({"type": "http", "headers": []}),
+        )
+        return [
+            json.loads(frame[6:])
+            async for frame in response.body_iterator
+            if frame.startswith("data: ")
+        ]
+
+    first, second = await asyncio.wait_for(
+        asyncio.gather(collect("a"), collect("b")), 4
+    )
+    assert first[0] == {"kind": "tool_started", "tool": "a"}
+    assert second[0] == {"kind": "tool_started", "tool": "b"}
+    assert [len(first), len(second)] == [2, 2]
+
+
+@pytest.mark.parametrize("reasoning", [None, "", "x" * 12001])
+def test_reasoning_is_capped_request_local_display_metadata(reasoning):
+    """Only separate reasoning reaches progress; response and prompts stay intact."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from backend.ui.chat_logic import (
+        MAX_REASONING_CHARS_PER_ROUND,
+        _chat_completion,
+        report_chat_progress,
+    )
+
+    response = SimpleNamespace(
+        content=[{"type": "text", "text": "<think>ordinary answer</think>"}],
+        raw_response=SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(reasoning_content=reasoning))
+            ]
+        ),
+    )
+    provider = Mock()
+    provider.create_completion.return_value = response
+    messages = [{"role": "user", "content": "question"}]
+    events = []
+    with report_chat_progress(events.append):
+        assert _chat_completion(provider, messages=messages) is response
+        assert _chat_completion(provider, messages=messages) is response
+    assert [event for event in events if event["kind"] == "reasoning"] == (
+        [
+            {
+                "kind": "reasoning",
+                "round": n,
+                "text": reasoning[:MAX_REASONING_CHARS_PER_ROUND],
+            }
+            for n in (1, 2)
+        ]
+        if reasoning
+        else []
+    )
+    before = list(events)
+    assert _chat_completion(provider, messages=messages) is response
+    assert events == before
+    assert all(
+        call.kwargs == {"messages": messages}
+        for call in provider.create_completion.call_args_list
+    )
+    assert messages == [{"role": "user", "content": "question"}]

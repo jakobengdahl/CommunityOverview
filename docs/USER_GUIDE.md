@@ -662,6 +662,14 @@ Type any question in natural language. The assistant has full access to the grap
 > *"Show me the production solutions for economic statistics."*
 > *"What is the data structure for the employment dataset?"*
 
+While a request runs, an animation and progress list show each LLM round and
+each tool starting and finishing, including its name. The final answer appears
+when the chat finishes. If the provider supplies separate reasoning, a collapsed
+**Reasoning** dropdown appears for that round; click it to read the text. Each
+round is limited to 12,000 characters. Reasoning stays in memory for the open
+chat and is never included in later prompts or saved to graph/session history.
+Models without separate reasoning show only the usual progress and answer.
+
 The assistant responds in whatever language you write in — switch mid-conversation freely.
 
 Responses support **Markdown**: bold text, bullet lists, tables, and inline code are

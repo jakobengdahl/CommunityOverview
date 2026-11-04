@@ -14,17 +14,22 @@ authorized as the caller rather than as an anonymous request.
 """
 
 import logging
+import asyncio
+import json
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from starlette.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from backend.runtime.authorization import use_request_authorization
 
-from .chat_logic import run_chat_off_event_loop
+from .chat_logic import run_chat_off_event_loop, report_chat_progress
 from .chat_service import ChatService
 from .document_service import DocumentService
 
 logger = logging.getLogger(__name__)
+
+CHAT_KEEPALIVE_SECONDS = 15
 
 # ==================== Request/Response Models ====================
 
@@ -219,6 +224,76 @@ def create_ui_router(
         except Exception:
             logger.exception("Error in /chat endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
+
+    # Retain disconnected workers until completion, matching non-streaming chats.
+    running_chats = set()
+
+    @router.post("/chat/stream")
+    async def chat_stream(request: ChatRequest, http_request: Request):
+        async def events():
+            queue = asyncio.Queue()
+            connected = True
+
+            def emit(step):
+                if connected:
+                    queue.put_nowait(step)
+
+            async def produce():
+                try:
+                    with report_chat_progress(emit):
+                        result = await chat(request, http_request)
+                    emit(
+                        {
+                            "kind": "chat_finished",
+                            "response": result.model_dump(mode="json"),
+                        }
+                    )
+                except HTTPException as exc:
+                    # HTTP headers are already sent so carry the ordinary
+                    # endpoint's status and body in the terminal stream event.
+                    emit(
+                        {
+                            "kind": "error",
+                            "status": exc.status_code,
+                            "response": {"detail": exc.detail},
+                        }
+                    )
+                except Exception:
+                    logger.exception("Error encoding /chat/stream response")
+                    emit(
+                        {
+                            "kind": "error",
+                            "status": 500,
+                            "response": {"detail": "Internal server error"},
+                        }
+                    )
+                finally:
+                    emit(None)
+
+            task = asyncio.create_task(produce())
+            running_chats.add(task)
+            task.add_done_callback(running_chats.discard)
+            try:
+                yield ": connected\n\n"
+                while True:
+                    try:
+                        step = await asyncio.wait_for(
+                            queue.get(), timeout=CHAT_KEEPALIVE_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+                        continue
+                    if step is None:
+                        break
+                    yield f"data: {json.dumps(step)}\n\n"
+            finally:
+                connected = False
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.post("/chat/simple", response_model=ChatResponse)
     async def chat_simple(

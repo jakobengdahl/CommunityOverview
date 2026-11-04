@@ -1134,7 +1134,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side; a session materialised this way (or by joining its stream) is always `direct`, whatever `SESSION_WRITE_MODE_DEFAULT` says. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8. With `write_mode`: switch an existing session `direct` → `staged` (asks the hook as `set_session_write_mode`; fans out as a `write_mode_changed` op); `staged` → `direct` is `409 write_mode_irreversible` |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast, which carries the session's `write_mode`, as does the answer `{deleted, id, write_mode}`). A staged session holding staged changes is `409 layer_not_empty` unless `?discard_staged=true`; deleting a staged session retires its id for good (asks the hook under the session lock as `delete_visualization_session`, with `graph_operation=discard` when discarding) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (the MCP annotation edit-lease guard), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (exclusive annotation edit leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 | GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
@@ -1542,7 +1542,7 @@ returned `revision` into the next `expected_revision`.
   # nothing unless a canvas receives the push and adds them; check
   # visualization_delivery (delivered, status) on that result before assuming
   # the push reached anything:
-  added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
+  added = add_nodes_to_session(session_id=sid, node_ids=["example-node-a", "example-node-b"])
   # then arrange with apply_visualization_layout as above, threading
   # expected_revision=added["revision"], then:
   link = s["session"]["session_url"]   # server-owned canonical link, or null
@@ -1589,7 +1589,7 @@ instead of silently overriding it — a collaboration-courtesy refusal, not an
 authorization check; see docs/ANNOTATION_CONTRACT.md's "Operation timing and
 leases". Re-read current state before retrying, the same as
 `revision_conflict`; this tool never acquires a lease of its own
-(`task-mcp-annotation-human-edit-guard`).
+(the MCP annotation edit-lease guard).
 
 `create_sticky_note` doubles as an upsert: passing an `annotation_id` that
 already exists replaces that note (idempotent for a retried call with the
@@ -1676,7 +1676,7 @@ files to ship; omitted/absent means the app's own default font), and
 `bottom-right`). Each falls back independently to how the canvas already
 rendered before these existed, so omitting any of them changes nothing for an
 existing annotation. `shape` also reads `style.fill`/`style.border`
-(task-annotation-merge-frame-into-shape-rectangle): each independently a CSS
+(the frame-to-shape consolidation): each independently a CSS
 colour string or the literal `"transparent"`, e.g. `{"style": {"fill":
 "transparent", "border": "#94a3b8"}}` for a transparent-bodied box with a
 coloured outline — what the retired `frame` type used to be, before it was
@@ -1686,7 +1686,7 @@ written for annotations already stored with type `frame` (see
 docs/ANNOTATION_CONTRACT.md's "Unrecognised annotation data").
 `text`/`label`/`icon` accept a
 `content.attachment = {target_id, target_type, anchor, offset}` binding them
-to a node (`vote_dot` used to be in this list; task-annotation-vote-dot-simplify
+to a node (`vote_dot` used to be in this list; the vote-dot simplification
 retired its attachment behaviour — it is now a plain coloured dot that always
 lives on its own), and a `line`'s `content.start`/`content.end` may each carry a
 `point` (`{x, y}`) and/or an `attachment`
@@ -1879,6 +1879,7 @@ own.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
+| POST | `/ui/chat/stream` | POST SSE: LLM rounds, optional capped reasoning, tool start/finish, final chat response; 15-second keep-alive comments |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -1887,7 +1888,15 @@ own.
 | GET | `/ui/supported-formats` | Get supported document formats |
 | GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
 
-`/ui/chat` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
+`/ui/chat/stream` accepts the same body as `/ui/chat`. SSE `data` frames contain
+`kind`: `llm_started` (with `round`), `tool_started` or `tool_finished` (with
+`tool`), and `chat_finished` (with `response`, the ordinary chat response).
+An endpoint failure emits `error` without exception details. Progress contains
+no model reasoning, tool arguments or tool results. Each request owns its queue;
+steps go only to the requesting connection, with the same authorization and
+session context as `/ui/chat`. Disconnecting does not cancel the running chat.
+
+`/ui/chat`, `/ui/chat/stream` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
 event loop keeps answering `/health` and other requests during a chat. Their tool
 calls and every other graph access hop back to the event loop thread, carrying
 the request's context, so graph access stays single-threaded.
@@ -2050,3 +2059,10 @@ Kill existing server or use a different port:
 ```bash
 uvicorn backend.api_host.server:get_app --factory --port 8001
 ```
+
+The chat stream emits `{kind: "reasoning", round, text}` after an LLM call only
+when its OpenAI-compatible response has separate `reasoning_content`. Text is
+capped by `MAX_REASONING_CHARS_PER_ROUND` (12,000 characters). It goes only to the
+requesting client, is not logged or persisted, and is never added to subsequent
+LLM messages. Answer text is not parsed for reasoning tags. The provider call
+remains non-streaming and `/ui/chat` retains its existing response contract.

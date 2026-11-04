@@ -68,6 +68,14 @@
     "privacy_notice": "**OBS:** Hantera inte personuppgifter i denna tjänst."
   },
   "chat": {
+    "reasoning_round": "Resonemang · omgång {round}",
+    "progress_label": "Chattförlopp",
+    "progress_llm_started": "LLM-omgång {round} startad",
+    "progress_tool_started": "Verktyg startat: {tool}",
+    "progress_tool_finished": "Verktyg klart: {tool}",
+    "progress_chat_finished": "Chatten klar",
+    "progress_error": "Chatten misslyckades",
+    "progress_interrupted": "Anslutningen till chatten avbröts",
     "placeholder": "Ställ en fråga eller begär en åtgärd...",
     "placeholder_with_file": "Beskriv vad du vill göra med dokumentet...",
     "send": "Skicka",

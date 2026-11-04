@@ -44,6 +44,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const isSheet = variant === 'sheet';
   const {
     chatMessages,
+    sessionEpoch,
     addChatMessage,
     updateChatMessage,
     nodes,
@@ -77,9 +78,14 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [progressSteps, setProgressSteps] = useState([]);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setProgressSteps([]);
+  }, [sessionEpoch]);
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -91,7 +97,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
   useEffect(() => {
     scrollToBottom();
-  }, [chatMessages]);
+  }, [chatMessages, progressSteps]);
 
   useEffect(() => {
     if (error) {
@@ -264,8 +270,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     setInputValue('');
     setUploadedFile(null);
     setIsProcessing(true);
+    setProgressSteps([]);
     setError(null);
     const requestEpoch = useGraphStore.getState().sessionEpoch;
+    const requestSteps = [];
 
     try {
       const conversationMessages = chatMessages
@@ -275,6 +283,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        onProgress: (step) => {
+          if (!isStaleSessionEpoch(requestEpoch)) {
+            requestSteps.push(step);
+            setProgressSteps([...requestSteps]);
+          }
+        },
         federationDepth,
         modelProfileId: selectedModelProfileId || undefined,
         expertAgentId:
@@ -295,6 +309,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
+        progressSteps: requestSteps,
         toolUsed: response.toolUsed,
         proposal: toolResult?.proposed_node
           ? {
@@ -318,6 +333,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        progressSteps: requestSteps,
         timestamp: new Date(),
       });
       setError(err.message);
@@ -379,7 +395,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const msg = t('chat.approve_node', { name: proposal.node.name });
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    setProgressSteps([]);
     const requestEpoch = useGraphStore.getState().sessionEpoch;
+    const requestSteps = [];
 
     try {
       const conversationMessages = chatMessages
@@ -388,6 +406,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        onProgress: (step) => {
+          if (!isStaleSessionEpoch(requestEpoch)) {
+            requestSteps.push(step);
+            setProgressSteps([...requestSteps]);
+          }
+        },
         federationDepth,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
@@ -408,6 +432,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
+        progressSteps: requestSteps,
         toolUsed: response.toolUsed,
       });
     } catch (err) {
@@ -415,6 +440,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        progressSteps: requestSteps,
         timestamp: new Date(),
       });
     } finally {
@@ -426,7 +452,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    setProgressSteps([]);
     const requestEpoch = useGraphStore.getState().sessionEpoch;
+    const requestSteps = [];
 
     try {
       const conversationMessages = chatMessages
@@ -435,6 +463,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        onProgress: (step) => {
+          if (!isStaleSessionEpoch(requestEpoch)) {
+            requestSteps.push(step);
+            setProgressSteps([...requestSteps]);
+          }
+        },
         federationDepth,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
@@ -444,6 +478,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: response.content,
+        progressSteps: requestSteps,
         timestamp: new Date(),
       });
     } catch (err) {
@@ -457,7 +492,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const msg = t('chat.confirm_delete');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
+    setProgressSteps([]);
     const requestEpoch = useGraphStore.getState().sessionEpoch;
+    const requestSteps = [];
 
     try {
       const conversationMessages = chatMessages
@@ -466,6 +503,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        onProgress: (step) => {
+          if (!isStaleSessionEpoch(requestEpoch)) {
+            requestSteps.push(step);
+            setProgressSteps([...requestSteps]);
+          }
+        },
         federationDepth,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
@@ -487,6 +530,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
+        progressSteps: requestSteps,
         toolUsed: response.toolUsed,
       });
     } catch (err) {
@@ -494,6 +538,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        progressSteps: requestSteps,
         timestamp: new Date(),
       });
     } finally {
@@ -526,7 +571,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     // kiosk, and keeping the answers aggregatable if the save is deferred.
     addChatMessage({ role: 'user', content: readable, llmContent, timestamp: new Date() });
     setIsProcessing(true);
+    setProgressSteps([]);
     const requestEpoch = useGraphStore.getState().sessionEpoch;
+    const requestSteps = [];
 
     try {
       const conversationMessages = chatMessages
@@ -535,6 +582,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       conversationMessages.push({ role: 'user', content: llmContent });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        onProgress: (step) => {
+          if (!isStaleSessionEpoch(requestEpoch)) {
+            requestSteps.push(step);
+            setProgressSteps([...requestSteps]);
+          }
+        },
         federationDepth,
         expertAgentId:
           activeExperts.length > 0 ? activeExperts[activeExperts.length - 1] : undefined,
@@ -549,6 +602,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         role: 'assistant',
         content: response.content,
         timestamp: new Date(),
+        progressSteps: requestSteps,
         toolUsed: response.toolUsed,
         form: formFromResponse(response),
       });
@@ -557,6 +611,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        progressSteps: requestSteps,
         timestamp: new Date(),
       });
       setError(err.message);
@@ -763,6 +818,39 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                     </div>
                     <span className="loading-text">{t('chat.processing')}</span>
                   </div>
+                )}
+
+                {(msg.progressSteps?.length > 0 ||
+                  (isProcessing &&
+                    idx === chatMessages.length - 1 &&
+                    progressSteps.length > 0)) && (
+                  <ol
+                    className="chat-progress"
+                    aria-live="polite"
+                    aria-label={t('chat.progress_label')}
+                  >
+                    {(msg.progressSteps || progressSteps).map((step, index) =>
+                      step.kind === 'reasoning' ? (
+                        <li key={index}>
+                          <details className="chat-reasoning">
+                            <summary>{t('chat.reasoning_round', { round: step.round })}</summary>
+                            <div>{step.text}</div>
+                          </details>
+                        </li>
+                      ) : (
+                        <li
+                          key={index}
+                          aria-current={
+                            isProcessing && !msg.progressSteps && index === progressSteps.length - 1
+                              ? 'step'
+                              : undefined
+                          }
+                        >
+                          {t(`chat.progress_${step.kind}`, { round: step.round, tool: step.tool })}
+                        </li>
+                      )
+                    )}
+                  </ol>
                 )}
 
                 {msg.proposal && (

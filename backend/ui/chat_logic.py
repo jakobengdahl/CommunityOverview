@@ -1,12 +1,13 @@
 from typing import Any, List, Dict, Callable, Optional
 import functools
+import contextvars
+from contextlib import contextmanager
 import os
 import json
 import logging
 import threading
-from anyio import from_thread
+from anyio import CapacityLimiter, from_thread, to_thread
 from dotenv import load_dotenv
-from starlette.concurrency import run_in_threadpool
 import inspect
 from backend.llm.llm_providers import (
     create_provider,
@@ -531,6 +532,50 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 """
 
 
+# Context is copied into the worker; shared processors never hold request progress.
+MAX_REASONING_CHARS_PER_ROUND = 12000
+
+_chat_progress = contextvars.ContextVar("chat_progress", default=None)
+
+
+@contextmanager
+def report_chat_progress(callback):
+    token = _chat_progress.set({"callback": callback, "round": 0})
+    try:
+        yield
+    finally:
+        _chat_progress.reset(token)
+
+
+def _report_step(kind, **fields):
+    progress = _chat_progress.get()
+    if progress is not None:
+        run_on_event_loop(progress["callback"], {"kind": kind, **fields})
+
+
+def _chat_completion(provider, **kwargs):
+    progress = _chat_progress.get()
+    if progress is not None:
+        progress["round"] += 1
+        _report_step("llm_started", round=progress["round"])
+    response = provider.create_completion(**kwargs)
+    if progress is not None:
+        raw = getattr(response, "raw_response", None)
+        choices = getattr(raw, "choices", None)
+        message = getattr(choices[0], "message", None) if choices else None
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            _report_step(
+                "reasoning",
+                round=progress["round"],
+                text=reasoning[:MAX_REASONING_CHARS_PER_ROUND],
+            )
+    return response
+
+
+# Match the default pool's 40-slot ceiling without consuming its slots during LLM waits.
+_CHAT_WORKER_LIMIT = 40
+_chat_limiter = CapacityLimiter(_CHAT_WORKER_LIMIT)
 _chat_worker = threading.local()
 
 
@@ -548,7 +593,7 @@ async def run_chat_off_event_loop(func: Callable, /, **kwargs) -> Any:
         finally:
             _chat_worker.active = False
 
-    return await run_in_threadpool(chat_on_worker)
+    return await to_thread.run_sync(chat_on_worker, limiter=_chat_limiter)
 
 
 def run_on_event_loop(func: Callable, /, *args, **kwargs) -> Any:
@@ -658,7 +703,8 @@ def _answer_after_empty_reply(
     """
     _log_empty_reply(response, stage)
     try:
-        retry = provider.create_completion(
+        retry = _chat_completion(
+            provider,
             messages=[
                 *messages,
                 {"role": "user", "content": _EMPTY_REPLY_RETRY_INSTRUCTION},
@@ -1479,7 +1525,8 @@ class ChatProcessor:
             )
 
             # First call to LLM
-            response = llm_provider.create_completion(
+            response = _chat_completion(
+                llm_provider,
                 messages=messages,
                 system_prompt=active_system_prompt,
                 tools=active_tool_definitions,
@@ -1661,6 +1708,8 @@ class ChatProcessor:
                 )
                 continue
 
+            _report_step("tool_started", tool=tool_name)
+
             # Execute the tool
             tool_result = None
 
@@ -1716,6 +1765,8 @@ class ChatProcessor:
                     tool_result = {"error": str(e)}
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
+
+            _report_step("tool_finished", tool=tool_name)
 
             # Accumulate nodes and edges from tools that return them
             if tool_result and isinstance(tool_result, dict):
@@ -1789,7 +1840,8 @@ class ChatProcessor:
             }
         )
 
-        final_response = provider.create_completion(
+        final_response = _chat_completion(
+            provider,
             messages=messages,
             system_prompt=active_system_prompt,
             tools=active_tool_definitions,
