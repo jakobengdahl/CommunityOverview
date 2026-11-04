@@ -1163,7 +1163,7 @@ any more — `computeOps` always emits a field-diffed patch with `base_version`
 set — so this fallback is now purely a compatibility path, not the default.
 
 **Update — this was not actually true for a real browser until
-the browser-pipeline version-drop fix (fixed after
+the browser-pipeline version-drop fix (after
 the field-patch and conflict decision was accepted).** `computeOps`
 itself always did the right thing — `diffAnnotationFields` correctly excludes
 `version`/`field_versions` from the outgoing content diff and reads
@@ -2528,7 +2528,7 @@ collaborator or agent had just set.
 ## Keyboard, touch and screen-reader controls audit (v1 accessibility baseline)
 
 Audit for the v1 accessibility and touch decision (accepted 2026-08-30),
-run against `main` as of this PR.
+run against `main` at the time of the audit.
 It maps what the six mechanism areas the decision names actually do today,
 per annotation kind, so the shared accessible-controls change (the
 follow-up implementation task) starts from a verified baseline instead of a
@@ -2579,7 +2579,7 @@ says which kind it is:
     gap, not this feature.)
   - Both files pass today (`npm run test:canvas` — 1025 tests including
     these), and the full `npm run test:unit` (all four workspaces, 1973
-    tests) and `npm run lint` are green with the additions in this PR.
+    tests) and `npm run lint` were green with the accessible-control test additions.
   - What Test rows prove: real DOM/accname behaviour under jsdom. What they do
     **not** prove: how a real screen reader (NVDA/JAWS/VoiceOver/TalkBack)
     actually announces any of this, or real touch-hardware behaviour (palm
@@ -2885,9 +2885,9 @@ A work item, tracked outside this repository, may be marked done only when
 every acceptance matrix row (or cell) it claims to close is ✅, verified by a
 passing test (or, for the device column, a recorded physical-device pass) —
 not merely by a merged PR that touches the relevant files. A PR that only
-closes some cells of a row must record exactly which cells moved and which
-remain, and the item's parent must stay in progress until its own full row
-set is ✅.
+closes some cells of a row must record in the planning graph exactly which
+cells moved and which remain, and the item's parent must stay in progress
+until its own full row set is ✅.
 
 ## V1 non-goals
 
