@@ -465,6 +465,8 @@ class AttachmentReadTools:
                 used += len(passage.text)
                 key = (passage.source["node_id"], passage.source["attachment_id"])
                 counts[key] = counts.get(key, 0) + len(passage.text)
+            if not records:
+                self.audit("search")
             return {
                 **ENVELOPE,
                 "query": query,
@@ -478,8 +480,6 @@ class AttachmentReadTools:
         finally:
             for key, (record, status) in records.items():
                 self.audit("search", key[0], record, counts.get(key, 0), status)
-            if not records:
-                self.audit("search")
 
 
 def tool_definitions():

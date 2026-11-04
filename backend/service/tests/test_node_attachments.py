@@ -1959,6 +1959,33 @@ def test_attachment_search_limits_extraction_to_remaining_chars(
     assert "".join(s["text"] for s in read["segments"]) == "policy second"
 
 
+@pytest.mark.parametrize("failure", [None, "enumeration", "ranking"])
+def test_attachment_empty_search_audits_once(service, monkeypatch, caplog, failure):
+    from backend.service import attachment_tools
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("confidential failure details")
+
+    if failure == "enumeration":
+        monkeypatch.setattr(service.attachment_settings.store, "list", fail)
+    elif failure == "ranking":
+        monkeypatch.setattr(attachment_tools, "rank_passages", fail)
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = service.attachment_tool_search("policy", ["doc"])
+    if failure:
+        assert result["error_code"] == "failed"
+    else:
+        assert result["passages"] == result["files"] == []
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    assert audits[0].event == "attachment_content_read"
+    assert audits[0].tool == "search_node_attachments"
+    assert audits[0].outcome == ("failed" if failure else "ok")
+    assert audits[0].attachment_id is None
+    assert audits[0].chars == 0
+    assert "confidential failure details" not in repr(audits[0].__dict__)
+
+
 @pytest.mark.parametrize("failure", ["enumeration", "ranking"])
 @pytest.mark.parametrize("warm_cache", [False, True])
 def test_attachment_search_preserves_read_audits_on_later_failure(
