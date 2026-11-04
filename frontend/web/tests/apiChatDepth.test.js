@@ -82,7 +82,9 @@ describe('chat progress stream', () => {
   it('decodes terminal errors like ordinary HTTP errors', async () => {
     const payload = { detail: 'Internal server error' };
     global.fetch.mockResolvedValueOnce({
-      ok: false, status: 500, json: async () => payload,
+      ok: false,
+      status: 500,
+      json: async () => payload,
     });
     const ordinary = await sendChatMessage([]).catch((error) => error);
     const read = vi.fn().mockResolvedValueOnce({
