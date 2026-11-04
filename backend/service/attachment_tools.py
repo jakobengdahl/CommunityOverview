@@ -228,13 +228,19 @@ class AttachmentReadTools:
             },
         )
 
-    def extracted(self, node_id, record, deadline, *, search=False):
+    def extracted(self, node_id, record, deadline, *, search=False, max_chars=None):
         settings = self.service.attachment_settings
         key = (settings.namespace, node_id, record.id, record.sha256)
+        char_limit = min(
+            self.extraction_limits.max_chars,
+            max_chars if max_chars is not None else self.extraction_limits.max_chars,
+        )
         with self.lock:
             if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
+                cached = self.cache[key]
+                if sum(len(s.text) for s in cached[0].segments) <= char_limit:
+                    self.cache.move_to_end(key)
+                    return cached
         if not self.slots.acquire(timeout=max(0, deadline - time.monotonic())):
             return None
         try:
@@ -258,6 +264,7 @@ class AttachmentReadTools:
                         self.extraction_limits,
                         max_input_bytes=settings.limits.max_file_bytes,
                         timeout_seconds=timeout,
+                        max_chars=char_limit,
                     ),
                 )
             except (AttachmentNotFound, OSError):
@@ -275,7 +282,11 @@ class AttachmentReadTools:
                 + 256
             )
             with self.lock:
-                if key not in self.cache and cost <= self.limits.text_cache_max_chars:
+                if (
+                    char_limit == self.extraction_limits.max_chars
+                    and key not in self.cache
+                    and cost <= self.limits.text_cache_max_chars
+                ):
                     while (
                         self.cache
                         and self.cache_chars + cost > self.limits.text_cache_max_chars
@@ -381,83 +392,94 @@ class AttachmentReadTools:
         deadline = time.monotonic() + self.limits.search_timeout_seconds
         segments, files, unresolved, records = [], [], [], {}
         searched, total = 0, 0
-        for node_id in dict.fromkeys(node_ids):
-            if self.resolve(node_id, narrowings) is None:
-                unresolved.append(node_id)
-                continue
-            if attachments.is_federated_node_id(node_id):
-                continue
-            for record in settings.store.list(settings.namespace, node_id):
-                source = {
-                    "node_id": node_id,
-                    "attachment_id": record.id,
-                    "filename": record.filename,
-                }
-                found = None
-                if (
-                    searched < self.limits.search_max_files
-                    and total < self.limits.search_max_total_chars
-                    and time.monotonic() < deadline
-                ):
-                    records[(node_id, record.id)] = (record, "skipped_budget")
-                    found = self.extracted(node_id, record, deadline, search=True)
-                status, truncated = "skipped_budget", False
-                if found is not None:
-                    result, _ = found
-                    searched += 1
-                    size = sum(len(s.text) for s in result.segments)
-                    truncated = result.truncated
-                    remaining = self.limits.search_max_total_chars - total
-                    # Even rejected extraction results consume the call budget.
-                    total += size
-                    if size <= remaining:
-                        status = result.status
-                        if status == "ok":
-                            segments.extend(
-                                Segment(s.text, s.locator, source)
-                                for s in result.segments
-                            )
-                    records[(node_id, record.id)] = (record, status)
-                if status != "ok" or truncated:
-                    files.append({**source, "status": status, "truncated": truncated})
-        ranked = rank_passages(
-            query,
-            segments,
-            top_k=min(top_k, self.limits.search_max_top_k),
-            chunk_size=self.limits.chunk_chars,
-            overlap=self.limits.chunk_overlap_chars,
-            rerank_candidates=self.limits.rerank_candidates,
-            vector_store=getattr(self.service.storage, "vector_store", None),
-        )
-        passages, counts, used = [], {}, 0
-        for passage in ranked.passages:
-            if used + len(passage.text) > self.limits.result_max_chars:
-                break
-            passages.append(
-                {
-                    **passage.source,
-                    "locator": passage.locator,
-                    "score": passage.score,
-                    "text": passage.text,
-                }
+        counts = {}
+        try:
+            for node_id in dict.fromkeys(node_ids):
+                if self.resolve(node_id, narrowings) is None:
+                    unresolved.append(node_id)
+                    continue
+                if attachments.is_federated_node_id(node_id):
+                    continue
+                for record in settings.store.list(settings.namespace, node_id):
+                    source = {
+                        "node_id": node_id,
+                        "attachment_id": record.id,
+                        "filename": record.filename,
+                    }
+                    found = None
+                    if (
+                        searched < self.limits.search_max_files
+                        and total < self.limits.search_max_total_chars
+                        and time.monotonic() < deadline
+                    ):
+                        records[(node_id, record.id)] = (record, "skipped_budget")
+                        found = self.extracted(
+                            node_id,
+                            record,
+                            deadline,
+                            search=True,
+                            max_chars=self.limits.search_max_total_chars - total,
+                        )
+                    status, truncated = "skipped_budget", False
+                    if found is not None:
+                        result, _ = found
+                        searched += 1
+                        size = sum(len(s.text) for s in result.segments)
+                        truncated = result.truncated
+                        remaining = self.limits.search_max_total_chars - total
+                        # Even rejected extraction results consume the call budget.
+                        total += size
+                        if size <= remaining:
+                            status = result.status
+                            if status == "ok":
+                                segments.extend(
+                                    Segment(s.text, s.locator, source)
+                                    for s in result.segments
+                                )
+                        records[(node_id, record.id)] = (record, status)
+                    if status != "ok" or truncated:
+                        files.append(
+                            {**source, "status": status, "truncated": truncated}
+                        )
+            ranked = rank_passages(
+                query,
+                segments,
+                top_k=min(top_k, self.limits.search_max_top_k),
+                chunk_size=self.limits.chunk_chars,
+                overlap=self.limits.chunk_overlap_chars,
+                rerank_candidates=self.limits.rerank_candidates,
+                vector_store=getattr(self.service.storage, "vector_store", None),
             )
-            used += len(passage.text)
-            key = (passage.source["node_id"], passage.source["attachment_id"])
-            counts[key] = counts.get(key, 0) + len(passage.text)
-        for key, (record, status) in records.items():
-            self.audit("search", key[0], record, counts.get(key, 0), status)
-        if not records:
-            self.audit("search")
-        return {
-            **ENVELOPE,
-            "query": query,
-            "ranking": ranked.ranking,
-            "passages": passages,
-            "files": files,
-            "unresolved_node_ids": unresolved,
-            "searched_files": searched,
-            "passages_truncated": len(passages) < len(ranked.passages),
-        }
+            passages, counts, used = [], {}, 0
+            for passage in ranked.passages:
+                if used + len(passage.text) > self.limits.result_max_chars:
+                    break
+                passages.append(
+                    {
+                        **passage.source,
+                        "locator": passage.locator,
+                        "score": passage.score,
+                        "text": passage.text,
+                    }
+                )
+                used += len(passage.text)
+                key = (passage.source["node_id"], passage.source["attachment_id"])
+                counts[key] = counts.get(key, 0) + len(passage.text)
+            return {
+                **ENVELOPE,
+                "query": query,
+                "ranking": ranked.ranking,
+                "passages": passages,
+                "files": files,
+                "unresolved_node_ids": unresolved,
+                "searched_files": searched,
+                "passages_truncated": len(passages) < len(ranked.passages),
+            }
+        finally:
+            for key, (record, status) in records.items():
+                self.audit("search", key[0], record, counts.get(key, 0), status)
+            if not records:
+                self.audit("search")
 
 
 def tool_definitions():

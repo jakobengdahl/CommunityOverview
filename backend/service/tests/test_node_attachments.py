@@ -1914,6 +1914,93 @@ def test_attachment_search_rejected_text_exhausts_total_budget(
     assert len(audits) == 2
 
 
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_attachment_search_limits_extraction_to_remaining_chars(
+    service, client, monkeypatch, warm_cache
+):
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.service import attachment_tools
+
+    uploaded = [
+        _upload(client, "doc", text, f"{i}.txt").json()
+        for i, text in enumerate((b"policy", b"policy second", b"last"))
+    ]
+    tools = service._attachment_read_tools
+    tools.limits = replace(tools.limits, search_max_total_chars=10)
+    calls = []
+
+    def extract(data, content_type, limits):
+        calls.append((data, limits.max_chars))
+        text = data.decode()
+        return ExtractionResult(
+            "ok",
+            (Segment(text[: limits.max_chars], {"line": 1}),),
+            truncated=len(text) > limits.max_chars,
+        )
+
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    if warm_cache:
+        service.attachment_tool_read("doc", uploaded[1]["id"])
+        calls.clear()
+    result = service.attachment_tool_search("policy", ["doc"])
+    assert calls == [(b"policy", 10), (b"policy second", 4)]
+    assert result["searched_files"] == 2
+    assert sum(len(p["text"]) for p in result["passages"]) <= 10
+    assert {
+        f["attachment_id"]: (f["status"], f["truncated"]) for f in result["files"]
+    } == {
+        uploaded[1]["id"]: ("ok", True),
+        uploaded[2]["id"]: ("skipped_budget", False),
+    }
+    assert not tools.cache if not warm_cache else len(tools.cache) == 1
+    # A limited search result must never replace the full attachment in the cache.
+    read = service.attachment_tool_read("doc", uploaded[1]["id"])
+    assert "".join(s["text"] for s in read["segments"]) == "policy second"
+
+
+@pytest.mark.parametrize("failure", ["enumeration", "ranking"])
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_attachment_search_preserves_read_audits_on_later_failure(
+    service, client, monkeypatch, caplog, failure, warm_cache
+):
+    from backend.service import attachment_tools
+
+    secret = b"policy confidential content"
+    record = _upload(client, "doc", secret).json()
+    if warm_cache:
+        service.attachment_tool_read("doc", record["id"])
+    caplog.clear()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("later operation failed")
+
+    if failure == "ranking":
+        monkeypatch.setattr(attachment_tools, "rank_passages", fail)
+    else:
+        store = service.attachment_settings.store
+        original_list = store.list
+
+        def list_records(namespace, node_id):
+            return fail() if node_id == "actor" else original_list(namespace, node_id)
+
+        monkeypatch.setattr(store, "list", list_records)
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = service.attachment_tool_search("policy", ["doc", "actor"])
+    assert result["success"] is False
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    reads = [r for r in audits if r.attachment_id is not None]
+    assert len(reads) == 1
+    assert (reads[0].node_id, reads[0].attachment_id, reads[0].sha256) == (
+        "doc",
+        record["id"],
+        record["sha256"],
+    )
+    assert reads[0].outcome == "ok"
+    assert reads[0].chars == 0
+    assert all(secret.decode() not in repr(r.__dict__) for r in audits)
+
+
 @pytest.mark.parametrize("query", ["policy", "absent"])
 def test_attachment_search_audits_every_extraction(
     service, client, monkeypatch, caplog, query
