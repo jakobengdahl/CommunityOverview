@@ -1,5 +1,4 @@
 from typing import Any, List, Dict, Callable, Optional
-import copy
 import functools
 import os
 import json
@@ -17,6 +16,7 @@ from backend.llm.llm_providers import (
     tool_input_type_error,
 )
 from backend.config import config_loader
+from backend.core.events.dispatcher import _copy_payload
 from backend.core.storage_search import MATCH_MODES
 from backend.config.model_profiles import (
     create_provider_from_profile,
@@ -556,11 +556,12 @@ def run_on_event_loop(func: Callable, /, *args, **kwargs) -> Any:
 
     The hop carries the worker's contextvars, so the request's authorization
     context reaches func. The result is copied on the loop because the worker
-    must not iterate live graph state while the loop may be changing it.
+    must not iterate live graph state while the loop may be changing it. The copy
+    does not recurse per level, as a result can hold metadata at the write depth cap.
     """
     call = functools.partial(func, *args, **kwargs)
     if getattr(_chat_worker, "active", False):
-        return from_thread.run_sync(lambda: copy.deepcopy(call()))
+        return from_thread.run_sync(lambda: _copy_payload(call()))
     return call()
 
 

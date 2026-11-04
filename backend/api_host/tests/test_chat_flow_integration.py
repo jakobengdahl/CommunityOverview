@@ -11,12 +11,14 @@ These tests verify the complete chat workflow:
 """
 
 import asyncio
+import json
 import threading
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from backend.core.models import MAX_METADATA_DEPTH
 from backend.llm.llm_providers import LLMResponse
 from backend.runtime.authorization import get_current_request_authorization_inputs
 from backend.runtime.request_context import ACTOR_ID_HEADER
@@ -138,6 +140,56 @@ async def test_hop_copies_its_result_and_other_callers_run_in_place():
 
     assert hopped == live and hopped["nodes"] is not live["nodes"]
     assert run_on_event_loop(lambda: live) is live
+
+
+@pytest.mark.asyncio
+async def test_metadata_at_the_depth_cap_keeps_tool_results_and_collection_grant(
+    test_app_with_mock,
+):
+    """A deep result that is not the final one reaches the LLM, and a deep
+    collection keeps its attachment grant."""
+    app = test_app_with_mock[0].app
+    service = app.state.chat_service
+    deep = {}
+    for _ in range(MAX_METADATA_DEPTH - 1):
+        deep = {"k": deep}
+    akc = {
+        "short_name": "kiosk",
+        "tool_allowlist": ["read_node_attachment", "get_node_details", "search_graph"],
+        "deep": deep,
+    }
+    node = {"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}
+    service.graph_service.add_nodes(nodes=[node], edges=[])
+    service._processor.tool_definitions.append({"name": "read_node_attachment"})
+    # Under "node", as a deep value in the final toolResult is a 500 regardless.
+    service._processor.tools_map["get_node_details"] = lambda: {"node": node}
+    service._processor.tools_map["search_graph"] = lambda: {"nodes": []}
+    calls = [
+        ("get_node_details", {}),
+        ("search_graph", {}),
+    ]
+    requests = []
+
+    class _ScriptedLLM:
+        def create_completion(self, messages, **kwargs):
+            requests.append((list(messages), kwargs["tools"]))
+            if not calls:
+                text = {"type": "text", "text": "done"}
+                return LLMResponse(content=[text], stop_reason="end_turn")
+            name, tool_input = calls.pop(0)
+            call = {"type": "tool_use", "id": name, "name": name, "input": tool_input}
+            return LLMResponse(content=[call], stop_reason="tool_use")
+
+    service._processor._resolve_llm_provider = lambda *_: (_ScriptedLLM(), None)
+    body = {"messages": _MESSAGES, "collection_short_name": "kiosk"}
+
+    async with _http(app) as http:
+        response = await http.post("/ui/chat", json=body)
+
+    assert response.status_code == 200
+    delivered = json.loads(requests[1][0][-1]["content"][0]["content"])
+    assert delivered["node"]["metadata"]["deep"] == deep
+    assert "read_node_attachment" in {t["name"] for t in requests[0][1]}
 
 
 @pytest.mark.asyncio
