@@ -206,7 +206,6 @@ def _failing_tests(
         old = base.renames.get(test, test)
         if (
             old in base.tree.paths
-            and _is_test_file(old)
             and old not in base_coverage
             and old not in base_exempt
         ):
@@ -265,6 +264,11 @@ def _read_base(root: Path, ref: str) -> Base:
                     path = posixpath.normpath(
                         posixpath.join(posixpath.dirname(link), target, *parts[end:])
                     )
+                    if posixpath.isabs(path):
+                        try:
+                            path = Path(path).relative_to(root.resolve()).as_posix()
+                        except ValueError:
+                            return None
                     break
             else:
                 return path if path in entries else None

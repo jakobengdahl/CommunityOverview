@@ -334,6 +334,21 @@ def test_a_renamed_test_file_keeps_its_base_total(repo):
     assert _commit(repo, {}) == 0
 
 
+@pytest.mark.parametrize("base_size, expected", [(15, 1), (16, 0)])
+def test_a_non_test_renamed_with_a_header_counts_its_base_content(
+    repo, capsys, base_size, expected
+):
+    old, test = "old_content.txt", "tests/test_new.py"
+    _commit_on_base(repo, {old: _lines(base_size)})
+    capsys.readouterr()
+    _git("mv", old, test)
+    assert _commit(repo, {test: "# covers: mod.py\n" + _lines(base_size + 1)}) == expected
+    assert _read_base(repo, "base").renames[test] == old
+    output = capsys.readouterr().out
+    assert test + ":" in output
+    assert ("already over the limit on base" in output) == (expected == 0)
+
+
 def test_test_files_merged_on_the_branch_keep_their_base_total(repo):
     guards = "tests/test_mod_guards.py"
     _commit_on_base(repo, {"tests/test_mod.py": _lines(8), guards: _lines(8)})
@@ -376,25 +391,32 @@ def test_a_base_ref_git_cannot_resolve_is_an_error_not_a_pass(repo):
 
 @pytest.mark.parametrize("base_size, expected", [(15, 1), (16, 0)])
 @pytest.mark.parametrize("linked_test", [False, True])
+@pytest.mark.parametrize("absolute", [False, True])
 def test_base_symlinks_count_target_content(
-    repo, capsys, base_size, expected, linked_test
+    repo, capsys, base_size, expected, linked_test, absolute
 ):
     test = "tests/test_mod.py"
     _git("checkout", "-q", "base")
     (repo / "source").mkdir()
     (repo / "source/actual.py").write_text(_lines(10))
     (repo / "mod.py").unlink()
-    (repo / "mod.py").symlink_to("source/alias.py")
+    (repo / "mod.py").symlink_to(
+        repo / "source/alias.py" if absolute else "source/alias.py"
+    )
     (repo / "source/alias.py").symlink_to("actual.py")
     if linked_test:
         (repo / "test_content.txt").write_text(_lines(base_size))
-        (repo / test).symlink_to("../test_content.txt")
+        (repo / test).symlink_to(
+            repo / "test_content.txt" if absolute else "../test_content.txt"
+        )
     else:
         (repo / test).write_text(_lines(base_size))
     _git("add", ".")
     _git("commit", "-qm", "linked base")
     _git("checkout", "-qB", "work")
     assert _read_base(repo, "base").tree.lines("mod.py") == 10
+    if linked_test:
+        assert _read_base(repo, "base").tree.lines(test) == base_size
     if linked_test:
         (repo / test).unlink()
         (repo / test).symlink_to("../grown_content.txt")
