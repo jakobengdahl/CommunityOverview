@@ -125,6 +125,27 @@ describe('ChatPanel session-switch epoch guard', () => {
     ]);
   });
 
+  it('keeps reasoning collapsed and excludes it from follow-up prompts', async () => {
+    api.sendChatMessage.mockImplementation(async (_messages, _unused, options) => {
+      options.onProgress({ kind: 'reasoning', round: 1, text: '<b>private reasoning</b>' });
+      return { content: 'answer', toolResult: null };
+    });
+    render(<ChatPanel />);
+    expect(document.querySelector('details.chat-reasoning')).toBeNull();
+    await sendMessage('question');
+    const details = document.querySelector('details.chat-reasoning');
+    expect(details.open).toBe(false);
+    fireEvent.click(details.querySelector('summary'));
+    expect(details.open).toBe(true);
+    expect(details.querySelector('b')).toBeNull();
+    await sendMessage('follow up');
+    expect(api.sendChatMessage.mock.calls[1][0]).toEqual([
+      { role: 'user', content: 'question' },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: 'follow up' },
+    ]);
+  });
+
   it('appends the response normally when no session switch happens', async () => {
     api.sendChatMessage.mockResolvedValue({
       content: 'fresh answer',

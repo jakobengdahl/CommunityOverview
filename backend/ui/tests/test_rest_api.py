@@ -657,3 +657,51 @@ async def test_concurrent_streams_only_receive_their_own_steps():
     assert first[0] == {"kind": "tool_started", "tool": "a"}
     assert second[0] == {"kind": "tool_started", "tool": "b"}
     assert [len(first), len(second)] == [2, 2]
+
+
+@pytest.mark.parametrize("reasoning", [None, "", "x" * 12001])
+def test_reasoning_is_capped_request_local_display_metadata(reasoning):
+    """Only separate reasoning reaches progress; response and prompts stay intact."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from backend.ui.chat_logic import (
+        MAX_REASONING_CHARS_PER_ROUND,
+        _chat_completion,
+        report_chat_progress,
+    )
+
+    response = SimpleNamespace(
+        content=[{"type": "text", "text": "<think>ordinary answer</think>"}],
+        raw_response=SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(reasoning_content=reasoning))
+            ]
+        ),
+    )
+    provider = Mock()
+    provider.create_completion.return_value = response
+    messages = [{"role": "user", "content": "question"}]
+    events = []
+    with report_chat_progress(events.append):
+        assert _chat_completion(provider, messages=messages) is response
+        assert _chat_completion(provider, messages=messages) is response
+    assert [event for event in events if event["kind"] == "reasoning"] == (
+        [
+            {
+                "kind": "reasoning",
+                "round": n,
+                "text": reasoning[:MAX_REASONING_CHARS_PER_ROUND],
+            }
+            for n in (1, 2)
+        ]
+        if reasoning
+        else []
+    )
+    before = list(events)
+    assert _chat_completion(provider, messages=messages) is response
+    assert events == before
+    assert all(
+        call.kwargs == {"messages": messages}
+        for call in provider.create_completion.call_args_list
+    )
+    assert messages == [{"role": "user", "content": "question"}]

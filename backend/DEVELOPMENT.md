@@ -1879,7 +1879,7 @@ own.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
-| POST | `/ui/chat/stream` | POST SSE: LLM rounds, tool start/finish, final chat response; 15-second keep-alive comments |
+| POST | `/ui/chat/stream` | POST SSE: LLM rounds, optional capped reasoning, tool start/finish, final chat response; 15-second keep-alive comments |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -2059,3 +2059,10 @@ Kill existing server or use a different port:
 ```bash
 uvicorn backend.api_host.server:get_app --factory --port 8001
 ```
+
+The chat stream emits `{kind: "reasoning", round, text}` after an LLM call only
+when its OpenAI-compatible response has separate `reasoning_content`. Text is
+capped by `MAX_REASONING_CHARS_PER_ROUND` (12,000 characters). It goes only to the
+requesting client, is not logged or persisted, and is never added to subsequent
+LLM messages. Answer text is not parsed for reasoning tags. The provider call
+remains non-streaming and `/ui/chat` retains its existing response contract.
