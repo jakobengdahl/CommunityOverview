@@ -2,8 +2,8 @@
 
 The commit's locked unit, held to the same clauses on the file backend (the
 default, one journal record per batch) and on the in-memory reference
-backend; a store that assigns revisions (PostgreSQL mode) is refused until
-slice 3. The plan and digest that produce the writes are the service's
+backend; a store that assigns revisions (PostgreSQL mode) must also verify the
+plan's reads (slice 3). The plan and digest that produce the writes are the service's
 (backend/service/tests/test_import_merge_commit.py).
 """
 
@@ -23,6 +23,7 @@ from backend.core import (
     Node,
 )
 from backend.core.events.models import EventContext, EventType
+from backend.core.storage_backends import ExternalChangeRefused
 from backend.core.storage_merge import (
     EdgeOverwrite,
     ImportMergeUnsupported,
@@ -480,3 +481,118 @@ def test_a_store_that_assigns_revisions_refuses_a_merge_before_planning():
         storage.apply_import_merge(lambda: called.append(True) or MergeWrites())
     assert called == []
     storage.shutdown_events()
+
+
+class _ConditionsBackend(_EnforcingBackend):
+    """A store that declares it verifies a batch's conditions; records them."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.batches = []
+        self.saves = 0
+        self.failure = None
+
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            incremental_writes=True,
+            transactions=True,
+            change_notification=True,
+            revision_enforcement=True,
+            batch_conditions=True,
+        )
+
+    def apply_batch(self, operations, write_token=None):
+        if self.failure is not None:
+            raise self.failure
+        self.batches.append(list(operations))
+        return super().apply_batch(operations)
+
+    def save_graph_data(self, data):
+        self.saves += 1
+        return super().save_graph_data(data)
+
+
+@pytest.fixture
+def shared():
+    backend = _ConditionsBackend({})
+    graph = GraphStorage(persistence_backend=backend)
+    graph.add_nodes(
+        [
+            Node(id="kept", type="Actor", name="Kept"),
+            Node(id="over", type="Actor", name="Over"),
+        ],
+        [],
+    )
+    backend.batches.clear()
+    backend.saves = 0
+    yield graph, backend
+    graph.shutdown_events()
+
+
+def _subtype_merge(graph, **extra) -> MergeWrites:
+    return MergeWrites(
+        node_overwrites=[
+            NodeOverwrite(
+                "over", graph.nodes["over"].revision, {"subtypes": ["S"]}, False
+            )
+        ],
+        edge_creates=[Edge(id="new", source="over", target="kept")],
+        **extra,
+    )
+
+
+def test_a_shared_store_gets_the_plans_reads_and_generation_as_batch_conditions(shared):
+    graph, backend = shared
+    reads = {
+        ("node", "kept"): graph.nodes["kept"].revision,
+        ("node", "over"): graph.nodes["over"].revision,
+        ("edge", "gone"): None,
+    }
+
+    graph.apply_import_merge(lambda: _subtype_merge(graph, reads=reads))
+
+    assert backend.saves == 0
+    [batch] = backend.batches
+    assert batch[0].expected_generation == graph.generation
+    # A written entity is covered by its expectation instead.
+    assert batch[0].read_revisions == (
+        ("edge", "gone", None),
+        ("node", "kept", reads[("node", "kept")]),
+    )
+    assert all(not op.read_revisions for op in batch[1:])
+
+
+def test_an_incident_edge_check_lists_only_edges_the_store_holds_before_the_merge(
+    shared,
+):
+    graph, backend = shared
+
+    graph.apply_import_merge(lambda: _subtype_merge(graph))
+
+    overwrite = next(op for op in backend.batches[0] if op.entity_id == "over")
+    assert overwrite.incident_edge_revisions == ()
+
+
+def test_a_merge_the_shared_store_refuses_leaves_memory_as_it_was(shared):
+    graph, backend = shared
+    before = graph.nodes["over"].to_dict()
+    backend.failure = EntityRevisionConflict("node", "kept", 1, 2)
+
+    with pytest.raises(EntityRevisionConflict):
+        graph.apply_import_merge(lambda: _subtype_merge(graph))
+
+    assert graph.nodes["over"].to_dict() == before
+    assert "new" not in graph.edges
+
+
+def test_an_unclassified_failure_never_arms_a_whole_graph_save_on_a_shared_store(
+    shared,
+):
+    graph, backend = shared
+    backend.failure = ExternalChangeRefused("reported on a writing thread")
+
+    with pytest.raises(ExternalChangeRefused):
+        graph.apply_import_merge(lambda: _subtype_merge(graph))
+
+    assert not graph._resync_pending
+    assert backend.saves == 0

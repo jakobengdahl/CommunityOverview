@@ -19,7 +19,7 @@ job any caller of ``claim_next`` on this seam will ever see today.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .models import ExecutionKind
 from .store import ExecutionStore
@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 # model can genuinely take minutes, and a lease that expires mid-encode would
 # let a second worker reclaim and re-run work still legitimately in flight.
 DEFAULT_LEASE_SECONDS = 300.0
+
+# How often one merge job re-encodes nodes that moved while they were encoded.
+MERGE_EMBEDDING_PASSES = 3
 
 _SUPERSEDED_MESSAGE = (
     "a later graph import replaced the graph before this job's embeddings "
@@ -62,6 +65,43 @@ def _mark_superseded(store: ExecutionStore, job: "ExecutionJob") -> None:
     )
 
 
+def _embed_merged_nodes(
+    storage: "GraphStorage", generation: Optional[int]
+) -> Optional[int]:
+    """Embed every node without a vector, for a merge's job (ADR 0013 §6).
+
+    Each pass encodes copies, so the text recorded is the text encoded even
+    if the live node is updated meanwhile. A node the commit leaves out moved
+    while it was encoded, and the next pass reads it again. Returns how many
+    vectors landed, or None when a later replace superseded the job. Nodes
+    still moving after the last pass raise, so the job retries with backoff.
+    """
+
+    def without_vector():
+        return [
+            node.model_copy()
+            for node in list(storage.nodes.values())
+            if not storage.vector_store.has_embedding(node.id)
+        ]
+
+    embedded = 0
+    for _ in range(MERGE_EMBEDDING_PASSES):
+        nodes = without_vector()
+        if not nodes:
+            return embedded
+        committed = storage.commit_merge_embeddings(
+            generation,
+            storage.vector_store.compute_node_embeddings(nodes),
+            {node.id: storage.vector_store.embedding_text(node) for node in nodes},
+        )
+        if committed is None:
+            return None
+        embedded += committed
+    if without_vector():
+        raise RuntimeError("nodes kept changing while they were embedded")
+    return embedded
+
+
 def _run_one_import_job(
     store: ExecutionStore, storage: "GraphStorage", job: "ExecutionJob"
 ) -> None:
@@ -78,12 +118,22 @@ def _run_one_import_job(
         _mark_superseded(store, job)
         return
 
-    nodes = [
-        node
-        for node in storage.nodes.values()
-        if not storage.vector_store.has_embedding(node.id)
-    ]
     try:
+        if job.payload.get("mode") == "merge":
+            embedded = _embed_merged_nodes(storage, job_generation)
+            if embedded is None:
+                _mark_superseded(store, job)
+                return
+            store.complete(
+                job.id,
+                result={"embeddings_status": "succeeded", "embedded_count": embedded},
+            )
+            return
+        nodes = [
+            node
+            for node in storage.nodes.values()
+            if not storage.vector_store.has_embedding(node.id)
+        ]
         # Encode off to the side — `compute_node_embeddings` never touches the
         # live index — so a replace landing during this (potentially
         # minutes-long) step cannot yet be corrupted by it. The result is only

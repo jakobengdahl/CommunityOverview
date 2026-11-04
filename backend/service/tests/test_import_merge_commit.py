@@ -22,6 +22,7 @@ from backend.agents.execution import ExecutionState, InMemoryExecutionStore
 from backend.core import (
     BackendCapabilities,
     Edge,
+    EntityRevisionConflict,
     GraphStorage,
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
@@ -882,6 +883,71 @@ class _EnforcingBackend(InMemoryGraphPersistenceBackend):
 
     def read_write_evidence(self, keys):
         return {}
+
+
+class _ConditionsBackend(_EnforcingBackend):
+    refuse_with = None
+    batches: List[Any] = []
+
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            incremental_writes=True,
+            transactions=True,
+            change_notification=True,
+            revision_enforcement=True,
+            batch_conditions=True,
+        )
+
+    def apply_batch(self, operations, write_token=None):
+        if self.refuse_with is not None:
+            raise self.refuse_with
+        self.batches = [*self.batches, list(operations)]
+        return super().apply_batch(operations)
+
+
+class TestSharedStoreCommit:
+    """A merge attaching a new node to a live one, on a store that verifies
+    what the plan read."""
+
+    BODY = {
+        "document": {
+            "nodes": [{"id": "new", "type": "Actor", "name": "New"}],
+            "edges": [
+                {"id": "e", "source": "new", "target": "live", "type": "RELATES_TO"}
+            ],
+        },
+        "policy": {"default": "skip"},
+    }
+
+    @pytest.fixture
+    def shared(self, monkeypatch):
+        monkeypatch.setattr(import_service, "_write_backup", lambda s: "backup")
+        backend = _ConditionsBackend({})
+        store = GraphStorage(persistence_backend=backend)
+        store.add_nodes([Node(id="live", type="Actor", name="Live")], [])
+        yield store, backend
+        store.shutdown_events()
+
+    def test_the_commit_lands_with_the_plans_live_reads_as_conditions(
+        self, shared, job_store
+    ):
+        store, backend = shared
+        response = _client(store, job_store).post(URL, json=self.BODY)
+        assert response.status_code == 200
+        assert {"new", "live"} == set(store.nodes)
+        first = backend.batches[-1][0]
+        assert ("node", "live", store.nodes["live"].revision) in first.read_revisions
+        assert first.expected_generation == store.generation
+
+    def test_a_read_the_store_refuses_answers_a_stale_plan_with_nothing_written(
+        self, shared, job_store
+    ):
+        store, backend = shared
+        backend.refuse_with = EntityRevisionConflict("node", "live", 1, 2)
+        response = _client(store, job_store).post(URL, json=self.BODY)
+        assert response.status_code == 409
+        assert response.json()["detail"]["error_code"] == "import_plan_stale"
+        assert set(store.nodes) == {"live"}
 
 
 class TestRefusals:

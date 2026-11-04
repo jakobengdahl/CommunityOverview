@@ -17,6 +17,7 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
+import dataclasses
 import importlib.util
 import logging
 import threading
@@ -45,6 +46,7 @@ from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
     EntityOperation,
     EntityRevisionConflict,
+    GraphGenerationMoved,
     ExternalChange,
     ExternalChangeRefused,
     FileGraphPersistenceBackend,
@@ -1350,6 +1352,7 @@ class GraphStorage:
         expectations: Optional[Dict[Tuple[str, str], Any]] = None,
         *,
         event_context: Optional[EventContext] = None,
+        conditions: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Stamp revisions on a write already applied to memory, and persist it.
 
@@ -1357,7 +1360,9 @@ class GraphStorage:
         yet. `changes` lists ("node" | "edge", "upsert" | "delete", entity or
         id) in the order the store applies them; `undo` is the state captured
         before memory changed; `expectations` maps (kind, id) to the
-        expected revision or EXPECT_ABSENT, already checked against memory.
+        expected revision or EXPECT_ABSENT, already checked against memory;
+        `conditions` are the batch's for a store others write to
+        (EntityOperation), which a single writer's memory already settled.
 
         A single-writer store takes revisions from this instance's counter and
         keeps today's fire-and-forget write, except that a write carrying an
@@ -1408,6 +1413,8 @@ class GraphStorage:
         if not changes:
             return
         operations = self._operations(changes, expectations, undo=undo)
+        if conditions:
+            operations[0] = dataclasses.replace(operations[0], **conditions)
         token = uuid.uuid4().hex
         future = self._io_executor.submit(
             self._do_apply, tuple(operations), token=token
@@ -1481,6 +1488,8 @@ class GraphStorage:
                             sorted(
                                 (e.id, e.revision)
                                 for e in self.get_edges_for_node(entity_id)
+                                # One this write creates is not in the store yet.
+                                if undo.edges.get(e.id, e) is not None
                             )
                         )
                         if undo is not None
@@ -3672,11 +3681,64 @@ class GraphStorage:
                     self.save().result()
             return True
 
+    def commit_merge_embeddings(
+        self,
+        generation: Optional[int],
+        vectors: Dict[str, Any],
+        texts: Dict[str, str],
+    ) -> Optional[int]:
+        """Commit a merge job's vectors, each only if it still describes its
+        node (ADR 0013 §6): the node has no vector yet and its embedding text
+        is the one in ``texts``, read before encoding. The revision is not
+        compared, as a metadata-only update moves it and leaves the text.
+
+        Entity upserts, each expecting the revision this instance holds. A
+        store that refuses one (another instance moved the node) refuses the
+        batch, so that node is dropped and the rest re-issued.
+
+        Returns how many vectors landed; a node left out still has no vector,
+        for the caller's next pass. None means a replace superseded
+        ``generation``, here or in a store others write to.
+        """
+        with self._lock:
+            if generation is not None and self._generation != generation:
+                return None
+            pending = {
+                node_id: vector
+                for node_id, vector in vectors.items()
+                if node_id in self.nodes
+                and not self.vector_store.has_embedding(node_id)
+                and self.vector_store.embedding_text(self.nodes[node_id])
+                == texts.get(node_id)
+            }
+            while pending:
+                nodes = [self.nodes[node_id] for node_id in pending]
+                undo = self._capture(node_ids=list(pending))
+                self.vector_store.absorb_embeddings(pending)
+                try:
+                    self._commit(
+                        [("node", "upsert", node) for node in nodes],
+                        undo,
+                        {("node", node.id): node.revision for node in nodes},
+                        conditions={"expected_generation": generation},
+                    )
+                    return len(pending)
+                except GraphGenerationMoved:
+                    return None
+                except EntityRevisionConflict as conflict:
+                    # _commit has undone memory, so the nodes are read again.
+                    if pending.pop(conflict.entity_id, None) is None:
+                        raise
+            return 0
+
     @property
     def supports_import_merge(self) -> bool:
         """Whether ``apply_import_merge`` can run on this backend (ADR 0013
-        §6): not on a store that assigns revisions, until slice 3."""
-        return not self._store_assigns_revisions
+        §3): a store that assigns revisions must verify the plan's reads."""
+        return (
+            not self._store_assigns_revisions
+            or self._backend_capabilities.batch_conditions
+        )
 
     def apply_import_merge(
         self,
@@ -3705,16 +3767,16 @@ class GraphStorage:
         ordinary create or update event fires per written entity.
 
         Raises:
-            ImportMergeUnsupported: the store assigns revisions.
+            ImportMergeUnsupported: the store assigns revisions and does not
+                declare ``batch_conditions``.
             EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
                 as for every direct write (§4.4).
             Whatever ``prepare`` raises, with nothing changed.
         """
         with self._lock:
-            if self._store_assigns_revisions:
+            if not self.supports_import_merge:
                 raise ImportMergeUnsupported(
-                    "merge import is not supported on a store that assigns "
-                    "revisions yet"
+                    "this store cannot verify a merge import's reads in its unit"
                 )
             writes = prepare()
 
@@ -3816,7 +3878,23 @@ class GraphStorage:
                 raise
 
             try:
-                self._commit(changes, undo, expectations, event_context=event_context)
+                self._commit(
+                    changes,
+                    undo,
+                    expectations,
+                    event_context=event_context,
+                    conditions={
+                        # Sorted so two commits hold shared rows in one order.
+                        "read_revisions": tuple(
+                            sorted(
+                                (*key, revision)
+                                for key, revision in writes.reads.items()
+                                if key not in expectations
+                            )
+                        ),
+                        "expected_generation": self._generation,
+                    },
+                )
             except (EntityRevisionConflict, GraphWriteFailed):
                 # _commit has undone memory.
                 undone()
@@ -3824,6 +3902,9 @@ class GraphStorage:
             except GraphWriteOutcomeUnknown:
                 raise
             except Exception as exc:
+                # A whole-graph re-save would overwrite other instances' writes.
+                if self._store_assigns_revisions:
+                    raise
                 # The batch reached the store and neither it nor the
                 # whole-graph re-save landed: memory keeps the merge, and the
                 # next write carries the whole graph again.

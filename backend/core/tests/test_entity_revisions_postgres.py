@@ -43,9 +43,11 @@ from backend.core.storage import GraphStorage  # noqa: E402
 from backend.core.storage_backends import (  # noqa: E402
     EntityOperation,
     EntityRevisionConflict,
+    GraphGenerationMoved,
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
 )
+from backend.core.storage_merge import MergeWrites, NodeOverwrite  # noqa: E402
 from backend.core.tests.layer_store_contract import A, entry  # noqa: E402
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
@@ -199,6 +201,91 @@ def test_import_embedding_commit_refuses_an_unseen_conflicting_node(
     assert not importing.vector_store.has_embedding("a")
     assert not importing.vector_store.has_embedding("b")
     assert not importing._resync_pending
+
+
+def test_a_merge_refused_on_a_read_it_does_not_write_lands_nothing(instances, schema):
+    importing = instances(deaf=True)
+    importing.add_nodes([_node("kept")], [])
+    other = instances(deaf=True)
+    other.load()
+    read = importing.nodes["kept"].revision
+    other.update_node("kept", {"subtypes": ["Moved"]})
+    assert importing.nodes["kept"].revision == read
+
+    with pytest.raises(EntityRevisionConflict):
+        importing.apply_import_merge(
+            lambda: MergeWrites(
+                node_creates=[_node("new")],
+                edge_creates=[Edge(id="e", source="new", target="kept")],
+                reads={("node", "kept"): read, ("node", "new"): None},
+            )
+        )
+
+    assert _stored(schema, "graph_nodes", "new") is None
+    assert _stored(schema, "graph_edges", "e") is None
+    assert "new" not in importing.nodes
+
+
+def test_a_merge_decided_before_a_replace_elsewhere_is_refused(instances, schema):
+    importing = instances(deaf=True)
+    importing.add_nodes([_node("kept")], [])
+    other = instances(deaf=True)
+    other.load()
+    other.replace_all_nodes_and_edges([_node("kept", "replaced")], [])
+    assert importing.nodes["kept"].name == "kept"
+
+    with pytest.raises(GraphGenerationMoved):
+        importing.apply_import_merge(lambda: MergeWrites(node_creates=[_node("new")]))
+
+    assert _stored(schema, "graph_nodes", "new") is None
+
+
+def test_a_merge_takes_a_subtype_change_with_a_new_incident_edge(instances, schema):
+    importing = instances()
+    importing.add_nodes([_node("over"), _node("kept")], [])
+    writes = MergeWrites(
+        node_overwrites=[
+            NodeOverwrite(
+                "over", importing.nodes["over"].revision, {"subtypes": ["S"]}, False
+            )
+        ],
+        edge_creates=[Edge(id="new", source="over", target="kept")],
+        reads={("node", "kept"): importing.nodes["kept"].revision},
+    )
+
+    applied = importing.apply_import_merge(lambda: writes)
+
+    assert _stored(schema, "graph_nodes", "over")["subtypes"] == ["S"]
+    assert (
+        _stored(schema, "graph_edges", "new")["revision"]
+        == applied.revisions[("edge", "new")]
+    )
+
+
+def test_a_merge_embedding_commit_drops_a_node_moved_elsewhere_and_lands_the_rest(
+    instances, schema
+):
+    importing = instances(deaf=True)
+    importing.add_nodes([_node("a"), _node("b")], [])
+    other = instances(deaf=True)
+    other.load()
+    texts = {
+        node_id: importing.vector_store.embedding_text(node)
+        for node_id, node in importing.nodes.items()
+    }
+    other.update_node("b", {"metadata": {"moved": True}})
+    remote = _stored(schema, "graph_nodes", "b")
+
+    assert (
+        importing.commit_merge_embeddings(
+            importing.generation, {"a": [1.0, 0.0], "b": [0.0, 1.0]}, texts
+        )
+        == 1
+    )
+
+    assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
+    assert _stored(schema, "graph_nodes", "b") == remote
+    assert not importing.vector_store.has_embedding("b")
 
 
 def test_the_store_refuses_a_stale_expectation_the_instance_could_not_see(

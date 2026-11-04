@@ -82,6 +82,7 @@ from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
     EntityRevisionConflict,
+    GraphGenerationMoved,
     ExternalChange,
     ExternalChangeRefused,
     NodeTypeChanged,
@@ -1098,6 +1099,7 @@ class PostgresGraphPersistenceBackend:
             store_traversal=True,
             revision_enforcement=True,
             staged_sessions=self._staged_sessions,
+            batch_conditions=True,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -1639,6 +1641,7 @@ class PostgresGraphPersistenceBackend:
                     raise EntityRevisionConflict(
                         "node", checks[0].entity_id, None, None
                     ) from exc
+                self._verify_batch_conditions(conn, operations)
                 self._hold_endpoints(conn, operations)
                 created_nodes = []
                 revisions = [
@@ -1653,6 +1656,54 @@ class PostgresGraphPersistenceBackend:
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
                 return revisions
+
+    def _verify_batch_conditions(
+        self, conn, operations: Sequence[EntityOperation]
+    ) -> None:
+        """Verify what the batch's decision read and does not write.
+
+        FOR SHARE, stronger than an edge write's FOR KEY SHARE: an ordinary
+        update of a row the decision rests on, a subtype change say, waits for
+        this commit and is otherwise seen here (ADR 0013 §3). The generation
+        needs no row lock: a replace is a whole-graph save, which takes the
+        save lock this batch already holds in SHARE mode.
+        """
+        for operation in operations:
+            if operation.expected_generation is not None:
+                row = conn.execute(
+                    sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    )
+                ).fetchone()
+                try:
+                    stored = int(row[0]) if row and row[0] is not None else 0
+                except ValueError:
+                    # As GraphStorage.load() reads it.
+                    stored = 0
+                if stored != operation.expected_generation:
+                    raise GraphGenerationMoved(operation.expected_generation, stored)
+            for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
+                read = {
+                    entity_id: revision
+                    for read_kind, entity_id, revision in operation.read_revisions
+                    if read_kind == kind
+                }
+                if not read:
+                    continue
+                scope, scope_params = self._and_scope()
+                rows = conn.execute(
+                    sql.SQL(
+                        "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                        " WHERE id = ANY(%s::text[]){} ORDER BY id FOR SHARE"
+                    ).format(self._table(table), scope),
+                    (sorted(read), *scope_params),
+                ).fetchall()
+                stored_revisions = {row[0]: int(row[1]) for row in rows}
+                for entity_id, revision in read.items():
+                    if stored_revisions.get(entity_id) != revision:
+                        raise EntityRevisionConflict(
+                            kind, entity_id, revision, stored_revisions.get(entity_id)
+                        )
 
     def _refuse_dangling_edges_on_create(
         self, conn, created_nodes, operations: Sequence[EntityOperation]

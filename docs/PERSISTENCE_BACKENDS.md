@@ -86,6 +86,7 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
+| `batch_conditions` | `apply_batch` verifies `read_revisions` and `expected_generation` (carried on a batch's first operation) inside its unit; needs `revision_enforcement` | a merge import may run on a store that assigns revisions; without it one is refused (`import_merge_not_supported`) |
 | `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
 | `staged_sessions` | the layer store is implemented: session layers, staged-session records and merge records live next to the graph | nothing yet — the slices that stage and merge build on it; see *The layer store* |
 
