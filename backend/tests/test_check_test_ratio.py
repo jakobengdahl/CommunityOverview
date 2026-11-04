@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.check_test_ratio import check, main  # noqa: E402
+from scripts.check_test_ratio import _read_base, check, main  # noqa: E402
 
 
 def _lines(count):
@@ -289,6 +289,56 @@ def test_a_file_exempt_on_the_branch_does_not_count_towards_the_base_total(repo)
     _commit_on_base(repo, {big: _lines(99)})
     files = {big: "# ratio-exempt: generated matrix\n", "tests/test_mod.py": _lines(16)}
     assert _commit(repo, files) == 1
+
+
+@pytest.mark.parametrize("sibling, expected", [(15, 0), (16, 1)])
+def test_a_header_on_a_large_old_file_neither_hides_nor_causes_a_sibling_report(
+    repo, sibling, expected
+):
+    old, test = "tests/test_old.py", "tests/test_mod.py"
+    _commit_on_base(repo, {old: _lines(99), test: _lines(15)})
+    assert (
+        _commit(repo, {old: "# covers: mod.py\n" + _lines(99), test: _lines(sibling)})
+        == expected
+    )
+    report = check(repo, ["mod.py", old, test], {old, test}, _read_base(repo, "base"))
+    assert [item.path for item in report.over] == [test] * expected
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        ("# ratio-exempt: generated matrix\n", "# covers: mod.py\n"),
+        ("# covers: other.py\n", "# covers: mod.py\n"),
+    ],
+)
+def test_a_file_newly_charged_to_a_module_within_the_limit_is_reported(
+    repo, before, after
+):
+    test = "tests/test_big.py"
+    _commit_on_base(repo, {"other.py": _lines(99), test: before + _lines(99)})
+    assert _commit(repo, {test: after + _lines(99)}) == 1
+
+
+@pytest.mark.parametrize("base_size, expected", [(16, 0), (15, 1)])
+def test_a_moved_module_is_judged_by_its_old_path_on_base(repo, base_size, expected):
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(base_size)})
+    _git("mv", "mod.py", "moved.py")
+    _git("mv", "tests/test_mod.py", "tests/test_moved.py")
+    assert _commit(repo, {"tests/test_moved.py": _lines(16)}) == expected
+
+
+def test_a_renamed_test_file_keeps_its_base_total(repo):
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(16)})
+    _git("mv", "tests/test_mod.py", "tests/test_mod_core.py")
+    assert _commit(repo, {}) == 0
+
+
+def test_test_files_merged_on_the_branch_keep_their_base_total(repo):
+    guards = "tests/test_mod_guards.py"
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(8), guards: _lines(8)})
+    (repo / guards).unlink()
+    assert _commit(repo, {"tests/test_mod.py": _lines(16)}) == 0
 
 
 def test_the_base_total_splits_a_file_by_the_modules_lines_on_base(repo):

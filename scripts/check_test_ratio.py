@@ -7,9 +7,12 @@ reported.
 
 Only growth past the limit is reported, not historic size. A module already over the
 limit at the merge base of ``--base`` and HEAD is printed for information and does
-not fail; its base total applies HEAD's coverage to the base content, so adding a
-header to an old file judges that file on its size before the branch. A module that
-does not exist on base, or has no lines covered there, counts as within the limit.
+not fail. Its base total counts the test files that covered it on base, following
+renames and including files since deleted or merged, unless HEAD exempts them or
+points them elsewhere. A file that covered nothing on base and gets a header on the
+branch adds its size on base to that total, and is not itself reported when only
+its siblings grew past the limit. A module that does not exist on base, or has no
+lines covered there, counts as within the limit.
 
 A test file covers the modules, repo-relative, in a header comment within its first
 10 lines; its lines count towards each in proportion to that module's lines, so a
@@ -46,7 +49,7 @@ from collections import defaultdict
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple, Optional, Set
+from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 MAX_RATIO = 1.5
 HEADER_LINES = 10
@@ -74,6 +77,19 @@ class Report(NamedTuple):
     over_on_base: List[Overage]
 
 
+class Tree(NamedTuple):
+    paths: Set[str]
+    read: Callable[[str], bytes]
+
+    def lines(self, path: str) -> int:
+        return len(self.read(path).splitlines())
+
+
+class Base(NamedTuple):
+    tree: Tree
+    renames: Dict[str, str]  # path at HEAD -> path on base
+
+
 def _git_bytes(*args: str) -> bytes:
     return subprocess.run(["git", *args], check=True, capture_output=True).stdout
 
@@ -86,37 +102,32 @@ def _is_test_file(path: str) -> bool:
     return bool(PY_TEST.match(path) or JS_TEST.match(path))
 
 
-def _line_count(path: Path) -> int:
-    return len(path.read_bytes().splitlines())
-
-
-def _is_module(root: Path, path: str, tracked: Set[str]) -> bool:
+def _is_module(path: str, tree: Tree) -> bool:
     return (
-        path in tracked
+        path in tree.paths
         and (path.endswith(MODULE_SUFFIXES) or posixpath.basename(path) == "Dockerfile")
         and not _is_test_file(path)
         and "tests" not in path.split("/")[:-1]
-        and (root / path).is_file()
     )
 
 
-def _name_match(root: Path, test_path: str, tracked: Set[str]) -> List[str]:
+def _name_match(test_path: str, tree: Tree) -> List[str]:
     py = PY_TEST.match(test_path)
     if not py:
         stem = JS_TEST.match(test_path)["stem"]
         candidates = [stem + suffix for suffix in JS_SUFFIXES]
-        return [path for path in candidates if _is_module(root, path, tracked)]
+        return [path for path in candidates if _is_module(path, tree)]
     directory = re.sub(r"(^|/)tests/$", r"\1", py["dir"])
     parts = py["name"].split("_")
     for end in range(len(parts), 0, -1):
         path = f"{directory}{'_'.join(parts[:end])}.py"
-        if _is_module(root, path, tracked):
+        if _is_module(path, tree):
             return [path]
     return []
 
 
-def _header(root: Path, test_path: str, pattern: re.Pattern) -> Optional[str]:
-    text = (root / test_path).read_text(encoding="utf-8", errors="replace")
+def _header(test_path: str, tree: Tree, pattern: re.Pattern) -> Optional[str]:
+    text = tree.read(test_path).decode("utf-8", errors="replace")
     for line in text.splitlines()[:HEADER_LINES]:
         match = pattern.match(line.strip())
         if match:
@@ -124,15 +135,30 @@ def _header(root: Path, test_path: str, pattern: re.Pattern) -> Optional[str]:
     return None
 
 
-def _covered(root: Path, test_path: str, tracked: Set[str]) -> List[str]:
-    header = _header(root, test_path, COVERS_HEADER) or ""
+def _covered(test_path: str, tree: Tree) -> List[str]:
+    header = _header(test_path, tree, COVERS_HEADER) or ""
     named = [posixpath.normpath(p.strip()) for p in header.split(",") if p.strip()]
-    return list(dict.fromkeys(named)) or _name_match(root, test_path, tracked)
+    return list(dict.fromkeys(named)) or _name_match(test_path, tree)
+
+
+def _scan(tree: Tree) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """Return each test file's modules and each exempt test file's reason."""
+    coverage: Dict[str, List[str]] = {}
+    exempt: Dict[str, str] = {}
+    for path in sorted(filter(_is_test_file, tree.paths)):
+        reason = _header(path, tree, EXEMPT_HEADER)
+        if reason:
+            exempt[path] = reason
+            continue
+        modules = [m for m in _covered(path, tree) if _is_module(m, tree)]
+        if modules:
+            coverage[path] = modules
+    return coverage, exempt
 
 
 def _total(
     module: str,
-    tests: List[str],
+    tests: Iterable[str],
     coverage: Dict[str, List[str]],
     line_count: Callable[[str], int],
 ) -> Fraction:
@@ -149,62 +175,106 @@ def _total(
     return total
 
 
-def _within_limit_on_base(
+def _failing_tests(
     module: str,
     tests: List[str],
     coverage: Dict[str, List[str]],
-    base_lines: Callable[[str], Optional[int]],
-) -> bool:
-    module_lines = base_lines(module)
-    if module_lines is None:
-        return True
-    total = _total(module, tests, coverage, lambda path: base_lines(path) or 0)
-    return total <= Fraction(MAX_RATIO) * module_lines
+    head: Tree,
+    base: Base,
+    base_scan: Tuple[Dict[str, List[str]], Dict[str, str]],
+) -> Set[str]:
+    """Return which of the tests over-limit ``module`` counts against, given base."""
+    base_module = base.renames.get(module, module)
+    if base_module not in base.tree.paths:
+        return set(tests)
+    base_coverage, base_exempt = base_scan
+    head_path = {old: new for new, old in base.renames.items()}
+
+    stable: Dict[str, List[str]] = {}
+    for test, modules in base_coverage.items():
+        at_head = head_path.get(test, test)
+        if base_module in modules and (
+            at_head not in head.paths or module in coverage.get(at_head, [])
+        ):
+            stable[test] = modules
+
+    # A file that covered nothing on base is charged by its header at HEAD. One that
+    # was exempt or covered something else was no part of this module's total.
+    retrofitted: Dict[str, List[str]] = {}
+    retrofitted_at_head = set()
+    for test in tests:
+        old = base.renames.get(test, test)
+        if (
+            old in base.tree.paths
+            and _is_test_file(old)
+            and old not in base_coverage
+            and old not in base_exempt
+        ):
+            named = [base.renames.get(m, m) for m in coverage[test]]
+            retrofitted[old] = [m for m in named if m in base.tree.paths]
+            retrofitted_at_head.add(test)
+
+    limit = Fraction(MAX_RATIO) * base.tree.lines(base_module)
+    charged = {**stable, **retrofitted}
+    if _total(base_module, charged, charged, base.tree.lines) <= limit:
+        return set(tests)
+    # A retrofit must not hide siblings that grew past the limit on their own.
+    siblings = [test for test in tests if test not in retrofitted_at_head]
+    if _total(base_module, stable, stable, base.tree.lines) <= limit and _total(
+        module, siblings, coverage, head.lines
+    ) > Fraction(MAX_RATIO) * head.lines(module):
+        return set(siblings)
+    return set()
 
 
-def _base_line_reader(root: Path, ref: str) -> Callable[[str], Optional[int]]:
-    """Return a line counter for files at the merge base; None for a file not there."""
+def _read_base(root: Path, ref: str) -> Base:
+    """Return the tree at the merge base and the renames since it."""
     base = _git("merge-base", ref, "HEAD").strip()
     # ls-tree lists paths relative to the working directory unless run from the root.
-    present = set(
+    paths = set(
         _git("-C", str(root), "ls-tree", "-rz", "--name-only", base).split("\0")
     )
-
-    def base_lines(path: str) -> Optional[int]:
-        if path not in present:
-            return None
-        return len(_git_bytes("-C", str(root), "show", f"{base}:{path}").splitlines())
-
-    return base_lines
+    fields = _git(
+        "-C",
+        str(root),
+        "diff",
+        "--find-renames",
+        "--diff-filter=R",
+        "--name-status",
+        "-z",
+        base,
+        "HEAD",
+    ).split("\0")
+    renames = dict(zip(fields[2::3], fields[1::3]))
+    read = lru_cache(maxsize=None)(
+        lambda path: _git_bytes("-C", str(root), "show", f"{base}:{path}")
+    )
+    return Base(Tree(paths, read), renames)
 
 
 def check(
     root: Path,
     tracked: List[str],
     changed: Set[str],
-    base_lines: Callable[[str], Optional[int]] = lambda path: None,
+    base: Optional[Base] = None,
 ) -> Report:
     """Hold each module covered by a changed test file to the limit.
 
-    A module ``base_lines`` shows was over the limit before goes to ``over_on_base``.
+    A module ``base`` shows was over the limit before goes to ``over_on_base``.
     """
-    report = Report([], {}, {}, [])
-    coverage: Dict[str, List[str]] = {}
-    known = set(tracked)
-    for path in tracked:
-        if not _is_test_file(path) or not (root / path).is_file():
+    head = Tree(
+        {path for path in tracked if (root / path).is_file()},
+        lru_cache(maxsize=None)(lambda path: (root / path).read_bytes()),
+    )
+    coverage, exempt = _scan(head)
+    report = Report(
+        [], {}, {path: why for path, why in exempt.items() if path in changed}, []
+    )
+    for path in sorted(changed & head.paths):
+        if not _is_test_file(path) or path in exempt:
             continue
-        reason = _header(root, path, EXEMPT_HEADER)
-        if reason:
-            if path in changed:
-                report.exempt[path] = reason
-            continue
-        covered = _covered(root, path, known)
-        modules = [module for module in covered if _is_module(root, module, known)]
-        if modules:
-            coverage[path] = modules
-        if path not in changed:
-            continue
+        covered = _covered(path, head)
+        modules = coverage.get(path, [])
         if not covered:
             report.unresolved[path] = (
                 "no module matches its name; add a '# covers: <path>' header"
@@ -220,28 +290,32 @@ def check(
         for module in modules:
             tests_of[module].append(test)
 
-    head_lines = lru_cache(maxsize=None)(lambda path: _line_count(root / path))
-    base_lines = lru_cache(maxsize=None)(base_lines)
+    # Reading every test file on base is only worth it once a module is over at HEAD.
+    scan_base = lru_cache(maxsize=None)(lambda: _scan(base.tree))
     for module, tests in tests_of.items():
         reported = sorted(set(tests) & changed)
         if not reported:
             continue
-        module_lines = head_lines(module)
-        total = _total(module, tests, coverage, head_lines)
+        module_lines = head.lines(module)
+        total = _total(module, tests, coverage, head.lines)
         if total <= Fraction(MAX_RATIO) * module_lines:
             continue
-        grew = _within_limit_on_base(module, tests, coverage, base_lines)
-        (report.over if grew else report.over_on_base).extend(
-            Overage(
-                path,
-                head_lines(path),
-                math.ceil(total),
-                len(tests),
-                module,
-                module_lines,
-            )
-            for path in reported
+        failing = (
+            _failing_tests(module, tests, coverage, head, base, scan_base())
+            if base
+            else set(tests)
         )
+        for path in reported:
+            (report.over if path in failing else report.over_on_base).append(
+                Overage(
+                    path,
+                    head.lines(path),
+                    math.ceil(total),
+                    len(tests),
+                    module,
+                    module_lines,
+                )
+            )
     return report
 
 
@@ -268,7 +342,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             root,
             tracked.split("\0"),
             set(changed.split("\0")),
-            _base_line_reader(root, args.base),
+            _read_base(root, args.base),
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip()
