@@ -399,6 +399,7 @@ class AttachmentReadTools:
                     and total < self.limits.search_max_total_chars
                     and time.monotonic() < deadline
                 ):
+                    records[(node_id, record.id)] = (record, "skipped_budget")
                     found = self.extracted(node_id, record, deadline, search=True)
                 status, truncated = "skipped_budget", False
                 if found is not None:
@@ -406,15 +407,17 @@ class AttachmentReadTools:
                     searched += 1
                     size = sum(len(s.text) for s in result.segments)
                     truncated = result.truncated
-                    if total + size <= self.limits.search_max_total_chars:
+                    remaining = self.limits.search_max_total_chars - total
+                    # Even rejected extraction results consume the call budget.
+                    total += size
+                    if size <= remaining:
                         status = result.status
                         if status == "ok":
-                            total += size
-                            records[(node_id, record.id)] = record
                             segments.extend(
                                 Segment(s.text, s.locator, source)
                                 for s in result.segments
                             )
+                    records[(node_id, record.id)] = (record, status)
                 if status != "ok" or truncated:
                     files.append({**source, "status": status, "truncated": truncated})
         ranked = rank_passages(
@@ -441,9 +444,9 @@ class AttachmentReadTools:
             used += len(passage.text)
             key = (passage.source["node_id"], passage.source["attachment_id"])
             counts[key] = counts.get(key, 0) + len(passage.text)
-        for key, chars in counts.items():
-            self.audit("search", key[0], records[key], chars)
-        if not counts:
+        for key, (record, status) in records.items():
+            self.audit("search", key[0], record, counts.get(key, 0), status)
+        if not records:
             self.audit("search")
         return {
             **ENVELOPE,

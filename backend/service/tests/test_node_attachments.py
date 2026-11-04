@@ -1874,6 +1874,93 @@ def test_attachment_tool_reports_unreadable_and_budget_skips(
     assert service.attachment_tool_search("policy", ["doc"])["files"] == result["files"]
 
 
+@pytest.mark.parametrize("status", ["ok", "failed"])
+def test_attachment_search_rejected_text_exhausts_total_budget(
+    service, client, monkeypatch, caplog, status
+):
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.service import attachment_tools
+
+    uploaded = [
+        _upload(client, "doc", text, f"{i}.txt").json()
+        for i, text in enumerate((b"first", b"oversized", b"last"))
+    ]
+    tools = service._attachment_read_tools
+    tools.limits = replace(tools.limits, search_max_total_chars=10)
+    calls = []
+
+    def extract(data, *args):
+        calls.append(data)
+        return ExtractionResult(
+            status if data == b"oversized" else "ok",
+            (Segment("policy" if data == b"first" else "policy " * 2, {"line": 1}),),
+        )
+
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = service.attachment_tool_search("policy", ["doc"])
+    assert calls == [b"first", b"oversized"]
+    assert result["searched_files"] == 2
+    assert {f["attachment_id"]: f["status"] for f in result["files"]} == {
+        record["id"]: "skipped_budget" for record in uploaded[1:]
+    }
+    assert {p["attachment_id"] for p in result["passages"]} == {uploaded[0]["id"]}
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert {r.attachment_id: r.outcome for r in audits} == {
+        uploaded[0]["id"]: "ok",
+        uploaded[1]["id"]: "skipped_budget",
+    }
+    assert len(audits) == 2
+
+
+@pytest.mark.parametrize("query", ["policy", "absent"])
+def test_attachment_search_audits_every_extraction(
+    service, client, monkeypatch, caplog, query
+):
+    from dataclasses import replace
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.service import attachment_tools
+
+    uploaded = [
+        _upload(client, "doc", text, f"{i}.txt").json()
+        for i, text in enumerate((b"first", b"second", b"failed"))
+    ]
+    tools = service._attachment_read_tools
+    tools.limits = replace(tools.limits, search_max_top_k=1)
+    secret = "policy confidential extraction text"
+
+    def extract(data, *args):
+        return (
+            ExtractionResult("failed")
+            if data == b"failed"
+            else ExtractionResult("ok", (Segment(secret, {"line": 1}),))
+        )
+
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    # A second call also verifies audit coverage for cached extraction results.
+    for _ in range(2):
+        caplog.clear()
+        with caplog.at_level("INFO", logger="attachments.audit"):
+            result = service.attachment_tool_search(query, ["doc"])
+        audits = [r for r in caplog.records if r.name == "attachments.audit"]
+        assert len(audits) == 3
+        by_id = {r.attachment_id: r for r in audits}
+        assert set(by_id) == {r["id"] for r in uploaded}
+        for record in uploaded:
+            audit = by_id[record["id"]]
+            assert audit.node_id == "doc"
+            assert audit.sha256 == record["sha256"]
+            assert audit.outcome == ("failed" if record == uploaded[2] else "ok")
+            assert audit.chars == sum(
+                len(p["text"])
+                for p in result["passages"]
+                if p["attachment_id"] == record["id"]
+            )
+            assert secret not in repr(audit.__dict__)
+        assert sum(r.chars == 0 for r in audits) >= 2
+
+
 def test_attachment_tool_enforces_budgets_and_read_windows(
     service, client, monkeypatch
 ):
