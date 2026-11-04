@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
+from typing import List, Dict, Optional, Any, Set, TYPE_CHECKING, Callable, Tuple
 from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
@@ -538,6 +538,11 @@ class GraphStorage:
         # load() and save() wait on the queue while holding it, so a writer
         # that did would deadlock the process.
         self._resync_pending = False
+        # Nodes whose vector in the index may not be in the store: generated
+        # while settling a batch that wrote none, or absorbed by a commit of
+        # unknown outcome. Search uses it; a merge's job still owes it to the
+        # store. Cleared by a write of the node or a re-read of the store.
+        self._unstored_vectors: Set[str] = set()
         # The most recent write of any kind - incremental or whole-graph.
         # Writes go to a background executor, so `self.nodes` is ahead of the
         # store between a mutation and its write landing. A traversal answered
@@ -1342,8 +1347,32 @@ class GraphStorage:
             self.graph.add_edge(edge.source, edge.target, key=edge_id, data=edge)
         try:
             self._settle_vector_index(touched)
+            self._note_generated_vectors(touched)
         except Exception as exc:
             logger.warning(f"could not restore vectors after an undone write: {exc}")
+
+    def _note_generated_vectors(
+        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
+        """Record the vectors a settle generated, which no write carried to
+        the store, as a merge's job must not read them as embedded (ADR 0013
+        §6). Callers must hold _lock."""
+        self._unstored_vectors.update(
+            node_id
+            for node_id, (node, vector) in touched.items()
+            if node is not None
+            and vector is None
+            and self.vector_store.has_embedding(node_id)
+        )
+
+    def _vectors_written(self, changes: List[Tuple[str, str, Any]]) -> None:
+        """A written node's payload carries its vector, and a deleted one has
+        none left to store. Callers must hold _lock."""
+        self._unstored_vectors.difference_update(
+            entity if action == "delete" else entity.id
+            for kind, action, entity in changes
+            if kind == "node"
+        )
 
     def _commit(
         self,
@@ -1408,6 +1437,7 @@ class GraphStorage:
             future = self._persist(self._operations(changes, expectations, undo=undo))
             if expectations:
                 self._await_landing(future)
+            self._vectors_written(changes)
             return
 
         if not changes:
@@ -1439,6 +1469,7 @@ class GraphStorage:
         for (_, action, entity), revision in zip(changes, stamps):
             if action == "upsert" and revision is not None:
                 entity.revision = revision
+        self._vectors_written(changes)
 
     def _operations(
         self,
@@ -1979,6 +2010,7 @@ class GraphStorage:
             )
 
         self.vector_store.load_vectors(vectors)
+        self._unstored_vectors.clear()
         # Every vector that came out of graph.json, whether or not the index
         # took it. One the index refused for its width will never be carried by
         # a sidecar write at all, since it is not in the index to be written;
@@ -2414,6 +2446,8 @@ class GraphStorage:
             # the description it no longer has.
             try:
                 self._settle_vector_index(touched)
+                self._unstored_vectors.difference_update(touched)
+                self._note_generated_vectors(touched)
             except Exception as exc:
                 if failure is None:
                     failure = exc
@@ -3640,6 +3674,7 @@ class GraphStorage:
             except Exception:
                 _restore()
                 raise
+            self._unstored_vectors.clear()
 
     def commit_generation_embeddings(
         self, generation: Optional[int], vectors: Dict[str, Any]
@@ -3696,15 +3731,24 @@ class GraphStorage:
                     self.save().result()
             return True
 
+    def _lacks_stored_vector(self, node_id: str) -> bool:
+        """No vector here, or one that may not be in the store. Callers must
+        hold _lock."""
+        return (
+            not self.vector_store.has_embedding(node_id)
+            or node_id in self._unstored_vectors
+        )
+
     def nodes_without_embedding(self) -> List[Node]:
-        """Copies of the nodes with no vector. Under the lock, as a reload
-        empties ``nodes`` in place before refilling it, and a read in that gap
-        would report nothing left to embed."""
+        """Copies of the nodes with no vector, or one the store may lack.
+        Under the lock, as a reload empties ``nodes`` in place before
+        refilling it, and a read in that gap would report nothing left to
+        embed."""
         with self._lock:
             return [
                 node.model_copy()
                 for node in self.nodes.values()
-                if not self.vector_store.has_embedding(node.id)
+                if self._lacks_stored_vector(node.id)
             ]
 
     def commit_merge_embeddings(
@@ -3714,18 +3758,20 @@ class GraphStorage:
         texts: Dict[str, str],
     ) -> Optional[int]:
         """Commit a merge job's vectors, each only if it still describes its
-        node (ADR 0013 §6): the node has no vector yet and its embedding text
-        is the one in ``texts``, read before encoding. The revision is not
-        compared, as a metadata-only update moves it and leaves the text.
+        node (ADR 0013 §6): the node has no stored vector yet and its
+        embedding text is the one in ``texts``, read before encoding. The
+        revision is not compared, as a metadata-only update moves it and
+        leaves the text.
 
         Entity upserts, each expecting the revision this instance holds. A
         store that refuses one (another instance moved the node) refuses the
         batch, so that node is dropped and the rest re-issued.
 
-        Returns how many vectors landed; a node left out still has no vector,
-        here or in the store, for the caller's next pass, also when this
-        raises because the commit failed. None means a replace superseded
-        ``generation``, here or in a store others write to.
+        Returns how many vectors landed; ``nodes_without_embedding`` still
+        lists a node left out, for the caller's next pass, also when this
+        raises because the commit failed or its outcome is unknown. None means
+        a replace superseded ``generation``, here or in a store others write
+        to.
         """
         with self._lock:
             if generation is not None and self._generation != generation:
@@ -3734,7 +3780,7 @@ class GraphStorage:
                 node_id: vector
                 for node_id, vector in vectors.items()
                 if node_id in self.nodes
-                and not self.vector_store.has_embedding(node_id)
+                and self._lacks_stored_vector(node_id)
                 and self.vector_store.embedding_text(self.nodes[node_id])
                 == texts.get(node_id)
             }
@@ -3751,6 +3797,9 @@ class GraphStorage:
                     )
                     return len(pending)
                 except GraphWriteOutcomeUnknown:
+                    # The re-read that would settle this can fail too, and
+                    # memory then keeps vectors the store may not have.
+                    self._unstored_vectors.update(pending)
                     raise
                 except Exception as exc:
                     # With a model loaded _undo regenerates a vector for each

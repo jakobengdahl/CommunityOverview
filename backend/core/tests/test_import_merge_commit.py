@@ -7,6 +7,8 @@ plan's reads (slice 3). The plan and digest that produce the writes are the serv
 (backend/service/tests/test_import_merge_commit.py).
 """
 
+# covers: backend/core/storage.py, backend/core/storage_merge.py
+
 from __future__ import annotations
 
 import json
@@ -583,6 +585,34 @@ def test_a_merge_the_shared_store_refuses_leaves_memory_as_it_was(shared):
 
     assert graph.nodes["over"].to_dict() == before
     assert "new" not in graph.edges
+
+
+def test_a_vector_regenerated_by_undoing_a_refused_merge_stays_owed_to_the_store(
+    shared, monkeypatch
+):
+    graph, backend = shared
+    store = graph.vector_store
+    store.remove_nodes_embeddings(["kept", "over"])
+    monkeypatch.setattr(
+        store,
+        "update_nodes_embeddings",
+        lambda nodes: store.absorb_embeddings({node.id: [9.0, 9.0] for node in nodes}),
+    )
+    backend.failure = EntityRevisionConflict("node", "kept", 1, 2)
+
+    with pytest.raises(EntityRevisionConflict):
+        graph.apply_import_merge(lambda: _subtype_merge(graph))
+
+    assert store.has_embedding("over")
+    backend.failure = None
+    text = store.embedding_text(graph.nodes["over"])
+    assert "over" in {node.id for node in graph.nodes_without_embedding()}
+    assert graph.commit_merge_embeddings(
+        graph.generation, {"over": [1.0, 0.0]}, {"over": text}
+    )
+    [[op]] = backend.batches
+    assert op.entity_id == "over"
+    assert op.payload["embedding"] == [1.0, 0.0]
 
 
 def test_an_unclassified_failure_never_arms_a_whole_graph_save_on_a_shared_store(

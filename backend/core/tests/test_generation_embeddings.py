@@ -12,9 +12,12 @@ from backend.core import (
     Edge,
     EntityRevisionConflict,
     GraphStorage,
+    GraphWriteOutcomeUnknown,
     Node,
 )
 from backend.core.storage_backends import (
+    EntityOperation,
+    ExternalChange,
     GraphGenerationMoved,
     GraphWriteFailed,
     WriteRefusedByStore,
@@ -322,3 +325,71 @@ def test_a_failed_merge_vector_commit_leaves_no_regenerated_vector(
     assert [node.id for node in storage.nodes_without_embedding()] == ["b"]
     assert storage.vector_store.get_vector_list("a") == [1.0, 0.0]
     assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+
+
+def _listed(storage):
+    return {node.id for node in storage.nodes_without_embedding()}
+
+
+def test_a_vector_generated_for_an_external_update_stays_owed_to_the_store(
+    storage, monkeypatch
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    monkeypatch.setattr(
+        storage.vector_store,
+        "update_nodes_embeddings",
+        lambda nodes: storage.vector_store.absorb_embeddings(
+            {node.id: [9.0, 9.0] for node in nodes}
+        ),
+    )
+    texts = _texts(storage)
+
+    def reported(node_id, **fields):
+        storage.apply_external_change(
+            ExternalChange.entities(
+                [
+                    EntityOperation.upsert_node(
+                        {**backend._store["nodes"][node_id], **fields}
+                    )
+                ]
+            )
+        )
+
+    reported("a", metadata={"k": "v"})
+    reported("b", metadata={"k": "v"})
+    assert _listed(storage) == {"a", "b"}
+    reported("b", metadata={"k": "w"}, embedding=[0.0, 1.0])
+    assert _listed(storage) == {"a"}
+
+    committed = storage.commit_merge_embeddings(
+        storage.generation, {"a": [1.0, 0.0], "b": [1.0, 0.0]}, texts
+    )
+
+    assert committed == 1
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert storage.vector_store.get_vector_list("b") == [0.0, 1.0]
+    assert _listed(storage) == set()
+
+
+def test_merge_vectors_of_unknown_outcome_are_committed_again_after_a_failed_reread(
+    storage, monkeypatch
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    apply_batch = backend.apply_batch
+    texts = _texts(storage)
+    vectors = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
+    monkeypatch.setattr(backend, "apply_batch", Mock(side_effect=RuntimeError("lost")))
+    monkeypatch.setattr(storage, "load", Mock(side_effect=RuntimeError("down")))
+
+    with pytest.raises(GraphWriteOutcomeUnknown):
+        storage.commit_merge_embeddings(storage.generation, vectors, texts)
+
+    assert _listed(storage) == {"a", "b"}
+    monkeypatch.setattr(backend, "apply_batch", apply_batch)
+    assert storage.commit_merge_embeddings(storage.generation, vectors, texts) == 2
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert _listed(storage) == set()

@@ -240,10 +240,14 @@ the decisions above:
 - **Per-node comparison, merge jobs only.** A job with `mode: "merge"` encodes
   detached copies, so the text recorded is the text encoded, and commits
   through `GraphStorage.commit_merge_embeddings`: under the lock a vector is
-  dropped if its node is gone, has a vector, or has other embedding text. A
-  node the store refuses is dropped and the batch re-issued. A commit that
+  dropped if its node is gone, has a stored vector, or has other embedding text.
+  A node the store refuses is dropped and the batch re-issued. A commit that
   fails leaves its nodes with no vector in memory either, where undoing it would
-  otherwise regenerate one the store lacks and hide the node. The worker then
+  otherwise regenerate one the store lacks and hide the node. A vector in memory
+  that the store may lack does not count as stored: one generated when settling
+  an external change or an undone write, such as a merge the store refused, or
+  one absorbed by a commit of unknown outcome. Search keeps using it, and a
+  merge's job embeds the node until a write carries it. The worker then
   reads what is still without a vector again, for at most three passes; if
   nodes are still moving the job fails and retries with backoff, and the drain
   that failed it waits out the delay and claims it again, as nothing polls the
