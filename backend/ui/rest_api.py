@@ -242,7 +242,12 @@ def create_ui_router(
                 try:
                     with report_chat_progress(emit):
                         result = await chat(request, http_request)
-                    emit({"kind": "chat_finished", "response": result.model_dump()})
+                    emit(
+                        {
+                            "kind": "chat_finished",
+                            "response": result.model_dump(mode="json"),
+                        }
+                    )
                 except HTTPException as exc:
                     # HTTP headers are already sent so carry the ordinary
                     # endpoint's status and body in the terminal stream event.
@@ -251,6 +256,15 @@ def create_ui_router(
                             "kind": "error",
                             "status": exc.status_code,
                             "response": {"detail": exc.detail},
+                        }
+                    )
+                except Exception:
+                    logger.exception("Error encoding /chat/stream response")
+                    emit(
+                        {
+                            "kind": "error",
+                            "status": 500,
+                            "response": {"detail": "Internal server error"},
                         }
                     )
                 finally:

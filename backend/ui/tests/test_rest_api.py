@@ -474,6 +474,53 @@ def test_stream_reports_rounds_and_tools_without_intermediate_content(
     assert steps[-1]["response"]["toolUsed"] == "search_graph"
 
 
+def test_stream_encodes_tool_results_like_non_streaming_chat():
+    """Nested datetime and UUID tool values retain the ordinary JSON encoding."""
+    import json
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.ui.rest_api import create_ui_router
+
+    result = {
+        "content": "Found the record.",
+        "toolUsed": "search_graph",
+        "toolResult": {
+            "records": [
+                {
+                    "created": datetime(2026, 11, 4, 12, 30, tzinfo=timezone.utc),
+                    "id": UUID("12345678-1234-5678-1234-567812345678"),
+                }
+            ]
+        },
+    }
+    app = FastAPI()
+    app.include_router(
+        create_ui_router(SimpleNamespace(process_message=lambda **kwargs: result))
+    )
+    with TestClient(app) as client:
+        payload = {"messages": [{"role": "user", "content": "search"}]}
+        ordinary = client.post("/chat", json=payload)
+        streamed = client.post("/chat/stream", json=payload)
+
+    assert ordinary.status_code == streamed.status_code == 200
+    steps = [
+        json.loads(line[6:])
+        for line in streamed.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps == [{"kind": "chat_finished", "response": ordinary.json()}]
+    assert steps[0]["response"]["toolResult"]["records"] == [
+        {
+            "created": "2026-11-04T12:30:00Z",
+            "id": "12345678-1234-5678-1234-567812345678",
+        }
+    ]
+
+
 @pytest.mark.parametrize("after_progress", [False, True])
 @pytest.mark.parametrize("failure", ["runtime", "http"])
 def test_stream_error_preserves_non_streaming_status_and_payload(
