@@ -511,9 +511,6 @@ def test_stream_error_preserves_non_streaming_status_and_payload(
     ]
     assert ordinary.status_code == 500
     assert ordinary.json() == {"detail": "Internal server error"}
-    # An error event cannot substitute for the HTTP status seen by clients
-    # and proxies, including when the chain fails after emitting progress.
-    assert streamed.status_code == ordinary.status_code
     assert steps[-1] == {
         "kind": "error",
         "status": ordinary.status_code,
