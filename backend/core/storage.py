@@ -3500,6 +3500,15 @@ class GraphStorage:
         with self._lock:
             return self._generation
 
+    @property
+    def generation_shared_across_scopes(self) -> bool:
+        """Whether another scope's replace moves ``generation``, so a move says
+        nothing about this scope's nodes. Only a backend that declares it."""
+        return (
+            getattr(self._persistence_backend, "generation_shared_across_scopes", False)
+            is True
+        )
+
     def replace_all_nodes_and_edges(
         self,
         nodes: List[Node],

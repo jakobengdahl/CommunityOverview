@@ -1657,6 +1657,12 @@ class PostgresGraphPersistenceBackend:
                 self._announce(conn, operations)
                 return revisions
 
+    @property
+    def generation_shared_across_scopes(self) -> bool:
+        """`graph_generation` lives in the one metadata row per schema, so a
+        replace in any scope moves it for every scope there."""
+        return self._scope is not None
+
     def _stored_generation(self, conn) -> int:
         row = conn.execute(
             sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(

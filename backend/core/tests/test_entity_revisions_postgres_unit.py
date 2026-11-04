@@ -281,3 +281,12 @@ def test_a_reserved_generation_is_drawn_above_the_stored_one_under_the_save_lock
         ("seq", 41),
         ("seq",),
     ]
+
+
+@pytest.mark.parametrize("scope,shared", [(None, False), ("workspace", True)])
+def test_the_generation_is_shared_across_scopes_only_with_a_scope_configured(
+    backend, scope, shared
+):
+    backend._scope = scope
+
+    assert backend.generation_shared_across_scopes is shared

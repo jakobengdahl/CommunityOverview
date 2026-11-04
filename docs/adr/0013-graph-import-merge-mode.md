@@ -252,6 +252,11 @@ the decisions above:
   nodes are still moving the job fails and retries with backoff, and the drain
   that failed it waits out the delay and claims it again, as nothing polls the
   queue. A replace's job is unchanged.
+- **A scope's merge job outlives another scope's replace.** The generation sits
+  in the metadata row every scope in a schema shares, and a replace's job covers
+  only its own scope's nodes. With a scope configured, a merge's job therefore
+  checks each pass against the generation current when the pass starts, and a
+  move means another pass rather than `superseded`.
 - **§3's checks reach the store as batch conditions.** Slice 2's comparison
   under `_lock` proves nothing about another instance's writes. The locked
   plan's recorded reads go with the batch as `read_revisions`, less those an

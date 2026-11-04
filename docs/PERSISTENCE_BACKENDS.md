@@ -1320,7 +1320,9 @@ Two boundaries and one cost, none of them accidents:
   `GraphStorage` would otherwise do, and loads an empty graph carrying another
   scope's metadata — `graph_name` included. A schema per scope has none of
   this; one set of tables for several scopes is the shape this bullet exists to
-  rule out.
+  rule out. `graph_generation` sits in that row too, so a replace in one scope
+  supersedes another scope's replace job. A merge's job carries on instead (the
+  backend's `generation_shared_across_scopes`).
 - **`id` remains the primary key of each entity table**, so two scopes sharing
   one table cannot both hold `n0`. An upsert therefore conflicts with *the* row
   of that id whatever scope it carries, and the backend **refuses** such a

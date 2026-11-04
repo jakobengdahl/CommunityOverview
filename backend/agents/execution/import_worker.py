@@ -77,9 +77,16 @@ def _embed_merged_nodes(
     while it was encoded, and the next pass reads it again. Returns how many
     vectors landed, or None when a later replace superseded the job. Nodes
     still moving after the last pass raise, so the job retries with backoff.
+
+    A generation shared across scopes moves with another scope's replace, whose
+    job does not cover this scope's nodes. So there each pass takes the current
+    one, and one that moves only means another pass.
     """
+    shared = storage.generation_shared_across_scopes
     embedded = 0
     for _ in range(MERGE_EMBEDDING_PASSES):
+        if shared:
+            generation = storage.generation
         nodes = storage.nodes_without_embedding()
         if not nodes:
             return embedded
@@ -89,6 +96,8 @@ def _embed_merged_nodes(
             {node.id: storage.vector_store.embedding_text(node) for node in nodes},
         )
         if committed is None:
+            if shared:
+                continue
             return None
         embedded += committed
     if storage.nodes_without_embedding():
@@ -109,7 +118,14 @@ def _run_one_import_job(
     # was ever about, and no work should be attempted against them under this
     # job's identity.
     job_generation = job.payload.get("graph_generation")
-    if job_generation is not None and storage.generation != job_generation:
+    if (
+        job_generation is not None
+        and storage.generation != job_generation
+        and not (
+            job.payload.get("mode") == "merge"
+            and storage.generation_shared_across_scopes
+        )
+    ):
         _mark_superseded(store, job)
         return None
 

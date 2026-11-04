@@ -261,7 +261,9 @@ What happens, in order:
      longer than the gap between the two imports or because it was a
      crash-recovered job resumed after the fact. Nothing was written back for
      it; the newer import's own job (re)generates embeddings for the content
-     that is actually live.
+     that is actually live. A merge's job in a scoped PostgreSQL store is never
+     `superseded`: the generation is shared with every scope in the schema, so
+     it carries on with the nodes that lack a vector.
 
    A `failed` job means embedding generation itself failed after retries —
    the graph replace is **not** rolled back for this, since it already

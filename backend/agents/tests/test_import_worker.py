@@ -599,3 +599,43 @@ class TestMergeJobPerNodeGuard:
 
         assert store.get(job.id).result["embeddings_status"] == "superseded"
         assert not storage.vector_store.has_embedding("n")
+
+    @pytest.mark.parametrize("moved_during_encoding", [False, True])
+    def test_another_scopes_replace_leaves_a_merge_job_embedding_its_nodes(
+        self, store, storage, monkeypatch, moved_during_encoding
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+        storage._persistence_backend.generation_shared_across_scopes = True
+        encoded = []
+
+        def encode(nodes):
+            encoded.append(True)
+            if moved_during_encoding and len(encoded) == 1:
+                storage._generation += 7
+            return {node.id: [1.0, 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+        if not moved_during_encoding:
+            storage._generation += 7
+
+        drain_import_jobs(store, storage)
+
+        assert storage.vector_store.has_embedding("n")
+        assert len(encoded) == (2 if moved_during_encoding else 1)
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.SUCCEEDED
+        assert stored.result["embedded_count"] == 1
+
+    def test_a_replace_job_is_still_superseded_by_a_generation_shared_across_scopes(
+        self, store, storage
+    ):
+        job = store.enqueue(
+            _import_job(payload={"graph_generation": storage.generation})
+        )
+        storage._persistence_backend.generation_shared_across_scopes = True
+        storage._generation += 7
+
+        drain_import_jobs(store, storage)
+
+        assert store.get(job.id).result["embeddings_status"] == "superseded"
