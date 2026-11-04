@@ -1949,6 +1949,7 @@ class GraphStorage:
         if self._embedding_sidecar is None:
             accepted = matching_dimension(inline, dominant_dimension(inline))
             self.vector_store.load_vectors(accepted)
+            self._unstored_vectors.clear()
             # Same reason as the sidecar path below: a vector the index refuses
             # for its width is still the node's only durable copy, and here
             # there is no sidecar it could ever move to. Without this the next
@@ -3780,7 +3781,9 @@ class GraphStorage:
         lists a node left out, for the caller's next pass, also when this
         raises because the commit failed or its outcome is unknown. None means
         a replace superseded ``generation``, here or in a store others write
-        to.
+        to. Where another scope's replace moves the generation, the graph is
+        first re-read from the store, as memory would otherwise hold the old
+        one on every pass (``generation_shared_across_scopes``).
         """
         with self._lock:
             if generation is not None and self._generation != generation:
@@ -3797,6 +3800,9 @@ class GraphStorage:
                 nodes = [self.nodes[node_id] for node_id in pending]
                 undo = self._capture(node_ids=list(pending))
                 self.vector_store.absorb_embeddings(pending)
+                # Only in memory until the write lands. A re-read that settles
+                # an unknown outcome clears this, and a failed one leaves it.
+                self._unstored_vectors.update(pending)
                 try:
                     self._commit(
                         [("node", "upsert", node) for node in nodes],
@@ -3806,16 +3812,16 @@ class GraphStorage:
                     )
                     return len(pending)
                 except GraphWriteOutcomeUnknown:
-                    # The re-read that would settle this can fail too, and
-                    # memory then keeps vectors the store may not have.
-                    self._unstored_vectors.update(pending)
                     raise
                 except Exception as exc:
                     # With a model loaded _undo regenerates a vector for each
                     # restored node, in memory only and from the text it holds
                     # now, which would pass the node off as embedded.
                     self.vector_store.remove_nodes_embeddings(list(pending))
+                    self._unstored_vectors.difference_update(pending)
                     if isinstance(exc, GraphGenerationMoved):
+                        if self.generation_shared_across_scopes:
+                            self.load(bootstrap_if_missing=False)
                         return None
                     # _commit has undone memory, so the nodes are read again.
                     if (
