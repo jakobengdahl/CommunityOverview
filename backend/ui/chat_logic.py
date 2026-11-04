@@ -6,9 +6,8 @@ import os
 import json
 import logging
 import threading
-from anyio import from_thread
+from anyio import CapacityLimiter, from_thread, to_thread
 from dotenv import load_dotenv
-from starlette.concurrency import run_in_threadpool
 import inspect
 from backend.llm.llm_providers import (
     create_provider,
@@ -560,6 +559,9 @@ def _chat_completion(provider, **kwargs):
     return provider.create_completion(**kwargs)
 
 
+# Match the default pool's 40-slot ceiling without consuming its slots during LLM waits.
+_CHAT_WORKER_LIMIT = 40
+_chat_limiter = CapacityLimiter(_CHAT_WORKER_LIMIT)
 _chat_worker = threading.local()
 
 
@@ -577,7 +579,7 @@ async def run_chat_off_event_loop(func: Callable, /, **kwargs) -> Any:
         finally:
             _chat_worker.active = False
 
-    return await run_in_threadpool(chat_on_worker)
+    return await to_thread.run_sync(chat_on_worker, limiter=_chat_limiter)
 
 
 def run_on_event_loop(func: Callable, /, *args, **kwargs) -> Any:
