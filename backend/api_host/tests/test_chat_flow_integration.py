@@ -15,13 +15,18 @@ import threading
 from unittest.mock import MagicMock
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 import pytest
 
 from backend.core.models import MAX_METADATA_DEPTH
 from backend.llm.llm_providers import LLMResponse
 from backend.runtime.authorization import get_current_request_authorization_inputs
 from backend.runtime.request_context import ACTOR_ID_HEADER
-from backend.ui.chat_logic import run_chat_off_event_loop, run_on_event_loop
+from backend.ui.chat_logic import (
+    _CHAT_WORKER_LIMIT,
+    run_chat_off_event_loop,
+    run_on_event_loop,
+)
 
 _WAIT_S = 5
 _MESSAGES = [{"role": "user", "content": "x"}]
@@ -92,6 +97,25 @@ async def test_requests_answered_during_isolated_concurrent_chats(test_app_with_
     assert health.status_code == 200 and write.status_code == 200
     assert llm.released_in_time == [True, True]
     assert sorted(seen) == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.asyncio
+async def test_full_chat_pool_leaves_default_threadpool_available(test_app_with_mock):
+    """Blocked LLM calls never occupy the default worker limiter."""
+    app = test_app_with_mock[0].app
+    llm = _GatedLLM(app)
+    async with _http(app) as http:
+        tasks = [
+            asyncio.create_task(http.post("/ui/chat/simple", json={"message": "x"}))
+            for _ in range(_CHAT_WORKER_LIMIT)
+        ]
+        try:
+            await _until(lambda: len(llm.threads) == _CHAT_WORKER_LIMIT)
+            assert await asyncio.wait_for(run_in_threadpool(lambda: 42), 1) == 42
+        finally:
+            llm.release.set()
+            await asyncio.gather(*tasks)
+    assert all(llm.released_in_time)
 
 
 @pytest.mark.asyncio
