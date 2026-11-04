@@ -208,6 +208,7 @@ def _failing_tests(
             old in base.tree.paths
             and old not in base_coverage
             and old not in base_exempt
+            and _header(test, head, COVERS_HEADER)
         ):
             named = [base.renames.get(m, m) for m in coverage[test]]
             retrofitted[old] = [m for m in named if m in base.tree.paths]

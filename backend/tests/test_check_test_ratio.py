@@ -334,15 +334,18 @@ def test_a_renamed_test_file_keeps_its_base_total(repo):
     assert _commit(repo, {}) == 0
 
 
-@pytest.mark.parametrize("base_size, expected", [(15, 1), (16, 0)])
-def test_a_non_test_renamed_with_a_header_counts_its_base_content(
-    repo, capsys, base_size, expected
+@pytest.mark.parametrize("base_size", [15, 16])
+@pytest.mark.parametrize("header", ["", "# covers: mod.py\n"])
+@pytest.mark.parametrize("old", ["old_content.txt", "tests/test_unresolved.py"])
+def test_a_rename_only_retrofits_base_content_when_it_adds_a_header(
+    repo, capsys, base_size, header, old
 ):
-    old, test = "old_content.txt", "tests/test_new.py"
+    test = "tests/test_mod.py"
+    expected = 0 if header and base_size == 16 else 1
     _commit_on_base(repo, {old: _lines(base_size)})
     capsys.readouterr()
     _git("mv", old, test)
-    assert _commit(repo, {test: "# covers: mod.py\n" + _lines(base_size + 1)}) == expected
+    assert _commit(repo, {test: header + _lines(base_size + 1)}) == expected
     assert _read_base(repo, "base").renames[test] == old
     output = capsys.readouterr().out
     assert test + ":" in output
