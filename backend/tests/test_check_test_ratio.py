@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.check_test_ratio import check, main  # noqa: E402
+from scripts.check_test_ratio import _read_base, check, main  # noqa: E402
 
 
 def _lines(count):
@@ -253,5 +253,177 @@ def test_an_unchanged_exempt_file_is_not_printed(repo, capsys):
     assert _printed_paths(capsys) == set()
 
 
+def _commit_on_base(repo, files):
+    _git("checkout", "-q", "base")
+    _commit(repo, files)
+    _git("checkout", "-qB", "work")
+
+
+def test_growth_within_a_module_already_over_on_base_is_printed_and_does_not_fail(
+    repo, capsys
+):
+    test = "tests/test_mod.py"
+    _commit_on_base(repo, {test: _lines(16)})
+    capsys.readouterr()
+    assert _commit(repo, {test: _lines(40)}) == 0
+    assert _printed_paths(capsys) == {test}
+
+
+def test_a_module_within_the_limit_on_base_is_reported_once_it_grows_past_it(repo):
+    test = "tests/test_mod.py"
+    _commit_on_base(repo, {test: _lines(15)})
+    assert _commit(repo, {test: _lines(16)}) == 1
+
+
+@pytest.mark.parametrize("base_size, expected", [(16, 0), (15, 1)])
+def test_a_header_added_on_the_branch_judges_the_file_on_its_size_before(
+    repo, base_size, expected
+):
+    test = "tests/test_old.py"
+    _commit_on_base(repo, {test: _lines(base_size)})
+    assert _commit(repo, {test: "# covers: mod.py\n" + _lines(99)}) == expected
+
+
+def test_a_file_exempt_on_the_branch_does_not_count_towards_the_base_total(repo):
+    big = "tests/test_mod_big.py"
+    _commit_on_base(repo, {big: _lines(99)})
+    files = {big: "# ratio-exempt: generated matrix\n", "tests/test_mod.py": _lines(16)}
+    assert _commit(repo, files) == 1
+
+
+@pytest.mark.parametrize("sibling, expected", [(15, 0), (16, 1)])
+def test_a_header_on_a_large_old_file_neither_hides_nor_causes_a_sibling_report(
+    repo, sibling, expected
+):
+    old, test = "tests/test_old.py", "tests/test_mod.py"
+    _commit_on_base(repo, {old: _lines(99), test: _lines(15)})
+    assert (
+        _commit(repo, {old: "# covers: mod.py\n" + _lines(99), test: _lines(sibling)})
+        == expected
+    )
+    report = check(repo, ["mod.py", old, test], {old, test}, _read_base(repo, "base"))
+    assert [item.path for item in report.over] == [test] * expected
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        ("# ratio-exempt: generated matrix\n", "# covers: mod.py\n"),
+        ("# covers: other.py\n", "# covers: mod.py\n"),
+    ],
+)
+def test_a_file_newly_charged_to_a_module_within_the_limit_is_reported(
+    repo, before, after
+):
+    test = "tests/test_big.py"
+    _commit_on_base(repo, {"other.py": _lines(99), test: before + _lines(99)})
+    assert _commit(repo, {test: after + _lines(99)}) == 1
+
+
+@pytest.mark.parametrize("base_size, expected", [(16, 0), (15, 1)])
+def test_a_moved_module_is_judged_by_its_old_path_on_base(repo, base_size, expected):
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(base_size)})
+    _git("mv", "mod.py", "moved.py")
+    _git("mv", "tests/test_mod.py", "tests/test_moved.py")
+    assert _commit(repo, {"tests/test_moved.py": _lines(16)}) == expected
+
+
+def test_a_renamed_test_file_keeps_its_base_total(repo):
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(16)})
+    _git("mv", "tests/test_mod.py", "tests/test_mod_core.py")
+    assert _commit(repo, {}) == 0
+
+
+@pytest.mark.parametrize("base_size", [15, 16])
+@pytest.mark.parametrize("header", ["", "# covers: mod.py\n"])
+@pytest.mark.parametrize("old", ["old_content.txt", "tests/test_unresolved.py"])
+def test_a_rename_only_retrofits_base_content_when_it_adds_a_header(
+    repo, capsys, base_size, header, old
+):
+    test = "tests/test_mod.py"
+    expected = 0 if header and base_size == 16 else 1
+    _commit_on_base(repo, {old: _lines(base_size)})
+    capsys.readouterr()
+    _git("mv", old, test)
+    assert _commit(repo, {test: header + _lines(base_size + 1)}) == expected
+    assert _read_base(repo, "base").renames[test] == old
+    output = capsys.readouterr().out
+    assert test + ":" in output
+    assert ("already over the limit on base" in output) == (expected == 0)
+
+
+def test_test_files_merged_on_the_branch_keep_their_base_total(repo):
+    guards = "tests/test_mod_guards.py"
+    _commit_on_base(repo, {"tests/test_mod.py": _lines(8), guards: _lines(8)})
+    (repo / guards).unlink()
+    assert _commit(repo, {"tests/test_mod.py": _lines(16)}) == 0
+
+
+def test_the_base_total_splits_a_file_by_the_modules_lines_on_base(repo):
+    test = "tests/test_wide.py"
+    header = "# covers: mod.py, big.py\n"
+    _commit_on_base(repo, {"big.py": _lines(1000), test: header + _lines(99)})
+    assert _commit(repo, {"big.py": _lines(10), test: header + _lines(98)}) == 1
+
+
+def test_the_base_is_the_merge_base_not_the_tip_of_the_ref(repo):
+    test = "tests/test_mod.py"
+    _commit(repo, {test: _lines(16)})
+    _git("checkout", "-q", "base")
+    (repo / test).write_text(_lines(99))
+    _git("add", ".")
+    _git("commit", "-qm", "later on base")
+    _git("checkout", "-q", "work")
+    assert main(["--base", "base"]) == 1
+
+
+def test_base_content_is_read_from_any_directory_and_in_any_encoding(repo, monkeypatch):
+    test = "tests/test_mod.py"
+    (repo / test).write_bytes(b"\xff\n" * 16)
+    _commit_on_base(repo, {})
+    (repo / test).write_text(_lines(40))
+    _git("add", ".")
+    _git("commit", "-qm", "grow")
+    monkeypatch.chdir(repo / "tests")
+    assert main(["--base", "base"]) == 0
+
+
 def test_a_base_ref_git_cannot_resolve_is_an_error_not_a_pass(repo):
     assert main(["--base", "no-such-ref"]) == 2
+
+
+@pytest.mark.parametrize("base_size, expected", [(15, 1), (16, 0)])
+@pytest.mark.parametrize("linked_test", [False, True])
+@pytest.mark.parametrize("absolute", [False, True])
+def test_base_symlinks_count_target_content(
+    repo, capsys, base_size, expected, linked_test, absolute
+):
+    test = "tests/test_mod.py"
+    _git("checkout", "-q", "base")
+    (repo / "source").mkdir()
+    (repo / "source/actual.py").write_text(_lines(10))
+    (repo / "mod.py").unlink()
+    (repo / "mod.py").symlink_to(
+        repo / "source/alias.py" if absolute else "source/alias.py"
+    )
+    (repo / "source/alias.py").symlink_to("actual.py")
+    if linked_test:
+        (repo / "test_content.txt").write_text(_lines(base_size))
+        (repo / test).symlink_to(
+            repo / "test_content.txt" if absolute else "../test_content.txt"
+        )
+    else:
+        (repo / test).write_text(_lines(base_size))
+    _git("add", ".")
+    _git("commit", "-qm", "linked base")
+    _git("checkout", "-qB", "work")
+    assert _read_base(repo, "base").tree.lines("mod.py") == 10
+    if linked_test:
+        assert _read_base(repo, "base").tree.lines(test) == base_size
+    if linked_test:
+        (repo / test).unlink()
+        (repo / test).symlink_to("../grown_content.txt")
+    assert _commit(repo, {test: _lines(16 if expected else 17)}) == expected
+    output = capsys.readouterr().out
+    assert test + ":" in output
+    assert ("already over the limit on base" in output) == (expected == 0)
