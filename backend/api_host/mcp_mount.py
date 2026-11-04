@@ -100,6 +100,36 @@ def bind_request_authorization_to_asgi_app(asgi_app):
     return request_bound_app
 
 
+def drop_response_after_sse_disconnect(asgi_app):
+    """Drop a second response an ASGI app sends after its first one started.
+
+    The mcp library's SSE endpoint returns a ``Response()`` once the stream ends.
+    On a client disconnect the stream ends without a closing body, so that second
+    ``http.response.start`` reaches BaseHTTPMiddleware, which asserts. The session
+    is already over by then.
+    """
+
+    async def single_response_app(scope, receive, send):
+        if scope.get("type") != "http":
+            await asgi_app(scope, receive, send)
+            return
+
+        started = False
+        dropping = False
+
+        async def send_first_response_only(message):
+            nonlocal started, dropping
+            if message["type"] == "http.response.start":
+                dropping = started
+                started = True
+            if not dropping:
+                await send(message)
+
+        await asgi_app(scope, receive, send_first_response_only)
+
+    return single_response_app
+
+
 def _mount_relative_path(scope) -> str:
     """Return the request path relative to the mount this handler is served from.
 
@@ -246,7 +276,9 @@ def mount_mcp(app: FastAPI, mcp, tools_map):
     """
     _install_mcp_no_redirect_rewrite(app)
 
-    mcp_sse_app = bind_request_authorization_to_asgi_app(mcp.sse_app())
+    mcp_sse_app = bind_request_authorization_to_asgi_app(
+        drop_response_after_sse_disconnect(mcp.sse_app())
+    )
 
     # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
     # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
