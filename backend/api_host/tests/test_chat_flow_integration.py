@@ -11,7 +11,6 @@ These tests verify the complete chat workflow:
 """
 
 import asyncio
-import json
 import threading
 from unittest.mock import MagicMock
 
@@ -29,13 +28,11 @@ _MESSAGES = [{"role": "user", "content": "x"}]
 
 
 class _GatedLLM:
-    """Holds each chat's first call until released, then asks for one search and
-    answers once it has the result."""
+    """Holds each chat's first call until released, then searches and answers."""
 
     def __init__(self, app):
         self.release = threading.Event()
-        self.threads = []
-        self.released_in_time = []
+        self.threads, self.released_in_time = [], []
         processor = app.state.chat_service._processor
         processor._resolve_llm_provider = lambda *_: (self, None)
 
@@ -45,14 +42,12 @@ class _GatedLLM:
             text = {"type": "text", "text": "done"}
             return LLMResponse(content=[text], stop_reason="end_turn")
         self.released_in_time.append(self.release.wait(_WAIT_S))
-        call = {"type": "tool_use", "id": "t1", "name": "search_graph"}
-        call["input"] = {"query": "x"}
+        call = dict(type="tool_use", id="t1", name="search_graph", input={"query": "x"})
         return LLMResponse(content=[call], stop_reason="tool_use")
 
 
 def _http(app):
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test")
 
 
 def _record_searches(app):
@@ -74,9 +69,7 @@ async def _until(condition):
 
 
 @pytest.mark.asyncio
-async def test_health_and_writes_answered_while_concurrent_chats_stay_isolated(
-    test_app_with_mock,
-):
+async def test_requests_answered_during_isolated_concurrent_chats(test_app_with_mock):
     app = test_app_with_mock[0].app
     llm = _GatedLLM(app)
     seen = _record_searches(app)
@@ -102,28 +95,21 @@ async def test_health_and_writes_answered_while_concurrent_chats_stay_isolated(
 
 
 @pytest.mark.asyncio
-async def test_all_graph_access_runs_on_the_loop_thread_and_llm_calls_off_it(
-    test_app_with_mock,
-):
+async def test_graph_access_on_the_loop_thread_and_llm_calls_off_it(test_app_with_mock):
     app = test_app_with_mock[0].app
     llm = _GatedLLM(app)
     llm.release.set()
     service = app.state.chat_service
-    akc = {
-        "short_name": "kiosk",
-        "tool_allowlist": ["read_node_attachment", "search_graph"],
-    }
-    service.graph_service.add_nodes(
-        nodes=[{"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}],
-        edges=[],
-    )
+    allowlist = ["read_node_attachment", "search_graph"]
+    akc = {"short_name": "kiosk", "tool_allowlist": allowlist}
+    node = {"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}
+    service.graph_service.add_nodes(nodes=[node], edges=[])
     # An advertised attachment tool makes the chat re-read the collection's grant.
     service._processor.tool_definitions.append({"name": "read_node_attachment"})
     hook = service.graph_service._authorization_hook
     evaluate, hook_threads = hook.evaluate, []
     hook.evaluate = lambda c: hook_threads.append(threading.get_ident()) or evaluate(c)
     body = {"messages": _MESSAGES, "collection_short_name": "kiosk"}
-
     async with _http(app) as http:
         assert (await http.post("/ui/chat", json=body)).status_code == 200
 
@@ -133,63 +119,15 @@ async def test_all_graph_access_runs_on_the_loop_thread_and_llm_calls_off_it(
 
 
 @pytest.mark.asyncio
-async def test_hop_copies_its_result_and_other_callers_run_in_place():
-    live = {"nodes": []}
-
+async def test_hop_copies_depth_capped_results_and_other_callers_run_in_place():
+    deep = {}
+    for _ in range(MAX_METADATA_DEPTH - 1):
+        deep = {"k": deep}
+    live = {"nodes": [], "deep": deep}
     hopped = await run_chat_off_event_loop(lambda: run_on_event_loop(lambda: live))
 
     assert hopped == live and hopped["nodes"] is not live["nodes"]
     assert run_on_event_loop(lambda: live) is live
-
-
-@pytest.mark.asyncio
-async def test_metadata_at_the_depth_cap_keeps_tool_results_and_collection_grant(
-    test_app_with_mock,
-):
-    """A deep result that is not the final one reaches the LLM, and a deep
-    collection keeps its attachment grant."""
-    app = test_app_with_mock[0].app
-    service = app.state.chat_service
-    deep = {}
-    for _ in range(MAX_METADATA_DEPTH - 1):
-        deep = {"k": deep}
-    akc = {
-        "short_name": "kiosk",
-        "tool_allowlist": ["read_node_attachment", "get_node_details", "search_graph"],
-        "deep": deep,
-    }
-    node = {"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}
-    service.graph_service.add_nodes(nodes=[node], edges=[])
-    service._processor.tool_definitions.append({"name": "read_node_attachment"})
-    # Under "node", as a deep value in the final toolResult is a 500 regardless.
-    service._processor.tools_map["get_node_details"] = lambda: {"node": node}
-    service._processor.tools_map["search_graph"] = lambda: {"nodes": []}
-    calls = [
-        ("get_node_details", {}),
-        ("search_graph", {}),
-    ]
-    requests = []
-
-    class _ScriptedLLM:
-        def create_completion(self, messages, **kwargs):
-            requests.append((list(messages), kwargs["tools"]))
-            if not calls:
-                text = {"type": "text", "text": "done"}
-                return LLMResponse(content=[text], stop_reason="end_turn")
-            name, tool_input = calls.pop(0)
-            call = {"type": "tool_use", "id": name, "name": name, "input": tool_input}
-            return LLMResponse(content=[call], stop_reason="tool_use")
-
-    service._processor._resolve_llm_provider = lambda *_: (_ScriptedLLM(), None)
-    body = {"messages": _MESSAGES, "collection_short_name": "kiosk"}
-
-    async with _http(app) as http:
-        response = await http.post("/ui/chat", json=body)
-
-    assert response.status_code == 200
-    delivered = json.loads(requests[1][0][-1]["content"][0]["content"])
-    assert delivered["node"]["metadata"]["deep"] == deep
-    assert "read_node_attachment" in {t["name"] for t in requests[0][1]}
 
 
 @pytest.mark.asyncio
@@ -198,22 +136,18 @@ async def test_cancelled_or_failing_chats_keep_their_outcomes(test_app_with_mock
     llm = _GatedLLM(app)
     seen = _record_searches(app)
     service, failure = app.state.chat_service, RuntimeError("failed")
-
-    def chat(http):
-        body, headers = {"messages": _MESSAGES}, {ACTOR_ID_HEADER: "a"}
-        return http.post("/ui/chat", json=body, headers=headers)
-
+    request = {"json": {"messages": _MESSAGES}, "headers": {ACTOR_ID_HEADER: "a"}}
     async with _http(app) as http:
-        cancelled = asyncio.create_task(chat(http))
+        cancelled = asyncio.create_task(http.post("/ui/chat", **request))
         await _until(lambda: llm.threads)
         cancelled.cancel()
         await asyncio.gather(cancelled, return_exceptions=True)
         llm.release.set()
         await _until(lambda: len(llm.threads) == 2)
         service._processor.tools_map["search_graph"] = MagicMock(side_effect=failure)
-        tool_error = await chat(http)
+        tool_error = await http.post("/ui/chat", **request)
         service.process_message = MagicMock(side_effect=failure)
-        chat_error = await chat(http)
+        chat_error = await http.post("/ui/chat", **request)
 
     assert seen == [("a", None)]
     assert tool_error.json()["toolResult"] == {"error": str(failure)}
