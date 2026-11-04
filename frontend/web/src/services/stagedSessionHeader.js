@@ -47,6 +47,7 @@ export const SESSION_AWARE = [
   ['POST', /^\/execute_tool$/],
   ['GET', /^\/export_graph$/],
   ['POST', /^\/ui\/chat$/],
+  ['POST', /^\/ui\/chat\/stream$/],
   ['POST', /^\/ui\/chat\/simple$/],
   ['POST', /^\/agents\/proposals\/[^/]+\/approve$/],
 ];

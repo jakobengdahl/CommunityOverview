@@ -1879,6 +1879,7 @@ own.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
+| POST | `/ui/chat/stream` | POST SSE: LLM rounds, tool start/finish, final chat response; 15-second keep-alive comments |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -1887,7 +1888,15 @@ own.
 | GET | `/ui/supported-formats` | Get supported document formats |
 | GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
 
-`/ui/chat` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
+`/ui/chat/stream` accepts the same body as `/ui/chat`. SSE `data` frames contain
+`kind`: `llm_started` (with `round`), `tool_started` or `tool_finished` (with
+`tool`), and `chat_finished` (with `response`, the ordinary chat response).
+An endpoint failure emits `error` without exception details. Progress contains
+no model reasoning, tool arguments or tool results. Each request owns its queue;
+steps go only to the requesting connection, with the same authorization and
+session context as `/ui/chat`. Disconnecting does not cancel the running chat.
+
+`/ui/chat`, `/ui/chat/stream` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
 event loop keeps answering `/health` and other requests during a chat. Their tool
 calls and every other graph access hop back to the event loop thread, carrying
 the request's context, so graph access stays single-threaded.

@@ -1,3 +1,4 @@
+# covers: backend/ui/rest_api.py, backend/ui/chat_logic.py
 """
 Tests for UI Backend REST API.
 
@@ -8,6 +9,7 @@ Verifies that:
 """
 
 import io
+import pytest
 
 
 class TestChatEndpoint:
@@ -443,3 +445,115 @@ class TestVisualizationContextEndpoint:
         assert response.status_code == 200
         assert mock_llm.received_system_prompts, "LLM was never called"
         assert "CURRENT VISUALIZATION STATE" not in mock_llm.received_system_prompts[0]
+
+
+def test_stream_reports_rounds_and_tools_without_intermediate_content(
+    fastapi_test_client,
+):
+    """Progress exposes only step metadata, followed by the ordinary response."""
+    import json
+
+    client, llm, _ = fastapi_test_client
+    llm.mock_tool_calls = [{"name": "search_graph", "input": {"query": "example"}}]
+    response = client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": "search"}]}
+    )
+    steps = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert steps[:-1] == [
+        {"kind": "llm_started", "round": 1},
+        {"kind": "tool_started", "tool": "search_graph"},
+        {"kind": "tool_finished", "tool": "search_graph"},
+        {"kind": "llm_started", "round": 2},
+    ]
+    assert steps[-1]["kind"] == "chat_finished"
+    assert steps[-1]["response"]["content"] == llm.mock_text_response
+    assert steps[-1]["response"]["toolUsed"] == "search_graph"
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_loop_live_and_worker_finishes_after_disconnect(monkeypatch):
+    """Idle streams send heartbeats and disconnects leave the worker running."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+    from backend.ui.rest_api import ChatRequest, create_ui_router
+
+    release = threading.Event()
+    finished = threading.Event()
+
+    def process_message(**kwargs):
+        try:
+            assert release.wait(3)
+            return {"content": "answer"}
+        finally:
+            finished.set()
+
+    monkeypatch.setattr("backend.ui.rest_api.CHAT_KEEPALIVE_SECONDS", 0.01)
+    router = create_ui_router(SimpleNamespace(process_message=process_message))
+    endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/chat/stream"
+    )
+    response = await endpoint(
+        ChatRequest(messages=[]), Request({"type": "http", "headers": []})
+    )
+    iterator = response.body_iterator
+    try:
+        await anext(iterator)
+        await asyncio.wait_for(anext(iterator), 1)
+        assert not finished.is_set()
+        await iterator.aclose()
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_streams_only_receive_their_own_steps():
+    """Concurrent chats on one service isolate progress callbacks."""
+    import asyncio
+    import json
+    import threading
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+    from backend.ui.chat_logic import _report_step
+    from backend.ui.rest_api import ChatRequest, create_ui_router
+
+    barrier = threading.Barrier(2, timeout=3)
+
+    def process_message(messages, **kwargs):
+        barrier.wait()
+        _report_step("tool_started", tool=messages[0]["content"])
+        return {"content": "answer"}
+
+    router = create_ui_router(SimpleNamespace(process_message=process_message))
+    endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/chat/stream"
+    )
+
+    async def collect(name):
+        response = await endpoint(
+            ChatRequest(messages=[{"role": "user", "content": name}]),
+            Request({"type": "http", "headers": []}),
+        )
+        return [
+            json.loads(frame[6:])
+            async for frame in response.body_iterator
+            if frame.startswith("data: ")
+        ]
+
+    first, second = await asyncio.wait_for(
+        asyncio.gather(collect("a"), collect("b")), 4
+    )
+    assert first[0] == {"kind": "tool_started", "tool": "a"}
+    assert second[0] == {"kind": "tool_started", "tool": "b"}
+    assert [len(first), len(second)] == [2, 2]

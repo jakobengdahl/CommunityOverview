@@ -728,6 +728,50 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (Array.isArray(options.selectedNodeIds)) {
     body.selected_node_ids = options.selectedNodeIds;
   }
+  if (options.onProgress) {
+    const url = `${UI_API_BASE}/chat/stream`;
+    refuseWhileModeUnknown(url, 'POST');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        ...sessionHeaders(url, 'POST'),
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw await responseError(response);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        let end;
+        while ((end = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const data = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trimStart())
+            .join('\n');
+          if (!data) continue;
+          const step = JSON.parse(data);
+          if (step.kind === 'error')
+            throw new Error(translate('chat.progress_error', 'Chat failed'));
+          options.onProgress(step.kind === 'chat_finished' ? { kind: step.kind } : step);
+          if (step.kind === 'chat_finished') return step.response;
+        }
+        if (done)
+          throw new Error(translate('chat.progress_interrupted', 'Chat connection interrupted'));
+      }
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+    }
+  }
   return apiFetch(`${UI_API_BASE}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),
