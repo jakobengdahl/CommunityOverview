@@ -829,18 +829,27 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                     aria-live="polite"
                     aria-label={t('chat.progress_label')}
                   >
-                    {(msg.progressSteps || progressSteps).map((step, index) => (
-                      <li
-                        key={index}
-                        aria-current={
-                          isProcessing && !msg.progressSteps && index === progressSteps.length - 1
-                            ? 'step'
-                            : undefined
-                        }
-                      >
-                        {t(`chat.progress_${step.kind}`, { round: step.round, tool: step.tool })}
-                      </li>
-                    ))}
+                    {(msg.progressSteps || progressSteps).map((step, index) =>
+                      step.kind === 'reasoning' ? (
+                        <li key={index}>
+                          <details className="chat-reasoning">
+                            <summary>{t('chat.reasoning_round', { round: step.round })}</summary>
+                            <div>{step.text}</div>
+                          </details>
+                        </li>
+                      ) : (
+                        <li
+                          key={index}
+                          aria-current={
+                            isProcessing && !msg.progressSteps && index === progressSteps.length - 1
+                              ? 'step'
+                              : undefined
+                          }
+                        >
+                          {t(`chat.progress_${step.kind}`, { round: step.round, tool: step.tool })}
+                        </li>
+                      )
+                    )}
                   </ol>
                 )}
 

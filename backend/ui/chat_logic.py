@@ -534,6 +534,8 @@ Always be helpful, transparent, and data-driven in your responses while minimizi
 
 
 # Context is copied into the worker; shared processors never hold request progress.
+MAX_REASONING_CHARS_PER_ROUND = 12000
+
 _chat_progress = contextvars.ContextVar("chat_progress", default=None)
 
 
@@ -557,7 +559,19 @@ def _chat_completion(provider, **kwargs):
     if progress is not None:
         progress["round"] += 1
         _report_step("llm_started", round=progress["round"])
-    return provider.create_completion(**kwargs)
+    response = provider.create_completion(**kwargs)
+    if progress is not None:
+        raw = getattr(response, "raw_response", None)
+        choices = getattr(raw, "choices", None)
+        message = getattr(choices[0], "message", None) if choices else None
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            _report_step(
+                "reasoning",
+                round=progress["round"],
+                text=reasoning[:MAX_REASONING_CHARS_PER_ROUND],
+            )
+    return response
 
 
 _chat_worker = threading.local()
