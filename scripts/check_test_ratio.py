@@ -231,9 +231,12 @@ def _read_base(root: Path, ref: str) -> Base:
     """Return the tree at the merge base and the renames since it."""
     base = _git("merge-base", ref, "HEAD").strip()
     # ls-tree lists paths relative to the working directory unless run from the root.
-    paths = set(
-        _git("-C", str(root), "ls-tree", "-rz", "--name-only", base).split("\0")
-    )
+    entries = {}
+    for entry in _git("-C", str(root), "ls-tree", "-rz", base).split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            entries[path] = metadata.split()[0]
+    paths = set(entries)
     fields = _git(
         "-C",
         str(root),
@@ -246,9 +249,31 @@ def _read_base(root: Path, ref: str) -> Base:
         "HEAD",
     ).split("\0")
     renames = dict(zip(fields[2::3], fields[1::3]))
-    read = lru_cache(maxsize=None)(
+    blob = lru_cache(maxsize=None)(
         lambda path: _git_bytes("-C", str(root), "show", f"{base}:{path}")
     )
+
+    def resolve(path: str) -> Optional[str]:
+        seen = set()
+        while path not in seen:
+            seen.add(path)
+            parts = path.split("/")
+            for end in range(1, len(parts) + 1):
+                link = "/".join(parts[:end])
+                if entries.get(link) == "120000":
+                    target = blob(link).decode(errors="surrogateescape")
+                    path = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(link), target, *parts[end:])
+                    )
+                    break
+            else:
+                return path if path in entries else None
+        return None
+
+    # Like HEAD's is_file/read_bytes, count linked content, not the link text.
+    resolved = {path: resolve(path) for path in paths}
+    paths = {path for path, target in resolved.items() if target is not None}
+    read = lru_cache(maxsize=None)(lambda path: blob(resolved[path]))
     return Base(Tree(paths, read), renames)
 
 

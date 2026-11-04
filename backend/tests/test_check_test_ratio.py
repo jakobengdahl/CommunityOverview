@@ -372,3 +372,33 @@ def test_base_content_is_read_from_any_directory_and_in_any_encoding(repo, monke
 
 def test_a_base_ref_git_cannot_resolve_is_an_error_not_a_pass(repo):
     assert main(["--base", "no-such-ref"]) == 2
+
+
+@pytest.mark.parametrize("base_size, expected", [(15, 1), (16, 0)])
+@pytest.mark.parametrize("linked_test", [False, True])
+def test_base_symlinks_count_target_content(
+    repo, capsys, base_size, expected, linked_test
+):
+    test = "tests/test_mod.py"
+    _git("checkout", "-q", "base")
+    (repo / "source").mkdir()
+    (repo / "source/actual.py").write_text(_lines(10))
+    (repo / "mod.py").unlink()
+    (repo / "mod.py").symlink_to("source/alias.py")
+    (repo / "source/alias.py").symlink_to("actual.py")
+    if linked_test:
+        (repo / "test_content.txt").write_text(_lines(base_size))
+        (repo / test).symlink_to("../test_content.txt")
+    else:
+        (repo / test).write_text(_lines(base_size))
+    _git("add", ".")
+    _git("commit", "-qm", "linked base")
+    _git("checkout", "-qB", "work")
+    assert _read_base(repo, "base").tree.lines("mod.py") == 10
+    if linked_test:
+        (repo / test).unlink()
+        (repo / test).symlink_to("../grown_content.txt")
+    assert _commit(repo, {test: _lines(16 if expected else 17)}) == expected
+    output = capsys.readouterr().out
+    assert test + ":" in output
+    assert ("already over the limit on base" in output) == (expected == 0)
