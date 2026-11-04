@@ -79,6 +79,34 @@ describe('chat progress stream', () => {
     expect(options.headers['x-communityoverview-session-id']).toBe('1111-2222-3333-4444');
   });
 
+  it('decodes terminal errors like ordinary HTTP errors', async () => {
+    const payload = { detail: 'Internal server error' };
+    global.fetch.mockResolvedValueOnce({
+      ok: false, status: 500, json: async () => payload,
+    });
+    const ordinary = await sendChatMessage([]).catch((error) => error);
+    const read = vi.fn().mockResolvedValueOnce({
+      value: new TextEncoder().encode(
+        `data: ${JSON.stringify({ kind: 'error', status: 500, response: payload })}\n\n`
+      ),
+      done: false,
+    });
+    const cancel = vi.fn();
+    const releaseLock = vi.fn();
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      body: { getReader: () => ({ read, cancel, releaseLock }) },
+    });
+    const onProgress = vi.fn();
+    const streamed = await sendChatMessage([], null, { onProgress }).catch((error) => error);
+    expect(streamed).toBeInstanceOf(Error);
+    for (const key of ['message', 'status', 'code', 'data', 'statusOnly'])
+      expect(streamed[key]).toEqual(ordinary[key]);
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(releaseLock).toHaveBeenCalledOnce();
+  });
+
   it.each([{ steps: [] }, { steps: [{ kind: 'error' }] }])(
     'rejects streams without a final response (%j)',
     async ({ steps }) => {

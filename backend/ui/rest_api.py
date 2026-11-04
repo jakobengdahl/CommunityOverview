@@ -243,8 +243,16 @@ def create_ui_router(
                     with report_chat_progress(emit):
                         result = await chat(request, http_request)
                     emit({"kind": "chat_finished", "response": result.model_dump()})
-                except Exception:
-                    emit({"kind": "error"})
+                except HTTPException as exc:
+                    # HTTP headers are already sent so carry the ordinary
+                    # endpoint's status and body in the terminal stream event.
+                    emit(
+                        {
+                            "kind": "error",
+                            "status": exc.status_code,
+                            "response": {"detail": exc.detail},
+                        }
+                    )
                 finally:
                     emit(None)
 

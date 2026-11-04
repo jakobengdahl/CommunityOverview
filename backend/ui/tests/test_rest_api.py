@@ -474,6 +474,59 @@ def test_stream_reports_rounds_and_tools_without_intermediate_content(
     assert steps[-1]["response"]["toolUsed"] == "search_graph"
 
 
+@pytest.mark.parametrize("after_progress", [False, True])
+@pytest.mark.parametrize("failure", ["runtime", "http"])
+def test_stream_error_preserves_non_streaming_status_and_payload(
+    after_progress, failure
+):
+    """Failures before or after progress retain the ordinary endpoint's error."""
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from backend.ui.chat_logic import _report_step
+    from backend.ui.rest_api import create_ui_router
+
+    def process_message(**kwargs):
+        if after_progress:
+            _report_step("llm_started", round=1)
+            _report_step("tool_started", tool="search_graph")
+        if failure == "http":
+            raise HTTPException(status_code=403, detail="private tool detail")
+        raise RuntimeError("private provider detail")
+
+    app = FastAPI()
+    app.include_router(
+        create_ui_router(SimpleNamespace(process_message=process_message))
+    )
+    with TestClient(app) as client:
+        payload = {"messages": [{"role": "user", "content": "search"}]}
+        ordinary = client.post("/chat", json=payload)
+        streamed = client.post("/chat/stream", json=payload)
+    steps = [
+        json.loads(line[6:])
+        for line in streamed.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert ordinary.status_code == 500
+    assert ordinary.json() == {"detail": "Internal server error"}
+    assert steps[-1] == {
+        "kind": "error",
+        "status": ordinary.status_code,
+        "response": ordinary.json(),
+    }
+    assert steps[:-1] == (
+        [
+            {"kind": "llm_started", "round": 1},
+            {"kind": "tool_started", "tool": "search_graph"},
+        ]
+        if after_progress
+        else []
+    )
+    assert "private" not in streamed.text
+
+
 @pytest.mark.asyncio
 async def test_stream_keeps_loop_live_and_worker_finishes_after_disconnect(monkeypatch):
     """Idle streams send heartbeats and disconnects leave the worker running."""

@@ -759,6 +759,11 @@ export async function sendChatMessage(messages, documentContext = null, options 
             .join('\n');
           if (!data) continue;
           const step = JSON.parse(data);
+          if (step.kind === 'error' && step.status && step.response)
+            throw await responseError({
+              status: step.status,
+              json: async () => step.response,
+            });
           if (step.kind === 'error')
             throw new Error(translate('chat.progress_error', 'Chat failed'));
           options.onProgress(step.kind === 'chat_finished' ? { kind: step.kind } : step);
