@@ -275,11 +275,13 @@ class TestChatServiceToolExecution:
         """An omitted depth falls back to the request's; an explicit 0 is kept."""
         from unittest.mock import MagicMock
 
-        service, _ = chat_service
+        service, mock_llm = chat_service
         service._graph_service.search_graph = MagicMock(return_value={"nodes": []})
-        service._current_federation_depth = 3
+        mock_llm.mock_tool_calls = [{"name": "search_graph", "input": {"query": "x"}}]
 
-        service._search_graph_tool(query="x")
+        service.process_message(
+            messages=[{"role": "user", "content": "find x"}], federation_depth=3
+        )
         kwargs = service._graph_service.search_graph.call_args.kwargs
         assert kwargs["federation_depth"] == 3
         assert kwargs["include_archived"] is False
