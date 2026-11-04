@@ -2885,9 +2885,9 @@ A work item, tracked outside this repository, may be marked done only when
 every acceptance matrix row (or cell) it claims to close is ✅, verified by a
 passing test (or, for the device column, a recorded physical-device pass) —
 not merely by a merged PR that touches the relevant files. A PR that only
-closes some cells of a row must record in the planning graph exactly which
-cells moved and which remain, and the item's parent must stay in progress
-until its own full row set is ✅.
+closes some cells of a row must record exactly which cells moved and which
+remain, and the item's parent must stay in progress until its own full row
+set is ✅.
 
 ## V1 non-goals
 
