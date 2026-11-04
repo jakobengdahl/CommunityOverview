@@ -155,8 +155,12 @@ a session ends, sweep unlogged notes into the graph. Never add to `SMALL_FIXES.m
   or under a `tests/` directory. A file covering several modules
   counts towards each in proportion to the module's lines. A `# ratio-exempt: <reason>` header
   skips the file and the script prints it; adding one needs the owner's approval.
-  Untouched files are left alone; no bulk trim. `scripts/check_test_ratio.py` checks
-  this, in CI as the non-required `Test volume (per-file limit)`.
+  Untouched files are left alone; no bulk trim. Only growth past the limit is
+  reported: a module already over it on the base branch, counting the files that
+  covered it there (renames followed; a header added to an old file that covered
+  nothing judges that file on its size before the PR), is printed for information
+  and does not fail. `scripts/check_test_ratio.py` checks this, in CI as the
+  non-required `Test volume (per-file limit)`.
 - Tests assert behaviour, not wording: no assertions on message wording, log text
   or substrings of serialized data. Assert constants, structured fields, mock
   arguments or record attributes instead. A test that only passes through such a
