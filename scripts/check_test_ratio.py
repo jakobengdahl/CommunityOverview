@@ -5,6 +5,12 @@ Whole files count, not the lines the branch added: every test file covering the
 same module counts towards its total, changed or not, but only changed files are
 reported.
 
+Only growth past the limit is reported, not historic size. A module already over the
+limit at the merge base of ``--base`` and HEAD is printed for information and does
+not fail; its base total applies HEAD's coverage to the base content, so adding a
+header to an old file judges that file on its size before the branch. A module that
+does not exist on base, or has no lines covered there, counts as within the limit.
+
 A test file covers the modules, repo-relative, in a header comment within its first
 10 lines; its lines count towards each in proportion to that module's lines, so a
 file alone is held to 1.5x their summed lines and a header should name only what the
@@ -26,7 +32,8 @@ which is then left out of totals and printed when changed:
 
 Usage: check_test_ratio.py [--base REF]
 
-Exit status: 0 within the limit, 1 a file is over it or covers nothing, 2 git failed.
+Exit status: 0 no growth past the limit, 1 a file grew past it or covers nothing,
+2 git failed.
 """
 
 import argparse
@@ -37,8 +44,9 @@ import subprocess
 import sys
 from collections import defaultdict
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set
 
 MAX_RATIO = 1.5
 HEADER_LINES = 10
@@ -63,12 +71,15 @@ class Report(NamedTuple):
     over: List[Overage]
     unresolved: Dict[str, str]
     exempt: Dict[str, str]
+    over_on_base: List[Overage]
+
+
+def _git_bytes(*args: str) -> bytes:
+    return subprocess.run(["git", *args], check=True, capture_output=True).stdout
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], check=True, capture_output=True, text=True
-    ).stdout
+    return _git_bytes(*args).decode(errors="surrogateescape")
 
 
 def _is_test_file(path: str) -> bool:
@@ -119,9 +130,65 @@ def _covered(root: Path, test_path: str, tracked: Set[str]) -> List[str]:
     return list(dict.fromkeys(named)) or _name_match(root, test_path, tracked)
 
 
-def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
-    """Hold each module covered by a changed test file to the limit."""
-    report = Report([], {}, {})
+def _total(
+    module: str,
+    tests: List[str],
+    coverage: Dict[str, List[str]],
+    line_count: Callable[[str], int],
+) -> Fraction:
+    total = Fraction()
+    for test in tests:
+        covered_lines = sum(line_count(other) for other in coverage[test])
+        # An all-empty set of modules has no proportions; each takes the whole file.
+        share = (
+            Fraction(line_count(module), covered_lines)
+            if covered_lines
+            else Fraction(1)
+        )
+        total += line_count(test) * share
+    return total
+
+
+def _within_limit_on_base(
+    module: str,
+    tests: List[str],
+    coverage: Dict[str, List[str]],
+    base_lines: Callable[[str], Optional[int]],
+) -> bool:
+    module_lines = base_lines(module)
+    if module_lines is None:
+        return True
+    total = _total(module, tests, coverage, lambda path: base_lines(path) or 0)
+    return total <= Fraction(MAX_RATIO) * module_lines
+
+
+def _base_line_reader(root: Path, ref: str) -> Callable[[str], Optional[int]]:
+    """Return a line counter for files at the merge base; None for a file not there."""
+    base = _git("merge-base", ref, "HEAD").strip()
+    # ls-tree lists paths relative to the working directory unless run from the root.
+    present = set(
+        _git("-C", str(root), "ls-tree", "-rz", "--name-only", base).split("\0")
+    )
+
+    def base_lines(path: str) -> Optional[int]:
+        if path not in present:
+            return None
+        return len(_git_bytes("-C", str(root), "show", f"{base}:{path}").splitlines())
+
+    return base_lines
+
+
+def check(
+    root: Path,
+    tracked: List[str],
+    changed: Set[str],
+    base_lines: Callable[[str], Optional[int]] = lambda path: None,
+) -> Report:
+    """Hold each module covered by a changed test file to the limit.
+
+    A module ``base_lines`` shows was over the limit before goes to ``over_on_base``.
+    """
+    report = Report([], {}, {}, [])
     coverage: Dict[str, List[str]] = {}
     known = set(tracked)
     for path in tracked:
@@ -148,36 +215,42 @@ def check(root: Path, tracked: List[str], changed: Set[str]) -> Report:
                 f"covers header names non-modules: {', '.join(rejected)}"
             )
 
-    totals: Dict[str, Fraction] = defaultdict(Fraction)
     tests_of: Dict[str, List[str]] = defaultdict(list)
     for test, modules in coverage.items():
-        test_lines = _line_count(root / test)
-        covered_lines = sum(_line_count(root / module) for module in modules)
         for module in modules:
-            # An all-empty set of modules has no proportions; each takes the whole file.
-            share = (
-                Fraction(_line_count(root / module), covered_lines)
-                if covered_lines
-                else Fraction(1)
-            )
-            totals[module] += test_lines * share
             tests_of[module].append(test)
 
+    head_lines = lru_cache(maxsize=None)(lambda path: _line_count(root / path))
+    base_lines = lru_cache(maxsize=None)(base_lines)
     for module, tests in tests_of.items():
-        module_lines = _line_count(root / module)
-        if totals[module] > Fraction(MAX_RATIO) * module_lines:
-            report.over.extend(
-                Overage(
-                    path,
-                    _line_count(root / path),
-                    math.ceil(totals[module]),
-                    len(tests),
-                    module,
-                    module_lines,
-                )
-                for path in sorted(set(tests) & changed)
+        reported = sorted(set(tests) & changed)
+        if not reported:
+            continue
+        module_lines = head_lines(module)
+        total = _total(module, tests, coverage, head_lines)
+        if total <= Fraction(MAX_RATIO) * module_lines:
+            continue
+        grew = _within_limit_on_base(module, tests, coverage, base_lines)
+        (report.over if grew else report.over_on_base).extend(
+            Overage(
+                path,
+                head_lines(path),
+                math.ceil(total),
+                len(tests),
+                module,
+                module_lines,
             )
+            for path in reported
+        )
     return report
+
+
+def _size(item: Overage) -> str:
+    return (
+        f"{item.lines} lines; {item.total_lines} across {item.test_files} test "
+        f"file(s) against {item.module_lines} in {item.module}; the limit is "
+        f"{MAX_RATIO}x"
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -191,21 +264,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             "diff", "--name-only", "--diff-filter=d", "-z", f"{args.base}...HEAD"
         )
         tracked = _git("-C", str(root), "ls-files", "-z")
+        report = check(
+            root,
+            tracked.split("\0"),
+            set(changed.split("\0")),
+            _base_line_reader(root, args.base),
+        )
     except subprocess.CalledProcessError as exc:
-        print(f"git failed: {exc.stderr.strip()}", file=sys.stderr)
+        stderr = exc.stderr.decode(errors="replace").strip()
+        print(f"git failed: {stderr}", file=sys.stderr)
         return 2
 
-    report = check(root, tracked.split("\0"), set(changed.split("\0")))
     for path, reason in report.exempt.items():
         print(f"{path}: ratio-exempt: {reason}")
+    for item in report.over_on_base:
+        print(f"{item.path}: already over the limit on base: {_size(item)}")
     for path, problem in report.unresolved.items():
         print(f"{path}: {problem}")
     for item in report.over:
-        print(
-            f"{item.path}: {item.lines} lines; {item.total_lines} across "
-            f"{item.test_files} test file(s) against {item.module_lines} in "
-            f"{item.module}; the limit is {MAX_RATIO}x"
-        )
+        print(f"{item.path}: {_size(item)}")
     return 1 if report.over or report.unresolved else 0
 
 

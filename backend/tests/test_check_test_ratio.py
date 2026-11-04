@@ -253,5 +253,72 @@ def test_an_unchanged_exempt_file_is_not_printed(repo, capsys):
     assert _printed_paths(capsys) == set()
 
 
+def _commit_on_base(repo, files):
+    _git("checkout", "-q", "base")
+    _commit(repo, files)
+    _git("checkout", "-qB", "work")
+
+
+def test_growth_within_a_module_already_over_on_base_is_printed_and_does_not_fail(
+    repo, capsys
+):
+    test = "tests/test_mod.py"
+    _commit_on_base(repo, {test: _lines(16)})
+    capsys.readouterr()
+    assert _commit(repo, {test: _lines(40)}) == 0
+    assert _printed_paths(capsys) == {test}
+
+
+def test_a_module_within_the_limit_on_base_is_reported_once_it_grows_past_it(repo):
+    test = "tests/test_mod.py"
+    _commit_on_base(repo, {test: _lines(15)})
+    assert _commit(repo, {test: _lines(16)}) == 1
+
+
+@pytest.mark.parametrize("base_size, expected", [(16, 0), (15, 1)])
+def test_a_header_added_on_the_branch_judges_the_file_on_its_size_before(
+    repo, base_size, expected
+):
+    test = "tests/test_old.py"
+    _commit_on_base(repo, {test: _lines(base_size)})
+    assert _commit(repo, {test: "# covers: mod.py\n" + _lines(99)}) == expected
+
+
+def test_a_file_exempt_on_the_branch_does_not_count_towards_the_base_total(repo):
+    big = "tests/test_mod_big.py"
+    _commit_on_base(repo, {big: _lines(99)})
+    files = {big: "# ratio-exempt: generated matrix\n", "tests/test_mod.py": _lines(16)}
+    assert _commit(repo, files) == 1
+
+
+def test_the_base_total_splits_a_file_by_the_modules_lines_on_base(repo):
+    test = "tests/test_wide.py"
+    header = "# covers: mod.py, big.py\n"
+    _commit_on_base(repo, {"big.py": _lines(1000), test: header + _lines(99)})
+    assert _commit(repo, {"big.py": _lines(10), test: header + _lines(98)}) == 1
+
+
+def test_the_base_is_the_merge_base_not_the_tip_of_the_ref(repo):
+    test = "tests/test_mod.py"
+    _commit(repo, {test: _lines(16)})
+    _git("checkout", "-q", "base")
+    (repo / test).write_text(_lines(99))
+    _git("add", ".")
+    _git("commit", "-qm", "later on base")
+    _git("checkout", "-q", "work")
+    assert main(["--base", "base"]) == 1
+
+
+def test_base_content_is_read_from_any_directory_and_in_any_encoding(repo, monkeypatch):
+    test = "tests/test_mod.py"
+    (repo / test).write_bytes(b"\xff\n" * 16)
+    _commit_on_base(repo, {})
+    (repo / test).write_text(_lines(40))
+    _git("add", ".")
+    _git("commit", "-qm", "grow")
+    monkeypatch.chdir(repo / "tests")
+    assert main(["--base", "base"]) == 0
+
+
 def test_a_base_ref_git_cannot_resolve_is_an_error_not_a_pass(repo):
     assert main(["--base", "no-such-ref"]) == 2
