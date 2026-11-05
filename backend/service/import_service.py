@@ -726,7 +726,7 @@ def commit_merge_import(
     event_origin: Optional[str] = None,
     event_correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Commit a MERGE import (ADR 0013, slice 2).
+    """Commit a MERGE import (ADR 0013, slices 2 and 3).
 
     Authorized as the preview is. The plan is recomputed and must match the
     caller's ``plan_digest`` (optional only when the policy can change no
@@ -744,8 +744,8 @@ def commit_merge_import(
             "success": False,
             "error_code": ImportMergeUnsupported.code,
             "message": (
-                "Merge import is not supported on a shared (PostgreSQL) graph "
-                "store yet; nothing was changed."
+                "This graph store cannot verify a merge import's reads inside "
+                "its write; nothing was changed."
             ),
         }
     try:

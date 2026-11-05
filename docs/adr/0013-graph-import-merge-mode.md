@@ -227,6 +227,72 @@ delivery-queue depth at return was 0 only because the measurement's
 loopback target is refused at once, so the enqueued count is the depth a
 slower target sees.
 
+### Slice 3 as implemented
+
+Slice 3 lifts the refusal of merges in PostgreSQL mode. Choices it made inside
+the decisions above:
+
+- **The entity-upsert embedding commit already existed.** Since §6 was written
+  `commit_generation_embeddings` has persisted incremental stores' vectors as
+  revision-checked upserts rather than with `save()`, so §6's second gap was
+  half closed. A refused node still failed the whole batch; what this slice
+  adds is the rule §6 (a) names for that case.
+- **Per-node comparison, merge jobs only.** A job with `mode: "merge"` encodes
+  detached copies, so the text recorded is the text encoded, and commits
+  through `GraphStorage.commit_merge_embeddings`: under the lock a vector is
+  dropped if its node is gone, has a stored vector, or has other embedding text.
+  A node the store refuses is dropped and the batch re-issued. A commit that
+  fails leaves its nodes with no vector in memory either, where undoing it would
+  otherwise regenerate one the store lacks and hide the node. A vector in memory
+  that the store may lack does not count as stored: one generated when settling
+  an external change or an undone write, such as a merge the store refused, or
+  one absorbed by a commit of unknown outcome. Search keeps using it, and a
+  merge's job embeds the node until a write carries it. The worker then
+  reads what is still without a vector again, for at most three passes; if
+  nodes are still moving the job fails and retries with backoff, and the drain
+  that failed it waits out the delay and claims it again, as nothing polls the
+  queue. A replace's job is unchanged.
+- **A scope's merge job outlives another scope's replace.** The generation sits
+  in the metadata row every scope in a schema shares, and a replace's job covers
+  only its own scope's nodes. With a scope configured, a merge's job therefore
+  checks each pass against the generation current when the pass starts, and a
+  move means another pass rather than `superseded`.
+- **§3's checks reach the store as batch conditions.** Slice 2's comparison
+  under `_lock` proves nothing about another instance's writes. The locked
+  plan's recorded reads go with the batch as `read_revisions`, less those an
+  expectation covers, and its `generation` as `expected_generation`.
+  PostgreSQL verifies both in the unit: each present row under `FOR SHARE`, so
+  a subtype change waits or is seen, and the generation stored in
+  `graph_metadata`, which needs no row lock as a replace's save takes the save
+  lock this batch holds in SHARE mode. A failure answers `import_plan_stale`.
+  The embedding commit carries the generation too: after a replace an entity
+  reads revision 0 before and after, so its expectation alone would pass. For
+  the comparison to mean anything, a replace on PostgreSQL takes its generation
+  from the store's revision counter instead of adding one to its own: two
+  instances replacing from one generation would otherwise store one value, and
+  the one whose content lost would pass the check against the other's graph.
+- **Absences stay ordinary concurrent writes.** A row a read found absent
+  cannot be held, so one inserted after the check lands beside the merge, and
+  a duplicate triple another instance adds is not seen, as §4 allows. Incident
+  edges of a node whose subtypes change are the exception: its row is locked
+  `FOR UPDATE` and the edge set compared, which excludes concurrent inserts
+  (§3). That list now omits edges the same merge creates, which the store does
+  not hold yet and which would otherwise refuse every such merge.
+- **A capability, not the refusal's removal.** A backend declares
+  `batch_conditions`; PostgreSQL does. One that assigns revisions without
+  declaring it would ignore the conditions, so it stays refused with 501
+  `import_merge_not_supported`.
+- **No whole-graph save on a shared store.** A failure `_commit` does not
+  classify is re-raised from `apply_import_merge` rather than arming the re-save
+  that follows a file backend's lost batch.
+- **Costs §6 (a) names.** Each embedded node's revision moves, so a preview or
+  caller expectation taken before the job finishes can go stale, and other
+  instances receive an `external-change` event per node. The backup and the
+  audit record stay per instance (§7).
+- **No schema or migration change.**
+- **Not measured.** §8's multi-instance figures need a PostgreSQL server and
+  are not in this slice.
+
 ## Context
 
 ### What exists today

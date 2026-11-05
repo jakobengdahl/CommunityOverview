@@ -1,5 +1,7 @@
 """PostgreSQL revision orchestration that needs no running server."""
 
+# covers: backend/core/postgres_backend.py
+
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -11,11 +13,13 @@ from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core.postgres_backend import (  # noqa: E402
     EVIDENCE_CONNECT_TIMEOUT_SECONDS,
+    SAVE_LOCK_KEY,
     PostgresGraphPersistenceBackend,
 )
 from backend.core.storage_backends import (  # noqa: E402
     EntityOperation,
     EntityRevisionConflict,
+    GraphGenerationMoved,
 )
 
 
@@ -200,3 +204,89 @@ def test_direct_incident_guard_refuses_added_or_changed_edges_before_writing(
     assert "new-edge" not in str(refused.value)
     assert "kept" not in str(refused.value)
     assert any("FOR UPDATE" in str(c.args[0]) for c in conn.execute.call_args_list)
+
+
+def _reading(rows_per_statement):
+    """A connection answering each statement with the next list of rows."""
+    conn = Mock()
+    conn.execute.side_effect = [
+        Mock(fetchall=Mock(return_value=rows), fetchone=Mock(return_value=rows))
+        for rows in rows_per_statement
+    ]
+    return conn
+
+
+def _conditions(**fields):
+    return [EntityOperation("node", "upsert", "w", {"id": "w"}, **fields)]
+
+
+@pytest.mark.parametrize("stored", [[("kept", 8)], []], ids=["moved", "gone"])
+def test_a_read_that_moved_or_went_refuses_the_batch(backend, stored):
+    with pytest.raises(EntityRevisionConflict) as refused:
+        backend._verify_batch_conditions(
+            _reading([stored]), _conditions(read_revisions=(("node", "kept", 7),))
+        )
+    assert refused.value.entity_id == "kept"
+    assert refused.value.expected_revision == 7
+
+
+def test_a_read_absent_that_now_exists_refuses_the_batch(backend):
+    with pytest.raises(EntityRevisionConflict) as refused:
+        backend._verify_batch_conditions(
+            _reading([[("late", 3)]]),
+            _conditions(read_revisions=(("edge", "late", None),)),
+        )
+    assert refused.value.kind == "edge"
+
+
+def test_reads_that_hold_pass(backend):
+    backend._verify_batch_conditions(
+        _reading([[("a", 1)], [("e", 0)]]),
+        _conditions(
+            read_revisions=(("node", "a", 1), ("node", "b", None), ("edge", "e", 0))
+        ),
+    )
+
+
+@pytest.mark.parametrize("row", [("3",), None], ids=["moved", "never-replaced"])
+def test_a_stored_generation_other_than_the_expected_refuses_the_batch(backend, row):
+    with pytest.raises(GraphGenerationMoved):
+        backend._verify_batch_conditions(
+            _reading([row]), _conditions(expected_generation=2)
+        )
+
+
+def test_a_never_replaced_store_is_at_generation_zero(backend):
+    backend._verify_batch_conditions(
+        _reading([None]), _conditions(expected_generation=0)
+    )
+
+
+def test_a_reserved_generation_is_drawn_above_the_stored_one_under_the_save_lock(
+    backend,
+):
+    backend._sequence_regclass = lambda: "seq"
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.side_effect = [("41",), (42,)]
+    backend._pool = MagicMock()
+    backend._pool.connection.return_value.__enter__.return_value = conn
+
+    assert backend.reserve_generation() == 42
+
+    params = [
+        call.args[1] for call in conn.execute.call_args_list if len(call.args) > 1
+    ]
+    assert params == [
+        (SAVE_LOCK_KEY, backend.schema),
+        ("seq", 41),
+        ("seq",),
+    ]
+
+
+@pytest.mark.parametrize("scope,shared", [(None, False), ("workspace", True)])
+def test_the_generation_is_shared_across_scopes_only_with_a_scope_configured(
+    backend, scope, shared
+):
+    backend._scope = scope
+
+    assert backend.generation_shared_across_scopes is shared
