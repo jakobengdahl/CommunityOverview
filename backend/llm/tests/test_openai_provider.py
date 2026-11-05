@@ -11,7 +11,6 @@ import pytest
 
 from backend.llm.llm_providers import (
     ClaudeProvider,
-    DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMResponse,
     OpenAIProvider,
     create_provider,
@@ -363,22 +362,17 @@ def test_constructor_resolves_base_url_and_model(openai_cls, monkeypatch):
     openai_cls.assert_called_with(
         api_key="k",
         base_url="http://env.example/v1",
-        timeout=DEFAULT_LLM_TIMEOUT_SECONDS,
     )
     assert provider.model == "env-model"
 
     provider = OpenAIProvider("k", model="explicit", base_url="http://arg.example")
-    openai_cls.assert_called_with(
-        api_key="k", base_url="http://arg.example", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
-    )
+    openai_cls.assert_called_with(api_key="k", base_url="http://arg.example")
     assert provider.model == "explicit"
 
     monkeypatch.delenv("OPENAI_BASE_URL")
     monkeypatch.delenv("OPENAI_MODEL")
     provider = OpenAIProvider("k")
-    openai_cls.assert_called_with(
-        api_key="k", base_url=None, timeout=DEFAULT_LLM_TIMEOUT_SECONDS
-    )
+    openai_cls.assert_called_with(api_key="k", base_url=None)
     assert provider.model == "gpt-4o"
 
 
@@ -387,18 +381,14 @@ def test_create_provider_selects_by_argument(openai_cls):
         "k", provider_type="openai", model="m", base_url="http://b"
     )
     assert isinstance(provider, OpenAIProvider)
-    openai_cls.assert_called_once_with(
-        api_key="k", base_url="http://b", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
-    )
+    openai_cls.assert_called_once_with(api_key="k", base_url="http://b")
     assert provider.model == "m"
     with patch("anthropic.Anthropic") as anthropic_cls:
         provider = create_provider(
             "k", provider_type="claude", model="m", base_url="http://b"
         )
     assert isinstance(provider, ClaudeProvider)
-    anthropic_cls.assert_called_once_with(
-        api_key="k", base_url="http://b", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
-    )
+    anthropic_cls.assert_called_once_with(api_key="k", base_url="http://b")
     assert provider.model == "m"
 
 
@@ -789,20 +779,38 @@ def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reas
 
 
 @pytest.mark.parametrize(
-    "setting, expected", [("900", 900), ("", 600), ("0", 600), ("bad", 600)]
+    "setting, expected",
+    [
+        ("900", 900),
+        ("", 600),
+        ("0", 600),
+        ("bad", 600),
+        ("99999999999", 600),
+        ("86400", 86400),
+        ("86401", 600),
+        ("-1", 600),
+    ],
 )
 @pytest.mark.parametrize(
     "provider_class, target",
     [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
 )
 def test_provider_request_timeout_is_configured(
-    monkeypatch, setting, expected, provider_class, target
+    monkeypatch, setting, expected, caplog, provider_class, target
 ):
-    """Both provider clients receive a positive timeout with a safe fallback."""
+    """Chat validates the deadline and passes it explicitly to the provider."""
+    from unittest.mock import MagicMock
+    from backend.ui.chat_logic import _chat_completion
+
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
     with patch(target) as client:
         provider_class("test-key")
-    assert client.call_args.kwargs["timeout"] == expected
+    assert "timeout" not in client.call_args.kwargs
+    provider = MagicMock(spec=provider_class)
+    _chat_completion(provider, messages=[], system_prompt="", tools=[])
+    assert provider.create_completion.call_args.kwargs["timeout_seconds"] == expected
+    if setting in {"0", "bad", "99999999999", "86401", "-1"}:
+        assert "Ignoring invalid LLM_TIMEOUT_SECONDS" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -829,23 +837,23 @@ def test_total_provider_timeout_recovers_while_sdk_keeps_making_progress(
 
     with patch(target) as client:
         provider = provider_class("test-key")
+        client.return_value.with_options.return_value = client.return_value
         create = (
             client.return_value.messages.create
             if provider_class is ClaudeProvider
             else client.return_value.chat.completions.create
         )
         create.side_effect = dribbling_response
-        with patch("backend.llm.llm_providers.positive_int_setting", return_value=0.05):
-            start = monotonic()
-            try:
-                with pytest.raises(TimeoutError):
-                    provider.create_completion([], "", [])
-                assert entered.is_set()
-                assert not finished.is_set()
-                assert monotonic() - start < 1
-            finally:
-                release.set()
-                assert finished.wait(1)
+        start = monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="LLM call exceeded 0.05 seconds"):
+                provider.create_completion([], "", [], timeout_seconds=0.05)
+            assert entered.is_set()
+            assert not finished.is_set()
+            assert monotonic() - start < 1
+        finally:
+            release.set()
+            assert finished.wait(1)
 
 
 def test_provider_deadline_preserves_context_results_and_errors():
@@ -855,14 +863,118 @@ def test_provider_deadline_preserves_context_results_and_errors():
     context = ContextVar("provider_test_context")
     token = context.set(object())
     try:
-        assert _provider_call(context.get) is context.get()
+        assert _provider_call(context.get, deadline_seconds=1) is context.get()
         error = ValueError("provider failure")
 
         def fail():
             raise error
 
         with pytest.raises(ValueError) as caught:
-            _provider_call(fail)
+            _provider_call(fail, deadline_seconds=1)
         assert caught.value is error
     finally:
         context.reset(token)
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+@pytest.mark.parametrize("bounded", [False, True])
+def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch):
+    """Inspect actual SDK requests, preserving non-chat defaults and retries."""
+    import importlib
+    import httpx as legacy_httpx
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "1")
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    requests = []
+    from threading import current_thread
+
+    caller = current_thread()
+
+    def reject(request):
+        assert (current_thread() is caller) is (not bounded)
+        requests.append(request)
+        return httpx.Response(
+            400, json={"error": {"message": "test", "type": "invalid_request_error"}}
+        )
+
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(reject))
+    )
+    original_timeout = provider.client.timeout
+    original_retries = provider.client.max_retries
+    if bounded:
+        from backend.llm.llm_providers import _completion_client
+
+        bounded_client = _completion_client(
+            provider.client, 17, type(provider.client.timeout)
+        )
+        assert bounded_client.max_retries == 0
+        assert provider.client.max_retries == original_retries == 2
+    with pytest.raises(Exception) as caught:
+        provider.create_completion(
+            [], "", [], **({"timeout_seconds": 17} if bounded else {})
+        )
+    assert caught.value.status_code == 400
+    assert len(requests) == 1
+    timeout = requests[0].extensions["timeout"]
+    assert timeout["connect"] == 5.0
+    assert timeout["read"] == (17 if bounded else original_timeout.read)
+    assert timeout["write"] == (17 if bounded else original_timeout.write)
+    assert timeout["pool"] == (17 if bounded else original_timeout.pool)
+    provider.client.close()
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+def test_chat_sdk_does_not_retry_after_deadline(provider_class):
+    import importlib
+    import httpx as legacy_httpx
+    from threading import Event, Thread
+    from backend.llm.llm_providers import _completion_client
+
+    release, finished = Event(), Event()
+    requests = []
+    workers = []
+
+    def worker(**kwargs):
+        thread = Thread(**kwargs)
+        workers.append(thread)
+        return thread
+
+    def fail_after_deadline(request):
+        requests.append(request)
+        assert release.wait(2)
+        finished.set()
+        return httpx.Response(
+            500, json={"error": {"message": "test", "type": "api_error"}}
+        )
+
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(fail_after_deadline))
+    )
+    assert (
+        _completion_client(
+            provider.client, 1, type(provider.client.timeout)
+        ).max_retries
+        == 0
+    )
+    with patch("backend.llm.llm_providers.Thread", side_effect=worker):
+        try:
+            with pytest.raises(TimeoutError, match="0.05 seconds"):
+                provider.create_completion([], "", [], timeout_seconds=0.05)
+        finally:
+            release.set()
+        workers[0].join(2)
+    assert not workers[0].is_alive()
+    assert finished.is_set()
+    assert len(requests) == 1

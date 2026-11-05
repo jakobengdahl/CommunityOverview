@@ -1590,7 +1590,12 @@ class TestPresentForm:
                 self.n = 0
 
             def create_completion(
-                self, messages, system_prompt, tools, max_tokens=4096
+                self,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens=4096,
+                timeout_seconds=None,
             ):
                 self.n += 1
                 if self.n == 1:
@@ -2708,7 +2713,9 @@ class TestEmptyFinalReplyAfterToolChain:
         script = list(final_replies) if first_turn else [tool_turn, *final_replies]
         calls = []
 
-        def create_completion(messages, system_prompt, tools, max_tokens=4096):
+        def create_completion(
+            messages, system_prompt, tools, max_tokens=4096, timeout_seconds=None
+        ):
             calls.append(
                 {"messages": list(messages), "tools": tools, "max_tokens": max_tokens}
             )
@@ -2981,3 +2988,27 @@ def test_answer_retry_respects_chat_round_budget(chat_service, monkeypatch, limi
     )
     assert len(calls) == limit
     assert result["content"] == _NO_ANSWER_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "result", [{"success": False, "message": "No nodes added"}, {"error": "failed"}]
+)
+def test_chat_round_cap_reports_failed_mutation(chat_service, monkeypatch, result):
+    from backend.ui.chat_logic import CHAT_ROUND_LIMIT_MESSAGE
+
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", "1")
+    service, _ = chat_service
+    llm = MagicMock()
+    llm.options = {}
+    llm.create_completion.return_value = LLMResponse(
+        content=[{"type": "tool_use", "id": "call", "name": "add_nodes", "input": {}}],
+        stop_reason="tool_use",
+    )
+    response = service._processor.process_message(
+        [{"role": "user", "content": "Add nodes"}],
+        llm_provider=llm,
+        tools_override={"add_nodes": lambda: result},
+    )
+    assert response["content"] == CHAT_ROUND_LIMIT_MESSAGE.format(
+        summary="add_nodes (failed): 1"
+    )

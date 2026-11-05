@@ -17,6 +17,8 @@ from backend.llm.llm_providers import (
     LLMProvider,
     LLMResponse,
     DEFAULT_CHAT_MAX_ROUNDS,
+    DEFAULT_LLM_TIMEOUT_SECONDS,
+    MAX_LLM_TIMEOUT_SECONDS,
     positive_int_setting,
     provider_max_tokens,
     TOOL_CALLS_NOT_RUN_MESSAGE,
@@ -573,7 +575,14 @@ def _chat_completion(provider, **kwargs):
         progress["round"] += 1
         _report_step("llm_started", round=progress["round"])
     try:
-        response = provider.create_completion(**kwargs)
+        response = provider.create_completion(
+            **kwargs,
+            timeout_seconds=positive_int_setting(
+                "LLM_TIMEOUT_SECONDS",
+                DEFAULT_LLM_TIMEOUT_SECONDS,
+                MAX_LLM_TIMEOUT_SECONDS,
+            ),
+        )
     except (TimeoutError, ClaudeTimeoutError, OpenAITimeoutError):
         response = LLMResponse(content=[], stop_reason="timeout")
     if progress is not None:
@@ -1813,7 +1822,8 @@ class ChatProcessor:
             _report_step("tool_finished", tool=tool_name)
             outcome = (
                 "failed"
-                if isinstance(tool_result, dict) and tool_result.get("error")
+                if isinstance(tool_result, dict)
+                and (tool_result.get("error") or tool_result.get("success") is False)
                 else "completed"
             )
             completed_tools.append(f"{tool_name} ({outcome})")
