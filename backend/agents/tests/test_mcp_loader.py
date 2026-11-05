@@ -260,6 +260,51 @@ class TestToolExecutor:
         assert len(mock_service.search_calls) == 1
         assert mock_service.search_calls[0]["query"] == "test"
 
+    @pytest.mark.parametrize("raises", [False, True])
+    def test_graph_tool_logs_exclude_sensitive_values(self, caplog, raises):
+        argument_secret = "argument-secret-content"
+        exception_secret = "exception-secret-content"
+
+        class FailingService:
+            def search_graph(self, **kwargs):
+                if raises:
+                    raise ValueError(exception_secret)
+                return {"error": exception_secret}
+
+        loader = MCPLoader([])
+        loader._tools_cache = {
+            "GRAPH__search_graph": NamespacedTool(
+                integration_id="GRAPH",
+                original_name="search_graph",
+                namespaced_name="GRAPH__search_graph",
+                description="Search",
+                input_schema={},
+            )
+        }
+        executor = loader.create_tool_executor(graph_service=FailingService())
+
+        with caplog.at_level(logging.INFO, logger=mcp_loader.__name__):
+            result = executor(
+                "GRAPH__search_graph",
+                {"query": argument_secret, "options": {"content": argument_secret}},
+            )
+
+        assert result == {"error": exception_secret}
+        records = [r for r in caplog.records if r.name == mcp_loader.__name__]
+        assert records
+        for record in records:
+            assert argument_secret not in repr(record.__dict__)
+            assert exception_secret not in repr(record.__dict__)
+        assert "search_graph" in caplog.text
+        assert "query" in caplog.text
+        assert "options" in caplog.text
+        if raises:
+            error_records = [r for r in records if r.levelno == logging.ERROR]
+            assert len(error_records) == 1
+            assert "ValueError" in error_records[0].getMessage()
+            assert "query" in error_records[0].getMessage()
+            assert error_records[0].exc_info is None
+
     def test_executor_unknown_tool_raises(self, mock_service):
         """Test that calling unknown tool returns error."""
         loader = MCPLoader([])

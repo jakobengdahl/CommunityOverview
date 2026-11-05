@@ -95,16 +95,9 @@ def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
     return (raw[:max_bytes], True) if over_cap else (raw, False)
 
 
-def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
-    """Summarize tool arguments for logging (truncate long values)."""
-
-    try:
-        text = json.dumps(args, default=str, ensure_ascii=False)
-    except Exception:
-        text = str(args)
-    if len(text) > max_len:
-        return text[:max_len] + "..."
-    return text
+def _summarize_args(args: Dict[str, Any]) -> str:
+    """Summarize argument names only; values may contain secrets or file content."""
+    return json.dumps(list(args), ensure_ascii=False)
 
 
 @dataclass
@@ -881,7 +874,7 @@ class MCPLoader:
             else:
                 logger.info(
                     f"Executing tool {namespaced_name} "
-                    f"with args: {_summarize_args(input_args)}"
+                    f"with argument names: {_summarize_args(input_args)}"
                 )
 
             # Route to appropriate executor
@@ -899,9 +892,7 @@ class MCPLoader:
                 result = {"error": f"No executor for integration: {integration_id}"}
 
             if isinstance(result, dict) and "error" in result:
-                logger.warning(
-                    f"Tool {namespaced_name} returned error: {result['error']}"
-                )
+                logger.warning("Tool %s returned an error", namespaced_name)
 
             return result
 
@@ -964,8 +955,10 @@ class MCPLoader:
                 return method(**input_args)
         except Exception as e:
             logger.error(
-                f"Graph tool {tool_name} failed: {e} "
-                f"(args: {_summarize_args(input_args)})"
+                "Graph tool %s failed (%s); argument names: %s",
+                tool_name,
+                type(e).__name__,
+                _summarize_args(input_args),
             )
             return {"error": str(e)}
 
