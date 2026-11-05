@@ -644,6 +644,12 @@ class MCPLoader:
             ),
         ]
 
+        from backend.service.attachment_tools import tool_definitions
+
+        graph_tools.extend(
+            (t["name"], t["description"], t["input_schema"]) for t in tool_definitions()
+        )
+
         return [
             NamespacedTool(
                 integration_id=integration.id,
@@ -868,10 +874,15 @@ class MCPLoader:
             integration_id = tool.integration_id
             original_name = tool.original_name
 
-            logger.info(
-                f"Executing tool {namespaced_name} "
-                f"with args: {_summarize_args(input_args)}"
-            )
+            from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+            if original_name in ATTACHMENT_TOOLS:
+                logger.info("Executing attachment tool %s", namespaced_name)
+            else:
+                logger.info(
+                    f"Executing tool {namespaced_name} "
+                    f"with args: {_summarize_args(input_args)}"
+                )
 
             # Route to appropriate executor
             if integration_id == "GRAPH":
@@ -921,13 +932,28 @@ class MCPLoader:
             input_args.setdefault("edges", [])
             input_args.setdefault("nodes", [])
 
-        # Route to the appropriate GraphService method
-        method = getattr(graph_service, tool_name, None)
+        attachment_methods = {
+            "list_node_attachments": "attachment_tool_list",
+            "read_node_attachment": "attachment_tool_read",
+            "search_node_attachments": "attachment_tool_search",
+        }
+        # Dispatch only advertised GRAPH tools, never REST attachment methods.
+        if tool_name not in {
+            t.original_name
+            for t in self._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+        }:
+            return {"error": f"Unknown graph tool: {tool_name}"}
+        method = getattr(
+            graph_service, attachment_methods.get(tool_name, tool_name), None
+        )
         if not method:
             return {"error": f"Unknown graph tool: {tool_name}"}
 
         try:
-            return method(**input_args)
+            from backend.service.attachment_tools import tool_caller
+
+            with tool_caller("agent", agent_id):
+                return method(**input_args)
         except Exception as e:
             logger.error(
                 f"Graph tool {tool_name} failed: {e} "

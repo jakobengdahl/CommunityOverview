@@ -15,6 +15,8 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+from .attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS
+
 import functools
 import inspect
 import json
@@ -561,6 +563,8 @@ def register_mcp_tools(
         if not attachment_tool_allowed(func.__name__, attachment_access):
             return func
         if func.__name__ in ATTACHMENT_TOOLS:
+            if service.attachment_settings is None:
+                return func
             original = func
 
             @functools.wraps(original)
@@ -568,7 +572,12 @@ def register_mcp_tools(
                 refused = attachment_tool_refusal(
                     original.__name__, attachment_access, service.authorization_hook
                 )
-                return refused if refused is not None else original(*args, **kwargs)
+                if refused is not None:
+                    return refused
+                from .attachment_tools import tool_caller
+
+                with tool_caller("mcp"):
+                    return original(*args, **kwargs)
 
         wrapped = _session_aware(
             func,
@@ -577,9 +586,41 @@ def register_mcp_tools(
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
-        mcp.tool()(wrapped)
+        if func.__name__ in ATTACHMENT_TOOLS:
+
+            @functools.wraps(wrapped)
+            async def async_tool(*args, **kwargs):
+                import asyncio
+
+                return await asyncio.to_thread(wrapped, *args, **kwargs)
+
+            mcp.tool()(async_tool)
+        else:
+            mcp.tool()(wrapped)
         tools_map[func.__name__] = wrapped
         return wrapped
+
+    @register_tool
+    def list_node_attachments(node_id: str) -> Dict[str, Any]:
+        """List untrusted attachment metadata for a visible node."""
+        return service.attachment_tool_list(node_id)
+
+    @register_tool
+    def read_node_attachment(
+        node_id: str,
+        attachment_id: str,
+        offset: int = 0,
+        max_chars: int = ATTACHMENT_READ_DEFAULT_CHARS,
+    ) -> Dict[str, Any]:
+        """Read untrusted file text with citation locators."""
+        return service.attachment_tool_read(node_id, attachment_id, offset, max_chars)
+
+    @register_tool
+    def search_node_attachments(
+        query: str, node_ids: List[str], top_k: int = 8
+    ) -> Dict[str, Any]:
+        """Search files on up to 20 visible nodes; report unreadable files."""
+        return service.attachment_tool_search(query, node_ids, top_k)
 
     # ==================== Search Tools ====================
 

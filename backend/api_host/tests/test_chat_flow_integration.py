@@ -128,8 +128,9 @@ async def test_graph_access_on_the_loop_thread_and_llm_calls_off_it(test_app_wit
     akc = {"short_name": "kiosk", "tool_allowlist": allowlist}
     node = {"name": "K", "type": "ActiveKnowledgeCollection", "metadata": akc}
     service.graph_service.add_nodes(nodes=[node], edges=[])
-    # An advertised attachment tool makes the chat re-read the collection's grant.
-    service._processor.tool_definitions.append({"name": "read_node_attachment"})
+    # The production tool definition makes the chat re-read the collection grant.
+    definitions = service._processor.tool_definitions
+    assert sum(t["name"] == "read_node_attachment" for t in definitions) == 1
     hook = service.graph_service._authorization_hook
     evaluate, hook_threads = hook.evaluate, []
     hook.evaluate = lambda c: hook_threads.append(threading.get_ident()) or evaluate(c)

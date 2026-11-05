@@ -581,6 +581,59 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 
 ### Node attachments
 
+The synchronous read-tool wrappers are `GraphService.attachment_tool_list`,
+`attachment_tool_read` and `attachment_tool_search` in
+`service/attachment_tools.py`. REST-shaped methods retain their existing names.
+MCP tools use async thread shims; the execution map stays synchronous. Chat and
+Agent dispatch explicitly select the tool wrappers. No tool is registered on
+MCP without a configured store, and chat definitions require a mapped tool.
+Read/search require both `get_node_attachment` and
+`read_node_attachment_content`; every narrowing must permit the node before the
+store or cache is read. Missing and invisible nodes return the same result.
+Federated nodes contribute no files. Search reports files it could not fully
+search in `files`, including `skipped_budget`; empty passages with such files do
+not establish absence of a subject.
+
+Extraction results live only in a locked, bounded in-memory LRU keyed by
+namespace, node id, attachment id and SHA-256. Restart discards them. Cache
+accounting includes segment and entry overhead, including unsuccessful
+extractions. Slots are shared across callers in the process. No file text or
+attachment embeddings are persisted. Ranking uses BM25 and may use the already
+loaded local embedding model. `attachments.audit` receives one structured record
+per read or contributing search file, or one empty/error search record; it never
+receives text, queries or filenames.
+
+`ATTACHMENT_CONTENT_ACCESS=off` stops all read tools, including direct wrapper
+calls. The default ceiling is `read_write`; it does not itself grant a caller
+access. Existing assistant, kiosk, Agent and MCP grants remain independent.
+The following read limits are validated when GraphService is constructed:
+
+| Setting | Default |
+|---|---|
+| `ATTACHMENT_SEARCH_MAX_QUERY_CHARS` / `ATTACHMENT_SEARCH_MAX_NODES` | 500 / 20 (hard maximum 20 nodes) |
+| `ATTACHMENT_SEARCH_MAX_FILES` / `ATTACHMENT_SEARCH_MAX_TOTAL_CHARS` | 40 / 4000000 |
+| `ATTACHMENT_SEARCH_TIMEOUT_SECONDS` / `ATTACHMENT_SEARCH_MAX_TOP_K` | 120 / 20 |
+| `ATTACHMENT_RERANK_CANDIDATES` | 32 |
+| `ATTACHMENT_CHUNK_CHARS` / `ATTACHMENT_CHUNK_OVERLAP_CHARS` | 1200 / 200 |
+| `ATTACHMENT_RESULT_MAX_CHARS` / `ATTACHMENT_READ_MAX_CHARS` | 24000 / 50000 |
+| `ATTACHMENT_TEXT_CACHE_MAX_CHARS` / `ATTACHMENT_EXTRACT_CONCURRENCY` | 20000000 / 2 |
+
+All must be positive except overlap, which may be zero and must be below the
+chunk size. The result budget must fit one chunk. The named read default is
+20000 characters, clamped to the read maximum. Extraction settings and their
+defaults follow [ADR 0010 §3](../docs/adr/0010-attachment-content-access-for-agents-and-assistant.md#3-extraction-limits-and-isolation);
+they map to `ExtractionLimits`, with input bytes bounded by the store's file cap.
+
+**Security boundary:** the envelope supplies untrusted data, not an execution
+guard. This slice does not supply ADR 0010's conversation taint/confirmation,
+Agent egress and output-access controls, or comprehensive log redaction. Keep
+`ATTACHMENT_CONTENT_ACCESS=off` until those controls are present before using
+these tools with the built-in assistant or Agents. An external MCP client owns
+its own model loop and guard. Extraction contains resource exhaustion, not parser
+code execution: deployments needing that containment use an OS sandbox or a
+separate user with no network or secret access.
+
+
 Files attached to a node live in their own store beside the graph, never in
 the graph document, `GET /export`, mutation history or federation. The design
 is [ADR 0008](../docs/adr/0008-node-attachment-storage.md); the code is
@@ -1229,6 +1282,9 @@ generic mutation tools remain available for editing and legacy configurations.
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
+| `list_node_attachments` | List attachment metadata with an untrusted-content envelope; `node_id` required |
+| `read_node_attachment` | Read a located character window; `node_id`, `attachment_id`, optional `offset` and `max_chars` |
+| `search_node_attachments` | Rank cited passages from 1–20 `node_ids`; required `query`, optional `top_k`; report unreadable and budget-skipped files |
 | `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
 | `get_related_nodes` | Get nodes connected through visible nodes only |

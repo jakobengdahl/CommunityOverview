@@ -265,7 +265,9 @@ def rank_passages(
                 model, query, [chunks[i].text for i in candidates]
             )
         except Exception as exc:  # noqa: BLE001 - any model failure means BM25
-            logger.warning("attachment re-rank failed, using bm25 only: %s", exc)
+            logger.warning(
+                "attachment re-rank failed (%s), using bm25 only", type(exc).__name__
+            )
         else:
             fused = {i: 1.0 / (RRF_K + rank + 1) for rank, i in enumerate(candidates)}
             for rank, pos in enumerate(by_embedding):

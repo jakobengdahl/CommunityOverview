@@ -1,6 +1,7 @@
 """Attachment tool grants shared by Agents, chat and MCP (ADR 0010)."""
 
 import logging
+import os
 
 from backend.runtime.authorization import DefaultGraphAuthorizationHook
 
@@ -33,8 +34,14 @@ def agent_attachment_access(value, *, agent_id: str) -> str:
 def attachment_tool_allowed(name: str, access: str) -> bool:
     if name not in ATTACHMENT_TOOLS:
         return True
-    return access == "read_write" or (
-        access == "read" and name in ATTACHMENT_READ_TOOLS
+    ceiling = os.getenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+    return (
+        ceiling in ("read", "read_write")
+        and (ceiling == "read_write" or name in ATTACHMENT_READ_TOOLS)
+        and (
+            access == "read_write"
+            or (access == "read" and name in ATTACHMENT_READ_TOOLS)
+        )
     )
 
 
