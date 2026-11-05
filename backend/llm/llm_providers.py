@@ -4,6 +4,9 @@ Supports both Claude (Anthropic) and OpenAI APIs.
 """
 
 from abc import ABC, abstractmethod
+from concurrent.futures import Future
+from contextvars import copy_context
+from threading import Thread
 from typing import Any, Dict, List, Optional
 import json
 import logging
@@ -13,6 +16,64 @@ from backend.runtime.extensions import get_runtime_extensions, runtime_context
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOKENS = 16000
+DEFAULT_CHAT_MAX_ROUNDS = 64
+DEFAULT_LLM_TIMEOUT_SECONDS = 600
+MAX_LLM_TIMEOUT_SECONDS = 86400
+
+
+def positive_int_setting(name: str, default: int, maximum: Optional[int] = None) -> int:
+    """Read a positive integer setting, falling back on invalid input."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        limit = int(value)
+        if limit > 0 and (maximum is None or limit <= maximum):
+            return limit
+    except ValueError:
+        pass
+    logger.warning("Ignoring invalid %s; using %d", name, default)
+    return default
+
+
+def _provider_call(create, *, deadline_seconds=None, **kwargs):
+    """Bound the whole SDK call, including reads and internal retries.
+
+    SDK timeouts only bound individual network operations. A daemon worker lets
+    the caller recover even when an endpoint keeps dribbling response bytes.
+    The worker only obtains a model response; a late response cannot run tools.
+    """
+    if deadline_seconds is None:
+        return create(**kwargs)
+    timeout = deadline_seconds
+    result = Future()
+    context = copy_context()
+
+    def invoke():
+        try:
+            result.set_result(context.run(create, **kwargs))
+        except BaseException as exc:
+            result.set_exception(exc)
+
+    Thread(target=invoke, daemon=True, name="llm-provider-call").start()
+    try:
+        return result.result(timeout=timeout)
+    except TimeoutError as exc:
+        if result.done() and result.exception() is exc:
+            raise
+        raise TimeoutError(f"LLM call exceeded {timeout:g} seconds") from exc
+
+
+def _completion_client(client, timeout_seconds, timeout_type):
+    if timeout_seconds is None:
+        return client
+    # A running synchronous request cannot be cancelled by the daemon deadline.
+    # Disable SDK retries so it cannot start more paid requests after we return.
+    # Use the SDK export: newer SDKs use httpx2.Timeout, older ones httpx.Timeout.
+    return client.with_options(
+        timeout=timeout_type(timeout_seconds, connect=5.0), max_retries=0
+    )
+
 
 # The anthropic SDK refuses a non-streaming request it expects to run over 10
 # minutes, which it estimates as max_tokens / 128,000 of an hour.
@@ -83,8 +144,9 @@ class LLMProvider(ABC):
         system_prompt: str,
         tools: List[Dict],
         max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> "LLMResponse":
-        """Create a completion with the LLM"""
+        """Create a completion; timeout_seconds opts into the chat deadline policy."""
         pass
 
     @abstractmethod
@@ -136,7 +198,10 @@ class ClaudeProvider(LLMProvider):
     ):
         from anthropic import Anthropic
 
-        self.client = Anthropic(api_key=api_key, base_url=base_url)
+        self.client = Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+        )
         self.model = model or "claude-sonnet-4-5"
 
     def _cap_nonstreaming(self, max_tokens: int) -> int:
@@ -166,13 +231,19 @@ class ClaudeProvider(LLMProvider):
         system_prompt: str,
         tools: List[Dict],
         max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> LLMResponse:
         """Create completion using Claude API"""
         max_tokens = self._cap_nonstreaming(
             resolve_max_tokens(self.options) if max_tokens is None else max_tokens
         )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
-        response = self.client.messages.create(
+        from anthropic import Timeout
+
+        client = _completion_client(self.client, timeout_seconds, Timeout)
+        response = _provider_call(
+            client.messages.create,
+            deadline_seconds=timeout_seconds,
             model=self.model,
             max_tokens=max_tokens,
             system=system_prompt,
@@ -227,7 +298,10 @@ class OpenAIProvider(LLMProvider):
         # None = use SDK default (api.openai.com), unless overridden by caller
         # or OPENAI_BASE_URL (legacy env-var configuration).
         resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        self.client = OpenAI(api_key=api_key, base_url=resolved_base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=resolved_base_url,
+        )
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
 
@@ -237,6 +311,7 @@ class OpenAIProvider(LLMProvider):
         system_prompt: str,
         tools: List[Dict],
         max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> LLMResponse:
         """Create completion using OpenAI API"""
         if max_tokens is None:
@@ -254,7 +329,12 @@ class OpenAIProvider(LLMProvider):
             else {}
         )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
-        response = self.client.chat.completions.create(
+        from openai import Timeout
+
+        client = _completion_client(self.client, timeout_seconds, Timeout)
+        response = _provider_call(
+            client.chat.completions.create,
+            deadline_seconds=timeout_seconds,
             model=self.model,
             max_tokens=max_tokens,
             messages=openai_messages,
