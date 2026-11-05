@@ -1248,6 +1248,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Ask a connected frontend to capture and save its current canvas |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
+| `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 records / 7 days. New records can shift offset pages. |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
