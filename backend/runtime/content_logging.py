@@ -67,8 +67,10 @@ def log_failure(logger, level, code, exc, *, redact=False, context=""):
 class _TaintedRequestFilter(logging.Filter):
     def filter(self, record):
         if is_tainted() and record.msg == 'HTTP Request: %s %s "%s %d %s"':
-            method, url, version, status, reason = record.args
-            record.args = (method, str(url).split("?", 1)[0], version, status, reason)
+            # URL paths, userinfo, fragments and even response reason phrases
+            # can contain argument values. These records carry no safe tool
+            # name or argument-size diagnostics, so suppress them entirely.
+            return False
         return True
 
 

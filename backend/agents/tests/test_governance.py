@@ -1052,8 +1052,15 @@ def test_all_run_proposals_keep_taint_through_storage(tmp_path, durable):
         store.close()
 
 
-def test_proposal_taint_failure_withholds_content_and_blocks_run(monkeypatch):
-    store = InMemoryProposalStore()
+@pytest.mark.parametrize("durable", [False, True])
+def test_proposal_taint_failure_prevents_read_and_blocks_run(
+    monkeypatch, tmp_path, durable
+):
+    store = (
+        SqliteProposalStore(tmp_path / "taint-failure.db")
+        if durable
+        else InMemoryProposalStore()
+    )
     gate = AutonomyGate(
         autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
         tool_allowlist=None,
@@ -1087,7 +1094,92 @@ def test_proposal_taint_failure_withholds_content_and_blocks_run(monkeypatch):
     monkeypatch.setattr(store, "create", unexpected_create)
     for tool in ("graph.update_node", "graph.search_graph", "web.fetch"):
         assert execute(tool, {}) == result
-    assert calls == ["graph.search_graph"]
+    # The run never read untrusted content, so its earlier clean proposal is
+    # safe to approve. Withholding a result AFTER reading would not be safe.
+    assert calls == []
+    assert GovernanceManager(store).approve(before)["tainted"] is False
+    if durable:
+        store.close()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("outcome", ["clean", "untrusted", "raised"])
+def test_proposals_are_durably_protected_before_tool_execution(
+    tmp_path, durable, outcome
+):
+    db_path = tmp_path / "barrier.db"
+    store = SqliteProposalStore(db_path) if durable else InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.PROPOSE,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+    )
+    proposal_ids = []
+
+    def raw_executor(*_):
+        # A separate approver/connection must already see the taint before any
+        # content can enter the run, even if the process dies during this read.
+        reader = SqliteProposalStore(db_path) if durable else store
+        try:
+            for proposal_id in proposal_ids:
+                assert GovernanceManager(reader).get_proposal(proposal_id)["tainted"]
+        finally:
+            if durable:
+                reader.close()
+        if outcome == "raised":
+            raise ValueError("clean tool failure")
+        return {"untrusted_content": outcome == "untrusted"}
+
+    execute = gate.wrap(raw_executor)
+    for _ in range(2):
+        proposal_ids.append(execute("graph.update_node", {})["proposal_id"])
+    if outcome == "raised":
+        with pytest.raises(ValueError, match="clean tool failure"):
+            execute("graph.search_graph", {})
+    else:
+        execute("graph.search_graph", {})
+    if durable:
+        store.close()
+        store = SqliteProposalStore(db_path)
+    for proposal_id in proposal_ids:
+        assert store.get(proposal_id).tainted is (outcome == "untrusted")
+    if durable:
+        store.close()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_provisional_taint_cleanup_failure_keeps_proposals_protected(
+    monkeypatch, tmp_path, durable
+):
+    store = (
+        SqliteProposalStore(tmp_path / "cleanup.db")
+        if durable
+        else InMemoryProposalStore()
+    )
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.PROPOSE,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+    )
+    raw = MagicMock(return_value={"success": True})
+    execute = gate.wrap(raw)
+    proposal_id = execute("graph.update_node", {})["proposal_id"]
+
+    def fail_clear(_):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(store, "clear_provisional_taint", fail_clear)
+    denied = execute("graph.search_graph", {})
+    assert denied["error_code"] == "access_denied"
+    assert store.get(proposal_id).tainted
+    assert execute("graph.search_graph", {}) == denied
+    assert raw.call_count == 1
+    if durable:
+        store.close()
 
 
 @pytest.mark.parametrize("failure", ["returned", "raised", None])
@@ -1153,20 +1245,51 @@ def test_proposal_apply_formatted_logs_preserve_boundary(caplog, tainted, failur
 
 
 @pytest.mark.parametrize("logger_name", ["httpx", "httpx2"])
-def test_tainted_http_request_logs_omit_query(caplog, logger_name):
-    """Both HTTP clients retain clean diagnostics and redact tainted URL queries."""
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/file?SECRET-query",
+        "https://example.test/SECRET-path",
+        "https://SECRET-user:SECRET-password@example.test/file",
+        "https://example.test/file#SECRET-fragment",
+        "https://SECRET-user:SECRET-password@example.test/SECRET-path#SECRET-fragment?query",
+    ],
+)
+def test_tainted_http_request_logs_omit_content_during_approval(
+    caplog, logger_name, url
+):
+    """Only clean approvals retain HTTP diagnostics, across all URL components."""
     import logging
-    from backend.runtime.content_logging import content_logging
 
     for tainted in (False, True):
         caplog.clear()
-        with caplog.at_level(logging.INFO), content_logging(tainted=tainted):
+        store = InMemoryProposalStore()
+        proposal = store.create(
+            Proposal(
+                "a1",
+                "GRAPH__update_node",
+                {"url": url},
+                AutonomyLevel.ACT_AFTER_APPROVAL,
+                tainted=tainted,
+            )
+        )
+
+        def execute(*_):
             logging.getLogger(logger_name).info(
                 'HTTP Request: %s %s "%s %d %s"',
-                "GET",
-                "https://example.test/file?SECRET-query",
+                "POST",
+                url,
                 "HTTP/1.1",
                 200,
-                "OK",
+                "SECRET-reason",
             )
-        assert ("SECRET-query" in caplog.text) is not tainted
+            return {"success": True}
+
+        with caplog.at_level(logging.INFO):
+            result = GovernanceManager(store, lambda _: execute).approve(proposal.id)
+            logging.getLogger(logger_name).info("ordinary diagnostic")
+        assert result["status"] == "applied"
+        assert (url in caplog.text) is not tainted
+        assert ("SECRET-reason" in caplog.text) is not tainted
+        assert ("HTTP Request:" in caplog.text) is not tainted
+        assert "ordinary diagnostic" in caplog.text

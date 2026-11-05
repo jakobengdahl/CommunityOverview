@@ -257,32 +257,41 @@ class AutonomyGate:
                     }
                 return self._record_proposal(namespaced_name, input_args)
 
-            result = raw_executor(namespaced_name, input_args)
-            if isinstance(result, dict) and result.get("untrusted_content") is True:
-                self._tainted = True
-                mark_tainted()
-                # Earlier proposals belong to this same run too.
-                if self._proposal_ids:
+            # Persist a conservative taint barrier BEFORE a tool can return
+            # untrusted content. A failed write must leave the tool unexecuted,
+            # rather than leave proposals approvable as clean after a read.
+            protected = self._proposal_ids if not self._tainted else []
+            if protected:
+                try:
+                    self._store.mark_tainted(protected)
+                except Exception as exc:
+                    return self._block_taint_failure(exc)
+
+            result = None
+            try:
+                result = raw_executor(namespaced_name, input_args)
+                if isinstance(result, dict) and result.get("untrusted_content") is True:
+                    self._tainted = True
+                    mark_tainted()
+            finally:
+                # Only this gate's still-clean run may undo its provisional
+                # barrier. Actual taint remains sticky, including stale saves.
+                if protected and not self._tainted:
                     try:
-                        self._store.mark_tainted(self._proposal_ids)
+                        self._store.clear_provisional_taint(protected)
                     except Exception as exc:
-                        # Do not expose content while earlier proposals look clean.
-                        # Latch the failure even if the caller retries tool execution.
-                        self._taint_update_failed = True
-                        log_failure(
-                            logger,
-                            logging.ERROR,
-                            "proposal_taint_failed",
-                            exc,
-                            redact=True,
-                        )
-                        return {
-                            "error_code": "access_denied",
-                            "error": "Run blocked because proposal taint could not be persisted.",
-                        }
+                        return self._block_taint_failure(exc)
             return result
 
         return governed
+
+    def _block_taint_failure(self, exc: Exception) -> Dict[str, Any]:
+        self._taint_update_failed = True
+        log_failure(logger, logging.ERROR, "proposal_taint_failed", exc, redact=True)
+        return {
+            "error_code": "access_denied",
+            "error": "Run blocked because proposal taint could not be persisted.",
+        }
 
     def _record_proposal(
         self, namespaced_name: str, input_args: Dict[str, Any]
