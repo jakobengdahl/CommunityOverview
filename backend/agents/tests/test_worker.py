@@ -605,24 +605,27 @@ def test_execution_trace_formatted_logs_hide_content(
 ):
     import logging
 
-    secret = "SECRET-attachment-content"
+    sentinel = "sentinel-attachment-content"
     worker = AgentWorker(config=agent_config, settings=agent_settings, mcp_loader=None)
     with caplog.at_level("INFO"):
         worker._log_execution_trace(
             {
                 "success": False,
-                "error": secret,
-                "final_response": secret,
+                "error": sentinel,
+                "final_response": sentinel,
                 "trace": [
                     {
                         "turn": 1,
-                        "text_response": secret,
+                        "text_response": sentinel,
                         "tool_calls": [
                             {
                                 "name": "GRAPH__search_node_attachments",
-                                "input": {"query": secret},
+                                "input": {"query": sentinel},
                             },
-                            {"name": "GRAPH__search_graph", "input": {"query": secret}},
+                            {
+                                "name": "GRAPH__search_graph",
+                                "input": {"query": sentinel},
+                            },
                         ],
                     }
                 ],
@@ -631,7 +634,7 @@ def test_execution_trace_formatted_logs_hide_content(
             known_tools={"GRAPH__search_graph"},
         )
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
-    assert all(secret not in line for line in lines)
+    assert all(sentinel not in line for line in lines)
     assert any(
         "GRAPH__search_node_attachments argument_count=1" in line for line in lines
     )

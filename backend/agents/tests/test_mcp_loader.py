@@ -262,14 +262,14 @@ class TestToolExecutor:
 
     @pytest.mark.parametrize("raises", [False, True])
     def test_graph_tool_logs_exclude_sensitive_values(self, caplog, raises):
-        argument_secret = "argument-secret-content"
-        exception_secret = "exception-secret-content"
+        argument_sentinel = "argument-sentinel-content"
+        exception_sentinel = "exception-sentinel-content"
 
         class FailingService:
             def search_graph(self, **kwargs):
                 if raises:
-                    raise ValueError(exception_secret)
-                return {"error": exception_secret}
+                    raise ValueError(exception_sentinel)
+                return {"error": exception_sentinel}
 
         loader = MCPLoader([])
         loader._tools_cache = {
@@ -291,15 +291,17 @@ class TestToolExecutor:
         ):
             result = executor(
                 "GRAPH__search_graph",
-                {"query": argument_secret, "options": {"content": argument_secret}},
+                {"query": argument_sentinel, "options": {"content": argument_sentinel}},
             )
 
-        assert result == {"error": "Graph tool failed" if raises else exception_secret}
+        assert result == {
+            "error": "Graph tool failed" if raises else exception_sentinel
+        }
         records = [r for r in caplog.records if r.name == mcp_loader.__name__]
         assert records
         for record in records:
-            assert argument_secret not in repr(record.__dict__)
-            assert exception_secret not in repr(record.__dict__)
+            assert argument_sentinel not in repr(record.__dict__)
+            assert exception_sentinel not in repr(record.__dict__)
         assert "search_graph" in caplog.text
         assert "argument_count=2" in caplog.text
         assert "argument_sizes=" in caplog.text
@@ -2906,10 +2908,10 @@ class TestRedirectCapIsShared:
 def test_graph_failure_formatted_log_locates_raising_frame(caplog):
     from unittest.mock import MagicMock
 
-    secret = "SECRET-tool-arguments"
+    sentinel = "sentinel-tool-arguments"
 
     def fail(**kwargs):
-        raise RuntimeError(secret)
+        raise RuntimeError(sentinel)
 
     service = MagicMock()
     service.search_graph = fail
@@ -2922,10 +2924,10 @@ def test_graph_failure_formatted_log_locates_raising_frame(caplog):
 
     with caplog.at_level("INFO"), content_logging(tainted=True):
         loader.create_tool_executor(graph_service=service)(
-            "GRAPH__search_graph", {"query": secret}
+            "GRAPH__search_graph", {"query": sentinel}
         )
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
-    assert all(secret not in line for line in lines)
+    assert all(sentinel not in line for line in lines)
     assert any(
         "error_code=graph_tool_failed" in line
         and f"{__file__}:{fail.__code__.co_firstlineno + 1}" in line
