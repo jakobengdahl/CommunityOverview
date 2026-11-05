@@ -511,6 +511,7 @@ class AgentWorker:
             f"(type: {event_payload.get('event_type', 'unknown')})"
         )
 
+        tainted = False
         run_id = None
         if self._run_recorder is not None:
             run_id = self._run_recorder.record_start(
@@ -638,10 +639,17 @@ class AgentWorker:
             execute_tool = tool_executor
 
             def tool_executor(name: str, arguments: Dict[str, Any]) -> Any:
+                nonlocal tainted
                 if self._pause_reason is not None:
                     return {"error": self._pause_reason}
                 with agent_mutation_context(self.agent_id, event_payload):
-                    return execute_tool(name, arguments)
+                    tool_result = execute_tool(name, arguments)
+                    if (
+                        isinstance(tool_result, dict)
+                        and tool_result.get("untrusted_content") is True
+                    ):
+                        tainted = True
+                    return tool_result
 
             # Bind identity across the loop, including refusals before dispatch.
             from backend.service.attachment_tools import tool_caller
@@ -691,13 +699,14 @@ class AgentWorker:
             )
             self.events_failed += 1
 
+            failure_text = f"event_failed ({type(e).__name__})" if tainted else str(e)
             processing_result = ProcessingResult(
                 event_id=event_id,
                 agent_id=self.agent_id,
                 success=False,
                 handled=False,
-                summary=f"Processing failed ({type(e).__name__})",
-                error=f"Processing failed ({type(e).__name__})",
+                summary=failure_text,
+                error=failure_text,
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
 
