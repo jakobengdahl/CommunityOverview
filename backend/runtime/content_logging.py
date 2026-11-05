@@ -10,8 +10,12 @@ _state = ContextVar("content_logging_state", default=None)
 
 
 @contextmanager
-def content_logging(*, tainted=False, known_tools=()):
-    state = {"tainted": tainted, "known_tools": frozenset(known_tools)}
+def content_logging(*, tainted=False, known_tools=(), taint_probe=None):
+    state = {
+        "tainted": tainted,
+        "known_tools": frozenset(known_tools),
+        "taint_probe": taint_probe,
+    }
     token = _state.set(state)
     try:
         yield state
@@ -21,6 +25,14 @@ def content_logging(*, tainted=False, known_tools=()):
 
 def is_tainted():
     state = _state.get()
+    if state and not state["tainted"] and state["taint_probe"] is not None:
+        # Approval can outlive its proposal snapshot. Recheck at each logging
+        # boundary, and retain taint once observed even if the row is removed.
+        try:
+            state["tainted"] = bool(state["taint_probe"]())
+        except Exception:
+            # An unavailable store must never enable content logging.
+            state["tainted"] = True
     return bool(state and state["tainted"])
 
 

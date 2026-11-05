@@ -112,6 +112,10 @@ class GovernanceManager:
     # -- internal -----------------------------------------------------------
 
     def _apply(self, p: Proposal) -> None:
+        def current_taint() -> bool:
+            current = self._store.get(p.id)
+            return current is None or current.tainted
+
         if self._executor_factory is None:
             p.status = ProposalStatus.APPLY_FAILED
             p.apply_error = "No executor configured to apply the approved action."
@@ -123,7 +127,11 @@ class GovernanceManager:
             if type(p.causation_depth) is not int or p.causation_depth < 1:
                 raise ValueError("Invalid proposal causation depth")
             with (
-                content_logging(tainted=p.tainted, known_tools=(p.tool,)),
+                content_logging(
+                    tainted=p.tainted,
+                    known_tools=(p.tool,),
+                    taint_probe=current_taint,
+                ),
                 bind_session(p.session_id),
                 agent_mutation_context(
                     p.agent_id,

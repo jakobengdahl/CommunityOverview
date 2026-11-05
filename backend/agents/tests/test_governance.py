@@ -1314,3 +1314,82 @@ def test_tainted_http_request_logs_omit_content_during_approval(
         assert ("SECRET-reason" in caplog.text) is not tainted
         assert ("HTTP Request:" in caplog.text) is not tainted
         assert "ordinary diagnostic" in caplog.text
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("publication", ["after_snapshot", "during_execution"])
+@pytest.mark.parametrize("failure", ["returned", "raised"])
+def test_approval_logging_observes_taint_after_clean_snapshot(
+    tmp_path, monkeypatch, caplog, durable, publication, failure
+):
+    import logging
+    from backend.agents.config import MCPIntegration
+    from backend.agents.mcp_loader import MCPLoader
+    from backend.runtime.content_logging import is_tainted
+
+    db_path = tmp_path / "approval-race.db"
+    store = SqliteProposalStore(db_path) if durable else InMemoryProposalStore()
+    publisher = SqliteProposalStore(db_path) if durable else store
+    proposal = store.create(
+        Proposal(
+            "a1",
+            "GRAPH__update_node",
+            {"description": "SECRET-input"},
+            AutonomyLevel.ACT_AFTER_APPROVAL,
+        )
+    )
+    decide = store.decide
+
+    def decide_then_publish(*args, **kwargs):
+        snapshot = decide(*args, **kwargs)
+        assert snapshot.tainted is False
+        if publication == "after_snapshot":
+            publisher.mark_tainted([proposal.id])
+        return snapshot
+
+    monkeypatch.setattr(store, "decide", decide_then_publish)
+    loader = MCPLoader([])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+
+    def update_node(**kwargs):
+        if publication == "during_execution":
+            assert not is_tainted()
+            publisher.mark_tainted([proposal.id])
+        logging.getLogger("httpx").info(
+            'HTTP Request: %s %s "%s %d %s"',
+            "POST",
+            "https://example.test/SECRET-url",
+            "HTTP/1.1",
+            200,
+            "OK",
+        )
+        if failure == "raised":
+            raise ValueError("SECRET-exception")
+        return {"error": "SECRET-error"}
+
+    manager = GovernanceManager(
+        store,
+        lambda _: loader.create_tool_executor(
+            graph_service=SimpleNamespace(update_node=update_node)
+        ),
+    )
+    try:
+        with caplog.at_level(logging.INFO):
+            result = manager.approve(proposal.id)
+        assert result["tainted"] is True
+        assert result["status"] == "apply_failed"
+        assert ("SECRET-input" in caplog.text) is (publication == "during_execution")
+        assert "SECRET-error" not in caplog.text
+        assert "SECRET-exception" not in caplog.text
+        assert "SECRET-url" not in caplog.text
+        assert "GRAPH__update_node" in caplog.text
+        if publication == "after_snapshot":
+            assert "argument_count=1 argument_sizes=" in caplog.text
+        assert not is_tainted()
+    finally:
+        if durable:
+            publisher.close()
+            store.close()
