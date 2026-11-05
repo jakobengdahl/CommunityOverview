@@ -902,6 +902,12 @@ notification.
 
 ### 5.2 Recent activity (audit log)
 
+Agents can read a session’s retained annotation/canvas activity with the MCP
+`get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
+by action (`action`, for example `annotation_deleted`), including prior annotation
+data and inverse operations when recorded. Reading the log does not undo actions.
+
+
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,

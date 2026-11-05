@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """
 Tests for the MCP visualization-session CRUD tools registered in
 ``backend/service/mcp_tools.py`` (create/list/get/rename/delete).
@@ -406,3 +407,96 @@ class TestRateLimit:
         assert tools_map["delete_visualization_session"](session_id=sid, confirm=True)[
             "success"
         ]
+
+
+class TestSessionActivity:
+    def test_deleted_annotation_payload_is_read_without_mutation(self, crud_tools):
+        """Reading preserves the prior annotation, inverse op and session state."""
+        from copy import deepcopy
+
+        tools, manager = crud_tools
+        session = manager.store.create()
+        annotation = {"id": "note-1", "type": "note", "text": "Original"}
+        manager.store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": annotation,
+                "client_id": "actor-1",
+            },
+        )
+        annotation = deepcopy(session.state["annotations"][0])
+        manager.store.apply_state_op(
+            session,
+            {
+                "op": "annotation_deleted",
+                "annotation_id": "note-1",
+                "client_id": "actor-1",
+            },
+        )
+        before = deepcopy(session)
+        result = tools["get_session_activity"](session.id)
+        assert result["session_id"] == session.id
+        assert result["activity"] == list(reversed(before.activity_log))
+        deleted = result["activity"][0]
+        assert deleted["before"] == annotation
+        assert deleted["inverse_op"] == {
+            "op": "annotation_created",
+            "annotation": annotation,
+        }
+        assert session == before
+
+    def test_action_filter_precedes_paging(self, crud_tools):
+        """Pages count and advance through matching actions in newest-first order."""
+        tools, manager = crud_tools
+        session = manager.store.create()
+        session.activity_log = [
+            {"id": str(i), "op": "annotation_deleted" if i % 2 else "node_moved"}
+            for i in range(6)
+        ]
+        read = tools["get_session_activity"]
+        first = read(session.id, action="annotation_deleted", limit=2)
+        assert [r["id"] for r in first["activity"]] == ["5", "3"]
+        assert (first["total"], first["next_offset"]) == (3, 2)
+        last = read(session.id, action="annotation_deleted", limit=2, offset=2)
+        assert [r["id"] for r in last["activity"]] == ["1"]
+        assert last["next_offset"] is None
+        assert read(session.id, action="unknown")["activity"] == []
+        assert read(session.id, offset=6)["activity"] == []
+
+    @pytest.mark.parametrize("mode", ["read-only", "deny-all"])
+    def test_activity_uses_read_authorization(self, crud_tools, monkeypatch, mode):
+        """Activity reads obey the same read policy as session state."""
+        tools, manager = crud_tools
+        session = manager.store.create()
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, mode)
+        result = tools["get_session_activity"](session.id)
+        if mode == "deny-all":
+            assert result["error_code"] == "access_denied"
+        else:
+            assert result["activity"] == []
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"limit": 0},
+            {"limit": 501},
+            {"offset": -1},
+            {"limit": True},
+            {"offset": 1.5},
+            {"action": []},
+        ],
+    )
+    def test_invalid_paging_is_refused(self, crud_tools, arguments):
+        """Invalid boundaries cannot silently change the page requested."""
+        tools, manager = crud_tools
+        assert "error" in tools["get_session_activity"](
+            manager.store.create().id, **arguments
+        )
+
+    @pytest.mark.parametrize("session_id", ["invalid", "1111-2222-3333-4444"])
+    def test_invalid_or_missing_session_is_refused(self, crud_tools, session_id):
+        """Activity lookup neither creates sessions nor accepts malformed IDs."""
+        tools, manager = crud_tools
+        assert "error" in tools["get_session_activity"](session_id)
+        assert manager.get_session(session_id) is None

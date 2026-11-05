@@ -547,8 +547,10 @@ changing this design.
 - **Node id created again:** an orphan node directory must not become the
   files of a new node that reuses the id. Before `GraphService.add_nodes`
   creates a node with a caller-given id that the graph does not hold, it notes
-  the attachment ids already recorded under that id. Once the node is in the
-  graph it calls `AttachmentStore.quarantine`, which moves exactly those
+  the attachment ids already recorded under that id. The snapshot and create
+  share the graph write lock, excluding a competing create/upload/delete cycle.
+  Once the node is in the graph it calls `AttachmentStore.quarantine`, which
+  moves exactly those
   records and their blobs to `<namespace_key>/.quarantine/` and logs a
   warning. A create call that fails part-way keeps the nodes that landed
   before the failure, and their leftovers are quarantined too.
@@ -561,8 +563,12 @@ changing this design.
     stays.
   - Nothing is deleted: a quarantined file may still be wanted, and only an
     operator can tell. A failure is logged and never fails the create.
-  - A crash between the create and the quarantine, or a write whose outcome
-    is unknown, leaves the old files listed under the new node.
+  - On a partial failure, an unknown persistence outcome rereads the graph;
+    attempted node ids still present have their leftovers quarantined even
+    though the reread replaces their in-memory objects. An unknown outcome
+    raised by the final batch commit still leaves the old files listed.
+  - A crash between the create and the quarantine leaves the old files listed
+    under the new node.
   - Graph imports do not take this path: a REPLACE import may be a restore
     (below), and a merge plan flags new nodes whose id has leftover files
     instead.

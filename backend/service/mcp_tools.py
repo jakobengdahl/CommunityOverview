@@ -1917,6 +1917,60 @@ def register_mcp_tools(
         }
 
     @register_tool
+    def get_session_activity(
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        action: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read retained session activity, newest first, without changing it.
+
+        Records include prior annotation data and inverse ops when available.
+        The log retains at most 500 records for 7 days. Filter by the exact
+        op name (for example annotation_deleted) before paging. Offset paging
+        follows the current log; new activity can shift subsequent pages.
+
+        Args:
+            session_id: Visualization session ID.
+            limit: Page size, from 1 to 500 (default 50).
+            offset: Number of matching records to skip (default 0).
+            action: Optional exact activity op name.
+
+        Returns:
+            session_id, activity, total matching records, and next_offset
+            (null when there are no more records).
+        """
+        if session_manager is None:
+            return {"error": "Visualization sessions are not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": _INVALID_SESSION_ID_ERROR}
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_session_activity")
+        if denied:
+            return denied
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 500
+            or type(offset) is not int
+            or offset < 0
+            or (action is not None and not isinstance(action, str))
+        ):
+            return {"error": "Invalid activity paging or action filter"}
+        try:
+            records = session_manager.list_activity(session_id, limit=500)
+        except SessionNotFound:
+            return {"error": f"Session '{session_id}' not found"}
+        if action is not None:
+            records = [record for record in records if record.get("op") == action]
+        page = records[offset : offset + limit]
+        end = offset + len(page)
+        return {
+            "session_id": session_id,
+            "activity": page,
+            "total": len(records),
+            "next_offset": end if end < len(records) else None,
+        }
+
+    @register_tool
     def get_visualization_session_state(session_id: str) -> Dict[str, Any]:
         """
         Get the current visualization state of a session.

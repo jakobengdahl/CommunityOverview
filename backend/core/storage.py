@@ -514,6 +514,8 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+        # Serialize node lifecycles independently of graph reads and updates.
+        self.node_lifecycle_lock = threading.RLock()
         # Set, under _lock, once this instance is being torn down. A backend
         # promises not to call the listener after stop returns, but nothing
         # here can make it keep that promise; this is what stops a late
@@ -3138,7 +3140,7 @@ class GraphStorage:
                 the write was refused or could not be completed; nothing was
                 added and no event fired.
         """
-        with self._lock:
+        with self.node_lifecycle_lock, self._lock:
             if edges and (node_visible is not None or not allow_federated_endpoints):
                 endpoints = dict(self.nodes)
                 created = {node.id for node in nodes if node.id not in endpoints}
@@ -3214,7 +3216,10 @@ class GraphStorage:
                     event_context=event_context,
                 )
 
+            reread_after_unknown = False
+
             def persist_landed() -> None:
+                nonlocal reread_after_unknown
                 if not (unpersisted_nodes or unpersisted_edges):
                     return
                 try:
@@ -3225,6 +3230,9 @@ class GraphStorage:
                     # rather than a local failure that hides why.
                     raise
                 except Exception as persist_error:
+                    reread_after_unknown = isinstance(
+                        persist_error, GraphWriteOutcomeUnknown
+                    )
                     # The failure being handled may be the persist itself
                     # (executor shut down); the caller still gets its result.
                     logger.warning(f"could not persist what was added: {persist_error}")
@@ -3233,9 +3241,15 @@ class GraphStorage:
             generation_attempted = False
 
             def still_landed() -> List[str]:
-                # After persist_landed: a store that refused it has undone
-                # the nodes (or re-read the graph), and those did not stay.
-                return [n.id for n in nodes_to_embed if self.nodes.get(n.id) is n]
+                # Refused writes undo their nodes. An unknown outcome rereads
+                # authoritative nodes as new objects; present ids still need
+                # their old attachments quarantined.
+                return [
+                    n.id
+                    for n in nodes_to_embed
+                    if self.nodes.get(n.id) is n
+                    or (reread_after_unknown and n.id in self.nodes)
+                ]
 
             def generate_landed_vectors() -> None:
                 # Once per call: an exit after the attempt - a rejected edge -
@@ -4465,7 +4479,7 @@ class GraphStorage:
                 does not hold raises EntityRevisionConflict. Incident edges
                 deleted with a node carry no expectation.
         """
-        with self._lock:
+        with self.node_lifecycle_lock, self._lock:
             if len(node_ids) > 10:
                 return DeleteNodesResult(
                     deleted_node_ids=[],

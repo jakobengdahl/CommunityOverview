@@ -3919,6 +3919,7 @@ _MCP_UNMETERED_CALLS = {
     "connected_count",
     "create_session",
     "get_session",
+    "list_activity",
     "list_sessions",
     "push_command",
     "write_mode_of",
@@ -3995,6 +3996,7 @@ _MCP_UNMETERED_RUNS = {
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
+    "list_activity": lambda mgr, sid: mgr.list_activity(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),
     "push_command": lambda mgr, sid: mgr.push_command(sid, {"type": "noop"}),
     "write_mode_of": lambda mgr, sid: mgr.write_mode_of(
