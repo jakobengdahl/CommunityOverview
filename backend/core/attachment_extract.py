@@ -847,7 +847,7 @@ def _extract_xlsx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
                     yield line
 
         text = _bounded_join(rows(), "\n", out.remaining)
-        if not out.add(text, {"sheet": sheet.get("name", index)}):
+        if not out.add(text, {"sheet": sheet.get("name") or index}):
             break
     return STATUS_OK
 
