@@ -236,7 +236,7 @@ class TestCredentialsComeOnlyFromTheEnvironment:
         captured = {}
 
         class FakeOpenAI:
-            def __init__(self, api_key=None, base_url=None):
+            def __init__(self, api_key=None, base_url=None, timeout=None):
                 captured["api_key"] = api_key
                 captured["base_url"] = base_url
 
@@ -493,7 +493,7 @@ class TestReportsNeverCarryACredential:
         captured = {}
 
         class FakeOpenAI:
-            def __init__(self, api_key=None, base_url=None):
+            def __init__(self, api_key=None, base_url=None, timeout=None):
                 captured["api_key"] = api_key
                 self.chat = self
 

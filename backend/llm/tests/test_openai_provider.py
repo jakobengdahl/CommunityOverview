@@ -799,14 +799,10 @@ def test_provider_request_timeout_is_configured(
     monkeypatch, setting, expected, provider_class, target
 ):
     """Both provider clients receive a positive timeout with a safe fallback."""
-    from backend.llm.llm_providers import DEFAULT_LLM_TIMEOUT_SECONDS
-
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
     with patch(target) as client:
         provider_class("test-key")
-    assert client.call_args.kwargs["timeout"] == (
-        expected if setting == "900" else DEFAULT_LLM_TIMEOUT_SECONDS
-    )
+    assert client.call_args.kwargs["timeout"] == expected
 
 
 @pytest.mark.parametrize(
