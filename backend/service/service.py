@@ -836,7 +836,9 @@ class GraphService:
                     staging=staging,
                     allow_federated_endpoints=allow_federated_endpoints,
                 )
-            with self._storage.write_lock:
+            with self._storage.node_lifecycle_lock:
+                # Keep competing service creates/deletes out without holding the
+                # graph write lock during attachment file I/O.
                 # Files left under an id whose node was deleted must not become the
                 # new node's (ADR 0008 sec 8): note them now, quarantine them once
                 # the node is in the graph.
@@ -962,7 +964,7 @@ class GraphService:
         expected_revisions: Optional[Dict[str, int]] = None,
         expected_session_seq: Optional[int] = None,
     ) -> Dict[str, Any]:
-        def run(staging: Optional[StagedWrite]) -> Dict[str, Any]:
+        def delete(staging: Optional[StagedWrite]) -> Dict[str, Any]:
             result = mutations.delete_nodes(
                 self._storage,
                 self._authorization_hook,
@@ -982,6 +984,12 @@ class GraphService:
                     self._attachment_settings, result.get("deleted_node_ids") or []
                 )
             return result
+
+        def run(staging: Optional[StagedWrite]) -> Dict[str, Any]:
+            if staging is not None:
+                return delete(staging)
+            with self._storage.node_lifecycle_lock:
+                return delete(staging)
 
         return self._write(
             "delete_nodes",

@@ -895,7 +895,7 @@ class TestReusedNodeId:
         snapshot = attachments.leftover_attachments_of_absent_nodes
 
         def competing_lifecycle():
-            if service.storage.write_lock.acquire(timeout=0.05):
+            if service.storage.node_lifecycle_lock.acquire(timeout=0.05):
                 try:
                     service.storage.add_nodes(
                         [Node(id="doc", type="Document", name="Competing")], []
@@ -903,7 +903,7 @@ class TestReusedNodeId:
                     _seed(store, "doc")
                     service.storage.delete_nodes(["doc"], confirmed=True)
                 finally:
-                    service.storage.write_lock.release()
+                    service.storage.node_lifecycle_lock.release()
 
         def snapshot_then_compete(*args):
             leftovers = snapshot(*args)
@@ -918,6 +918,41 @@ class TestReusedNodeId:
             [{"id": "doc", "type": "Document", "name": "New"}], []
         )["success"]
         assert store.list(NS, "doc") == []
+
+    @pytest.mark.parametrize("has_leftovers", [False, True])
+    def test_attachment_io_does_not_hold_the_graph_write_lock(
+        self, service, store, monkeypatch, has_leftovers
+    ):
+        from concurrent.futures import ThreadPoolExecutor
+
+        if has_leftovers:
+            self._leave_orphan(service, store, monkeypatch)
+        else:
+            service.delete_nodes(["doc"], confirmed=True)
+        real_list, real_quarantine = store.list, store.quarantine
+        checked = []
+
+        def check_io(operation, *args):
+            def acquire_graph_lock():
+                acquired = service.storage.write_lock.acquire(timeout=0.1)
+                if acquired:
+                    service.storage.write_lock.release()
+                return acquired
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                assert executor.submit(acquire_graph_lock).result(timeout=5)
+            checked.append(operation)
+            return operation(*args)
+
+        monkeypatch.setattr(store, "list", lambda *a: check_io(real_list, *a))
+        monkeypatch.setattr(
+            store, "quarantine", lambda *a: check_io(real_quarantine, *a)
+        )
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"]
+        assert checked == [real_list] + ([real_quarantine] if has_leftovers else [])
 
     def test_unknown_partial_create_quarantines_after_a_store_reread(
         self, service, store, monkeypatch

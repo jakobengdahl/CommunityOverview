@@ -514,6 +514,8 @@ class GraphStorage:
         # Thread lock for in-memory data structure protection
         # RLock allows same thread to acquire lock multiple times (reentrant)
         self._lock = threading.RLock()
+        # Serialize node lifecycles independently of graph reads and updates.
+        self.node_lifecycle_lock = threading.RLock()
         # Set, under _lock, once this instance is being torn down. A backend
         # promises not to call the listener after stop returns, but nothing
         # here can make it keep that promise; this is what stops a late
@@ -3138,7 +3140,7 @@ class GraphStorage:
                 the write was refused or could not be completed; nothing was
                 added and no event fired.
         """
-        with self._lock:
+        with self.node_lifecycle_lock, self._lock:
             if edges and (node_visible is not None or not allow_federated_endpoints):
                 endpoints = dict(self.nodes)
                 created = {node.id for node in nodes if node.id not in endpoints}
@@ -4477,7 +4479,7 @@ class GraphStorage:
                 does not hold raises EntityRevisionConflict. Incident edges
                 deleted with a node carry no expectation.
         """
-        with self._lock:
+        with self.node_lifecycle_lock, self._lock:
             if len(node_ids) > 10:
                 return DeleteNodesResult(
                     deleted_node_ids=[],
