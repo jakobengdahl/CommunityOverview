@@ -55,49 +55,45 @@ def _completion(content=None, tool_calls=None, finish_reason="stop"):
     )
 
 
-def _tool_call(call_id, name, arguments):
+def _tool_call(call_id, name, arguments, *, raw=False):
     return SimpleNamespace(
         id=call_id,
-        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+        function=SimpleNamespace(
+            name=name, arguments=arguments if raw else json.dumps(arguments)
+        ),
     )
 
 
-def test_system_prompt_is_first_message_and_omitted_when_empty(provider):
-    converted = provider._convert_messages_to_openai(
-        [{"role": "user", "content": "hi"}], "be brief"
-    )
-    assert converted == [
-        {"role": "system", "content": "be brief"},
-        {"role": "user", "content": "hi"},
-    ]
+@pytest.mark.parametrize("system", ["be brief", ""])
+def test_system_prompt_is_first_message_and_omitted_when_empty(provider, system):
+    messages = [{"role": "user", "content": "hi"}]
+    expected = ([{"role": "system", "content": system}] if system else []) + messages
+    assert provider._convert_messages_to_openai(messages, system) == expected
+
+
+@pytest.mark.parametrize(
+    "role, content, expected",
+    [
+        ("user", "plain", "plain"),
+        (
+            "user",
+            [
+                {"type": "text", "text": "a"},
+                {"type": "image", "source": {}},
+                {"type": "text", "text": "b"},
+            ],
+            "a\nb",
+        ),
+        ("assistant", "reply", "reply"),
+        ("assistant", [{"type": "text", "text": "x"}], "x"),
+    ],
+)
+def test_user_and_assistant_string_and_text_block_content(
+    provider, role, content, expected
+):
     assert provider._convert_messages_to_openai(
-        [{"role": "user", "content": "hi"}], ""
-    ) == [{"role": "user", "content": "hi"}]
-
-
-def test_user_and_assistant_string_and_text_block_content(provider):
-    converted = provider._convert_messages_to_openai(
-        [
-            {"role": "user", "content": "plain"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "a"},
-                    {"type": "image", "source": {}},
-                    {"type": "text", "text": "b"},
-                ],
-            },
-            {"role": "assistant", "content": "reply"},
-            {"role": "assistant", "content": [{"type": "text", "text": "x"}]},
-        ],
-        "",
-    )
-    assert converted == [
-        {"role": "user", "content": "plain"},
-        {"role": "user", "content": "a\nb"},
-        {"role": "assistant", "content": "reply"},
-        {"role": "assistant", "content": "x"},
-    ]
+        [{"role": role, "content": content}], ""
+    ) == [{"role": role, "content": expected}]
 
 
 def test_user_blocks_without_text_produce_no_message(provider):
@@ -136,18 +132,14 @@ def test_assistant_tool_use_becomes_tool_calls_with_json_arguments(provider):
             "content": "Let me look.",
             "tool_calls": [
                 {
-                    "id": "call_1",
+                    "id": call_id,
                     "type": "function",
-                    "function": {
-                        "name": "search_graph",
-                        "arguments": '{"query": "AI"}',
-                    },
-                },
-                {
-                    "id": "call_2",
-                    "type": "function",
-                    "function": {"name": "get_node_details", "arguments": "{}"},
-                },
+                    "function": {"name": name, "arguments": arguments},
+                }
+                for call_id, name, arguments in [
+                    ("call_1", "search_graph", '{"query": "AI"}'),
+                    ("call_2", "get_node_details", "{}"),
+                ]
             ],
         }
     ]
@@ -213,26 +205,19 @@ def test_finish_reason_maps_to_provider_neutral_stop_reason(
     assert provider._map_finish_reason(finish_reason) == stop_reason
 
 
-def test_format_tool_definitions_wraps_claude_schema_as_functions(provider):
-    assert provider.format_tool_definitions(TOOLS) == [
+@pytest.mark.parametrize("tools", [TOOLS, []])
+def test_format_tool_definitions_wraps_claude_schema_as_functions(provider, tools):
+    assert provider.format_tool_definitions(tools) == [
         {
             "type": "function",
             "function": {
-                "name": "search_graph",
-                "description": "Search the graph",
-                "parameters": TOOLS[0]["input_schema"],
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_node_details",
-                "description": "Get one node",
-                "parameters": TOOLS[1]["input_schema"],
-            },
-        },
+        }
+        for tool in tools
     ]
-    assert provider.format_tool_definitions([]) == []
 
 
 def test_create_completion_sends_converted_request(provider):
@@ -304,9 +289,6 @@ def test_create_completion_maps_text_and_tool_calls_to_neutral_shape(provider):
 
 
 def test_tool_call_round_trip_preserves_ids_names_and_arguments(provider):
-    """A tool-calling turn fed back as history yields the OpenAI request shape
-    the API requires: assistant tool_calls followed by tool messages whose
-    tool_call_id matches."""
     provider.client.chat.completions.create.return_value = _completion(
         None,
         [_tool_call("call_9", "search_graph", {"query": "AI", "limit": 5})],
@@ -442,8 +424,8 @@ def test_user_turn_mixing_tool_results_and_text_keeps_text_after_tool_messages(
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "call_1", "name": "n", "input": {}},
-                    {"type": "tool_use", "id": "call_2", "name": "n", "input": {}},
+                    {"type": "tool_use", "id": call_id, "name": "n", "input": {}}
+                    for call_id in ("call_1", "call_2")
                 ],
             },
             {
@@ -520,12 +502,7 @@ def test_user_turn_with_text_before_tool_result_keeps_tool_result(provider):
 def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [
-            SimpleNamespace(
-                id="call_1",
-                function=SimpleNamespace(name="get_node_details", arguments=arguments),
-            )
-        ],
+        [_tool_call("call_1", "get_node_details", arguments, raw=True)],
         finish_reason="tool_calls",
     )
     response = provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
@@ -546,12 +523,7 @@ def test_other_falsy_json_arguments_are_returned_as_parsed(arguments, parsed):
 def test_malformed_tool_call_arguments_still_raise(provider):
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [
-            SimpleNamespace(
-                id="call_1",
-                function=SimpleNamespace(name="search_graph", arguments='{"query":'),
-            )
-        ],
+        [_tool_call("call_1", "search_graph", '{"query":', raw=True)],
         finish_reason="tool_calls",
     )
     with pytest.raises(json.JSONDecodeError):
@@ -559,18 +531,9 @@ def test_malformed_tool_call_arguments_still_raise(provider):
 
 
 def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
-    # A literal newline inside a JSON string is invalid JSON; strict parsing
-    # must reject it rather than hand dispatch a value no conforming server sends.
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [
-            SimpleNamespace(
-                id="call_1",
-                function=SimpleNamespace(
-                    name="search_graph", arguments='{"query": "a\nb"}'
-                ),
-            )
-        ],
+        [_tool_call("call_1", "search_graph", '{"query": "a\nb"}', raw=True)],
         finish_reason="tool_calls",
     )
     with pytest.raises(json.JSONDecodeError, match="Invalid control character"):
@@ -578,7 +541,6 @@ def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
 
 
 def test_claude_call_without_tools_sends_tool_history_as_text():
-    """The Anthropic API rejects tool blocks when a request defines no tools."""
     history = [
         {"role": "user", "content": "Find it"},
         {
@@ -665,7 +627,6 @@ def test_claude_limit_above_the_sdk_nonstreaming_cap_never_raises(caplog, limit)
 
     claude = ClaudeProvider("test-key", model="test-model")
 
-    # The SDK itself accepts the cap and refuses one token more.
     claude.client._calculate_nonstreaming_timeout(21_333, None)
     with pytest.raises(ValueError):
         claude.client._calculate_nonstreaming_timeout(21_334, None)
@@ -779,41 +740,6 @@ def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reas
 
 
 @pytest.mark.parametrize(
-    "setting, expected",
-    [
-        ("900", 900),
-        ("", 600),
-        ("0", 600),
-        ("bad", 600),
-        ("99999999999", 600),
-        ("86400", 86400),
-        ("86401", 600),
-        ("-1", 600),
-    ],
-)
-@pytest.mark.parametrize(
-    "provider_class, target",
-    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
-)
-def test_provider_request_timeout_is_configured(
-    monkeypatch, setting, expected, caplog, provider_class, target
-):
-    """Chat validates the deadline and passes it explicitly to the provider."""
-    from unittest.mock import MagicMock
-    from backend.ui.chat_logic import _chat_completion
-
-    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
-    with patch(target) as client:
-        provider_class("test-key")
-    assert "timeout" not in client.call_args.kwargs
-    provider = MagicMock(spec=provider_class)
-    _chat_completion(provider, messages=[], system_prompt="", tools=[])
-    assert provider.create_completion.call_args.kwargs["timeout_seconds"] == expected
-    if setting in {"0", "bad", "99999999999", "86401", "-1"}:
-        assert "Ignoring invalid LLM_TIMEOUT_SECONDS" in caplog.text
-
-
-@pytest.mark.parametrize(
     "provider_class, target",
     [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
 )
@@ -828,8 +754,7 @@ def test_total_provider_timeout_recovers_while_sdk_keeps_making_progress(
     def dribbling_response(**kwargs):
         entered.set()
         try:
-            # Simulate an SDK that receives bytes often enough to avoid its
-            # per-read timeout, but never completes the provider call.
+            # Bytes arrive within the read timeout, without completing the call.
             while not release.wait(0.005):
                 pass
         finally:
@@ -879,7 +804,6 @@ def test_provider_deadline_preserves_context_results_and_errors():
 @pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
 @pytest.mark.parametrize("bounded", [False, True])
 def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch):
-    """Inspect actual SDK requests, preserving non-chat defaults and retries."""
     import importlib
     import httpx as legacy_httpx
 

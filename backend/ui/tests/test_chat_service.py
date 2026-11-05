@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from backend.llm.llm_providers import (
+    ClaudeProvider,
+    OpenAIProvider,
     LLMResponse,
     TOOL_CALLS_NOT_RUN_MESSAGE,
     DEFAULT_CHAT_MAX_ROUNDS,
@@ -3012,3 +3014,38 @@ def test_chat_round_cap_reports_failed_mutation(chat_service, monkeypatch, resul
     assert response["content"] == CHAT_ROUND_LIMIT_MESSAGE.format(
         summary="add_nodes (failed): 1"
     )
+
+
+@pytest.mark.parametrize(
+    "setting, expected",
+    [
+        ("900", 900),
+        ("", 600),
+        ("0", 600),
+        ("bad", 600),
+        ("99999999999", 600),
+        ("86400", 86400),
+        ("86401", 600),
+        ("-1", 600),
+    ],
+)
+@pytest.mark.parametrize(
+    "provider_class, target",
+    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
+)
+def test_provider_request_timeout_is_configured(
+    monkeypatch, setting, expected, caplog, provider_class, target
+):
+    """Chat validates the deadline and passes it explicitly to the provider."""
+    from unittest.mock import MagicMock
+    from backend.ui.chat_logic import _chat_completion
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
+    with patch(target) as client:
+        provider_class("test-key")
+    assert "timeout" not in client.call_args.kwargs
+    provider = MagicMock(spec=provider_class)
+    _chat_completion(provider, messages=[], system_prompt="", tools=[])
+    assert provider.create_completion.call_args.kwargs["timeout_seconds"] == expected
+    if setting in {"0", "bad", "99999999999", "86401", "-1"}:
+        assert "Ignoring invalid LLM_TIMEOUT_SECONDS" in caplog.text
