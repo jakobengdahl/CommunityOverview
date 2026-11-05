@@ -167,6 +167,7 @@ class AutonomyGate:
         authorization_hook: Any = None,
     ) -> None:
         self._tainted = False
+        self._taint_update_failed = False
         self._proposal_ids: list[str] = []
         self._attachment_access = attachment_access
         self._attachment_access_resolver = attachment_access_resolver
@@ -182,6 +183,11 @@ class AutonomyGate:
 
     def wrap(self, raw_executor: ToolExecutor) -> ToolExecutor:
         def governed(namespaced_name: str, input_args: Dict[str, Any]) -> Any:
+            if self._taint_update_failed:
+                return {
+                    "error_code": "access_denied",
+                    "error": "Run blocked because proposal taint could not be persisted.",
+                }
             if self._allowlist is not None and namespaced_name not in self._allowlist:
                 from backend.service.attachment_tools import (
                     audit_attachment_refusal,
@@ -257,7 +263,23 @@ class AutonomyGate:
                 mark_tainted()
                 # Earlier proposals belong to this same run too.
                 if self._proposal_ids:
-                    self._store.mark_tainted(self._proposal_ids)
+                    try:
+                        self._store.mark_tainted(self._proposal_ids)
+                    except Exception as exc:
+                        # Do not expose content while earlier proposals look clean.
+                        # Latch the failure even if the caller retries tool execution.
+                        self._taint_update_failed = True
+                        log_failure(
+                            logger,
+                            logging.ERROR,
+                            "proposal_taint_failed",
+                            exc,
+                            redact=True,
+                        )
+                        return {
+                            "error_code": "access_denied",
+                            "error": "Run blocked because proposal taint could not be persisted.",
+                        }
             return result
 
         return governed

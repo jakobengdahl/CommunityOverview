@@ -47,6 +47,7 @@
     "status_rejected": "Avslaget",
     "status_applied": "Verkställt",
     "status_apply_failed": "Verkställande misslyckades",
+    "tainted_notice": "Varning: filinnehåll ingick i körningens kontext. Granska detta förslag noggrant.",
     "detail_autonomy": "Autonominivå",
     "detail_args": "Argument",
     "detail_decided_by": "Beslutat av",

@@ -1052,6 +1052,44 @@ def test_all_run_proposals_keep_taint_through_storage(tmp_path, durable):
         store.close()
 
 
+def test_proposal_taint_failure_withholds_content_and_blocks_run(monkeypatch):
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+    )
+    calls = []
+
+    def raw_executor(name, args):
+        calls.append(name)
+        return {"untrusted_content": True, "content": "SECRET-file-content"}
+
+    execute = gate.wrap(raw_executor)
+    before = execute("graph.update_node", {})["proposal_id"]
+
+    def fail_mark_tainted(ids):
+        assert ids == [before]
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(store, "mark_tainted", fail_mark_tainted)
+    result = execute("graph.search_graph", {})
+    assert result["error_code"] == "access_denied"
+    assert "SECRET-file-content" not in str(result)
+    assert "untrusted_content" not in result
+    assert not store.get(before).tainted
+
+    def unexpected_create(*args, **kwargs):
+        pytest.fail("Blocked run must not create another proposal")
+
+    monkeypatch.setattr(store, "create", unexpected_create)
+    for tool in ("graph.update_node", "graph.search_graph", "web.fetch"):
+        assert execute(tool, {}) == result
+    assert calls == ["graph.search_graph"]
+
+
 @pytest.mark.parametrize("failure", ["returned", "raised", None])
 @pytest.mark.parametrize("tainted", [False, True])
 def test_proposal_apply_formatted_logs_preserve_boundary(caplog, tainted, failure):
