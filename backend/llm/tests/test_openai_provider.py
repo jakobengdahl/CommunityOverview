@@ -1,3 +1,4 @@
+# covers: backend/llm/llm_providers.py
 """OpenAIProvider translation between the provider-neutral (Claude-shaped)
 message format and OpenAI chat completions, with the OpenAI client mocked."""
 
@@ -10,6 +11,7 @@ import pytest
 
 from backend.llm.llm_providers import (
     ClaudeProvider,
+    DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMResponse,
     OpenAIProvider,
     create_provider,
@@ -358,17 +360,25 @@ def test_constructor_resolves_base_url_and_model(openai_cls, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://env.example/v1")
     monkeypatch.setenv("OPENAI_MODEL", "env-model")
     provider = OpenAIProvider("k")
-    openai_cls.assert_called_with(api_key="k", base_url="http://env.example/v1")
+    openai_cls.assert_called_with(
+        api_key="k",
+        base_url="http://env.example/v1",
+        timeout=DEFAULT_LLM_TIMEOUT_SECONDS,
+    )
     assert provider.model == "env-model"
 
     provider = OpenAIProvider("k", model="explicit", base_url="http://arg.example")
-    openai_cls.assert_called_with(api_key="k", base_url="http://arg.example")
+    openai_cls.assert_called_with(
+        api_key="k", base_url="http://arg.example", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
+    )
     assert provider.model == "explicit"
 
     monkeypatch.delenv("OPENAI_BASE_URL")
     monkeypatch.delenv("OPENAI_MODEL")
     provider = OpenAIProvider("k")
-    openai_cls.assert_called_with(api_key="k", base_url=None)
+    openai_cls.assert_called_with(
+        api_key="k", base_url=None, timeout=DEFAULT_LLM_TIMEOUT_SECONDS
+    )
     assert provider.model == "gpt-4o"
 
 
@@ -377,14 +387,18 @@ def test_create_provider_selects_by_argument(openai_cls):
         "k", provider_type="openai", model="m", base_url="http://b"
     )
     assert isinstance(provider, OpenAIProvider)
-    openai_cls.assert_called_once_with(api_key="k", base_url="http://b")
+    openai_cls.assert_called_once_with(
+        api_key="k", base_url="http://b", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
+    )
     assert provider.model == "m"
     with patch("anthropic.Anthropic") as anthropic_cls:
         provider = create_provider(
             "k", provider_type="claude", model="m", base_url="http://b"
         )
     assert isinstance(provider, ClaudeProvider)
-    anthropic_cls.assert_called_once_with(api_key="k", base_url="http://b")
+    anthropic_cls.assert_called_once_with(
+        api_key="k", base_url="http://b", timeout=DEFAULT_LLM_TIMEOUT_SECONDS
+    )
     assert provider.model == "m"
 
 
@@ -772,3 +786,24 @@ def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reas
         response = claude.create_completion([], "", TOOLS, max_tokens=100)
 
     assert response.stop_reason == expected
+
+
+@pytest.mark.parametrize(
+    "setting, expected", [("900", 900), ("", 600), ("0", 600), ("bad", 600)]
+)
+@pytest.mark.parametrize(
+    "provider_class, target",
+    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
+)
+def test_provider_request_timeout_is_configured(
+    monkeypatch, setting, expected, provider_class, target
+):
+    """Both provider clients receive a positive timeout with a safe fallback."""
+    from backend.llm.llm_providers import DEFAULT_LLM_TIMEOUT_SECONDS
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
+    with patch(target) as client:
+        provider_class("test-key")
+    assert client.call_args.kwargs["timeout"] == (
+        expected if setting == "900" else DEFAULT_LLM_TIMEOUT_SECONDS
+    )

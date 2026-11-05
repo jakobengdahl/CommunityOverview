@@ -1,3 +1,4 @@
+# covers: backend/ui/chat_service.py, backend/ui/chat_logic.py
 """
 Tests for ChatService.
 
@@ -13,7 +14,11 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from backend.llm.llm_providers import LLMResponse, TOOL_CALLS_NOT_RUN_MESSAGE
+from backend.llm.llm_providers import (
+    LLMResponse,
+    TOOL_CALLS_NOT_RUN_MESSAGE,
+    DEFAULT_CHAT_MAX_ROUNDS,
+)
 from backend.ui.chat_logic import _EMPTY_REPLY_RETRY_INSTRUCTION, _NO_ANSWER_MESSAGE
 from backend.ui.chat_logic import _NO_TEXT_WITH_TOOL_CALLS_MESSAGE
 
@@ -2738,6 +2743,7 @@ class TestEmptyFinalReplyAfterToolChain:
         "retry",
         [
             RuntimeError("provider down"),
+            TimeoutError(),
             LLMResponse(
                 content=[{"type": "text", "text": "  \n"}], stop_reason="end_turn"
             ),
@@ -2894,3 +2900,84 @@ class TestEmptyFinalReplyAfterToolChain:
         assert result["content"] == "Done."
         assert len(calls) == 2
         assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
+
+
+@pytest.mark.parametrize(
+    "setting, limit",
+    [
+        ("1", 1),
+        ("3", 3),
+        ("", DEFAULT_CHAT_MAX_ROUNDS),
+        ("bad", DEFAULT_CHAT_MAX_ROUNDS),
+    ],
+)
+def test_chat_round_cap_keeps_completed_writes_and_results(
+    chat_service, monkeypatch, setting, limit
+):
+    """A repeating tool chain stops at the configured cap and keeps its writes."""
+    from backend.ui.chat_logic import CHAT_ROUND_LIMIT_MESSAGE
+
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", setting)
+    service, _ = chat_service
+    writes = []
+
+    def update_node():
+        writes.append(len(writes))
+        return {"nodes": [{"id": str(writes[-1])}]}
+
+    llm = MagicMock()
+    llm.options = {}
+    llm.create_completion.return_value = LLMResponse(
+        content=[
+            {"type": "tool_use", "id": "call", "name": "update_node", "input": {}}
+        ],
+        stop_reason="tool_use",
+    )
+    result = service._processor.process_message(
+        [{"role": "user", "content": "Update"}],
+        llm_provider=llm,
+        tools_override={"update_node": update_node},
+    )
+    assert llm.create_completion.call_count == limit
+    assert len(writes) == limit
+    assert result["toolResult"]["nodes"] == [{"id": str(i)} for i in writes]
+    assert result["content"] == CHAT_ROUND_LIMIT_MESSAGE.format(
+        summary=f"update_node (completed): {limit}"
+    )
+
+
+@pytest.mark.parametrize("first_turn", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("timeout_type", [TimeoutError, "claude", "openai"])
+def test_provider_timeout_uses_answer_retry(
+    chat_service, first_turn, recovered, timeout_type
+):
+    """Timeouts retry without tools and preserve any earlier tool results."""
+    from backend.ui.chat_logic import ClaudeTimeoutError, OpenAITimeoutError
+
+    timeout = (
+        {"claude": ClaudeTimeoutError, "openai": OpenAITimeoutError}[timeout_type](
+            request=MagicMock()
+        )
+        if isinstance(timeout_type, str)
+        else timeout_type()
+    )
+    runner = TestEmptyFinalReplyAfterToolChain
+    reply = runner._text_reply("Recovered") if recovered else TimeoutError()
+    result, calls, _ = runner._run(chat_service, timeout, reply, first_turn=first_turn)
+    assert len(calls) == (2 if first_turn else 3)
+    assert calls[-1]["tools"] == []
+    assert result["content"] == ("Recovered" if recovered else _NO_ANSWER_MESSAGE)
+    assert result["toolUsed"] == (None if first_turn else "search_graph")
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_answer_retry_respects_chat_round_budget(chat_service, monkeypatch, limit):
+    """Recovery does not make an extra provider call beyond the round budget."""
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", str(limit))
+    runner = TestEmptyFinalReplyAfterToolChain
+    result, calls, _ = runner._run(
+        chat_service, runner._empty_reply(), first_turn=limit == 1
+    )
+    assert len(calls) == limit
+    assert result["content"] == _NO_ANSWER_MESSAGE

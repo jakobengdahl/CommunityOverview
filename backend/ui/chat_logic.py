@@ -6,12 +6,18 @@ import os
 import json
 import logging
 import threading
+from collections import Counter
+from anthropic import APITimeoutError as ClaudeTimeoutError
+from openai import APITimeoutError as OpenAITimeoutError
 from anyio import CapacityLimiter, from_thread, to_thread
 from dotenv import load_dotenv
 import inspect
 from backend.llm.llm_providers import (
     create_provider,
     LLMProvider,
+    LLMResponse,
+    DEFAULT_CHAT_MAX_ROUNDS,
+    positive_int_setting,
     provider_max_tokens,
     TOOL_CALLS_NOT_RUN_MESSAGE,
     tool_input_type_error,
@@ -566,7 +572,10 @@ def _chat_completion(provider, **kwargs):
     if progress is not None:
         progress["round"] += 1
         _report_step("llm_started", round=progress["round"])
-    response = provider.create_completion(**kwargs)
+    try:
+        response = provider.create_completion(**kwargs)
+    except (TimeoutError, ClaudeTimeoutError, OpenAITimeoutError):
+        response = LLMResponse(content=[], stop_reason="timeout")
     if progress is not None:
         raw = getattr(response, "raw_response", None)
         choices = getattr(raw, "choices", None)
@@ -704,12 +713,15 @@ def _answer_after_empty_reply(
     provider: LLMProvider,
     system_prompt: str,
     stage: str = "tool chain",
+    retry_allowed: bool = True,
 ) -> str:
     """Retry once without tools; never returns blank, even if the retry fails.
 
     The instruction is sent on a copy so it stays out of the caller's history.
     """
     _log_empty_reply(response, stage)
+    if not retry_allowed:
+        return _NO_ANSWER_MESSAGE
     try:
         retry = _chat_completion(
             provider,
@@ -730,6 +742,12 @@ def _answer_after_empty_reply(
         return text
     _log_empty_reply(retry, "retry")
     return _NO_ANSWER_MESSAGE
+
+
+CHAT_ROUND_LIMIT_MESSAGE = (
+    "The chat chain stopped at its round limit. Completed tool calls: {summary}. "
+    "Earlier changes and results are kept. You can continue in another message."
+)
 
 
 class ChatProcessor:
@@ -1534,6 +1552,9 @@ class ChatProcessor:
                 tool_allowlist, attachment_access
             )
 
+            max_rounds = positive_int_setting(
+                "CHAT_MAX_ROUNDS", DEFAULT_CHAT_MAX_ROUNDS
+            )
             # First call to LLM
             response = _chat_completion(
                 llm_provider,
@@ -1561,6 +1582,7 @@ class ChatProcessor:
                     tool_allowlist=tool_allowlist,
                     active_tool_definitions=active_tool_definitions,
                     attachment_access=attachment_access,
+                    rounds_remaining=max_rounds,
                 )
 
             # Just text response
@@ -1574,6 +1596,7 @@ class ChatProcessor:
                     llm_provider,
                     active_system_prompt,
                     stage="first turn",
+                    retry_allowed=max_rounds > 1,
                 )
 
             return {
@@ -1610,6 +1633,8 @@ class ChatProcessor:
         tool_allowlist: Optional[List[str]] = None,
         active_tool_definitions: List[Dict] = None,
         attachment_access: Optional[Callable[[str], str]] = None,
+        rounds_remaining: Optional[int] = None,
+        completed_tools: Optional[List[str]] = None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1630,6 +1655,12 @@ class ChatProcessor:
         replace. Preserving it — and defaulting to additive when unset — is what
         keeps a plain additive request from clearing the current view.
         """
+        if rounds_remaining is None:
+            rounds_remaining = positive_int_setting(
+                "CHAT_MAX_ROUNDS", DEFAULT_CHAT_MAX_ROUNDS
+            )
+        if completed_tools is None:
+            completed_tools = []
         if accumulated_nodes is None:
             accumulated_nodes = []
         if accumulated_edges is None:
@@ -1780,6 +1811,12 @@ class ChatProcessor:
                 tool_result = {"error": f"Tool {tool_name} not found"}
 
             _report_step("tool_finished", tool=tool_name)
+            outcome = (
+                "failed"
+                if isinstance(tool_result, dict) and tool_result.get("error")
+                else "completed"
+            )
+            completed_tools.append(f"{tool_name} ({outcome})")
 
             # Accumulate nodes and edges from tools that return them
             if tool_result and isinstance(tool_result, dict):
@@ -1853,13 +1890,31 @@ class ChatProcessor:
             }
         )
 
-        final_response = _chat_completion(
-            provider,
-            messages=messages,
-            system_prompt=active_system_prompt,
-            tools=active_tool_definitions,
-            max_tokens=provider_max_tokens(provider),
-        )
+        if rounds_remaining <= 1:
+            summary = (
+                ", ".join(
+                    f"{name}: {count}"
+                    for name, count in Counter(completed_tools).items()
+                )
+                or "none"
+            )
+            final_response = LLMResponse(
+                content=[
+                    {
+                        "type": "text",
+                        "text": CHAT_ROUND_LIMIT_MESSAGE.format(summary=summary),
+                    }
+                ],
+                stop_reason="end_turn",
+            )
+        else:
+            final_response = _chat_completion(
+                provider,
+                messages=messages,
+                system_prompt=active_system_prompt,
+                tools=active_tool_definitions,
+                max_tokens=provider_max_tokens(provider),
+            )
 
         # Check if LLM wants to use another tool (tool chaining)
         if _wants_tools(final_response):
@@ -1878,6 +1933,8 @@ class ChatProcessor:
                 tool_allowlist=tool_allowlist,
                 active_tool_definitions=active_tool_definitions,
                 attachment_access=attachment_access,
+                rounds_remaining=rounds_remaining - 1,
+                completed_tools=completed_tools,
             )
 
         final_text = (
@@ -1887,7 +1944,11 @@ class ChatProcessor:
         )
         if not final_text.strip():
             final_text = _answer_after_empty_reply(
-                messages, final_response, provider, active_system_prompt
+                messages,
+                final_response,
+                provider,
+                active_system_prompt,
+                retry_allowed=rounds_remaining > 2,
             )
 
         # Prepare final tool result with accumulated data

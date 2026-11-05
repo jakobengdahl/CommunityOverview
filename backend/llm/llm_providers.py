@@ -13,6 +13,24 @@ from backend.runtime.extensions import get_runtime_extensions, runtime_context
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOKENS = 16000
+DEFAULT_CHAT_MAX_ROUNDS = 64
+DEFAULT_LLM_TIMEOUT_SECONDS = 600
+
+
+def positive_int_setting(name: str, default: int) -> int:
+    """Read a positive integer setting, falling back on invalid input."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        limit = int(value)
+        if limit > 0:
+            return limit
+    except ValueError:
+        pass
+    logger.warning("Ignoring invalid %s; using %d", name, default)
+    return default
+
 
 # The anthropic SDK refuses a non-streaming request it expects to run over 10
 # minutes, which it estimates as max_tokens / 128,000 of an hour.
@@ -136,7 +154,13 @@ class ClaudeProvider(LLMProvider):
     ):
         from anthropic import Anthropic
 
-        self.client = Anthropic(api_key=api_key, base_url=base_url)
+        self.client = Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=positive_int_setting(
+                "LLM_TIMEOUT_SECONDS", DEFAULT_LLM_TIMEOUT_SECONDS
+            ),
+        )
         self.model = model or "claude-sonnet-4-5"
 
     def _cap_nonstreaming(self, max_tokens: int) -> int:
@@ -227,7 +251,13 @@ class OpenAIProvider(LLMProvider):
         # None = use SDK default (api.openai.com), unless overridden by caller
         # or OPENAI_BASE_URL (legacy env-var configuration).
         resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        self.client = OpenAI(api_key=api_key, base_url=resolved_base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=resolved_base_url,
+            timeout=positive_int_setting(
+                "LLM_TIMEOUT_SECONDS", DEFAULT_LLM_TIMEOUT_SECONDS
+            ),
+        )
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         self._tool_calling = os.getenv("OPENAI_TOOL_CALLING", "true").lower() != "false"
 
