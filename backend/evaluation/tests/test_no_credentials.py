@@ -1,3 +1,4 @@
+# covers: backend/evaluation/runner.py
 """
 The credential guarantee: no credential value lives in this repository, the
 harness reads one only from the environment, and no test needs a real one.
