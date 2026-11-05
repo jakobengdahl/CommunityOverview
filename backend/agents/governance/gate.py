@@ -32,7 +32,7 @@ from backend.core.events.causation import current_agent_mutation_context
 from .models import AutonomyLevel, Proposal
 from .store import ProposalStore
 
-from backend.runtime.content_logging import log_failure
+from backend.runtime.content_logging import log_failure, mark_tainted
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,38 @@ MUTATING_ORIGINAL_TOOLS = frozenset(
         "delete_edges",
         "write_file",
         *ATTACHMENT_WRITE_TOOLS,
+    }
+)
+
+# Fixed review boundary from ADR 0010 §5; additions require explicit review.
+ATTACHMENT_TAINT_PERMITTED_TOOLS = frozenset(
+    {
+        "search_graph",
+        "get_related_nodes",
+        "find_similar_nodes",
+        "find_similar_nodes_batch",
+        "list_node_types",
+        "get_subtypes",
+        "get_schema",
+        "get_presentation",
+        "list_saved_views",
+        "get_saved_view",
+        "get_node_details",
+        "get_graph_stats",
+        "get_capabilities",
+        "get_runtime_info",
+        "get_tenant_context",
+        "get_config_context",
+        "get_request_actor",
+        "get_request_scope",
+        "get_request_selection",
+        "list_node_attachments",
+        "read_node_attachment",
+        "search_node_attachments",
+        "propose_new_node",
+        "present_form",
+        "mark_nodes",
+        "clear_visualization",
     }
 )
 
@@ -134,6 +166,8 @@ class AutonomyGate:
         attachment_access_resolver: Optional[Callable[[], str]] = None,
         authorization_hook: Any = None,
     ) -> None:
+        self._tainted = False
+        self._proposal_ids: list[str] = []
         self._attachment_access = attachment_access
         self._attachment_access_resolver = attachment_access_resolver
         self._authorization_hook = authorization_hook
@@ -167,6 +201,21 @@ class AutonomyGate:
                 }
 
             original = original_tool_name(self._mcp_loader, namespaced_name)
+            mutating = is_mutating_tool(self._mcp_loader, namespaced_name)
+            if self._tainted:
+                tool = self._mcp_loader.get_tool(namespaced_name)
+                if (
+                    getattr(tool, "integration_id", None) != "GRAPH"
+                    or (
+                        original not in ATTACHMENT_TAINT_PERMITTED_TOOLS
+                        and not mutating
+                    )
+                    or (mutating and self._store is None)
+                ):
+                    return {
+                        "error_code": "access_denied",
+                        "error": "Tool blocked in a tainted run.",
+                    }
             if original in ATTACHMENT_TOOLS:
                 access = self._attachment_access
                 if self._attachment_access_resolver is not None:
@@ -202,7 +251,14 @@ class AutonomyGate:
                     }
                 return self._record_proposal(namespaced_name, input_args)
 
-            return raw_executor(namespaced_name, input_args)
+            result = raw_executor(namespaced_name, input_args)
+            if isinstance(result, dict) and result.get("untrusted_content") is True:
+                self._tainted = True
+                mark_tainted()
+                # Earlier proposals belong to this same run too.
+                if self._proposal_ids:
+                    self._store.mark_tainted(self._proposal_ids)
+            return result
 
         return governed
 
@@ -213,6 +269,7 @@ class AutonomyGate:
             context = current_agent_mutation_context()
             proposal = self._store.create(
                 Proposal(
+                    tainted=self._tainted,
                     agent_id=self._agent_id,
                     agent_name=self._agent_name,
                     tool=namespaced_name,
@@ -228,6 +285,7 @@ class AutonomyGate:
                     session_id=current_session_id(),
                 )
             )
+            self._proposal_ids.append(proposal.id)
             return {
                 "status": "proposed",
                 "proposal_id": proposal.id,

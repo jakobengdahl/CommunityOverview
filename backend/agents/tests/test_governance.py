@@ -603,9 +603,11 @@ def test_causation_schema_migrates_existing_v2_proposals(tmp_path):
     store.close()
     with sqlite3.connect(db) as conn:
         conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
+        conn.execute("ALTER TABLE proposals DROP COLUMN tainted")
         conn.execute("PRAGMA user_version=2")
     migrated = SqliteProposalStore(db)
     assert migrated.get(p.id).causation_depth == 1
+    assert migrated.get(p.id).tainted is False
     migrated.close()
 
 
@@ -923,3 +925,210 @@ def test_governance_exception_formatted_logs_hide_content(caplog):
         and "raising_frame=" in line
         for line in lines
     )
+
+
+def test_taint_permitted_tools_are_explicit_and_classify_graph():
+    """The reviewed list is fixed and every advertised graph tool is classified."""
+    from backend.agents.governance.gate import (
+        ATTACHMENT_TAINT_PERMITTED_TOOLS as permitted,
+        MUTATING_ORIGINAL_TOOLS as mutating,
+    )
+    from backend.agents.mcp_loader import MCPLoader
+    from backend.agents.config import MCPIntegration
+
+    assert permitted == {
+        "search_graph",
+        "get_related_nodes",
+        "find_similar_nodes",
+        "find_similar_nodes_batch",
+        "list_node_types",
+        "get_subtypes",
+        "get_schema",
+        "get_presentation",
+        "list_saved_views",
+        "get_saved_view",
+        "get_node_details",
+        "get_graph_stats",
+        "get_capabilities",
+        "get_runtime_info",
+        "get_tenant_context",
+        "get_config_context",
+        "get_request_actor",
+        "get_request_scope",
+        "get_request_selection",
+        "list_node_attachments",
+        "read_node_attachment",
+        "search_node_attachments",
+        "propose_new_node",
+        "present_form",
+        "mark_nodes",
+        "clear_visualization",
+    }
+    loader = MCPLoader([])
+    assert {
+        t.original_name
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    } <= permitted | mutating
+
+
+@pytest.mark.parametrize("store_available", [False, True])
+@pytest.mark.parametrize("level", list(AutonomyLevel))
+def test_run_taint_blocks_egress_and_unknown_graph_tools(store_available, level):
+    """Taint sticks to the run and permits only graph reads or governed writes."""
+    from backend.runtime.content_logging import content_logging, is_tainted
+
+    loader = SimpleNamespace(
+        get_tool=lambda name: SimpleNamespace(
+            integration_id=name.split("__")[0], original_name=name.split("__")[-1]
+        )
+    )
+    store = InMemoryProposalStore() if store_available else None
+    gate = AutonomyGate(
+        autonomy_level=level,
+        tool_allowlist=None,
+        mcp_loader=loader,
+        proposal_store=store,
+        agent_id="a1",
+    )
+    raw = MagicMock(return_value={"untrusted_content": True})
+    execute = gate.wrap(raw)
+    with content_logging():
+        execute("WEB__fetch", {})
+        assert is_tainted()
+        raw.return_value = {"success": True}
+        for name in (
+            "WEB__fetch",
+            "SEARCH__search",
+            "FS__read_file",
+            "FUTURE__search_graph",
+            "GRAPH__future_read",
+            "FS__update_node",
+        ):
+            assert execute(name, {})["error_code"] == "access_denied"
+        assert execute("GRAPH__search_graph", {}) == {"success": True}
+        result = execute("GRAPH__update_node", {})
+        if store_available and not level.is_read_only:
+            assert result["status"] == "proposed"
+            assert store.get(result["proposal_id"]).tainted
+        else:
+            assert "error" in result
+    assert raw.call_count == 2
+    assert not is_tainted()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_all_run_proposals_keep_taint_through_storage(tmp_path, durable):
+    """Proposals before and after a read expose persistent taint to approvers."""
+    store = (
+        SqliteProposalStore(tmp_path / "taint.db")
+        if durable
+        else InMemoryProposalStore()
+    )
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.PROPOSE,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+    )
+    execute = gate.wrap(lambda *_: {"untrusted_content": True})
+    before = execute("graph.update_node", {})["proposal_id"]
+    stale = store.get(before)
+    assert not stale.tainted
+    store.decide(before, ProposalStatus.APPROVED)
+    execute("graph.search_graph", {})
+    assert store.get(before).status is ProposalStatus.APPROVED
+    stale.status = ProposalStatus.APPROVED
+    assert store.save(stale).tainted
+    if durable:
+        store.close()
+        store = SqliteProposalStore(tmp_path / "taint.db")
+    assert GovernanceManager(store).get_proposal(before)["tainted"] is True
+    assert Proposal.from_dict(store.get(before).to_dict()).tainted
+    assert not Proposal.from_dict(
+        {**store.get(before).to_dict(), "tainted": False}
+    ).tainted
+    if durable:
+        store.close()
+
+
+@pytest.mark.parametrize("failure", ["returned", "raised", None])
+@pytest.mark.parametrize("tainted", [False, True])
+def test_proposal_apply_formatted_logs_preserve_boundary(caplog, tainted, failure):
+    """Approved actions bind taint across loader call, error and exception logs."""
+    import logging
+    from backend.agents.config import MCPIntegration
+    from backend.agents.mcp_loader import MCPLoader
+    from backend.runtime.content_logging import is_tainted
+
+    loader = MCPLoader([])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+
+    def update_node(**kwargs):
+        assert is_tainted() is tainted
+        if failure == "raised":
+            raise ValueError("SECRET-exception")
+        return {"error": "SECRET-error"} if failure else {"success": True}
+
+    store = InMemoryProposalStore()
+    p = store.create(
+        Proposal(
+            "a1",
+            "GRAPH__update_node",
+            {"description": "SECRET-input"},
+            AutonomyLevel.ACT_AFTER_APPROVAL,
+            tainted=tainted,
+        )
+    )
+    manager = GovernanceManager(
+        store,
+        lambda _: loader.create_tool_executor(
+            graph_service=SimpleNamespace(update_node=update_node)
+        ),
+    )
+    with caplog.at_level(logging.INFO):
+        manager.approve(p.id)
+    output = caplog.text
+    assert ("SECRET-input" in output) is not tainted
+    assert ("SECRET-error" in output) is (failure == "returned" and not tainted)
+    assert ("SECRET-exception" in output) is (failure == "raised" and not tainted)
+    assert "GRAPH__update_node" in output
+    assert not is_tainted()
+
+    def fail_factory(_):
+        raise RuntimeError("SECRET-factory")
+
+    p = store.create(
+        Proposal(
+            "a1",
+            "GRAPH__update_node",
+            {},
+            AutonomyLevel.ACT_AFTER_APPROVAL,
+            tainted=tainted,
+        )
+    )
+    GovernanceManager(store, fail_factory).approve(p.id)
+    assert p.id in caplog.text and "SECRET-factory" not in caplog.text
+
+
+@pytest.mark.parametrize("logger_name", ["httpx", "httpx2"])
+def test_tainted_http_request_logs_omit_query(caplog, logger_name):
+    """Both HTTP clients retain clean diagnostics and redact tainted URL queries."""
+    import logging
+    from backend.runtime.content_logging import content_logging
+
+    for tainted in (False, True):
+        caplog.clear()
+        with caplog.at_level(logging.INFO), content_logging(tainted=tainted):
+            logging.getLogger(logger_name).info(
+                'HTTP Request: %s %s "%s %d %s"',
+                "GET",
+                "https://example.test/file?SECRET-query",
+                "HTTP/1.1",
+                200,
+                "OK",
+            )
+        assert ("SECRET-query" in caplog.text) is not tainted

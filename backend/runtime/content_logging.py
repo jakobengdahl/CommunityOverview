@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
+import logging
 import traceback
 
 _state = ContextVar("content_logging_state", default=None)
@@ -61,3 +62,15 @@ def log_failure(logger, level, code, exc, *, redact=False, context=""):
         frame.lineno,
         "" if redact or is_tainted() else f" error={exc}",
     )
+
+
+class _TaintedRequestFilter(logging.Filter):
+    def filter(self, record):
+        if is_tainted() and record.msg == 'HTTP Request: %s %s "%s %d %s"':
+            method, url, version, status, reason = record.args
+            record.args = (method, str(url).split("?", 1)[0], version, status, reason)
+        return True
+
+
+for _logger_name in ("httpx", "httpx2"):
+    logging.getLogger(_logger_name).addFilter(_TaintedRequestFilter())

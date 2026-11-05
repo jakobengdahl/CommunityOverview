@@ -50,6 +50,7 @@ from backend.skills.loader import (
 from backend.runtime.content_logging import (
     argument_sizes,
     content_logging,
+    is_tainted,
     log_failure,
     mark_tainted,
     safe_tool_name,
@@ -656,14 +657,17 @@ class AgentWorker:
                 if self._pause_reason is not None:
                     return {"error": self._pause_reason}
                 with agent_mutation_context(self.agent_id, event_payload):
-                    tool_result = execute_tool(name, arguments)
-                    if (
-                        isinstance(tool_result, dict)
-                        and tool_result.get("untrusted_content") is True
-                    ):
-                        tainted = True
-                        mark_tainted()
-                    return tool_result
+                    try:
+                        tool_result = execute_tool(name, arguments)
+                        if (
+                            isinstance(tool_result, dict)
+                            and tool_result.get("untrusted_content") is True
+                        ):
+                            mark_tainted()
+                        return tool_result
+                    finally:
+                        # Keep failure logs redacted even if persisting taint fails.
+                        tainted = tainted or is_tainted()
 
             # Bind identity across the loop, including refusals before dispatch.
             from backend.service.attachment_tools import tool_caller
