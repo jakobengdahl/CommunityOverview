@@ -915,9 +915,11 @@ def test_governance_exception_formatted_logs_hide_content(caplog):
     assert all(secret not in line for line in lines)
     assert any(
         "error_code=proposal_record_failed error_class=RuntimeError" in line
+        and "raising_frame=" in line
         for line in lines
     )
     assert any(
         "error_code=proposal_apply_failed error_class=ValueError" in line
+        and "raising_frame=" in line
         for line in lines
     )

@@ -26,6 +26,13 @@ from backend.core.events.delivery import (
     pinned_transport,
 )
 
+from backend.runtime.content_logging import (
+    argument_sizes,
+    is_tainted,
+    log_failure,
+    mark_tainted,
+)
+
 logger = logging.getLogger(__name__)
 
 # Ingest caps for the two redirect walkers below. Neither had one: both read
@@ -96,8 +103,10 @@ def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
 
 
 def _summarize_args(args: Dict[str, Any]) -> str:
-    """Summarize argument names only; values may contain secrets or file content."""
-    return json.dumps(list(args), ensure_ascii=False)
+    """Summarize ordinary inputs, or sizes after reading untrusted content."""
+    if is_tainted():
+        return argument_sizes(args)
+    return json.dumps(args, default=str, ensure_ascii=False)[:300]
 
 
 @dataclass
@@ -861,7 +870,9 @@ class MCPLoader:
             """Execute a namespaced tool."""
             tool = self.get_tool(namespaced_name)
             if not tool:
-                logger.warning(f"Tool not found: {namespaced_name}")
+                logger.warning(
+                    "Tool not found: unknown_tool %s", argument_sizes(input_args)
+                )
                 return {"error": f"Unknown tool: {namespaced_name}"}
 
             integration_id = tool.integration_id
@@ -869,12 +880,14 @@ class MCPLoader:
 
             from backend.runtime.attachment_access import ATTACHMENT_TOOLS
 
-            if original_name in ATTACHMENT_TOOLS:
-                logger.info("Executing attachment tool %s", namespaced_name)
+            if original_name in ATTACHMENT_TOOLS or is_tainted():
+                logger.info(
+                    "Executing tool %s %s", namespaced_name, argument_sizes(input_args)
+                )
             else:
                 logger.info(
                     f"Executing tool {namespaced_name} "
-                    f"with argument names: {_summarize_args(input_args)}"
+                    f"with arguments: {_summarize_args(input_args)}"
                 )
 
             # Route to appropriate executor
@@ -891,7 +904,18 @@ class MCPLoader:
             else:
                 result = {"error": f"No executor for integration: {integration_id}"}
 
-            if isinstance(result, dict) and "error" in result:
+            if isinstance(result, dict) and result.get("untrusted_content") is True:
+                mark_tainted()
+            if (
+                isinstance(result, dict)
+                and "error" in result
+                and original_name not in ATTACHMENT_TOOLS
+                and not is_tainted()
+            ):
+                logger.warning(
+                    "Tool %s returned an error: %s", namespaced_name, result["error"]
+                )
+            elif isinstance(result, dict) and "error" in result:
                 logger.warning(
                     "Tool %s returned an error: error_code=%s",
                     namespaced_name,
@@ -971,18 +995,18 @@ class MCPLoader:
                     return invalid
                 return method(**input_args)
         except Exception as e:
-            import traceback
+            from backend.runtime.attachment_access import ATTACHMENT_TOOLS
 
-            frame = traceback.extract_tb(e.__traceback__)[-1]
-            logger.error(
-                "Graph tool %s failed (%s); argument names: %s error_code=graph_tool_failed raising_frame=%s:%s",
-                tool_name,
-                type(e).__name__,
-                _summarize_args(input_args),
-                frame.filename,
-                frame.lineno,
+            redact = is_tainted() or tool_name in ATTACHMENT_TOOLS
+            log_failure(
+                logger,
+                logging.ERROR,
+                "graph_tool_failed",
+                e,
+                redact=redact,
+                context=f"Graph tool {tool_name}",
             )
-            return {"error": str(e)}
+            return {"error": "Graph tool failed" if redact else str(e)}
 
     def _execute_fetch_tool(
         self,

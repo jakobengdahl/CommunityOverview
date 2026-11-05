@@ -626,13 +626,14 @@ def test_execution_trace_formatted_logs_hide_content(
                         ],
                     }
                 ],
-            }
+            },
+            tainted=True,
+            known_tools={"GRAPH__search_graph"},
         )
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
     assert all(secret not in line for line in lines)
     assert any(
-        "GRAPH__search_node_attachments argument_names=['query']" in line
-        for line in lines
+        "GRAPH__search_node_attachments argument_count=1" in line for line in lines
     )
     assert any("error_code=execution_failed" in line for line in lines)
 
@@ -649,13 +650,26 @@ def test_worker_event_failure_formatted_log_hides_exception(
         config=agent_config, settings=agent_settings, mcp_loader=loader
     )
     worker._llm_client = MagicMock()
-    worker._llm_client.execute_with_tools.side_effect = RuntimeError(secret)
+    loader.create_tool_executor.return_value = MagicMock(
+        return_value={"untrusted_content": True}
+    )
+
+    def fail_after_read(**kwargs):
+        kwargs["tool_executor"]("GRAPH__read_node_attachment", {})
+        from backend.runtime.content_logging import is_tainted
+
+        assert is_tainted()
+        raise RuntimeError(secret)
+
+    worker._llm_client.execute_with_tools.side_effect = fail_after_read
     with caplog.at_level("INFO"):
         worker._process_event(EventItem("event-1", {"event_type": "node.create"}))
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
     assert all(secret not in line for line in lines)
     assert any(
-        "error_code=event_failed error_class=RuntimeError" in line for line in lines
+        "error_code=event_failed error_class=RuntimeError" in line
+        and "raising_frame=" in line
+        for line in lines
     )
 
 
@@ -693,3 +707,104 @@ def test_worker_early_argument_refusal_audits_agent(
     record = json.loads(lines[0])
     assert record["actor"] == {"type": "agent", "id": agent_config.agent_id}
     assert record["outcome"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_trace_logging_preserves_clean_diagnostics(
+    agent_config, agent_settings, caplog, tainted
+):
+    import logging
+
+    worker = AgentWorker(config=agent_config, settings=agent_settings, mcp_loader=None)
+    with caplog.at_level("INFO"):
+        worker._log_execution_trace(
+            {
+                "success": False,
+                "error": "execution-detail",
+                "final_response": "final-detail",
+                "trace": [
+                    {
+                        "text_response": "reasoning-detail",
+                        "tool_calls": [
+                            {
+                                "name": "GRAPH__search_graph",
+                                "input": {"query": "input-detail"},
+                            },
+                            {
+                                "name": "SECRET-tool-name",
+                                "input": {"SECRET-key": "SECRET-value"},
+                            },
+                            {
+                                "name": "GRAPH__add_node_attachment",
+                                "input": {"SECRET-attachment-key": "SECRET-attachment"},
+                            },
+                        ],
+                    }
+                ],
+            },
+            tainted=tainted,
+            known_tools={"GRAPH__search_graph"},
+        )
+    lines = "\n".join(
+        logging.Formatter("%(message)s").format(r) for r in caplog.records
+    )
+    for detail in (
+        "execution-detail",
+        "final-detail",
+        "reasoning-detail",
+        "input-detail",
+    ):
+        assert (detail in lines) is not tainted
+    assert "SECRET-attachment" not in lines
+    if tainted:
+        assert "SECRET-" not in lines
+        assert "unknown_tool argument_count=1" in lines
+
+
+@pytest.mark.parametrize(
+    "site", ["schema_load", "result_callback", "event", "processing_loop"]
+)
+def test_clean_worker_exception_diagnostics(agent_config, agent_settings, caplog, site):
+    import logging
+    from backend.agents.worker import EventItem
+
+    loader = MagicMock()
+    loader.get_tool_definitions.return_value = []
+    worker = AgentWorker(
+        config=agent_config,
+        settings=agent_settings,
+        mcp_loader=loader,
+        graph_service=MagicMock(),
+    )
+    worker._llm_client = MagicMock()
+    worker._llm_client.execute_with_tools.return_value = {
+        "success": True,
+        "trace": [],
+        "final_response": "ok",
+    }
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("diagnostic-detail")
+
+    if site == "schema_load":
+        worker.graph_service.get_schema.side_effect = fail
+    elif site == "result_callback":
+        worker.on_result = fail
+    elif site == "event":
+        worker._llm_client.execute_with_tools.side_effect = fail
+    else:
+        worker._running = True
+        worker._queue = MagicMock()
+        worker._queue.get.side_effect = [RuntimeError("diagnostic-detail"), None]
+    with caplog.at_level("INFO"):
+        if site == "processing_loop":
+            worker._process_loop()
+        else:
+            worker._process_event(EventItem("event-1", {"event_type": "node.create"}))
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert any(
+        "diagnostic-detail" in line
+        and "error_class=RuntimeError" in line
+        and "raising_frame=" in line
+        for line in lines
+    )

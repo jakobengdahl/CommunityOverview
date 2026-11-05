@@ -812,15 +812,56 @@ def test_session_mismatch_audited_once(service, monkeypatch, caplog, name):
     assert json.loads(lines[0])["outcome"] == "session_mismatch"
 
 
-def test_agent_search_graph_formatted_logs_hide_query(service, caplog):
+@pytest.mark.parametrize("tainted", [False, True])
+def test_agent_search_graph_formatted_logs_hide_query(service, caplog, tainted):
     import logging
     from backend.agents.mcp_loader import MCPLoader
 
     secret = "SECRET-search-graph-query"
-    with caplog.at_level("INFO"):
+    from backend.runtime.content_logging import content_logging
+
+    with caplog.at_level("INFO"), content_logging(tainted=tainted):
         MCPLoader([])._execute_graph_tool(
             "search_graph", {"query": secret}, service, "test-agent"
         )
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
-    assert all(secret not in line for line in lines)
-    assert any(f"SEARCH: query_length={len(secret)}" in line for line in lines)
+    if tainted:
+        assert all(secret not in line for line in lines)
+        assert any(f"SEARCH: query_length={len(secret)}" in line for line in lines)
+    else:
+        assert any(secret in line and "node_types=None" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        (
+            "search_node_attachments",
+            {"query": "needle", "node_ids": '["doc"]', "top_k": "3"},
+        ),
+        (
+            "search_node_attachments",
+            {"query": "needle", "node_ids": ["doc"], "top_k": 3.0},
+        ),
+        (
+            "read_node_attachment",
+            {"node_id": "doc", "attachment_id": "a" * 32, "offset": "0"},
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fastmcp_preserves_sdk_argument_coercion(service, caplog, name, args):
+    import json
+    import logging
+    from mcp.server.fastmcp import FastMCP
+    from backend.service.mcp_tools import register_mcp_tools
+
+    mcp = FastMCP("test")
+    register_mcp_tools(mcp, service, attachment_access="read")
+    with caplog.at_level("INFO"):
+        result = await mcp.call_tool(name, args)
+    assert "invalid_arguments" not in str(result)
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    line = logging.Formatter("%(message)s").format(audits[0])
+    assert json.loads(line)["outcome"] != "invalid_arguments"

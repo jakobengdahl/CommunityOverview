@@ -633,7 +633,7 @@ def register_mcp_tools(
 
                         try:
                             self.arg_model.model_validate(
-                                arguments_to_validate, strict=True
+                                self.pre_parse_json(arguments_to_validate)
                             )
                         except ValidationError:
                             with tool_caller("mcp"):

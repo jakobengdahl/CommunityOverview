@@ -24,6 +24,8 @@ from backend.llm.llm_providers import (
     tool_input_type_error,
 )
 
+from backend.runtime.content_logging import is_tainted, log_failure, safe_tool_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,10 +134,7 @@ class LLMClient:
             return self._parse_response(response)
 
         except Exception as e:
-            logger.error(
-                "LLM call failed: error_code=llm_failed error_class=%s",
-                type(e).__name__,
-            )
+            log_failure(logger, logging.ERROR, "llm_failed", e)
             raise
 
     def _parse_response(self, response: LLMResponse) -> AgentTurn:
@@ -226,7 +225,10 @@ class LLMClient:
                 turn_record["tool_calls"] = []
                 logger.warning(
                     "Reply hit the token limit; tool calls not run: %s",
-                    [tc.name for tc in turn.tool_calls],
+                    [
+                        safe_tool_name(tc.name) if is_tainted() else tc.name
+                        for tc in turn.tool_calls
+                    ],
                 )
                 return {
                     "success": False,
@@ -275,15 +277,25 @@ class LLMClient:
                         }
                     )
                 except Exception as e:
-                    logger.warning(
-                        "Tool %s failed: error_code=tool_failed error_class=%s",
-                        tc.name,
-                        type(e).__name__,
+                    from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+                    redact = (
+                        is_tainted()
+                        or tc.name.removeprefix("GRAPH__") in ATTACHMENT_TOOLS
                     )
+                    log_failure(
+                        logger,
+                        logging.WARNING,
+                        "tool_failed",
+                        e,
+                        redact=redact,
+                        context=f"Tool {safe_tool_name(tc.name) if redact else tc.name}",
+                    )
+
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,
-                            "result": {"error": str(e)},
+                            "result": {"error": "Tool failed" if redact else str(e)},
                             "is_error": True,
                         }
                     )

@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 import logging
 
+from backend.runtime.content_logging import is_tainted
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,9 +72,16 @@ def search_graph(
             action=GRAPH_ACTION_READ, target="search_graph", decision=decision
         )
 
-    logger.info(
-        "SEARCH: query_length=%s limit=%s semantic=%s", len(query), limit, semantic
-    )
+    if is_tainted():
+        logger.info("SEARCH: query_length=%s", len(query))
+    else:
+        logger.info(
+            "SEARCH: query='%s' node_types=%s limit=%s semantic=%s",
+            query,
+            node_types,
+            limit,
+            semantic,
+        )
 
     type_filters = None
     if node_types:

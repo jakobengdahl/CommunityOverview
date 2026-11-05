@@ -32,6 +32,8 @@ from backend.core.events.causation import current_agent_mutation_context
 from .models import AutonomyLevel, Proposal
 from .store import ProposalStore
 
+from backend.runtime.content_logging import log_failure
+
 logger = logging.getLogger(__name__)
 
 # Tools (by their original, un-namespaced name) that change persistent state.
@@ -236,9 +238,8 @@ class AutonomyGate:
             }
         except Exception as exc:
             # A governance-store failure must fail closed: do not execute.
-            logger.error(
-                "Governance: error_code=proposal_record_failed error_class=%s",
-                type(exc).__name__,
+            log_failure(
+                logger, logging.ERROR, "proposal_record_failed", exc, redact=True
             )
             return {
                 "error": (

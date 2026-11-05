@@ -283,26 +283,31 @@ class TestToolExecutor:
         }
         executor = loader.create_tool_executor(graph_service=FailingService())
 
-        with caplog.at_level(logging.INFO, logger=mcp_loader.__name__):
+        from backend.runtime.content_logging import content_logging
+
+        with (
+            caplog.at_level(logging.INFO, logger=mcp_loader.__name__),
+            content_logging(tainted=True),
+        ):
             result = executor(
                 "GRAPH__search_graph",
                 {"query": argument_secret, "options": {"content": argument_secret}},
             )
 
-        assert result == {"error": exception_secret}
+        assert result == {"error": "Graph tool failed" if raises else exception_secret}
         records = [r for r in caplog.records if r.name == mcp_loader.__name__]
         assert records
         for record in records:
             assert argument_secret not in repr(record.__dict__)
             assert exception_secret not in repr(record.__dict__)
         assert "search_graph" in caplog.text
-        assert "query" in caplog.text
-        assert "options" in caplog.text
+        assert "argument_count=2" in caplog.text
+        assert "argument_sizes=" in caplog.text
         if raises:
             error_records = [r for r in records if r.levelno == logging.ERROR]
             assert len(error_records) == 1
             assert "ValueError" in error_records[0].getMessage()
-            assert "query" in error_records[0].getMessage()
+            assert "raising_frame=" in error_records[0].getMessage()
             assert error_records[0].exc_info is None
 
     def test_executor_unknown_tool_raises(self, mock_service):
@@ -2913,7 +2918,9 @@ def test_graph_failure_formatted_log_locates_raising_frame(caplog):
         t.namespaced_name: t
         for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
     }
-    with caplog.at_level("INFO"):
+    from backend.runtime.content_logging import content_logging
+
+    with caplog.at_level("INFO"), content_logging(tainted=True):
         loader.create_tool_executor(graph_service=service)(
             "GRAPH__search_graph", {"query": secret}
         )
@@ -2947,3 +2954,31 @@ def test_attachment_error_formatted_log_has_safe_code(caplog):
     lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
     assert all("SECRET-tool-content" not in line for line in lines)
     assert any("error_code=invalid_arguments" in line for line in lines)
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_executor_formatted_log_input_boundaries(caplog, tainted):
+    from backend.runtime.content_logging import content_logging
+    from unittest.mock import MagicMock
+
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    execute = loader.create_tool_executor(graph_service=MagicMock())
+    with caplog.at_level("INFO"), content_logging(tainted=tainted):
+        execute("GRAPH__search_graph", {"SECRET-key": "SECRET-value"})
+        execute(
+            "GRAPH__read_node_attachment",
+            {"SECRET-attachment-key": "SECRET-attachment"},
+        )
+        execute("SECRET-unknown-tool", {"SECRET-unknown-key": "SECRET-unknown"})
+    lines = "\n".join(
+        logging.Formatter("%(message)s").format(r) for r in caplog.records
+    )
+    assert ("SECRET-key" in lines) is not tainted
+    assert "SECRET-attachment" not in lines
+    assert "SECRET-unknown" not in lines
+    if tainted:
+        assert "argument_count=1" in lines
