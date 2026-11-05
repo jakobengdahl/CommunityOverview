@@ -163,6 +163,13 @@ class AutonomyGate:
                     original, access, self._authorization_hook
                 )
                 if refused is not None:
+                    from backend.service.attachment_tools import (
+                        audit_attachment_refusal,
+                        tool_caller,
+                    )
+
+                    with tool_caller("agent", self._agent_id):
+                        audit_attachment_refusal(original, refused["error_code"])
                     return refused
                 if self._store is None and original in ATTACHMENT_WRITE_TOOLS:
                     return {

@@ -215,7 +215,8 @@ class AttachmentReadTools:
             node if all(access.is_node_visible(node, n) for n in narrowings) else None
         )
 
-    def audit(self, tool, node_id=None, record=None, chars=0, outcome="ok"):
+    @staticmethod
+    def audit(tool, node_id=None, record=None, chars=0, outcome="ok"):
         context = build_graph_authorization_context(action="read", target=tool)
         actor = context.actor
         kind, caller_id = _caller.get()
@@ -553,3 +554,11 @@ def tool_definitions():
             ),
         ]
     ]
+
+
+def audit_attachment_refusal(name, outcome):
+    """Audit a dispatcher refusal before any node or attachment is resolved."""
+    if name in ("read_node_attachment", "search_node_attachments"):
+        AttachmentReadTools.audit(
+            "read" if name == "read_node_attachment" else "search", outcome=outcome
+        )

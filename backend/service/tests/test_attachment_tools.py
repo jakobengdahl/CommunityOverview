@@ -598,3 +598,56 @@ async def test_attachment_dispatch_keeps_extraction_off_loop(
         finally:
             release.set()
         await pending
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+@pytest.mark.parametrize("transport", ["execute_tool", "mcp"])
+def test_attachment_dispatch_refusal_formatted_audit(service, caplog, name, transport):
+    import json
+    import logging
+    from unittest.mock import MagicMock
+    from backend.service.mcp_tools import register_mcp_tools
+
+    registered = {}
+    mcp = MagicMock()
+
+    def register(func):
+        registered[func.__name__] = func
+        return func
+
+    mcp.tool.return_value = register
+    tools = register_mcp_tools(mcp, service, attachment_access="read")
+    service._authorization_hook = MagicMock()
+    service._authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
+        allowed=False
+    )
+    secret = "private-query-content-filename.txt"
+    args = (
+        {"query": secret, "node_ids": [secret]}
+        if name == "search_node_attachments"
+        else {"node_id": secret, "attachment_id": secret}
+    )
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = (
+            tools[name](**args)
+            if transport == "execute_tool"
+            else asyncio.run(registered[name](**args))
+        )
+    assert result["error_code"] == "access_denied"
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["tool"] == name
+    assert record["outcome"] == "access_denied"
+    assert record["actor"] == {"type": "mcp", "id": None}
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]

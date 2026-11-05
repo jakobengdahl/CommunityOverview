@@ -26,6 +26,7 @@ from backend.config.model_profiles import (
 from backend.llm.language_policy import format_language_policy_for_prompt
 from backend.service.attachment_tools import (
     attachment_graph_dispatch,
+    audit_attachment_refusal,
     tool_definitions as attachment_tool_definitions,
 )
 from backend.service.system_nodes import system_create_tool_definitions
@@ -1713,6 +1714,7 @@ class ChatProcessor:
                     self._authorization_hook,
                 )
                 if refused is not None:
+                    audit_attachment_refusal(tool_name, refused["error_code"])
                     tool_results.append({"tool_use_id": tool_id, "result": refused})
                     continue
 

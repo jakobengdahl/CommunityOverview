@@ -23,8 +23,17 @@ function MarkdownMessage({ children }) {
             </span>
           ),
         a: ({ href, children }) => {
-          const external =
-            href && new URL(href, window.location.href).origin !== window.location.origin;
+          let external;
+          try {
+            external =
+              href && new URL(href, window.location.href).origin !== window.location.origin;
+          } catch {
+            return (
+              <span>
+                {children} {children === href ? null : href}
+              </span>
+            );
+          }
           return (
             <a href={href} rel="noreferrer noopener">
               {children} {children === href ? null : href}

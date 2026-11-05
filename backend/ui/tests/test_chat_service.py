@@ -2902,3 +2902,46 @@ class TestEmptyFinalReplyAfterToolChain:
         assert result["content"] == "Done."
         assert len(calls) == 2
         assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_attachment_hook_refusal_formatted_audit(
+    chat_service, monkeypatch, caplog, name
+):
+    import json
+    import logging
+    from backend.runtime.authorization import GraphAuthorizationDecision
+
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+    service, llm = chat_service
+    service._assistant_attachment_access = "read"
+    raw = MagicMock()
+    service._processor.tools_map[name] = raw
+    service._processor._authorization_hook = MagicMock()
+    service._processor._authorization_hook.evaluate.return_value = (
+        GraphAuthorizationDecision(allowed=False)
+    )
+    secret = "private-query-content-filename.txt"
+    llm.mock_tool_calls = [
+        {"name": name, "input": {"query": secret, "node_id": secret}}
+    ]
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        service.process_message(messages=[{"role": "user", "content": "read files"}])
+    raw.assert_not_called()
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["tool"] == name
+    assert record["outcome"] == "access_denied"
+    assert record["actor"] == {"type": "user", "id": None}
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]

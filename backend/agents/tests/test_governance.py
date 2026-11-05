@@ -734,7 +734,7 @@ def test_attachment_denying_hook_blocks_execution_and_proposals(name, monkeypatc
         ("delete_node_attachment", "delete_node_attachment"),
     ],
 )
-def test_attachment_target_specific_hook_denial(name, target, monkeypatch):
+def test_attachment_target_specific_hook_denial(name, target, monkeypatch, caplog):
     """Metadata listing and content reads have separate authorization targets."""
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     seen = []
@@ -754,7 +754,24 @@ def test_attachment_target_specific_hook_denial(name, target, monkeypatch):
         attachment_access="read_write",
         authorization_hook=SimpleNamespace(evaluate=evaluate),
     )
-    result = gate.wrap(raw)("graph." + name, {})
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = gate.wrap(raw)("graph." + name, {})
+    if name in ("read_node_attachment", "search_node_attachments"):
+        import json
+        import logging
+
+        records = [r for r in caplog.records if r.name == "attachments.audit"]
+        assert len(records) == 1
+        record = json.loads(logging.Formatter("%(message)s").format(records[0]))
+        assert record["actor"] == {"type": "agent", "id": "a1"}
+        assert record["tool"] == name
+        assert record["outcome"] == "access_denied"
+        assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+            None,
+            None,
+            None,
+            0,
+        ]
     assert result["error_code"] == "access_denied"
     assert result["authorization"]["target"] == target
     assert seen[0].action == ("read" if name in ATTACHMENT_READ_TOOLS else "mutate")

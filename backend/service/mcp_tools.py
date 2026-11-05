@@ -569,14 +569,17 @@ def register_mcp_tools(
 
             @functools.wraps(original)
             def func(*args, **kwargs):
-                refused = attachment_tool_refusal(
-                    original.__name__, attachment_access, service.authorization_hook
-                )
-                if refused is not None:
-                    return refused
-                from .attachment_tools import tool_caller
+                from .attachment_tools import audit_attachment_refusal, tool_caller
 
                 with tool_caller("mcp"):
+                    refused = attachment_tool_refusal(
+                        original.__name__, attachment_access, service.authorization_hook
+                    )
+                    if refused is not None:
+                        audit_attachment_refusal(
+                            original.__name__, refused["error_code"]
+                        )
+                        return refused
                     return original(*args, **kwargs)
 
         wrapped = _session_aware(

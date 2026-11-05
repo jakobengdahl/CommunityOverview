@@ -37,3 +37,16 @@ it('shows image and link targets without fetching resources outside inline image
     expect(link.rel).toBe('noreferrer noopener');
   }
 });
+
+it.each(['[x](http://a:b/)', '<http://a:b>', '[x](http://)'])(
+  'renders malformed link %s as plain text',
+  (markdown) => {
+    const { container } = render(
+      <I18nProvider>
+        <MarkdownMessage>{markdown}</MarkdownMessage>
+      </I18nProvider>
+    );
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.textContent).toContain(markdown.includes('a:b') ? 'http://a:b' : 'http://');
+  }
+);
