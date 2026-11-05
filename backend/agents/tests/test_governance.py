@@ -1,3 +1,4 @@
+# covers: backend/agents/governance/models.py, backend/agents/governance/store.py, backend/agents/governance/gate.py, backend/agents/governance/manager.py, backend/agents/worker.py
 """
 Tests for basic agent governance: autonomy levels, the tool gate, the durable
 proposal store, and the approve/reject/apply manager, plus worker wiring.

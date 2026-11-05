@@ -256,7 +256,7 @@ def test_xlsx_resolves_shared_inline_and_literal_cells_per_named_sheet():
     assert result.segments[1].text == "shared two"
 
 
-@pytest.mark.parametrize("name_attribute", ['', ' name=""'])
+@pytest.mark.parametrize("name_attribute", ["", ' name=""'])
 def test_xlsx_nameless_sheets_have_distinct_numeric_locators(name_attribute):
     data = _xlsx({"First": [["i:first"]], "Second": [["i:second"]]})
     with zipfile.ZipFile(io.BytesIO(data)) as archive:

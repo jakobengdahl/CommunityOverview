@@ -1,3 +1,4 @@
+// covers: frontend/web/src/components/CollectKioskView.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import CollectKioskView from '../src/components/CollectKioskView';
