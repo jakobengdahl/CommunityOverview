@@ -104,7 +104,7 @@ describe('CollectKioskView rich-text rendering', () => {
     expect(firstItem.closest('ul')).not.toBeNull();
 
     // Link syntax → real anchor with href.
-    const link = screen.getByRole('link', { name: 'link' });
+    const link = screen.getByRole('link', { name: /link https:\/\/example\.com/ });
     expect(link).toHaveAttribute('href', 'https://example.com');
   });
 

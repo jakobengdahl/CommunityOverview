@@ -639,7 +639,8 @@ def test_attachment_grant_defaults_to_deny_even_with_allowlist(name, allowlist):
 @pytest.mark.parametrize("level", list(AutonomyLevel))
 @pytest.mark.parametrize("access", ["read", "read_write"])
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_grants_compose_with_autonomy(level, access, name):
+def test_attachment_grants_compose_with_autonomy(level, access, name, monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock(return_value={"ok": True})
     store = InMemoryProposalStore()
     gate = AutonomyGate(
@@ -673,8 +674,9 @@ def test_attachment_grants_compose_with_autonomy(level, access, name):
 
 
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_grant_does_not_bypass_nonempty_allowlist(name):
+def test_attachment_grant_does_not_bypass_nonempty_allowlist(name, monkeypatch):
     """A granted attachment tool outside a nonempty allowlist stays blocked."""
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock()
     store = InMemoryProposalStore()
     allowlist = ["graph.search_graph"]
@@ -702,7 +704,8 @@ def test_attachment_grant_does_not_bypass_nonempty_allowlist(name):
 
 
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_denying_hook_blocks_execution_and_proposals(name):
+def test_attachment_denying_hook_blocks_execution_and_proposals(name, monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock()
     store = InMemoryProposalStore()
     hook = SimpleNamespace(evaluate=lambda _: GraphAuthorizationDecision(allowed=False))
@@ -730,8 +733,9 @@ def test_attachment_denying_hook_blocks_execution_and_proposals(name):
         ("delete_node_attachment", "delete_node_attachment"),
     ],
 )
-def test_attachment_target_specific_hook_denial(name, target):
+def test_attachment_target_specific_hook_denial(name, target, monkeypatch):
     """Metadata listing and content reads have separate authorization targets."""
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     seen = []
 
     def evaluate(context):
@@ -759,8 +763,9 @@ def test_attachment_target_specific_hook_denial(name, target):
 
 @pytest.mark.parametrize("with_store", [False, True])
 def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
-    with_store,
+    with_store, monkeypatch
 ):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     helper = TestWorkerPreFiltersDefinitions()
     worker, raw = helper._worker(
         InMemoryProposalStore() if with_store else None, "act_after_approval"
@@ -784,3 +789,40 @@ def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
     )
     assert helper._run_and_capture(worker)["tools"] == []
     raw.assert_not_called()
+
+
+@pytest.mark.parametrize("ceiling", [None, "off", "read"])
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_agent_grants_respect_server_ceiling(monkeypatch, ceiling, name):
+    if ceiling is None:
+        monkeypatch.delenv("ATTACHMENT_CONTENT_ACCESS", raising=False)
+    else:
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", ceiling)
+    raw = MagicMock(return_value={"ok": True})
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+    )
+    tool = "graph." + name
+    shown = filter_tool_definitions(
+        [{"name": tool}],
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        attachment_access="read_write",
+    )
+    result = gate.wrap(raw)(tool, {})
+    allowed = ceiling == "read" and name in ATTACHMENT_READ_TOOLS
+    assert bool(shown) == allowed
+    if allowed:
+        assert result == {"ok": True}
+        raw.assert_called_once_with(tool, {})
+    else:
+        assert result["error_code"] == "access_denied"
+        raw.assert_not_called()
+    assert store.list_proposals() == []

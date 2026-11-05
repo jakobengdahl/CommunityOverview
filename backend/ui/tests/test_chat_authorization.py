@@ -435,7 +435,7 @@ def test_ui_chat_accepts_valid_credentials_when_auth_enabled(auth_enabled_app):
     ],
 )
 async def test_chat_attachment_hook_sees_request_actor(
-    chat_service, graph_storage, path, name
+    chat_service, graph_storage, path, name, monkeypatch
 ):
     """Each chat route binds the user before an attachment tool checks the hook."""
     from types import SimpleNamespace
@@ -443,6 +443,7 @@ async def test_chat_attachment_hook_sees_request_actor(
     from starlette.requests import Request
     from backend.ui.rest_api import ChatRequest, SimpleChatRequest
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     _, llm = chat_service
     hook = MagicMock()
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=False)

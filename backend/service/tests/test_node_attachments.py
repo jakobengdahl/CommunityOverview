@@ -1860,6 +1860,7 @@ def test_mcp_attachment_registration_filters_map_and_mount(
     )
     from backend.service.mcp_tools import register_mcp_tools
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     functions = {}
     calls = []
     for name in ATTACHMENT_TOOLS:
