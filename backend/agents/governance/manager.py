@@ -18,6 +18,8 @@ from backend.core.events.causation import agent_mutation_context
 from .models import Proposal, ProposalStatus, utcnow
 from .store import ProposalStore
 
+from backend.runtime.content_logging import log_failure
+
 logger = logging.getLogger(__name__)
 
 # executor_factory(agent_id) -> callable(namespaced_tool, input_args) -> result
@@ -140,6 +142,8 @@ class GovernanceManager:
                 p.status = ProposalStatus.APPLIED
                 p.apply_result = _small_result(result)
         except Exception as exc:
-            logger.error("Governance: applying proposal %s failed: %s", p.id, exc)
+            log_failure(
+                logger, logging.ERROR, "proposal_apply_failed", exc, redact=True
+            )
             p.status = ProposalStatus.APPLY_FAILED
             p.apply_error = str(exc)

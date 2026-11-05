@@ -260,6 +260,58 @@ class TestToolExecutor:
         assert len(mock_service.search_calls) == 1
         assert mock_service.search_calls[0]["query"] == "test"
 
+    @pytest.mark.parametrize("raises", [False, True])
+    def test_graph_tool_logs_exclude_sensitive_values(self, caplog, raises):
+        argument_sentinel = "argument-sentinel-content"
+        exception_sentinel = "exception-sentinel-content"
+
+        class FailingService:
+            def search_graph(self, **kwargs):
+                if raises:
+                    raise ValueError(exception_sentinel)
+                return {"error": exception_sentinel}
+
+        loader = MCPLoader([])
+        loader._tools_cache = {
+            "GRAPH__search_graph": NamespacedTool(
+                integration_id="GRAPH",
+                original_name="search_graph",
+                namespaced_name="GRAPH__search_graph",
+                description="Search",
+                input_schema={},
+            )
+        }
+        executor = loader.create_tool_executor(graph_service=FailingService())
+
+        from backend.runtime.content_logging import content_logging
+
+        with (
+            caplog.at_level(logging.INFO, logger=mcp_loader.__name__),
+            content_logging(tainted=True),
+        ):
+            result = executor(
+                "GRAPH__search_graph",
+                {"query": argument_sentinel, "options": {"content": argument_sentinel}},
+            )
+
+        assert result == {
+            "error": "Graph tool failed" if raises else exception_sentinel
+        }
+        records = [r for r in caplog.records if r.name == mcp_loader.__name__]
+        assert records
+        for record in records:
+            assert argument_sentinel not in repr(record.__dict__)
+            assert exception_sentinel not in repr(record.__dict__)
+        assert "search_graph" in caplog.text
+        assert "argument_count=2" in caplog.text
+        assert "argument_sizes=" in caplog.text
+        if raises:
+            error_records = [r for r in records if r.levelno == logging.ERROR]
+            assert len(error_records) == 1
+            assert "ValueError" in error_records[0].getMessage()
+            assert "raising_frame=" in error_records[0].getMessage()
+            assert error_records[0].exc_info is None
+
     def test_executor_unknown_tool_raises(self, mock_service):
         """Test that calling unknown tool returns error."""
         loader = MCPLoader([])
@@ -2851,3 +2903,84 @@ class TestRedirectCapIsShared:
             assert len(node.args) == 1
             assert isinstance(node.args[0], ast.Name), ast.dump(node)
             assert node.args[0].id == "MAX_REDIRECTS"
+
+
+def test_graph_failure_formatted_log_locates_raising_frame(caplog):
+    from unittest.mock import MagicMock
+
+    sentinel = "sentinel-tool-arguments"
+
+    def fail(**kwargs):
+        raise RuntimeError(sentinel)
+
+    service = MagicMock()
+    service.search_graph = fail
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    from backend.runtime.content_logging import content_logging
+
+    with caplog.at_level("INFO"), content_logging(tainted=True):
+        loader.create_tool_executor(graph_service=service)(
+            "GRAPH__search_graph", {"query": sentinel}
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(sentinel not in line for line in lines)
+    assert any(
+        "error_code=graph_tool_failed" in line
+        and f"{__file__}:{fail.__code__.co_firstlineno + 1}" in line
+        for line in lines
+    )
+
+
+def test_attachment_error_formatted_log_has_safe_code(caplog):
+    from unittest.mock import MagicMock
+
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    service = MagicMock()
+    service.attachment_tool_search.return_value = {
+        "error": "SECRET-tool-content",
+        "error_code": "invalid_arguments",
+    }
+    with caplog.at_level("INFO"):
+        loader.create_tool_executor(graph_service=service)(
+            "GRAPH__search_node_attachments",
+            {"query": "SECRET-tool-content", "node_ids": []},
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all("SECRET-tool-content" not in line for line in lines)
+    assert any("error_code=invalid_arguments" in line for line in lines)
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_executor_formatted_log_input_boundaries(caplog, tainted):
+    from backend.runtime.content_logging import content_logging
+    from unittest.mock import MagicMock
+
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    execute = loader.create_tool_executor(graph_service=MagicMock())
+    with caplog.at_level("INFO"), content_logging(tainted=tainted):
+        execute("GRAPH__search_graph", {"SECRET-key": "SECRET-value"})
+        execute(
+            "GRAPH__read_node_attachment",
+            {"SECRET-attachment-key": "SECRET-attachment"},
+        )
+        execute("SECRET-unknown-tool", {"SECRET-unknown-key": "SECRET-unknown"})
+    lines = "\n".join(
+        logging.Formatter("%(message)s").format(r) for r in caplog.records
+    )
+    assert ("SECRET-key" in lines) is not tainted
+    assert "SECRET-attachment" not in lines
+    assert "SECRET-unknown" not in lines
+    if tainted:
+        assert "argument_count=1" in lines

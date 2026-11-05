@@ -256,6 +256,24 @@ def test_xlsx_resolves_shared_inline_and_literal_cells_per_named_sheet():
     assert result.segments[1].text == "shared two"
 
 
+@pytest.mark.parametrize("name_attribute", ["", ' name=""'])
+def test_xlsx_nameless_sheets_have_distinct_numeric_locators(name_attribute):
+    data = _xlsx({"First": [["i:first"]], "Second": [["i:second"]]})
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        workbook = archive.read("xl/workbook.xml").decode()
+    for name in ("First", "Second"):
+        workbook = workbook.replace(f' name="{name}"', name_attribute)
+    data = _replace_member(data, "xl/workbook.xml", workbook)
+
+    result = extract(data, ae.XLSX)
+
+    assert result.status == ae.STATUS_OK
+    assert result.segments == (
+        ae.Segment("first", {"sheet": 1}),
+        ae.Segment("second", {"sheet": 2}),
+    )
+
+
 def test_pptx_slides_follow_presentation_order_not_file_names():
     result = extract(_pptx([["Title slide"], ["Second", "bullet"]]), ae.PPTX)
     assert result.status == ae.STATUS_OK
@@ -1582,7 +1600,7 @@ def test_g7_xlsx_ignores_phonetic_guides_and_negative_shared_indices():
         f'<sst xmlns="{_S}"><si><t>word</t><rPh><t>phonetic</t></rPh></si></sst>',
     )
     result = extract(data, ae.XLSX)
-    assert result.segments == (ae.Segment("word\t\ttail", {"sheet": ""}),)
+    assert result.segments == (ae.Segment("word\t\ttail", {"sheet": 1}),)
 
 
 @pytest.mark.parametrize("kind", ["external", "absolute", "missing"])

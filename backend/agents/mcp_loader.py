@@ -26,6 +26,13 @@ from backend.core.events.delivery import (
     pinned_transport,
 )
 
+from backend.runtime.content_logging import (
+    argument_sizes,
+    is_tainted,
+    log_failure,
+    mark_tainted,
+)
+
 logger = logging.getLogger(__name__)
 
 # Ingest caps for the two redirect walkers below. Neither had one: both read
@@ -95,16 +102,11 @@ def _read_capped(response, max_bytes: int) -> tuple[bytes, bool]:
     return (raw[:max_bytes], True) if over_cap else (raw, False)
 
 
-def _summarize_args(args: Dict[str, Any], max_len: int = 200) -> str:
-    """Summarize tool arguments for logging (truncate long values)."""
-
-    try:
-        text = json.dumps(args, default=str, ensure_ascii=False)
-    except Exception:
-        text = str(args)
-    if len(text) > max_len:
-        return text[:max_len] + "..."
-    return text
+def _summarize_args(args: Dict[str, Any]) -> str:
+    """Summarize ordinary inputs, or sizes after reading untrusted content."""
+    if is_tainted():
+        return argument_sizes(args)
+    return json.dumps(args, default=str, ensure_ascii=False)[:300]
 
 
 @dataclass
@@ -868,7 +870,9 @@ class MCPLoader:
             """Execute a namespaced tool."""
             tool = self.get_tool(namespaced_name)
             if not tool:
-                logger.warning(f"Tool not found: {namespaced_name}")
+                logger.warning(
+                    "Tool not found: unknown_tool %s", argument_sizes(input_args)
+                )
                 return {"error": f"Unknown tool: {namespaced_name}"}
 
             integration_id = tool.integration_id
@@ -876,12 +880,14 @@ class MCPLoader:
 
             from backend.runtime.attachment_access import ATTACHMENT_TOOLS
 
-            if original_name in ATTACHMENT_TOOLS:
-                logger.info("Executing attachment tool %s", namespaced_name)
+            if original_name in ATTACHMENT_TOOLS or is_tainted():
+                logger.info(
+                    "Executing tool %s %s", namespaced_name, argument_sizes(input_args)
+                )
             else:
                 logger.info(
                     f"Executing tool {namespaced_name} "
-                    f"with args: {_summarize_args(input_args)}"
+                    f"with arguments: {_summarize_args(input_args)}"
                 )
 
             # Route to appropriate executor
@@ -898,9 +904,35 @@ class MCPLoader:
             else:
                 result = {"error": f"No executor for integration: {integration_id}"}
 
-            if isinstance(result, dict) and "error" in result:
+            if isinstance(result, dict) and result.get("untrusted_content") is True:
+                mark_tainted()
+            if (
+                isinstance(result, dict)
+                and "error" in result
+                and original_name not in ATTACHMENT_TOOLS
+                and not is_tainted()
+            ):
                 logger.warning(
-                    f"Tool {namespaced_name} returned error: {result['error']}"
+                    "Tool %s returned an error: %s", namespaced_name, result["error"]
+                )
+            elif isinstance(result, dict) and "error" in result:
+                logger.warning(
+                    "Tool %s returned an error: error_code=%s",
+                    namespaced_name,
+                    result.get("error_code")
+                    if isinstance(result.get("error_code"), str)
+                    and result.get("error_code")
+                    in {
+                        "invalid_arguments",
+                        "access_denied",
+                        "not_found",
+                        "failed",
+                        "busy",
+                        "attachments_unavailable",
+                        "too_many_nodes",
+                        "attachment_index_corrupt",
+                    }
+                    else "tool_failed",
                 )
 
             return result
@@ -950,16 +982,31 @@ class MCPLoader:
             return {"error": f"Unknown graph tool: {tool_name}"}
 
         try:
-            from backend.service.attachment_tools import tool_caller
+            from backend.service.attachment_tools import (
+                attachment_argument_refusal,
+                tool_caller,
+            )
 
             with tool_caller("agent", agent_id):
+                invalid = attachment_argument_refusal(
+                    tool_name, method, kwargs=input_args
+                )
+                if invalid is not None:
+                    return invalid
                 return method(**input_args)
         except Exception as e:
-            logger.error(
-                f"Graph tool {tool_name} failed: {e} "
-                f"(args: {_summarize_args(input_args)})"
+            from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+            redact = is_tainted() or tool_name in ATTACHMENT_TOOLS
+            log_failure(
+                logger,
+                logging.ERROR,
+                "graph_tool_failed",
+                e,
+                redact=redact,
+                context=f"Graph tool {tool_name}",
             )
-            return {"error": str(e)}
+            return {"error": "Graph tool failed" if redact else str(e)}
 
     def _execute_fetch_tool(
         self,

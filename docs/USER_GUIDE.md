@@ -1519,3 +1519,7 @@ truncated or skipped are not evidence that a topic is absent. Images have no OCR
 Access depends on the instance switch, the caller's grant and node visibility.
 See the [attachment security boundary](../backend/DEVELOPMENT.md#node-attachments)
 before enabling these tools for an assistant or Agent.
+
+Assistant and kiosk Markdown replies load only inline `data:image/` images.
+Other images show their alt text and URL without loading them. Link targets
+are visible, with links to another origin marked as external.

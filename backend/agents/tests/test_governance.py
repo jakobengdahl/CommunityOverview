@@ -1,3 +1,4 @@
+# covers: backend/agents/governance/models.py, backend/agents/governance/store.py, backend/agents/governance/gate.py, backend/agents/governance/manager.py, backend/agents/worker.py
 """
 Tests for basic agent governance: autonomy levels, the tool gate, the durable
 proposal store, and the approve/reject/apply manager, plus worker wiring.
@@ -639,7 +640,8 @@ def test_attachment_grant_defaults_to_deny_even_with_allowlist(name, allowlist):
 @pytest.mark.parametrize("level", list(AutonomyLevel))
 @pytest.mark.parametrize("access", ["read", "read_write"])
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_grants_compose_with_autonomy(level, access, name):
+def test_attachment_grants_compose_with_autonomy(level, access, name, monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock(return_value={"ok": True})
     store = InMemoryProposalStore()
     gate = AutonomyGate(
@@ -673,8 +675,9 @@ def test_attachment_grants_compose_with_autonomy(level, access, name):
 
 
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_grant_does_not_bypass_nonempty_allowlist(name):
+def test_attachment_grant_does_not_bypass_nonempty_allowlist(name, monkeypatch):
     """A granted attachment tool outside a nonempty allowlist stays blocked."""
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock()
     store = InMemoryProposalStore()
     allowlist = ["graph.search_graph"]
@@ -702,7 +705,8 @@ def test_attachment_grant_does_not_bypass_nonempty_allowlist(name):
 
 
 @pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
-def test_attachment_denying_hook_blocks_execution_and_proposals(name):
+def test_attachment_denying_hook_blocks_execution_and_proposals(name, monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     raw = MagicMock()
     store = InMemoryProposalStore()
     hook = SimpleNamespace(evaluate=lambda _: GraphAuthorizationDecision(allowed=False))
@@ -730,8 +734,9 @@ def test_attachment_denying_hook_blocks_execution_and_proposals(name):
         ("delete_node_attachment", "delete_node_attachment"),
     ],
 )
-def test_attachment_target_specific_hook_denial(name, target):
+def test_attachment_target_specific_hook_denial(name, target, monkeypatch, caplog):
     """Metadata listing and content reads have separate authorization targets."""
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     seen = []
 
     def evaluate(context):
@@ -749,7 +754,24 @@ def test_attachment_target_specific_hook_denial(name, target):
         attachment_access="read_write",
         authorization_hook=SimpleNamespace(evaluate=evaluate),
     )
-    result = gate.wrap(raw)("graph." + name, {})
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = gate.wrap(raw)("graph." + name, {})
+    if name in ("read_node_attachment", "search_node_attachments"):
+        import json
+        import logging
+
+        records = [r for r in caplog.records if r.name == "attachments.audit"]
+        assert len(records) == 1
+        record = json.loads(logging.Formatter("%(message)s").format(records[0]))
+        assert record["actor"] == {"type": "agent", "id": "a1"}
+        assert record["tool"] == name
+        assert record["outcome"] == "access_denied"
+        assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+            None,
+            None,
+            None,
+            0,
+        ]
     assert result["error_code"] == "access_denied"
     assert result["authorization"]["target"] == target
     assert seen[0].action == ("read" if name in ATTACHMENT_READ_TOOLS else "mutate")
@@ -759,8 +781,9 @@ def test_attachment_target_specific_hook_denial(name, target):
 
 @pytest.mark.parametrize("with_store", [False, True])
 def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
-    with_store,
+    with_store, monkeypatch
 ):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     helper = TestWorkerPreFiltersDefinitions()
     worker, raw = helper._worker(
         InMemoryProposalStore() if with_store else None, "act_after_approval"
@@ -784,3 +807,119 @@ def test_worker_checks_live_attachment_grants_with_or_without_proposal_store(
     )
     assert helper._run_and_capture(worker)["tools"] == []
     raw.assert_not_called()
+
+
+@pytest.mark.parametrize("ceiling", [None, "off", "read"])
+@pytest.mark.parametrize("name", sorted(ATTACHMENT_TOOLS))
+def test_attachment_agent_grants_respect_server_ceiling(monkeypatch, ceiling, name):
+    if ceiling is None:
+        monkeypatch.delenv("ATTACHMENT_CONTENT_ACCESS", raising=False)
+    else:
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", ceiling)
+    raw = MagicMock(return_value={"ok": True})
+    store = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=store,
+        agent_id="a1",
+        attachment_access="read_write",
+    )
+    tool = "graph." + name
+    shown = filter_tool_definitions(
+        [{"name": tool}],
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        attachment_access="read_write",
+    )
+    result = gate.wrap(raw)(tool, {})
+    allowed = ceiling == "read" and name in ATTACHMENT_READ_TOOLS
+    assert bool(shown) == allowed
+    if allowed:
+        assert result == {"ok": True}
+        raw.assert_called_once_with(tool, {})
+    else:
+        assert result["error_code"] == "access_denied"
+        raw.assert_not_called()
+    assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_attachment_allowlist_refusal_formatted_audit(caplog, name):
+    import json
+    import logging
+
+    raw = MagicMock()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=["graph.search_graph"],
+        mcp_loader=FakeLoader(),
+        proposal_store=None,
+        agent_id="a1",
+        attachment_access="read",
+    )
+    secret = "private-query-content-filename.txt"
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = gate.wrap(raw)("graph." + name, {"query": secret})
+    assert "allowlist" in result["error"]
+    raw.assert_not_called()
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["actor"] == {"type": "agent", "id": "a1"}
+    assert record["tool"] == name
+    assert record["outcome"] == "access_denied"
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+def test_governance_exception_formatted_logs_hide_content(caplog):
+    import logging
+
+    secret = "SECRET-proposal-content"
+    broken_store = MagicMock()
+    broken_store.create.side_effect = RuntimeError(secret)
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.PROPOSE,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=broken_store,
+        agent_id="a1",
+        agent_name="A",
+        run_id="run-1",
+    )
+    store = InMemoryProposalStore()
+    proposal = store.create(
+        Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    manager = GovernanceManager(
+        store, executor_factory=lambda _: MagicMock(side_effect=ValueError(secret))
+    )
+    with caplog.at_level("INFO"):
+        assert gate.wrap(MagicMock())("graph.add_nodes", {"nodes": [secret]}).get(
+            "error"
+        )
+        assert manager.approve(proposal.id)["status"] == "apply_failed"
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "error_code=proposal_record_failed error_class=RuntimeError" in line
+        and "raising_frame=" in line
+        for line in lines
+    )
+    assert any(
+        "error_code=proposal_apply_failed error_class=ValueError" in line
+        and "raising_frame=" in line
+        for line in lines
+    )

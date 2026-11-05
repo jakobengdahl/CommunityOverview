@@ -21,6 +21,11 @@ from backend.service.tests.test_node_attachments import (
 )
 
 
+@pytest.fixture(autouse=True)
+def enable_attachment_ceiling(monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+
+
 # ADR 0010: the tool shape remains separate from REST attachment responses.
 def test_attachment_tools_hide_missing_and_invisible_nodes(service, storage):
     """G1: invisible and missing nodes have identical tool responses."""
@@ -51,7 +56,9 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     record = _upload(client, "doc", b"policy human review").json()
     with (
         caplog.at_level("INFO", logger="attachments.audit"),
-        use_request_authorization(actor_id="reader"),
+        use_request_authorization(
+            actor_id="reader", headers={"x-correlation-id": "read-123"}
+        ),
     ):
         result = service.attachment_tool_search("policy", ["doc"])
     passage = result["passages"][0]
@@ -67,6 +74,38 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     assert audits[0].chars == len(passage["text"])
     assert audits[0].sha256 == record["sha256"]
     assert audits[0].actor == {"type": "user", "id": "reader"}
+    import json
+    import logging
+    from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
+
+    for formatter in (logging.Formatter(TEXT_LOG_FORMAT), StructuredJsonFormatter()):
+        line = formatter.format(audits[0])
+        message = (
+            json.loads(line)["message"]
+            if isinstance(formatter, StructuredJsonFormatter)
+            else line.split(": ", 1)[1]
+        )
+        emitted = json.loads(message)
+        assert {
+            k: emitted[k]
+            for k in (
+                "actor",
+                "node_id",
+                "attachment_id",
+                "sha256",
+                "chars",
+                "outcome",
+                "correlation_id",
+            )
+        } == {
+            "actor": {"type": "user", "id": "reader"},
+            "node_id": "doc",
+            "attachment_id": record["id"],
+            "sha256": record["sha256"],
+            "chars": len(passage["text"]),
+            "outcome": "ok",
+            "correlation_id": "read-123",
+        }
 
 
 @pytest.mark.parametrize(
@@ -446,3 +485,383 @@ def test_attachment_read_dispatchers_use_tool_wrappers(service, client, caplog):
     assert "list_node_attachments" not in register_mcp_tools(
         mcp, empty, attachment_access="read"
     )
+
+
+def test_attachment_defaults_require_explicit_opt_in(service, monkeypatch):
+    from backend.api_host.config import AppConfig
+    from backend.runtime.attachment_access import attachment_tool_allowed
+
+    monkeypatch.delenv("ATTACHMENT_CONTENT_ACCESS")
+    monkeypatch.delenv("ASSISTANT_ATTACHMENT_ACCESS", raising=False)
+    assert not attachment_tool_allowed("read_node_attachment", "read")
+    assert service.attachment_tool_list("doc")["error_code"] == "access_denied"
+    assert AppConfig().assistant_attachment_access == "off"
+
+
+@pytest.mark.parametrize("kind", ["xlsx", "ods"])
+def test_nameless_sheets_have_distinct_locators(kind):
+    from backend.core import attachment_extract as ae
+    from backend.core.tests.test_attachment_extract import _xlsx, _odf, _replace_member
+
+    if kind == "xlsx":
+        data = _xlsx({"A": [["i:one"]], "B": [["i:two"]]})
+        import zipfile
+        import io
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            body = (
+                archive.read("xl/workbook.xml")
+                .decode()
+                .replace('name="A"', "")
+                .replace('name="B"', "")
+            )
+        data = _replace_member(data, "xl/workbook.xml", body)
+        result = ae.extract(data, ae.XLSX)
+    else:
+        table = "<table:table><table:table-row><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row></table:table>"
+        result = ae.extract(
+            _odf(ae.ODS, "<office:spreadsheet>" + table * 2 + "</office:spreadsheet>"),
+            ae.ODS,
+        )
+    assert result.status == "ok"
+    assert [s.locator for s in result.segments] == [{"sheet": 1}, {"sheet": 2}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatcher", ["chat", "execute_tool"])
+async def test_attachment_dispatch_keeps_extraction_off_loop(
+    service, client, monkeypatch, dispatcher
+):
+    import threading
+    from backend.service import attachment_tools
+    from backend.ui.chat_logic import run_chat_off_event_loop
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.runtime.authorization import use_request_authorization
+
+    record = _upload(client, "doc", b"policy").json()
+    loop_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    graph_threads = []
+    original = service.storage.get_node
+
+    def get_node(node_id):
+        graph_threads.append(threading.get_ident())
+        return original(node_id)
+
+    def extract(*args):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(3)
+        return ExtractionResult("ok", (Segment("policy", {"line": 1}),))
+
+    monkeypatch.setattr(service.storage, "get_node", get_node)
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    name = "read_node_attachment"
+    args = {"node_id": "doc", "attachment_id": record["id"]}
+    if dispatcher == "chat":
+        from backend.ui.chat_logic import ChatProcessor
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        processor = ChatProcessor({name: service.attachment_tool_read})
+        llm = MockLLMProvider()
+        llm.mock_tool_calls = [{"name": name, "input": args}]
+        call = run_chat_off_event_loop(
+            processor.process_message,
+            messages=[{"role": "user", "content": "read"}],
+            llm_provider=llm,
+            attachment_access=lambda _: "read",
+        )
+    else:
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+        from backend.api_host.tool_routes import register_tool_routes
+
+        app = FastAPI()
+        register_tool_routes(app, service, {name: service.attachment_tool_read}, True)
+
+        async def execute():
+            async with AsyncClient(
+                transport=ASGITransport(app), base_url="http://test"
+            ) as http:
+                response = await http.post(
+                    "/execute_tool", json={"tool_name": name, "arguments": args}
+                )
+                assert response.status_code == 200
+                assert response.json()["returned_chars"] == 6
+
+        call = execute()
+    with use_request_authorization(actor_id="reader"):
+        pending = asyncio.create_task(call)
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert graph_threads == [loop_thread]
+        finally:
+            release.set()
+        await pending
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+@pytest.mark.parametrize(
+    "transport,refusal",
+    [
+        (transport, refusal)
+        for transport in ("execute_tool", "mcp")
+        for refusal in ("access_denied", "session_not_supported", "invalid_arguments")
+    ]
+    + [("agent", "invalid_arguments")],
+)
+def test_attachment_dispatch_refusal_formatted_audit(
+    service, caplog, name, transport, refusal
+):
+    import json
+    import logging
+    from unittest.mock import MagicMock
+    from backend.service.mcp_tools import register_mcp_tools
+
+    registered = {}
+    mcp = MagicMock()
+
+    def register(func):
+        registered[func.__name__] = func
+        return func
+
+    mcp.tool.return_value = register
+    tools = register_mcp_tools(mcp, service, attachment_access="read")
+    service._authorization_hook = MagicMock()
+    service._authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
+        allowed=refusal != "access_denied"
+    )
+    secret = "private-query-content-filename.txt"
+    args = (
+        {"query": secret, "node_ids": [secret]}
+        if name == "search_node_attachments"
+        else {"node_id": secret, "attachment_id": secret}
+    )
+    from backend.runtime import session_context
+    from backend.agents.mcp_loader import MCPLoader
+
+    if refusal == "invalid_arguments":
+        args = (
+            {"query": secret}
+            if name == "search_node_attachments"
+            else {"node_id": secret}
+        )
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        session_context.bind_session(
+            "test-session" if refusal == "session_not_supported" else None
+        ),
+    ):
+        if transport == "agent":
+            result = MCPLoader([])._execute_graph_tool(name, args, service, "a1")
+        else:
+            result = (
+                tools[name](**args)
+                if transport == "execute_tool"
+                else asyncio.run(registered[name](**args))
+            )
+    assert (
+        result["error" if refusal == "session_not_supported" else "error_code"]
+        == refusal
+    )
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["tool"] == name
+    assert record["outcome"] == refusal
+    assert record["actor"] == (
+        {"type": "agent", "id": "a1"}
+        if transport == "agent"
+        else {"type": "mcp", "id": None}
+    )
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_attachment_missing_nodes_execute_endpoint(service, caplog):
+    import json
+    import logging
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from backend.api_host.tool_routes import register_tool_routes
+    from backend.service.mcp_tools import register_mcp_tools
+
+    tools = register_mcp_tools(MagicMock(), service, attachment_access="read")
+    app = FastAPI()
+    register_tool_routes(app, service, tools, True)
+    secret = "private-query-content-filename.txt"
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        async with AsyncClient(
+            transport=ASGITransport(app), base_url="http://test"
+        ) as http:
+            response = await http.post(
+                "/execute_tool",
+                json={
+                    "tool_name": "search_node_attachments",
+                    "arguments": {"query": secret},
+                },
+            )
+    assert response.status_code == 200
+    assert response.json()["error_code"] == "invalid_arguments"
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["actor"] == {"type": "mcp", "id": None}
+    assert record["outcome"] == "invalid_arguments"
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("search_node_attachments", {"query": "SECRET-file-query"}),
+        ("read_node_attachment", {"node_id": "SECRET-file-query"}),
+        ("search_node_attachments", {"query": "SECRET-file-query", "node_ids": 3}),
+        ("read_node_attachment", {"node_id": "SECRET-file-query", "attachment_id": []}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_real_fastmcp_validation_is_safe_and_audited(service, caplog, name, args):
+    import json
+    import logging
+    from mcp.server.fastmcp import FastMCP
+    from backend.service.mcp_tools import register_mcp_tools
+    from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
+
+    mcp = FastMCP("test")
+    register_mcp_tools(mcp, service, attachment_access="read")
+    schema = next(t for t in await mcp.list_tools() if t.name == name).inputSchema
+    assert (
+        "node_ids" in schema["required"]
+        if name.startswith("search")
+        else "attachment_id" in schema["required"]
+    )
+    with caplog.at_level("INFO"):
+        result = await mcp.call_tool(name, args)
+    assert "invalid_arguments" in str(result)
+    assert "SECRET-file-query" not in str(result)
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    for formatter in (logging.Formatter(TEXT_LOG_FORMAT), StructuredJsonFormatter()):
+        assert all(
+            "SECRET-file-query" not in formatter.format(r) for r in caplog.records
+        )
+    record = json.loads(audits[0].getMessage())
+    assert record["outcome"] == "invalid_arguments"
+    assert record["actor"]["type"] == "mcp"
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_session_mismatch_audited_once(service, monkeypatch, caplog, name):
+    import json
+    import logging
+    from starlette.datastructures import Headers
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from backend.runtime import session_context
+    from backend.service import mcp_tools
+
+    monkeypatch.setattr(
+        mcp_tools,
+        "_message_request",
+        lambda _: (
+            True,
+            SimpleNamespace(
+                headers=Headers({session_context.SESSION_ID_HEADER: "other"})
+            ),
+        ),
+    )
+    tools = mcp_tools.register_mcp_tools(MagicMock(), service, attachment_access="read")
+    with caplog.at_level("INFO"), session_context.bind_session("original"):
+        result = tools[name](query="SECRET-file-query")
+    assert result["error"] == "session_mismatch"
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert "SECRET-file-query" not in lines[0]
+    assert json.loads(lines[0])["outcome"] == "session_mismatch"
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_agent_search_graph_formatted_logs_hide_query(service, caplog, tainted):
+    import logging
+    from backend.agents.mcp_loader import MCPLoader
+
+    secret = "SECRET-search-graph-query"
+    from backend.runtime.content_logging import content_logging
+
+    with caplog.at_level("INFO"), content_logging(tainted=tainted):
+        MCPLoader([])._execute_graph_tool(
+            "search_graph", {"query": secret}, service, "test-agent"
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    if tainted:
+        assert all(secret not in line for line in lines)
+        assert any(f"SEARCH: query_length={len(secret)}" in line for line in lines)
+    else:
+        assert any(secret in line and "node_types=None" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        (
+            "search_node_attachments",
+            {"query": "needle", "node_ids": '["doc"]', "top_k": "3"},
+        ),
+        (
+            "search_node_attachments",
+            {"query": "needle", "node_ids": ["doc"], "top_k": 3.0},
+        ),
+        (
+            "read_node_attachment",
+            {"node_id": "doc", "attachment_id": "a" * 32, "offset": "0"},
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fastmcp_preserves_sdk_argument_coercion(service, caplog, name, args):
+    import json
+    import logging
+    from mcp.server.fastmcp import FastMCP
+    from backend.service.mcp_tools import register_mcp_tools
+
+    mcp = FastMCP("test")
+    register_mcp_tools(mcp, service, attachment_access="read")
+    with caplog.at_level("INFO"):
+        result = await mcp.call_tool(name, args)
+    assert "invalid_arguments" not in str(result)
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    line = logging.Formatter("%(message)s").format(audits[0])
+    assert json.loads(line)["outcome"] != "invalid_arguments"

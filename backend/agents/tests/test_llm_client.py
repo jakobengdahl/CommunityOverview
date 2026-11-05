@@ -267,3 +267,75 @@ def test_tool_calls_at_the_token_limit_run_nothing_and_keep_the_trace(caplog):
     assert [tc["name"] for tc in result["trace"][0]["tool_calls"]] == ["first"]
     assert result["trace"][1]["tool_calls"] == []
     assert result["trace"][1]["tool_calls_not_run"][0]["name"] == "second"
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_non_object_attachment_input_audited_once(name, caplog):
+    import json
+    import logging
+    from backend.service.attachment_tools import tool_caller
+
+    raw = MagicMock()
+    provider = ScriptedProvider([("GRAPH__" + name, ["SECRET-file-query"])])
+    with caplog.at_level("INFO"), tool_caller("agent", "test-agent"):
+        LLMClient(llm_provider=provider).execute_with_tools("", "event", [], raw)
+    raw.assert_not_called()
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    line = logging.Formatter("%(message)s").format(audits[0])
+    assert "SECRET-file-query" not in line
+    assert json.loads(line)["outcome"] == "invalid_arguments"
+
+
+def test_llm_and_tool_exception_logs_are_safe(caplog):
+    import logging
+
+    secret = "SECRET-exception-content"
+    provider = MagicMock()
+    provider.create_completion.side_effect = RuntimeError(secret)
+    from backend.runtime.content_logging import content_logging
+
+    with (
+        caplog.at_level("INFO"),
+        content_logging(tainted=True),
+        pytest.raises(RuntimeError),
+    ):
+        LLMClient(llm_provider=provider).run_turn("", [], [])
+    raw = MagicMock(side_effect=ValueError(secret))
+    provider = ScriptedProvider([("GRAPH__search_node_attachments", {"query": secret})])
+    with caplog.at_level("INFO"):
+        LLMClient(llm_provider=provider).execute_with_tools("", "event", [], raw)
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "error_code=llm_failed error_class=RuntimeError" in line
+        and "raising_frame=" in line
+        for line in lines
+    )
+    assert any(
+        "error_code=tool_failed error_class=ValueError" in line
+        and "raising_frame=" in line
+        for line in lines
+    )
+
+
+@pytest.mark.parametrize("site", ["provider", "tool"])
+@pytest.mark.parametrize("tainted", [False, True])
+def test_clean_llm_failure_keeps_exception_text(caplog, site, tainted):
+    import logging
+    from backend.runtime.content_logging import content_logging
+
+    with caplog.at_level("INFO"), content_logging(tainted=tainted):
+        if site == "provider":
+            provider = MagicMock()
+            provider.create_completion.side_effect = RuntimeError("provider-diagnostic")
+            with pytest.raises(RuntimeError):
+                LLMClient(llm_provider=provider).run_turn("", [], [])
+        else:
+            provider = ScriptedProvider([("GRAPH__search_graph", {"query": "ok"})])
+            raw = MagicMock(side_effect=RuntimeError("provider-diagnostic"))
+            LLMClient(llm_provider=provider).execute_with_tools("", "event", [], raw)
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert any("raising_frame=" in line for line in lines)
+    assert any("error_class=RuntimeError" in line for line in lines)
+    assert ("provider-diagnostic" in "\n".join(lines)) is not tainted
