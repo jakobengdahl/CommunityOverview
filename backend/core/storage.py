@@ -3214,7 +3214,10 @@ class GraphStorage:
                     event_context=event_context,
                 )
 
+            reread_after_unknown = False
+
             def persist_landed() -> None:
+                nonlocal reread_after_unknown
                 if not (unpersisted_nodes or unpersisted_edges):
                     return
                 try:
@@ -3225,6 +3228,9 @@ class GraphStorage:
                     # rather than a local failure that hides why.
                     raise
                 except Exception as persist_error:
+                    reread_after_unknown = isinstance(
+                        persist_error, GraphWriteOutcomeUnknown
+                    )
                     # The failure being handled may be the persist itself
                     # (executor shut down); the caller still gets its result.
                     logger.warning(f"could not persist what was added: {persist_error}")
@@ -3233,9 +3239,15 @@ class GraphStorage:
             generation_attempted = False
 
             def still_landed() -> List[str]:
-                # After persist_landed: a store that refused it has undone
-                # the nodes (or re-read the graph), and those did not stay.
-                return [n.id for n in nodes_to_embed if self.nodes.get(n.id) is n]
+                # Refused writes undo their nodes. An unknown outcome rereads
+                # authoritative nodes as new objects; present ids still need
+                # their old attachments quarantined.
+                return [
+                    n.id
+                    for n in nodes_to_embed
+                    if self.nodes.get(n.id) is n
+                    or (reread_after_unknown and n.id in self.nodes)
+                ]
 
             def generate_landed_vectors() -> None:
                 # Once per call: an exit after the attempt - a rejected edge -
