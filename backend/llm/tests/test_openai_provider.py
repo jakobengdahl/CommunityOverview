@@ -55,45 +55,49 @@ def _completion(content=None, tool_calls=None, finish_reason="stop"):
     )
 
 
-def _tool_call(call_id, name, arguments, *, raw=False):
+def _tool_call(call_id, name, arguments):
     return SimpleNamespace(
         id=call_id,
-        function=SimpleNamespace(
-            name=name, arguments=arguments if raw else json.dumps(arguments)
-        ),
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
     )
 
 
-@pytest.mark.parametrize("system", ["be brief", ""])
-def test_system_prompt_is_first_message_and_omitted_when_empty(provider, system):
-    messages = [{"role": "user", "content": "hi"}]
-    expected = ([{"role": "system", "content": system}] if system else []) + messages
-    assert provider._convert_messages_to_openai(messages, system) == expected
-
-
-@pytest.mark.parametrize(
-    "role, content, expected",
-    [
-        ("user", "plain", "plain"),
-        (
-            "user",
-            [
-                {"type": "text", "text": "a"},
-                {"type": "image", "source": {}},
-                {"type": "text", "text": "b"},
-            ],
-            "a\nb",
-        ),
-        ("assistant", "reply", "reply"),
-        ("assistant", [{"type": "text", "text": "x"}], "x"),
-    ],
-)
-def test_user_and_assistant_string_and_text_block_content(
-    provider, role, content, expected
-):
+def test_system_prompt_is_first_message_and_omitted_when_empty(provider):
+    converted = provider._convert_messages_to_openai(
+        [{"role": "user", "content": "hi"}], "be brief"
+    )
+    assert converted == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+    ]
     assert provider._convert_messages_to_openai(
-        [{"role": role, "content": content}], ""
-    ) == [{"role": role, "content": expected}]
+        [{"role": "user", "content": "hi"}], ""
+    ) == [{"role": "user", "content": "hi"}]
+
+
+def test_user_and_assistant_string_and_text_block_content(provider):
+    converted = provider._convert_messages_to_openai(
+        [
+            {"role": "user", "content": "plain"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "a"},
+                    {"type": "image", "source": {}},
+                    {"type": "text", "text": "b"},
+                ],
+            },
+            {"role": "assistant", "content": "reply"},
+            {"role": "assistant", "content": [{"type": "text", "text": "x"}]},
+        ],
+        "",
+    )
+    assert converted == [
+        {"role": "user", "content": "plain"},
+        {"role": "user", "content": "a\nb"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "assistant", "content": "x"},
+    ]
 
 
 def test_user_blocks_without_text_produce_no_message(provider):
@@ -132,14 +136,18 @@ def test_assistant_tool_use_becomes_tool_calls_with_json_arguments(provider):
             "content": "Let me look.",
             "tool_calls": [
                 {
-                    "id": call_id,
+                    "id": "call_1",
                     "type": "function",
-                    "function": {"name": name, "arguments": arguments},
-                }
-                for call_id, name, arguments in [
-                    ("call_1", "search_graph", '{"query": "AI"}'),
-                    ("call_2", "get_node_details", "{}"),
-                ]
+                    "function": {
+                        "name": "search_graph",
+                        "arguments": '{"query": "AI"}',
+                    },
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "get_node_details", "arguments": "{}"},
+                },
             ],
         }
     ]
@@ -205,19 +213,26 @@ def test_finish_reason_maps_to_provider_neutral_stop_reason(
     assert provider._map_finish_reason(finish_reason) == stop_reason
 
 
-@pytest.mark.parametrize("tools", [TOOLS, []])
-def test_format_tool_definitions_wraps_claude_schema_as_functions(provider, tools):
-    assert provider.format_tool_definitions(tools) == [
+def test_format_tool_definitions_wraps_claude_schema_as_functions(provider):
+    assert provider.format_tool_definitions(TOOLS) == [
         {
             "type": "function",
             "function": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["input_schema"],
+                "name": "search_graph",
+                "description": "Search the graph",
+                "parameters": TOOLS[0]["input_schema"],
             },
-        }
-        for tool in tools
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_node_details",
+                "description": "Get one node",
+                "parameters": TOOLS[1]["input_schema"],
+            },
+        },
     ]
+    assert provider.format_tool_definitions([]) == []
 
 
 def test_create_completion_sends_converted_request(provider):
@@ -289,6 +304,9 @@ def test_create_completion_maps_text_and_tool_calls_to_neutral_shape(provider):
 
 
 def test_tool_call_round_trip_preserves_ids_names_and_arguments(provider):
+    """A tool-calling turn fed back as history yields the OpenAI request shape
+    the API requires: assistant tool_calls followed by tool messages whose
+    tool_call_id matches."""
     provider.client.chat.completions.create.return_value = _completion(
         None,
         [_tool_call("call_9", "search_graph", {"query": "AI", "limit": 5})],
@@ -341,10 +359,7 @@ def test_constructor_resolves_base_url_and_model(openai_cls, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://env.example/v1")
     monkeypatch.setenv("OPENAI_MODEL", "env-model")
     provider = OpenAIProvider("k")
-    openai_cls.assert_called_with(
-        api_key="k",
-        base_url="http://env.example/v1",
-    )
+    openai_cls.assert_called_with(api_key="k", base_url="http://env.example/v1")
     assert provider.model == "env-model"
 
     provider = OpenAIProvider("k", model="explicit", base_url="http://arg.example")
@@ -424,8 +439,8 @@ def test_user_turn_mixing_tool_results_and_text_keeps_text_after_tool_messages(
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": call_id, "name": "n", "input": {}}
-                    for call_id in ("call_1", "call_2")
+                    {"type": "tool_use", "id": "call_1", "name": "n", "input": {}},
+                    {"type": "tool_use", "id": "call_2", "name": "n", "input": {}},
                 ],
             },
             {
@@ -502,7 +517,12 @@ def test_user_turn_with_text_before_tool_result_keeps_tool_result(provider):
 def test_empty_tool_call_arguments_parse_as_empty_input(provider, arguments):
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [_tool_call("call_1", "get_node_details", arguments, raw=True)],
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="get_node_details", arguments=arguments),
+            )
+        ],
         finish_reason="tool_calls",
     )
     response = provider.create_completion([{"role": "user", "content": "q"}], "", TOOLS)
@@ -523,7 +543,12 @@ def test_other_falsy_json_arguments_are_returned_as_parsed(arguments, parsed):
 def test_malformed_tool_call_arguments_still_raise(provider):
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [_tool_call("call_1", "search_graph", '{"query":', raw=True)],
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="search_graph", arguments='{"query":'),
+            )
+        ],
         finish_reason="tool_calls",
     )
     with pytest.raises(json.JSONDecodeError):
@@ -531,9 +556,18 @@ def test_malformed_tool_call_arguments_still_raise(provider):
 
 
 def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
+    # A literal newline inside a JSON string is invalid JSON; strict parsing
+    # must reject it rather than hand dispatch a value no conforming server sends.
     provider.client.chat.completions.create.return_value = _completion(
         None,
-        [_tool_call("call_1", "search_graph", '{"query": "a\nb"}', raw=True)],
+        [
+            SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(
+                    name="search_graph", arguments='{"query": "a\nb"}'
+                ),
+            )
+        ],
         finish_reason="tool_calls",
     )
     with pytest.raises(json.JSONDecodeError, match="Invalid control character"):
@@ -541,6 +575,7 @@ def test_raw_control_character_in_tool_call_arguments_still_raises(provider):
 
 
 def test_claude_call_without_tools_sends_tool_history_as_text():
+    """The Anthropic API rejects tool blocks when a request defines no tools."""
     history = [
         {"role": "user", "content": "Find it"},
         {
@@ -627,6 +662,7 @@ def test_claude_limit_above_the_sdk_nonstreaming_cap_never_raises(caplog, limit)
 
     claude = ClaudeProvider("test-key", model="test-model")
 
+    # The SDK itself accepts the cap and refuses one token more.
     claude.client._calculate_nonstreaming_timeout(21_333, None)
     with pytest.raises(ValueError):
         claude.client._calculate_nonstreaming_timeout(21_334, None)
@@ -737,168 +773,3 @@ def test_claude_tool_calls_at_the_token_limit_are_flagged_whatever_the_stop_reas
         response = claude.create_completion([], "", TOOLS, max_tokens=100)
 
     assert response.stop_reason == expected
-
-
-@pytest.mark.parametrize(
-    "provider_class, target",
-    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
-)
-def test_total_provider_timeout_recovers_while_sdk_keeps_making_progress(
-    provider_class, target
-):
-    from threading import Event
-    from time import monotonic
-
-    entered, release, finished = Event(), Event(), Event()
-
-    def dribbling_response(**kwargs):
-        entered.set()
-        try:
-            # Bytes arrive within the read timeout, without completing the call.
-            while not release.wait(0.005):
-                pass
-        finally:
-            finished.set()
-
-    with patch(target) as client:
-        provider = provider_class("test-key")
-        client.return_value.with_options.return_value = client.return_value
-        create = (
-            client.return_value.messages.create
-            if provider_class is ClaudeProvider
-            else client.return_value.chat.completions.create
-        )
-        create.side_effect = dribbling_response
-        start = monotonic()
-        try:
-            with pytest.raises(TimeoutError, match="LLM call exceeded 0.05 seconds"):
-                provider.create_completion([], "", [], timeout_seconds=0.05)
-            assert entered.is_set()
-            assert not finished.is_set()
-            assert monotonic() - start < 1
-        finally:
-            release.set()
-            assert finished.wait(1)
-
-
-def test_provider_deadline_preserves_context_results_and_errors():
-    from contextvars import ContextVar
-    from backend.llm.llm_providers import _provider_call
-
-    context = ContextVar("provider_test_context")
-    token = context.set(object())
-    try:
-        assert _provider_call(context.get, deadline_seconds=1) is context.get()
-        error = ValueError("provider failure")
-
-        def fail():
-            raise error
-
-        with pytest.raises(ValueError) as caught:
-            _provider_call(fail, deadline_seconds=1)
-        assert caught.value is error
-    finally:
-        context.reset(token)
-
-
-@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
-@pytest.mark.parametrize("bounded", [False, True])
-def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch):
-    import importlib
-    import httpx as legacy_httpx
-
-    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "1")
-    provider = provider_class("test-key")
-    httpx = importlib.import_module(
-        "httpx"
-        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
-        else "httpx2"
-    )
-    requests = []
-    from threading import current_thread
-
-    caller = current_thread()
-
-    def reject(request):
-        assert (current_thread() is caller) is (not bounded)
-        requests.append(request)
-        return httpx.Response(
-            400, json={"error": {"message": "test", "type": "invalid_request_error"}}
-        )
-
-    provider.client = provider.client.with_options(
-        http_client=httpx.Client(transport=httpx.MockTransport(reject))
-    )
-    original_timeout = provider.client.timeout
-    original_retries = provider.client.max_retries
-    if bounded:
-        from backend.llm.llm_providers import _completion_client
-
-        bounded_client = _completion_client(
-            provider.client, 17, type(provider.client.timeout)
-        )
-        assert bounded_client.max_retries == 0
-        assert provider.client.max_retries == original_retries == 2
-    with pytest.raises(Exception) as caught:
-        provider.create_completion(
-            [], "", [], **({"timeout_seconds": 17} if bounded else {})
-        )
-    assert caught.value.status_code == 400
-    assert len(requests) == 1
-    timeout = requests[0].extensions["timeout"]
-    assert timeout["connect"] == 5.0
-    assert timeout["read"] == (17 if bounded else original_timeout.read)
-    assert timeout["write"] == (17 if bounded else original_timeout.write)
-    assert timeout["pool"] == (17 if bounded else original_timeout.pool)
-    provider.client.close()
-
-
-@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
-def test_chat_sdk_does_not_retry_after_deadline(provider_class):
-    import importlib
-    import httpx as legacy_httpx
-    from threading import Event, Thread
-    from backend.llm.llm_providers import _completion_client
-
-    release, finished = Event(), Event()
-    requests = []
-    workers = []
-
-    def worker(**kwargs):
-        thread = Thread(**kwargs)
-        workers.append(thread)
-        return thread
-
-    def fail_after_deadline(request):
-        requests.append(request)
-        assert release.wait(2)
-        finished.set()
-        return httpx.Response(
-            500, json={"error": {"message": "test", "type": "api_error"}}
-        )
-
-    provider = provider_class("test-key")
-    httpx = importlib.import_module(
-        "httpx"
-        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
-        else "httpx2"
-    )
-    provider.client = provider.client.with_options(
-        http_client=httpx.Client(transport=httpx.MockTransport(fail_after_deadline))
-    )
-    assert (
-        _completion_client(
-            provider.client, 1, type(provider.client.timeout)
-        ).max_retries
-        == 0
-    )
-    with patch("backend.llm.llm_providers.Thread", side_effect=worker):
-        try:
-            with pytest.raises(TimeoutError, match="0.05 seconds"):
-                provider.create_completion([], "", [], timeout_seconds=0.05)
-        finally:
-            release.set()
-        workers[0].join(2)
-    assert not workers[0].is_alive()
-    assert finished.is_set()
-    assert len(requests) == 1

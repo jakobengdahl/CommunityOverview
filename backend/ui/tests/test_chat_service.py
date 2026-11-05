@@ -3049,3 +3049,54 @@ def test_provider_request_timeout_is_configured(
     assert provider.create_completion.call_args.kwargs["timeout_seconds"] == expected
     if setting in {"0", "bad", "99999999999", "86401", "-1"}:
         assert "Ignoring invalid LLM_TIMEOUT_SECONDS" in caplog.text
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+def test_chat_sdk_does_not_retry_after_deadline(provider_class):
+    import importlib
+    import httpx as legacy_httpx
+    from threading import Event, Thread
+    from backend.llm.llm_providers import _completion_client
+
+    release, finished = Event(), Event()
+    requests = []
+    workers = []
+
+    def worker(**kwargs):
+        thread = Thread(**kwargs)
+        workers.append(thread)
+        return thread
+
+    def fail_after_deadline(request):
+        requests.append(request)
+        assert release.wait(2)
+        finished.set()
+        return httpx.Response(
+            500, json={"error": {"message": "test", "type": "api_error"}}
+        )
+
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(fail_after_deadline))
+    )
+    assert (
+        _completion_client(
+            provider.client, 1, type(provider.client.timeout)
+        ).max_retries
+        == 0
+    )
+    with patch("backend.llm.llm_providers.Thread", side_effect=worker):
+        try:
+            with pytest.raises(TimeoutError, match="0.05 seconds"):
+                provider.create_completion([], "", [], timeout_seconds=0.05)
+        finally:
+            release.set()
+        workers[0].join(2)
+    assert not workers[0].is_alive()
+    assert finished.is_set()
+    assert len(requests) == 1
