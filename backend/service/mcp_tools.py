@@ -268,10 +268,6 @@ def _session_aware(
     def run(bound, args, kwargs):
         if kind is None:
             if bound is not None:
-                from .attachment_tools import audit_attachment_refusal, tool_caller
-
-                with tool_caller("mcp"):
-                    audit_attachment_refusal(name, "session_not_supported")
                 raise session_context.not_supported(f"tool {name}")
             return func(*args, **kwargs)
         named = kwargs.get(key)
@@ -322,6 +318,10 @@ def _session_aware(
             with authorization, session_context.bind_session(bound):
                 return run(bound, args, kwargs)
         except session_context.SessionRefused as exc:
+            from .attachment_tools import audit_attachment_refusal, tool_caller
+
+            with tool_caller("mcp"):
+                audit_attachment_refusal(name, exc.to_result()["error"])
             return exc.to_result()
 
     return wrapper
@@ -609,6 +609,47 @@ def register_mcp_tools(
                 return await asyncio.to_thread(wrapped, *args, **kwargs)
 
             mcp.tool()(async_tool)
+            # Keep the public schema, but handle validation refusals before
+            # FastMCP can turn a ValidationError (including inputs) into ToolError.
+            from mcp.server.fastmcp import FastMCP
+            from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+            from pydantic import ValidationError
+
+            if isinstance(mcp, FastMCP):
+
+                class AttachmentMetadata(FuncMetadata):
+                    async def call_fn_with_arg_validation(
+                        self,
+                        fn,
+                        fn_is_async,
+                        arguments_to_validate,
+                        arguments_to_pass_directly,
+                    ):
+                        from .attachment_tools import (
+                            audit_attachment_refusal,
+                            error,
+                            tool_caller,
+                        )
+
+                        try:
+                            self.arg_model.model_validate(
+                                arguments_to_validate, strict=True
+                            )
+                        except ValidationError:
+                            with tool_caller("mcp"):
+                                audit_attachment_refusal(
+                                    fn.__name__, "invalid_arguments"
+                                )
+                            return error("invalid_arguments")
+                        return await super().call_fn_with_arg_validation(
+                            fn,
+                            fn_is_async,
+                            arguments_to_validate,
+                            arguments_to_pass_directly,
+                        )
+
+                tool = mcp._tool_manager.get_tool(func.__name__)
+                tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
         else:
             mcp.tool()(wrapped)
         tools_map[func.__name__] = wrapped

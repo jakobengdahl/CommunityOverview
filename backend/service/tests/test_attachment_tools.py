@@ -730,3 +730,97 @@ async def test_attachment_missing_nodes_execute_endpoint(service, caplog):
         None,
         0,
     ]
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("search_node_attachments", {"query": "SECRET-file-query"}),
+        ("read_node_attachment", {"node_id": "SECRET-file-query"}),
+        ("search_node_attachments", {"query": "SECRET-file-query", "node_ids": 3}),
+        ("read_node_attachment", {"node_id": "SECRET-file-query", "attachment_id": []}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_real_fastmcp_validation_is_safe_and_audited(service, caplog, name, args):
+    import json
+    import logging
+    from mcp.server.fastmcp import FastMCP
+    from backend.service.mcp_tools import register_mcp_tools
+    from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
+
+    mcp = FastMCP("test")
+    register_mcp_tools(mcp, service, attachment_access="read")
+    schema = next(t for t in await mcp.list_tools() if t.name == name).inputSchema
+    assert (
+        "node_ids" in schema["required"]
+        if name.startswith("search")
+        else "attachment_id" in schema["required"]
+    )
+    with caplog.at_level("INFO"):
+        result = await mcp.call_tool(name, args)
+    assert "invalid_arguments" in str(result)
+    assert "SECRET-file-query" not in str(result)
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert len(audits) == 1
+    for formatter in (logging.Formatter(TEXT_LOG_FORMAT), StructuredJsonFormatter()):
+        assert all(
+            "SECRET-file-query" not in formatter.format(r) for r in caplog.records
+        )
+    record = json.loads(audits[0].getMessage())
+    assert record["outcome"] == "invalid_arguments"
+    assert record["actor"]["type"] == "mcp"
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_session_mismatch_audited_once(service, monkeypatch, caplog, name):
+    import json
+    import logging
+    from starlette.datastructures import Headers
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from backend.runtime import session_context
+    from backend.service import mcp_tools
+
+    monkeypatch.setattr(
+        mcp_tools,
+        "_message_request",
+        lambda _: (
+            True,
+            SimpleNamespace(
+                headers=Headers({session_context.SESSION_ID_HEADER: "other"})
+            ),
+        ),
+    )
+    tools = mcp_tools.register_mcp_tools(MagicMock(), service, attachment_access="read")
+    with caplog.at_level("INFO"), session_context.bind_session("original"):
+        result = tools[name](query="SECRET-file-query")
+    assert result["error"] == "session_mismatch"
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert "SECRET-file-query" not in lines[0]
+    assert json.loads(lines[0])["outcome"] == "session_mismatch"
+
+
+def test_agent_search_graph_formatted_logs_hide_query(service, caplog):
+    import logging
+    from backend.agents.mcp_loader import MCPLoader
+
+    secret = "SECRET-search-graph-query"
+    with caplog.at_level("INFO"):
+        MCPLoader([])._execute_graph_tool(
+            "search_graph", {"query": secret}, service, "test-agent"
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(f"SEARCH: query_length={len(secret)}" in line for line in lines)

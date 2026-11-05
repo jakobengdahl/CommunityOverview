@@ -140,6 +140,10 @@ class GovernanceManager:
                 p.status = ProposalStatus.APPLIED
                 p.apply_result = _small_result(result)
         except Exception as exc:
-            logger.error("Governance: applying proposal %s failed: %s", p.id, exc)
+            logger.error(
+                "Governance: applying proposal %s error_code=proposal_apply_failed error_class=%s",
+                p.id,
+                type(exc).__name__,
+            )
             p.status = ProposalStatus.APPLY_FAILED
             p.apply_error = str(exc)

@@ -598,3 +598,98 @@ class TestLoadSkills:
         skill = worker._load_skills()[0]
 
         assert skill.source_url == "https://example.org/skills/linked/SKILL.md"
+
+
+def test_execution_trace_formatted_logs_hide_content(
+    agent_config, agent_settings, caplog
+):
+    import logging
+
+    secret = "SECRET-attachment-content"
+    worker = AgentWorker(config=agent_config, settings=agent_settings, mcp_loader=None)
+    with caplog.at_level("INFO"):
+        worker._log_execution_trace(
+            {
+                "success": False,
+                "error": secret,
+                "final_response": secret,
+                "trace": [
+                    {
+                        "turn": 1,
+                        "text_response": secret,
+                        "tool_calls": [
+                            {
+                                "name": "GRAPH__search_node_attachments",
+                                "input": {"query": secret},
+                            },
+                            {"name": "GRAPH__search_graph", "input": {"query": secret}},
+                        ],
+                    }
+                ],
+            }
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "GRAPH__search_node_attachments argument_names=['query']" in line
+        for line in lines
+    )
+    assert any("error_code=execution_failed" in line for line in lines)
+
+
+def test_worker_event_failure_formatted_log_hides_exception(
+    agent_config, agent_settings, caplog
+):
+    import logging
+    from backend.agents.worker import EventItem
+
+    secret = "SECRET-event-exception"
+    loader = MagicMock()
+    worker = AgentWorker(
+        config=agent_config, settings=agent_settings, mcp_loader=loader
+    )
+    worker._llm_client = MagicMock()
+    worker._llm_client.execute_with_tools.side_effect = RuntimeError(secret)
+    with caplog.at_level("INFO"):
+        worker._process_event(EventItem("event-1", {"event_type": "node.create"}))
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "error_code=event_failed error_class=RuntimeError" in line for line in lines
+    )
+
+
+def test_worker_early_argument_refusal_audits_agent(
+    agent_config, agent_settings, caplog
+):
+    import json
+    import logging
+    from backend.agents.worker import EventItem
+    from backend.agents.llm_client import LLMClient
+    from backend.agents.tests.test_llm_client import ScriptedProvider
+
+    loader = MagicMock()
+    loader.get_tool_definitions.return_value = []
+    worker = AgentWorker(
+        config=agent_config, settings=agent_settings, mcp_loader=loader
+    )
+    worker._llm_client = LLMClient(
+        llm_provider=ScriptedProvider(
+            [
+                ("GRAPH__search_node_attachments", ["SECRET-argument"]),
+            ]
+        )
+    )
+    worker._cached_skills = []
+    with caplog.at_level("INFO"):
+        worker._process_event(EventItem("event-1", {"event_type": "node.create"}))
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert "SECRET-argument" not in lines[0]
+    record = json.loads(lines[0])
+    assert record["actor"] == {"type": "agent", "id": agent_config.agent_id}
+    assert record["outcome"] == "invalid_arguments"

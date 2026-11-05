@@ -892,7 +892,24 @@ class MCPLoader:
                 result = {"error": f"No executor for integration: {integration_id}"}
 
             if isinstance(result, dict) and "error" in result:
-                logger.warning("Tool %s returned an error", namespaced_name)
+                logger.warning(
+                    "Tool %s returned an error: error_code=%s",
+                    namespaced_name,
+                    result.get("error_code")
+                    if isinstance(result.get("error_code"), str)
+                    and result.get("error_code")
+                    in {
+                        "invalid_arguments",
+                        "access_denied",
+                        "not_found",
+                        "failed",
+                        "busy",
+                        "attachments_unavailable",
+                        "too_many_nodes",
+                        "attachment_index_corrupt",
+                    }
+                    else "tool_failed",
+                )
 
             return result
 
@@ -954,11 +971,16 @@ class MCPLoader:
                     return invalid
                 return method(**input_args)
         except Exception as e:
+            import traceback
+
+            frame = traceback.extract_tb(e.__traceback__)[-1]
             logger.error(
-                "Graph tool %s failed (%s); argument names: %s",
+                "Graph tool %s failed (%s); argument names: %s error_code=graph_tool_failed raising_frame=%s:%s",
                 tool_name,
                 type(e).__name__,
                 _summarize_args(input_args),
+                frame.filename,
+                frame.lineno,
             )
             return {"error": str(e)}
 

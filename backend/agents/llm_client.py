@@ -132,7 +132,10 @@ class LLMClient:
             return self._parse_response(response)
 
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.error(
+                "LLM call failed: error_code=llm_failed error_class=%s",
+                type(e).__name__,
+            )
             raise
 
     def _parse_response(self, response: LLMResponse) -> AgentTurn:
@@ -247,6 +250,13 @@ class LLMClient:
             for tc in turn.tool_calls:
                 input_error = tool_input_type_error(tc.name, tc.input)
                 if input_error is not None:
+                    from backend.service.attachment_tools import (
+                        audit_attachment_refusal,
+                    )
+
+                    audit_attachment_refusal(
+                        tc.name.removeprefix("GRAPH__"), "invalid_arguments"
+                    )
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,
@@ -265,7 +275,11 @@ class LLMClient:
                         }
                     )
                 except Exception as e:
-                    logger.warning(f"Tool {tc.name} failed: {e}")
+                    logger.warning(
+                        "Tool %s failed: error_code=tool_failed error_class=%s",
+                        tc.name,
+                        type(e).__name__,
+                    )
                     tool_results.append(
                         {
                             "tool_use_id": tc.id,

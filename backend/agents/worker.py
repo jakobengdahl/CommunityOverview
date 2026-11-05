@@ -475,7 +475,11 @@ class AgentWorker:
                 # Timeout, continue loop
                 continue
             except Exception as e:
-                logger.error(f"Agent {self.agent_id}: Error in processing loop: {e}")
+                logger.error(
+                    "Agent %s error_code=processing_loop_failed error_class=%s",
+                    self.agent_id,
+                    type(e).__name__,
+                )
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
@@ -585,7 +589,9 @@ class AgentWorker:
                     schema = self.graph_service.get_schema()
                 except Exception as e:
                     logger.warning(
-                        f"Agent {self.config.name}: Could not load schema: {e}"
+                        "Agent %s error_code=schema_load_failed error_class=%s",
+                        self.config.name,
+                        type(e).__name__,
                     )
 
             # Load skills lazily (once per config lifecycle)
@@ -637,8 +643,12 @@ class AgentWorker:
                 with agent_mutation_context(self.agent_id, event_payload):
                     return execute_tool(name, arguments)
 
+            # Bind identity across the loop, including refusals before dispatch.
+            from backend.service.attachment_tools import tool_caller
+
             # Execute with tools
             with (
+                tool_caller("agent", self.agent_id),
                 bind_execution_context(context),
                 bind_runtime_extensions(
                     self._extensions, admission_wait=self._stop_event.wait
@@ -673,7 +683,12 @@ class AgentWorker:
             )
 
         except Exception as e:
-            logger.error(f"Agent {self.config.name}: Event {event_id} failed: {e}")
+            logger.error(
+                "Agent %s: Event %s error_code=event_failed error_class=%s",
+                self.config.name,
+                event_id,
+                type(e).__name__,
+            )
             self.events_failed += 1
 
             processing_result = ProcessingResult(
@@ -681,8 +696,8 @@ class AgentWorker:
                 agent_id=self.agent_id,
                 success=False,
                 handled=False,
-                summary=f"Processing failed: {e}",
-                error=str(e),
+                summary=f"Processing failed ({type(e).__name__})",
+                error=f"Processing failed ({type(e).__name__})",
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -708,7 +723,9 @@ class AgentWorker:
             try:
                 self.on_result(processing_result)
             except Exception as e:
-                logger.error(f"Result callback failed: {e}")
+                logger.error(
+                    "error_code=result_callback_failed error_class=%s", type(e).__name__
+                )
 
     def _log_execution_trace(self, result: Dict[str, Any]) -> None:
         """Log the LLM execution trace with reasoning and tool calls."""
@@ -720,31 +737,29 @@ class AgentWorker:
             tool_calls = turn.get("tool_calls", [])
 
             if text:
-                # Truncate long reasoning for console readability
-                display_text = text[:500] + "..." if len(text) > 500 else text
                 logger.info(
-                    f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}"
+                    "Agent %s [turn %s] reasoning_chars=%s",
+                    agent_name,
+                    turn_num,
+                    len(text),
                 )
 
             for tc in tool_calls:
-                tc_name = tc.get("name", "?")
                 tc_input = tc.get("input", {})
-                input_summary = json.dumps(tc_input, default=str, ensure_ascii=False)
-                if len(input_summary) > 300:
-                    input_summary = input_summary[:300] + "..."
+                names = sorted(tc_input) if isinstance(tc_input, dict) else []
                 logger.info(
-                    f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})"
+                    "Agent %s [turn %s] tool call: %s argument_names=%s",
+                    agent_name,
+                    turn_num,
+                    tc.get("name", "?"),
+                    names,
                 )
 
         final = result.get("final_response")
         if final:
-            display_final = final[:500] + "..." if len(final) > 500 else final
-            logger.info(f"Agent {agent_name} final response: {display_final}")
-
+            logger.info("Agent %s final_response_chars=%s", agent_name, len(final))
         if not result.get("success"):
-            logger.warning(
-                f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}"
-            )
+            logger.warning("Agent %s error_code=execution_failed", agent_name)
 
     def _create_llm_client(self) -> LLMClient:
         """Create the LLM client, resolving the agent's model profile if configured."""

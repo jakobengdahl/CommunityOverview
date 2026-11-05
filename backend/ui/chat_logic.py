@@ -1721,6 +1721,7 @@ class ChatProcessor:
 
             input_error = tool_input_type_error(tool_name, tool_input)
             if input_error is not None:
+                audit_attachment_refusal(tool_name, "invalid_arguments")
                 tool_results.append(
                     {"tool_use_id": tool_id, "result": {"error": input_error}}
                 )

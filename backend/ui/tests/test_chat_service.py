@@ -3000,3 +3000,29 @@ def test_attachment_early_refusal_formatted_audit(
         None,
         0,
     ]
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_attachment_non_object_audit(chat_service, monkeypatch, caplog, name):
+    import json
+    import logging
+
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+    service, llm = chat_service
+    raw = MagicMock()
+    service._processor.tools_map[name] = raw
+    llm.mock_tool_calls = [{"name": name, "input": ["SECRET-file-query"]}]
+    with caplog.at_level("INFO"):
+        service._processor.process_message(
+            messages=[{"role": "user", "content": "read files"}],
+            attachment_access=lambda _: "read",
+        )
+    raw.assert_not_called()
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert "SECRET-file-query" not in lines[0]
+    assert json.loads(lines[0])["outcome"] == "invalid_arguments"

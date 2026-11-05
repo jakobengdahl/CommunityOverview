@@ -236,7 +236,10 @@ class AutonomyGate:
             }
         except Exception as exc:
             # A governance-store failure must fail closed: do not execute.
-            logger.error("Governance: failed to record proposal: %s", exc)
+            logger.error(
+                "Governance: error_code=proposal_record_failed error_class=%s",
+                type(exc).__name__,
+            )
             return {
                 "error": (
                     f"Mutating tool '{namespaced_name}' could not be recorded "

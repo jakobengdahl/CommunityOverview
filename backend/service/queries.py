@@ -71,7 +71,7 @@ def search_graph(
         )
 
     logger.info(
-        f"SEARCH: query='{query}' types={node_types} limit={limit} semantic={semantic}"
+        "SEARCH: query_length=%s limit=%s semantic=%s", len(query), limit, semantic
     )
 
     type_filters = None

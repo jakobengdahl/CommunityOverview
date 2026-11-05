@@ -882,3 +882,42 @@ def test_attachment_allowlist_refusal_formatted_audit(caplog, name):
         None,
         0,
     ]
+
+
+def test_governance_exception_formatted_logs_hide_content(caplog):
+    import logging
+
+    secret = "SECRET-proposal-content"
+    broken_store = MagicMock()
+    broken_store.create.side_effect = RuntimeError(secret)
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.PROPOSE,
+        tool_allowlist=None,
+        mcp_loader=FakeLoader(),
+        proposal_store=broken_store,
+        agent_id="a1",
+        agent_name="A",
+        run_id="run-1",
+    )
+    store = InMemoryProposalStore()
+    proposal = store.create(
+        Proposal("a1", "graph.add_nodes", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    manager = GovernanceManager(
+        store, executor_factory=lambda _: MagicMock(side_effect=ValueError(secret))
+    )
+    with caplog.at_level("INFO"):
+        assert gate.wrap(MagicMock())("graph.add_nodes", {"nodes": [secret]}).get(
+            "error"
+        )
+        assert manager.approve(proposal.id)["status"] == "apply_failed"
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "error_code=proposal_record_failed error_class=RuntimeError" in line
+        for line in lines
+    )
+    assert any(
+        "error_code=proposal_apply_failed error_class=ValueError" in line
+        for line in lines
+    )

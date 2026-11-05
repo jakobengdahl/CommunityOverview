@@ -2896,3 +2896,54 @@ class TestRedirectCapIsShared:
             assert len(node.args) == 1
             assert isinstance(node.args[0], ast.Name), ast.dump(node)
             assert node.args[0].id == "MAX_REDIRECTS"
+
+
+def test_graph_failure_formatted_log_locates_raising_frame(caplog):
+    from unittest.mock import MagicMock
+
+    secret = "SECRET-tool-arguments"
+
+    def fail(**kwargs):
+        raise RuntimeError(secret)
+
+    service = MagicMock()
+    service.search_graph = fail
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    with caplog.at_level("INFO"):
+        loader.create_tool_executor(graph_service=service)(
+            "GRAPH__search_graph", {"query": secret}
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all(secret not in line for line in lines)
+    assert any(
+        "error_code=graph_tool_failed" in line
+        and f"{__file__}:{fail.__code__.co_firstlineno + 1}" in line
+        for line in lines
+    )
+
+
+def test_attachment_error_formatted_log_has_safe_code(caplog):
+    from unittest.mock import MagicMock
+
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    service = MagicMock()
+    service.attachment_tool_search.return_value = {
+        "error": "SECRET-tool-content",
+        "error_code": "invalid_arguments",
+    }
+    with caplog.at_level("INFO"):
+        loader.create_tool_executor(graph_service=service)(
+            "GRAPH__search_node_attachments",
+            {"query": "SECRET-tool-content", "node_ids": []},
+        )
+    lines = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+    assert all("SECRET-tool-content" not in line for line in lines)
+    assert any("error_code=invalid_arguments" in line for line in lines)
