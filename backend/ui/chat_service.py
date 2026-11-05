@@ -1134,8 +1134,12 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 names = [
                     node.get("name", "") for node in proposed_nodes if node.get("name")
                 ]
-                similar_results = self._graph_service.find_similar_nodes_batch(
-                    names=names, node_type=node_type, threshold=0.7, limit=3
+                similar_results = run_on_event_loop(
+                    self._graph_service.find_similar_nodes_batch,
+                    names=names,
+                    node_type=node_type,
+                    threshold=0.7,
+                    limit=3,
                 )
                 if similar_results.get("success") is False:
                     # A denied duplicate check is reported, never read as
