@@ -1953,8 +1953,9 @@ no model reasoning, tool arguments or tool results. Each request owns its queue;
 steps go only to the requesting connection, with the same authorization and
 session context as `/ui/chat`. Disconnecting does not cancel the running chat.
 
-`/ui/chat`, `/ui/chat/stream` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
-event loop keeps answering `/health` and other requests during a chat. Their tool
+`/ui/chat`, `/ui/chat/stream`, `/ui/chat/simple`, `/ui/propose-nodes` and
+`/ui/upload` (when analyzing text) wait for the LLM on a worker thread, so the
+event loop keeps answering `/health` and other requests during analysis. Their tool
 calls and every other graph access hop back to the event loop thread, carrying
 the request's context, so graph access stays single-threaded.
 

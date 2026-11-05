@@ -355,7 +355,8 @@ def create_ui_router(
         """
         try:
             with use_request_authorization(headers=http_request.headers):
-                result = chat_service.propose_nodes_from_text(
+                result = await run_chat_off_event_loop(
+                    chat_service.propose_nodes_from_text,
                     text=request.text,
                     node_type=request.node_type,
                     communities=request.communities,
@@ -432,7 +433,8 @@ def create_ui_router(
                 )
 
                 with use_request_authorization(headers=http_request.headers):
-                    chat_result = chat_service.process_chat_request(
+                    chat_result = await run_chat_off_event_loop(
+                        chat_service.process_chat_request,
                         user_message=user_message,
                         document_context=result["text"],
                         api_key=api_key,
