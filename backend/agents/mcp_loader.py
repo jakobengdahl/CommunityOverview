@@ -950,9 +950,17 @@ class MCPLoader:
             return {"error": f"Unknown graph tool: {tool_name}"}
 
         try:
-            from backend.service.attachment_tools import tool_caller
+            from backend.service.attachment_tools import (
+                attachment_argument_refusal,
+                tool_caller,
+            )
 
             with tool_caller("agent", agent_id):
+                invalid = attachment_argument_refusal(
+                    tool_name, method, kwargs=input_args
+                )
+                if invalid is not None:
+                    return invalid
                 return method(**input_args)
         except Exception as e:
             logger.error(

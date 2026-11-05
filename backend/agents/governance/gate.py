@@ -147,6 +147,16 @@ class AutonomyGate:
     def wrap(self, raw_executor: ToolExecutor) -> ToolExecutor:
         def governed(namespaced_name: str, input_args: Dict[str, Any]) -> Any:
             if self._allowlist is not None and namespaced_name not in self._allowlist:
+                from backend.service.attachment_tools import (
+                    audit_attachment_refusal,
+                    tool_caller,
+                )
+
+                with tool_caller("agent", self._agent_id):
+                    audit_attachment_refusal(
+                        original_tool_name(self._mcp_loader, namespaced_name),
+                        "access_denied",
+                    )
                 return {
                     "error": (
                         f"Tool '{namespaced_name}' is not in this agent's "

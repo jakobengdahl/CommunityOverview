@@ -1693,6 +1693,7 @@ class ChatProcessor:
             # special cases below, so enforcement never depends on the LLM only
             # seeing the filtered tool list.
             if tool_allowlist is not None and tool_name not in tool_allowlist:
+                audit_attachment_refusal(tool_name, "access_denied")
                 tool_results.append(
                     {
                         "tool_use_id": tool_id,
@@ -1777,10 +1778,21 @@ class ChatProcessor:
                         k: v for k, v in tool_input.items() if k in sig.parameters
                     }
 
+                    from backend.service.attachment_tools import (
+                        attachment_argument_refusal,
+                    )
+
+                    invalid = attachment_argument_refusal(
+                        tool_name, func, kwargs=valid_args
+                    )
                     tool_result = (
-                        func(**valid_args)
-                        if tool_name in ATTACHMENT_TOOLS
-                        else run_on_event_loop(func, **valid_args)
+                        invalid
+                        if invalid is not None
+                        else (
+                            func(**valid_args)
+                            if tool_name in ATTACHMENT_TOOLS
+                            else run_on_event_loop(func, **valid_args)
+                        )
                     )
                 except Exception as e:
                     tool_result = {"error": str(e)}

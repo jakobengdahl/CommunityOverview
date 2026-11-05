@@ -2945,3 +2945,58 @@ def test_attachment_hook_refusal_formatted_audit(
         None,
         0,
     ]
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+@pytest.mark.parametrize("refusal", ["access_denied", "invalid_arguments"])
+def test_attachment_early_refusal_formatted_audit(
+    chat_service, caplog, monkeypatch, name, refusal
+):
+    import json
+    import logging
+    from backend.service.attachment_tools import tool_caller
+
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+    service, llm = chat_service
+    processor = service._processor
+    secret = "private-query-content-filename.txt"
+    raw = MagicMock()
+
+    def tool(node_ids, query):
+        return raw(node_ids, query)
+
+    processor.tools_map[name] = tool
+    processor.tool_definitions.append({"name": name})
+    llm.mock_tool_calls = [{"name": name, "input": {"query": secret}}]
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        tool_caller("kiosk", "collection"),
+    ):
+        processor.process_message(
+            messages=[{"role": "user", "content": "read files"}],
+            tool_allowlist=["search_graph"] if refusal == "access_denied" else [name],
+            attachment_access=lambda _: "read",
+        )
+    raw.assert_not_called()
+    result = _tool_result_payloads(llm)[0]
+    if refusal == "access_denied":
+        assert "allowlist" in result["error"]
+    else:
+        assert result["error_code"] == refusal
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["actor"] == {"type": "kiosk", "id": "collection"}
+    assert record["tool"] == name
+    assert record["outcome"] == refusal
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]

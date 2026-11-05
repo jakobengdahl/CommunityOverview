@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
 import functools
+import inspect
 import json
 import logging
 import os
@@ -562,3 +563,17 @@ def audit_attachment_refusal(name, outcome):
         AttachmentReadTools.audit(
             "read" if name == "read_node_attachment" else "search", outcome=outcome
         )
+
+
+def attachment_argument_refusal(name, func, args=(), kwargs=None):
+    """Reject malformed dispatcher calls without logging their arguments."""
+    from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
+
+    if name not in ATTACHMENT_READ_TOOLS:
+        return None
+    try:
+        inspect.signature(func).bind(*args, **(kwargs or {}))
+    except TypeError:
+        audit_attachment_refusal(name, "invalid_arguments")
+        return error("invalid_arguments")
+    return None

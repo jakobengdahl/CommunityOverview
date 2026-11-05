@@ -268,6 +268,10 @@ def _session_aware(
     def run(bound, args, kwargs):
         if kind is None:
             if bound is not None:
+                from .attachment_tools import audit_attachment_refusal, tool_caller
+
+                with tool_caller("mcp"):
+                    audit_attachment_refusal(name, "session_not_supported")
                 raise session_context.not_supported(f"tool {name}")
             return func(*args, **kwargs)
         named = kwargs.get(key)
@@ -580,6 +584,13 @@ def register_mcp_tools(
                             original.__name__, refused["error_code"]
                         )
                         return refused
+                    from .attachment_tools import attachment_argument_refusal
+
+                    invalid = attachment_argument_refusal(
+                        original.__name__, original, args, kwargs
+                    )
+                    if invalid is not None:
+                        return invalid
                     return original(*args, **kwargs)
 
         wrapped = _session_aware(

@@ -601,8 +601,18 @@ async def test_attachment_dispatch_keeps_extraction_off_loop(
 
 
 @pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
-@pytest.mark.parametrize("transport", ["execute_tool", "mcp"])
-def test_attachment_dispatch_refusal_formatted_audit(service, caplog, name, transport):
+@pytest.mark.parametrize(
+    "transport,refusal",
+    [
+        (transport, refusal)
+        for transport in ("execute_tool", "mcp")
+        for refusal in ("access_denied", "session_not_supported", "invalid_arguments")
+    ]
+    + [("agent", "invalid_arguments")],
+)
+def test_attachment_dispatch_refusal_formatted_audit(
+    service, caplog, name, transport, refusal
+):
     import json
     import logging
     from unittest.mock import MagicMock
@@ -619,7 +629,7 @@ def test_attachment_dispatch_refusal_formatted_audit(service, caplog, name, tran
     tools = register_mcp_tools(mcp, service, attachment_access="read")
     service._authorization_hook = MagicMock()
     service._authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
-        allowed=False
+        allowed=refusal != "access_denied"
     )
     secret = "private-query-content-filename.txt"
     args = (
@@ -627,13 +637,33 @@ def test_attachment_dispatch_refusal_formatted_audit(service, caplog, name, tran
         if name == "search_node_attachments"
         else {"node_id": secret, "attachment_id": secret}
     )
-    with caplog.at_level("INFO", logger="attachments.audit"):
-        result = (
-            tools[name](**args)
-            if transport == "execute_tool"
-            else asyncio.run(registered[name](**args))
+    from backend.runtime import session_context
+    from backend.agents.mcp_loader import MCPLoader
+
+    if refusal == "invalid_arguments":
+        args = (
+            {"query": secret}
+            if name == "search_node_attachments"
+            else {"node_id": secret}
         )
-    assert result["error_code"] == "access_denied"
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        session_context.bind_session(
+            "test-session" if refusal == "session_not_supported" else None
+        ),
+    ):
+        if transport == "agent":
+            result = MCPLoader([])._execute_graph_tool(name, args, service, "a1")
+        else:
+            result = (
+                tools[name](**args)
+                if transport == "execute_tool"
+                else asyncio.run(registered[name](**args))
+            )
+    assert (
+        result["error" if refusal == "session_not_supported" else "error_code"]
+        == refusal
+    )
     lines = [
         logging.Formatter("%(message)s").format(r)
         for r in caplog.records
@@ -643,8 +673,57 @@ def test_attachment_dispatch_refusal_formatted_audit(service, caplog, name, tran
     assert secret not in lines[0]
     record = json.loads(lines[0])
     assert record["tool"] == name
-    assert record["outcome"] == "access_denied"
+    assert record["outcome"] == refusal
+    assert record["actor"] == (
+        {"type": "agent", "id": "a1"}
+        if transport == "agent"
+        else {"type": "mcp", "id": None}
+    )
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_attachment_missing_nodes_execute_endpoint(service, caplog):
+    import json
+    import logging
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from backend.api_host.tool_routes import register_tool_routes
+    from backend.service.mcp_tools import register_mcp_tools
+
+    tools = register_mcp_tools(MagicMock(), service, attachment_access="read")
+    app = FastAPI()
+    register_tool_routes(app, service, tools, True)
+    secret = "private-query-content-filename.txt"
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        async with AsyncClient(
+            transport=ASGITransport(app), base_url="http://test"
+        ) as http:
+            response = await http.post(
+                "/execute_tool",
+                json={
+                    "tool_name": "search_node_attachments",
+                    "arguments": {"query": secret},
+                },
+            )
+    assert response.status_code == 200
+    assert response.json()["error_code"] == "invalid_arguments"
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
     assert record["actor"] == {"type": "mcp", "id": None}
+    assert record["outcome"] == "invalid_arguments"
     assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
         None,
         None,

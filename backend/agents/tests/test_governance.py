@@ -844,3 +844,41 @@ def test_attachment_agent_grants_respect_server_ceiling(monkeypatch, ceiling, na
         assert result["error_code"] == "access_denied"
         raw.assert_not_called()
     assert store.list_proposals() == []
+
+
+@pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
+def test_attachment_allowlist_refusal_formatted_audit(caplog, name):
+    import json
+    import logging
+
+    raw = MagicMock()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
+        tool_allowlist=["graph.search_graph"],
+        mcp_loader=FakeLoader(),
+        proposal_store=None,
+        agent_id="a1",
+        attachment_access="read",
+    )
+    secret = "private-query-content-filename.txt"
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        result = gate.wrap(raw)("graph." + name, {"query": secret})
+    assert "allowlist" in result["error"]
+    raw.assert_not_called()
+    lines = [
+        logging.Formatter("%(message)s").format(r)
+        for r in caplog.records
+        if r.name == "attachments.audit"
+    ]
+    assert len(lines) == 1
+    assert secret not in lines[0]
+    record = json.loads(lines[0])
+    assert record["actor"] == {"type": "agent", "id": "a1"}
+    assert record["tool"] == name
+    assert record["outcome"] == "access_denied"
+    assert [record[k] for k in ("node_id", "attachment_id", "sha256", "chars")] == [
+        None,
+        None,
+        None,
+        0,
+    ]
