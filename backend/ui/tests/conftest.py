@@ -59,6 +59,7 @@ class MockLLMProvider:
         system_prompt: str,
         tools: List[Dict],
         max_tokens: int = 4096,
+        timeout_seconds=None,
     ) -> LLMResponse:
         """Return mock response with optional tool calls."""
         self.received_messages.append(messages)

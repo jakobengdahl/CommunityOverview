@@ -1,3 +1,4 @@
+# covers: backend/llm/llm_providers.py
 """OpenAIProvider translation between the provider-neutral (Claude-shaped)
 message format and OpenAI chat completions, with the OpenAI client mocked."""
 

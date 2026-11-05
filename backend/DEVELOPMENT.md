@@ -232,6 +232,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
 | `LLM_MAX_TOKENS` | `16000` | Completion token limit for chat and agents (a model profile's `options.max_tokens` takes precedence) |
+| `CHAT_MAX_ROUNDS` | `64` | Maximum LLM rounds in a chat tool chain; at the limit, returns a summary of completed tool calls and keeps earlier writes/results. Streaming and non-streaming chains continue after disconnect within this cap. |
+| `LLM_TIMEOUT_SECONDS` | `600` | Total deadline per chat model call in seconds (1–86400), including network operations. Chat disables SDK retries and uses a 5 s connect timeout; timeouts use the existing retry/no-answer handling. Other callers retain SDK defaults. |
 | `LLM_ENABLE_THINKING` | - | `false` sends `chat_template_kwargs` `enable_thinking=false` on OpenAI-compatible requests |
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
@@ -2125,3 +2127,10 @@ capped by `MAX_REASONING_CHARS_PER_ROUND` (12,000 characters). It goes only to t
 requesting client, is not logged or persisted, and is never added to subsequent
 LLM messages. Answer text is not parsed for reasoning tags. The provider call
 remains non-streaming and `/ui/chat` retains its existing response contract.
+
+Chat round settings accept positive integers; chat timeout accepts 1–86400 seconds.
+Invalid values use the named defaults. The defaults allow long chains beyond 43
+calls and eight minutes overall; the deadline applies to each chat model call,
+including all network operations, not the whole chain. A current synchronous
+request may finish after the deadline, but SDK retries are disabled for chat.
+Agents, service helpers, and evaluation retain SDK timeout and retry defaults.

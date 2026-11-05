@@ -238,3 +238,19 @@ class TestRecordingProvider:
         recorder = RecordingProvider(ScriptedProvider(["done"]))
         recorder.create_completion([], "SYSTEM TEXT", [])
         assert recorder.transcript.provider_calls[0].system_prompt == "SYSTEM TEXT"
+
+
+@pytest.mark.parametrize("chat_timeout", [None, 1])
+def test_evaluation_keeps_sdk_timeout_defaults(monkeypatch, chat_timeout):
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "1")
+    inner = MagicMock()
+    inner.create_completion.return_value = LLMResponse(
+        content=[], stop_reason="end_turn"
+    )
+    recorder = RecordingProvider(inner)
+    recorder.create_completion([], "system", [], timeout_seconds=chat_timeout)
+    inner.create_completion.assert_called_once_with(
+        messages=[], system_prompt="system", tools=[], max_tokens=4096
+    )

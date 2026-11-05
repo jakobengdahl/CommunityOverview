@@ -660,7 +660,7 @@ async def test_concurrent_streams_only_receive_their_own_steps():
 
 
 @pytest.mark.parametrize("reasoning", [None, "", "x" * 12001])
-def test_reasoning_is_capped_request_local_display_metadata(reasoning):
+def test_reasoning_is_capped_request_local_display_metadata(reasoning, monkeypatch):
     """Only separate reasoning reaches progress; response and prompts stay intact."""
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -678,6 +678,7 @@ def test_reasoning_is_capped_request_local_display_metadata(reasoning):
             ]
         ),
     )
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "600")
     provider = Mock()
     provider.create_completion.return_value = response
     messages = [{"role": "user", "content": "question"}]
@@ -701,7 +702,7 @@ def test_reasoning_is_capped_request_local_display_metadata(reasoning):
     assert _chat_completion(provider, messages=messages) is response
     assert events == before
     assert all(
-        call.kwargs == {"messages": messages}
+        call.kwargs == {"messages": messages, "timeout_seconds": 600}
         for call in provider.create_completion.call_args_list
     )
     assert messages == [{"role": "user", "content": "question"}]

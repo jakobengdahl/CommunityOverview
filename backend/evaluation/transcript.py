@@ -188,7 +188,10 @@ class RecordingProvider(LLMProvider):
         system_prompt: str,
         tools: List[Dict],
         max_tokens: int = 4096,
+        timeout_seconds: Optional[int] = None,
     ) -> LLMResponse:
+        # Evaluation keeps SDK defaults even when exercising the chat chain;
+        # the interactive chat deadline must not change evaluation policy.
         turn = len(self.transcript.provider_calls)
         self._harvest_tool_results(messages)
 
