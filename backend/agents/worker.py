@@ -47,6 +47,15 @@ from backend.skills.loader import (
     SkillsLoader,
 )
 
+from backend.runtime.content_logging import (
+    argument_sizes,
+    content_logging,
+    log_failure,
+    mark_tainted,
+    safe_tool_name,
+)
+from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
 logger = logging.getLogger(__name__)
 
 
@@ -475,7 +484,13 @@ class AgentWorker:
                 # Timeout, continue loop
                 continue
             except Exception as e:
-                logger.error(f"Agent {self.agent_id}: Error in processing loop: {e}")
+                log_failure(
+                    logger,
+                    logging.ERROR,
+                    "processing_loop_failed",
+                    e,
+                    context=f"Agent {self.agent_id}",
+                )
 
     def _process_event(self, item: EventItem) -> None:
         """Process a single event."""
@@ -507,6 +522,7 @@ class AgentWorker:
             f"(type: {event_payload.get('event_type', 'unknown')})"
         )
 
+        tainted = False
         run_id = None
         if self._run_recorder is not None:
             run_id = self._run_recorder.record_start(
@@ -584,8 +600,12 @@ class AgentWorker:
                 try:
                     schema = self.graph_service.get_schema()
                 except Exception as e:
-                    logger.warning(
-                        f"Agent {self.config.name}: Could not load schema: {e}"
+                    log_failure(
+                        logger,
+                        logging.WARNING,
+                        "schema_load_failed",
+                        e,
+                        context=f"Agent {self.config.name}",
                     )
 
             # Load skills lazily (once per config lifecycle)
@@ -632,13 +652,26 @@ class AgentWorker:
             execute_tool = tool_executor
 
             def tool_executor(name: str, arguments: Dict[str, Any]) -> Any:
+                nonlocal tainted
                 if self._pause_reason is not None:
                     return {"error": self._pause_reason}
                 with agent_mutation_context(self.agent_id, event_payload):
-                    return execute_tool(name, arguments)
+                    tool_result = execute_tool(name, arguments)
+                    if (
+                        isinstance(tool_result, dict)
+                        and tool_result.get("untrusted_content") is True
+                    ):
+                        tainted = True
+                        mark_tainted()
+                    return tool_result
+
+            # Bind identity across the loop, including refusals before dispatch.
+            from backend.service.attachment_tools import tool_caller
 
             # Execute with tools
             with (
+                content_logging(known_tools=tool_names),
+                tool_caller("agent", self.agent_id),
                 bind_execution_context(context),
                 bind_runtime_extensions(
                     self._extensions, admission_wait=self._stop_event.wait
@@ -653,7 +686,7 @@ class AgentWorker:
                 )
 
             # Log detailed trace (reasoning and tool calls)
-            self._log_execution_trace(result)
+            self._log_execution_trace(result, tainted=tainted, known_tools=tool_names)
 
             # Parse the agent's response
             processing_result = self._parse_agent_response(
@@ -673,16 +706,24 @@ class AgentWorker:
             )
 
         except Exception as e:
-            logger.error(f"Agent {self.config.name}: Event {event_id} failed: {e}")
+            log_failure(
+                logger,
+                logging.ERROR,
+                "event_failed",
+                e,
+                redact=tainted,
+                context=f"Agent {self.config.name}: Event {event_id}",
+            )
             self.events_failed += 1
 
+            failure_text = f"event_failed ({type(e).__name__})" if tainted else str(e)
             processing_result = ProcessingResult(
                 event_id=event_id,
                 agent_id=self.agent_id,
                 success=False,
                 handled=False,
-                summary=f"Processing failed: {e}",
-                error=str(e),
+                summary=failure_text,
+                error=failure_text,
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
 
@@ -708,42 +749,49 @@ class AgentWorker:
             try:
                 self.on_result(processing_result)
             except Exception as e:
-                logger.error(f"Result callback failed: {e}")
+                log_failure(
+                    logger, logging.ERROR, "result_callback_failed", e, redact=tainted
+                )
 
-    def _log_execution_trace(self, result: Dict[str, Any]) -> None:
-        """Log the LLM execution trace with reasoning and tool calls."""
-        trace = result.get("trace", [])
+    def _log_execution_trace(
+        self, result: Dict[str, Any], *, tainted=False, known_tools=()
+    ) -> None:
+        """Keep ordinary diagnostics while respecting the run's content boundary."""
         agent_name = self.config.name
-        for turn in trace:
+        for turn in result.get("trace", []):
             turn_num = turn.get("turn", "?")
             text = turn.get("text_response")
-            tool_calls = turn.get("tool_calls", [])
-
-            if text:
-                # Truncate long reasoning for console readability
-                display_text = text[:500] + "..." if len(text) > 500 else text
+            if text and not tainted:
                 logger.info(
-                    f"Agent {agent_name} [turn {turn_num}] reasoning: {display_text}"
+                    "Agent %s [turn %s] reasoning: %s", agent_name, turn_num, text[:500]
                 )
-
-            for tc in tool_calls:
-                tc_name = tc.get("name", "?")
-                tc_input = tc.get("input", {})
-                input_summary = json.dumps(tc_input, default=str, ensure_ascii=False)
-                if len(input_summary) > 300:
-                    input_summary = input_summary[:300] + "..."
-                logger.info(
-                    f"Agent {agent_name} [turn {turn_num}] tool call: {tc_name}({input_summary})"
-                )
-
+            for tc in turn.get("tool_calls", []):
+                name = tc.get("name", "?")
+                arguments = tc.get("input", {})
+                if tainted or name.removeprefix("GRAPH__") in ATTACHMENT_TOOLS:
+                    logger.info(
+                        "Agent %s [turn %s] tool call: %s %s",
+                        agent_name,
+                        turn_num,
+                        safe_tool_name(name, known_tools),
+                        argument_sizes(arguments),
+                    )
+                else:
+                    logger.info(
+                        "Agent %s [turn %s] tool call: %s(%s)",
+                        agent_name,
+                        turn_num,
+                        name,
+                        json.dumps(arguments, default=str, ensure_ascii=False)[:300],
+                    )
         final = result.get("final_response")
-        if final:
-            display_final = final[:500] + "..." if len(final) > 500 else final
-            logger.info(f"Agent {agent_name} final response: {display_final}")
-
+        if final and not tainted:
+            logger.info("Agent %s final response: %s", agent_name, final[:500])
         if not result.get("success"):
             logger.warning(
-                f"Agent {agent_name} execution failed: {result.get('error', 'unknown')}"
+                "Agent %s error_code=execution_failed%s",
+                agent_name,
+                "" if tainted else f" error={result.get('error', 'unknown')}",
             )
 
     def _create_llm_client(self) -> LLMClient:

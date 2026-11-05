@@ -15,6 +15,8 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+from .attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS
+
 import functools
 import inspect
 import json
@@ -316,6 +318,10 @@ def _session_aware(
             with authorization, session_context.bind_session(bound):
                 return run(bound, args, kwargs)
         except session_context.SessionRefused as exc:
+            from .attachment_tools import audit_attachment_refusal, tool_caller
+
+            with tool_caller("mcp"):
+                audit_attachment_refusal(name, exc.to_result()["error"])
             return exc.to_result()
 
     return wrapper
@@ -561,14 +567,31 @@ def register_mcp_tools(
         if not attachment_tool_allowed(func.__name__, attachment_access):
             return func
         if func.__name__ in ATTACHMENT_TOOLS:
+            if service.attachment_settings is None:
+                return func
             original = func
 
             @functools.wraps(original)
             def func(*args, **kwargs):
-                refused = attachment_tool_refusal(
-                    original.__name__, attachment_access, service.authorization_hook
-                )
-                return refused if refused is not None else original(*args, **kwargs)
+                from .attachment_tools import audit_attachment_refusal, tool_caller
+
+                with tool_caller("mcp"):
+                    refused = attachment_tool_refusal(
+                        original.__name__, attachment_access, service.authorization_hook
+                    )
+                    if refused is not None:
+                        audit_attachment_refusal(
+                            original.__name__, refused["error_code"]
+                        )
+                        return refused
+                    from .attachment_tools import attachment_argument_refusal
+
+                    invalid = attachment_argument_refusal(
+                        original.__name__, original, args, kwargs
+                    )
+                    if invalid is not None:
+                        return invalid
+                    return original(*args, **kwargs)
 
         wrapped = _session_aware(
             func,
@@ -577,9 +600,82 @@ def register_mcp_tools(
             lambda: _message_request(mcp),
             _sessions_unreadable,
         )
-        mcp.tool()(wrapped)
+        if func.__name__ in ATTACHMENT_TOOLS:
+
+            @functools.wraps(wrapped)
+            async def async_tool(*args, **kwargs):
+                import asyncio
+
+                return await asyncio.to_thread(wrapped, *args, **kwargs)
+
+            mcp.tool()(async_tool)
+            # Keep the public schema, but handle validation refusals before
+            # FastMCP can turn a ValidationError (including inputs) into ToolError.
+            from mcp.server.fastmcp import FastMCP
+            from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+            from pydantic import ValidationError
+
+            if isinstance(mcp, FastMCP):
+
+                class AttachmentMetadata(FuncMetadata):
+                    async def call_fn_with_arg_validation(
+                        self,
+                        fn,
+                        fn_is_async,
+                        arguments_to_validate,
+                        arguments_to_pass_directly,
+                    ):
+                        from .attachment_tools import (
+                            audit_attachment_refusal,
+                            error,
+                            tool_caller,
+                        )
+
+                        try:
+                            self.arg_model.model_validate(
+                                self.pre_parse_json(arguments_to_validate)
+                            )
+                        except ValidationError:
+                            with tool_caller("mcp"):
+                                audit_attachment_refusal(
+                                    fn.__name__, "invalid_arguments"
+                                )
+                            return error("invalid_arguments")
+                        return await super().call_fn_with_arg_validation(
+                            fn,
+                            fn_is_async,
+                            arguments_to_validate,
+                            arguments_to_pass_directly,
+                        )
+
+                tool = mcp._tool_manager.get_tool(func.__name__)
+                tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
+        else:
+            mcp.tool()(wrapped)
         tools_map[func.__name__] = wrapped
         return wrapped
+
+    @register_tool
+    def list_node_attachments(node_id: str) -> Dict[str, Any]:
+        """List untrusted attachment metadata for a visible node."""
+        return service.attachment_tool_list(node_id)
+
+    @register_tool
+    def read_node_attachment(
+        node_id: str,
+        attachment_id: str,
+        offset: int = 0,
+        max_chars: int = ATTACHMENT_READ_DEFAULT_CHARS,
+    ) -> Dict[str, Any]:
+        """Read untrusted file text with citation locators."""
+        return service.attachment_tool_read(node_id, attachment_id, offset, max_chars)
+
+    @register_tool
+    def search_node_attachments(
+        query: str, node_ids: List[str], top_k: int = 8
+    ) -> Dict[str, Any]:
+        """Search files on up to 20 visible nodes; report unreadable files."""
+        return service.attachment_tool_search(query, node_ids, top_k)
 
     # ==================== Search Tools ====================
 
@@ -1873,6 +1969,60 @@ def register_mcp_tools(
             "connected_clients": clients,
             "message": message,
             "visible_node_count": len(visible),
+        }
+
+    @register_tool
+    def get_session_activity(
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        action: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read retained session activity, newest first, without changing it.
+
+        Records include prior annotation data and inverse ops when available.
+        The log retains at most 500 records for 7 days. Filter by the exact
+        op name (for example annotation_deleted) before paging. Offset paging
+        follows the current log; new activity can shift subsequent pages.
+
+        Args:
+            session_id: Visualization session ID.
+            limit: Page size, from 1 to 500 (default 50).
+            offset: Number of matching records to skip (default 0).
+            action: Optional exact activity op name.
+
+        Returns:
+            session_id, activity, total matching records, and next_offset
+            (null when there are no more records).
+        """
+        if session_manager is None:
+            return {"error": "Visualization sessions are not available"}
+        if not is_valid_session_id(session_id):
+            return {"error": _INVALID_SESSION_ID_ERROR}
+        denied = _authorize_session(GRAPH_ACTION_READ, "get_session_activity")
+        if denied:
+            return denied
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 500
+            or type(offset) is not int
+            or offset < 0
+            or (action is not None and not isinstance(action, str))
+        ):
+            return {"error": "Invalid activity paging or action filter"}
+        try:
+            records = session_manager.list_activity(session_id, limit=500)
+        except SessionNotFound:
+            return {"error": f"Session '{session_id}' not found"}
+        if action is not None:
+            records = [record for record in records if record.get("op") == action]
+        page = records[offset : offset + limit]
+        end = offset + len(page)
+        return {
+            "session_id": session_id,
+            "activity": page,
+            "total": len(records),
+            "next_offset": end if end < len(records) else None,
         }
 
     @register_tool

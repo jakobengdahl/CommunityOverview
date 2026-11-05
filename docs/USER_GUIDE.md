@@ -902,6 +902,12 @@ notification.
 
 ### 5.2 Recent activity (audit log)
 
+Agents can read a session’s retained annotation/canvas activity with the MCP
+`get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
+by action (`action`, for example `annotation_deleted`), including prior annotation
+data and inverse operations when recorded. Reading the log does not undo actions.
+
+
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,
@@ -1502,3 +1508,18 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `staged-session.png` | pending | Canvas in a staged session: the dashed Staged session bar with its pending count, and a node with a dashed amber border and a "Staged: changed" badge |
 | `staged-review.png` | pending | Staged changes review with one Ready change and one Conflict showing Before / This session / Graph now values and a resolution chosen |
 | `node-attachments.png` | pending | Node detail dialog, Details tab: Attachments section with two files, the Attach file button and the limits hint |
+
+
+### Reading attached files with tools
+
+Attachment read tools can list files on a node, read text with page or other
+locators, and search files on up to 20 nodes. Returned passages identify the node,
+attachment, filename and locator for citations. Files reported as unreadable,
+truncated or skipped are not evidence that a topic is absent. Images have no OCR.
+Access depends on the instance switch, the caller's grant and node visibility.
+See the [attachment security boundary](../backend/DEVELOPMENT.md#node-attachments)
+before enabling these tools for an assistant or Agent.
+
+Assistant and kiosk Markdown replies load only inline `data:image/` images.
+Other images show their alt text and URL without loading them. Link targets
+are visible, with links to another origin marked as external.

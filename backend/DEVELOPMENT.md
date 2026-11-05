@@ -221,7 +221,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
 | `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
-| `ASSISTANT_ATTACHMENT_ACCESS` | `read` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
+| `ASSISTANT_ATTACHMENT_ACCESS` | `off` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
 | `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
@@ -232,6 +232,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `LLM_PROVIDER` | auto-detect | Force LLM provider: `openai` or `claude` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model to use |
 | `LLM_MAX_TOKENS` | `16000` | Completion token limit for chat and agents (a model profile's `options.max_tokens` takes precedence) |
+| `CHAT_MAX_ROUNDS` | `64` | Maximum LLM rounds in a chat tool chain; at the limit, returns a summary of completed tool calls and keeps earlier writes/results. Streaming and non-streaming chains continue after disconnect within this cap. |
+| `LLM_TIMEOUT_SECONDS` | `600` | Total deadline per chat model call in seconds (1–86400), including network operations. Chat disables SDK retries and uses a 5 s connect timeout; timeouts use the existing retry/no-answer handling. Other callers retain SDK defaults. |
 | `LLM_ENABLE_THINKING` | - | `false` sends `chat_template_kwargs` `enable_thinking=false` on OpenAI-compatible requests |
 | `AGENTS_ENABLED` | `false` | Enable the AI agent system |
 | `AGENTS_LLM_PROVIDER` | - | LLM provider for agents (`openai` or `claude`) |
@@ -580,6 +582,60 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/agents/{id}/trigger` | Fire a scheduled agent immediately (used by GCP Cloud Scheduler) |
 
 ### Node attachments
+
+The synchronous read-tool wrappers are `GraphService.attachment_tool_list`,
+`attachment_tool_read` and `attachment_tool_search` in
+`service/attachment_tools.py`. REST-shaped methods retain their existing names.
+MCP tools use async thread shims; the execution map stays synchronous. Chat and
+Agent dispatch explicitly select the tool wrappers. No tool is registered on
+MCP without a configured store, and chat definitions require a mapped tool.
+Read/search require both `get_node_attachment` and
+`read_node_attachment_content`; every narrowing must permit the node before the
+store or cache is read. Missing and invisible nodes return the same result.
+Federated nodes contribute no files. Search reports files it could not fully
+search in `files`, including `skipped_budget`; empty passages with such files do
+not establish absence of a subject.
+
+Extraction results live only in a locked, bounded in-memory LRU keyed by
+namespace, node id, attachment id and SHA-256. Restart discards them. Cache
+accounting includes segment and entry overhead, including unsuccessful
+extractions. Slots are shared across callers in the process. No file text or
+attachment embeddings are persisted. Ranking uses BM25 and may use the already
+loaded local embedding model. `attachments.audit` receives one structured record
+per read or attempted search extraction (including cache hits), plus one null
+record on search errors or when no extraction was attempted; it never
+receives text, queries or filenames.
+
+`ATTACHMENT_CONTENT_ACCESS=off` stops all read tools, including direct wrapper
+calls. The default ceiling is `off`; it does not itself grant a caller
+access. Existing assistant, kiosk, Agent and MCP grants remain independent.
+The following read limits are validated when GraphService is constructed:
+
+| Setting | Default |
+|---|---|
+| `ATTACHMENT_SEARCH_MAX_QUERY_CHARS` / `ATTACHMENT_SEARCH_MAX_NODES` | 500 / 20 (hard maximum 20 nodes) |
+| `ATTACHMENT_SEARCH_MAX_FILES` / `ATTACHMENT_SEARCH_MAX_TOTAL_CHARS` | 40 / 4000000 |
+| `ATTACHMENT_SEARCH_TIMEOUT_SECONDS` / `ATTACHMENT_SEARCH_MAX_TOP_K` | 120 / 20 |
+| `ATTACHMENT_RERANK_CANDIDATES` | 32 |
+| `ATTACHMENT_CHUNK_CHARS` / `ATTACHMENT_CHUNK_OVERLAP_CHARS` | 1200 / 200 |
+| `ATTACHMENT_RESULT_MAX_CHARS` / `ATTACHMENT_READ_MAX_CHARS` | 24000 / 50000 |
+| `ATTACHMENT_TEXT_CACHE_MAX_CHARS` / `ATTACHMENT_EXTRACT_CONCURRENCY` | 20000000 / 2 |
+
+All must be positive except overlap, which may be zero and must be below the
+chunk size. The result budget must fit one chunk. The named read default is
+20000 characters, clamped to the read maximum. Extraction settings and their
+defaults follow [ADR 0010 §3](../docs/adr/0010-attachment-content-access-for-agents-and-assistant.md#3-extraction-limits-and-isolation);
+they map to `ExtractionLimits`, with input bytes bounded by the store's file cap.
+
+**Security boundary:** the envelope supplies untrusted data, not an execution
+guard. This slice does not supply ADR 0010's conversation taint/confirmation,
+Agent egress and output-access controls, or comprehensive log redaction. Keep
+`ATTACHMENT_CONTENT_ACCESS=off` until those controls are present before using
+these tools with the built-in assistant or Agents. An external MCP client owns
+its own model loop and guard. Extraction contains resource exhaustion, not parser
+code execution: deployments needing that containment use an OS sandbox or a
+separate user with no network or secret access.
+
 
 Files attached to a node live in their own store beside the graph, never in
 the graph document, `GET /export`, mutation history or federation. The design
@@ -1229,6 +1285,9 @@ generic mutation tools remain available for editing and legacy configurations.
 | Tool Name | Description |
 |-----------|-------------|
 | `search_graph` | Search nodes by query |
+| `list_node_attachments` | List attachment metadata with an untrusted-content envelope; `node_id` required |
+| `read_node_attachment` | Read a located character window; `node_id`, `attachment_id`, optional `offset` and `max_chars` |
+| `search_node_attachments` | Rank cited passages from 1–20 `node_ids`; required `query`, optional `top_k`; report unreadable and budget-skipped files |
 | `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
 | `get_related_nodes` | Get nodes connected through visible nodes only |
@@ -1248,6 +1307,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `get_graph_stats` | Get graph statistics |
 | `save_view` | Ask a connected frontend to capture and save its current canvas |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
+| `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 records / 7 days. New records can shift offset pages. |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
@@ -1896,8 +1956,9 @@ no model reasoning, tool arguments or tool results. Each request owns its queue;
 steps go only to the requesting connection, with the same authorization and
 session context as `/ui/chat`. Disconnecting does not cancel the running chat.
 
-`/ui/chat`, `/ui/chat/stream` and `/ui/chat/simple` wait for the LLM on a worker thread, so the
-event loop keeps answering `/health` and other requests during a chat. Their tool
+`/ui/chat`, `/ui/chat/stream`, `/ui/chat/simple`, `/ui/propose-nodes` and
+`/ui/upload` (when analyzing text) wait for the LLM on a worker thread, so the
+event loop keeps answering `/health` and other requests during analysis. Their tool
 calls and every other graph access hop back to the event loop thread, carrying
 the request's context, so graph access stays single-threaded.
 
@@ -2066,3 +2127,10 @@ capped by `MAX_REASONING_CHARS_PER_ROUND` (12,000 characters). It goes only to t
 requesting client, is not logged or persisted, and is never added to subsequent
 LLM messages. Answer text is not parsed for reasoning tags. The provider call
 remains non-streaming and `/ui/chat` retains its existing response contract.
+
+Chat round settings accept positive integers; chat timeout accepts 1–86400 seconds.
+Invalid values use the named defaults. The defaults allow long chains beyond 43
+calls and eight minutes overall; the deadline applies to each chat model call,
+including all network operations, not the whole chain. A current synchronous
+request may finish after the deadline, but SDK retries are disabled for chat.
+Agents, service helpers, and evaluation retain SDK timeout and retry defaults.

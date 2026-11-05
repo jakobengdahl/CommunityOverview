@@ -1,3 +1,4 @@
+# covers: backend/ui/chat_service.py, backend/ui/chat_logic.py
 """
 Tests for ChatService.
 
@@ -13,7 +14,13 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from backend.llm.llm_providers import LLMResponse, TOOL_CALLS_NOT_RUN_MESSAGE
+from backend.llm.llm_providers import (
+    ClaudeProvider,
+    OpenAIProvider,
+    LLMResponse,
+    TOOL_CALLS_NOT_RUN_MESSAGE,
+    DEFAULT_CHAT_MAX_ROUNDS,
+)
 from backend.ui.chat_logic import _EMPTY_REPLY_RETRY_INSTRUCTION, _NO_ANSWER_MESSAGE
 from backend.ui.chat_logic import _NO_TEXT_WITH_TOOL_CALLS_MESSAGE
 
@@ -1585,7 +1592,12 @@ class TestPresentForm:
                 self.n = 0
 
             def create_completion(
-                self, messages, system_prompt, tools, max_tokens=4096
+                self,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens=4096,
+                timeout_seconds=None,
             ):
                 self.n += 1
                 if self.n == 1:
@@ -2521,13 +2533,17 @@ class TestNonObjectToolInput:
         "deny_hook",
     ],
 )
-def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode):
+def test_attachment_tools_require_caller_grant_and_hook(
+    chat_service, name, mode, monkeypatch
+):
     """Hidden tools stay blocked even when the model calls them anyway."""
     from unittest.mock import MagicMock
     from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
     from backend.runtime.authorization import GraphAuthorizationDecision
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     service, llm = chat_service
+    service._assistant_attachment_access = "read"
     if mode == "kiosk_unresolved":
         service._assistant_attachment_access = "read_write"
     raw = MagicMock(return_value={"success": True})
@@ -2621,7 +2637,10 @@ def test_attachment_tools_are_absent_from_the_default_execution_map(chat_service
     assert ATTACHMENT_TOOLS.isdisjoint(service._processor.tools_map)
 
 
-def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
+def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(
+    chat_service, monkeypatch
+):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     from unittest.mock import MagicMock
 
     service, llm = chat_service
@@ -2703,7 +2722,9 @@ class TestEmptyFinalReplyAfterToolChain:
         script = list(final_replies) if first_turn else [tool_turn, *final_replies]
         calls = []
 
-        def create_completion(messages, system_prompt, tools, max_tokens=4096):
+        def create_completion(
+            messages, system_prompt, tools, max_tokens=4096, timeout_seconds=None
+        ):
             calls.append(
                 {"messages": list(messages), "tools": tools, "max_tokens": max_tokens}
             )
@@ -2738,6 +2759,7 @@ class TestEmptyFinalReplyAfterToolChain:
         "retry",
         [
             RuntimeError("provider down"),
+            TimeoutError(),
             LLMResponse(
                 content=[{"type": "text", "text": "  \n"}], stop_reason="end_turn"
             ),
@@ -2894,3 +2916,194 @@ class TestEmptyFinalReplyAfterToolChain:
         assert result["content"] == "Done."
         assert len(calls) == 2
         assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
+
+
+@pytest.mark.parametrize(
+    "setting, limit",
+    [
+        ("1", 1),
+        ("3", 3),
+        ("", DEFAULT_CHAT_MAX_ROUNDS),
+        ("bad", DEFAULT_CHAT_MAX_ROUNDS),
+    ],
+)
+def test_chat_round_cap_keeps_completed_writes_and_results(
+    chat_service, monkeypatch, setting, limit
+):
+    """A repeating tool chain stops at the configured cap and keeps its writes."""
+    from backend.ui.chat_logic import CHAT_ROUND_LIMIT_MESSAGE
+
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", setting)
+    service, _ = chat_service
+    writes = []
+
+    def update_node():
+        writes.append(len(writes))
+        return {"nodes": [{"id": str(writes[-1])}]}
+
+    llm = MagicMock()
+    llm.options = {}
+    llm.create_completion.return_value = LLMResponse(
+        content=[
+            {"type": "tool_use", "id": "call", "name": "update_node", "input": {}}
+        ],
+        stop_reason="tool_use",
+    )
+    result = service._processor.process_message(
+        [{"role": "user", "content": "Update"}],
+        llm_provider=llm,
+        tools_override={"update_node": update_node},
+    )
+    assert llm.create_completion.call_count == limit
+    assert len(writes) == limit
+    assert result["toolResult"]["nodes"] == [{"id": str(i)} for i in writes]
+    assert result["content"] == CHAT_ROUND_LIMIT_MESSAGE.format(
+        summary=f"update_node (completed): {limit}"
+    )
+
+
+@pytest.mark.parametrize("first_turn", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("timeout_type", [TimeoutError, "claude", "openai"])
+def test_provider_timeout_uses_answer_retry(
+    chat_service, first_turn, recovered, timeout_type
+):
+    """Timeouts retry without tools and preserve any earlier tool results."""
+    from backend.ui.chat_logic import ClaudeTimeoutError, OpenAITimeoutError
+
+    timeout = (
+        {"claude": ClaudeTimeoutError, "openai": OpenAITimeoutError}[timeout_type](
+            request=MagicMock()
+        )
+        if isinstance(timeout_type, str)
+        else timeout_type()
+    )
+    runner = TestEmptyFinalReplyAfterToolChain
+    reply = runner._text_reply("Recovered") if recovered else TimeoutError()
+    result, calls, _ = runner._run(chat_service, timeout, reply, first_turn=first_turn)
+    assert len(calls) == (2 if first_turn else 3)
+    assert calls[-1]["tools"] == []
+    assert result["content"] == ("Recovered" if recovered else _NO_ANSWER_MESSAGE)
+    assert result["toolUsed"] == (None if first_turn else "search_graph")
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_answer_retry_respects_chat_round_budget(chat_service, monkeypatch, limit):
+    """Recovery does not make an extra provider call beyond the round budget."""
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", str(limit))
+    runner = TestEmptyFinalReplyAfterToolChain
+    result, calls, _ = runner._run(
+        chat_service, runner._empty_reply(), first_turn=limit == 1
+    )
+    assert len(calls) == limit
+    assert result["content"] == _NO_ANSWER_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "result", [{"success": False, "message": "No nodes added"}, {"error": "failed"}]
+)
+def test_chat_round_cap_reports_failed_mutation(chat_service, monkeypatch, result):
+    from backend.ui.chat_logic import CHAT_ROUND_LIMIT_MESSAGE
+
+    monkeypatch.setenv("CHAT_MAX_ROUNDS", "1")
+    service, _ = chat_service
+    llm = MagicMock()
+    llm.options = {}
+    llm.create_completion.return_value = LLMResponse(
+        content=[{"type": "tool_use", "id": "call", "name": "add_nodes", "input": {}}],
+        stop_reason="tool_use",
+    )
+    response = service._processor.process_message(
+        [{"role": "user", "content": "Add nodes"}],
+        llm_provider=llm,
+        tools_override={"add_nodes": lambda: result},
+    )
+    assert response["content"] == CHAT_ROUND_LIMIT_MESSAGE.format(
+        summary="add_nodes (failed): 1"
+    )
+
+
+@pytest.mark.parametrize(
+    "setting, expected",
+    [
+        ("900", 900),
+        ("", 600),
+        ("0", 600),
+        ("bad", 600),
+        ("99999999999", 600),
+        ("86400", 86400),
+        ("86401", 600),
+        ("-1", 600),
+    ],
+)
+@pytest.mark.parametrize(
+    "provider_class, target",
+    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
+)
+def test_provider_request_timeout_is_configured(
+    monkeypatch, setting, expected, caplog, provider_class, target
+):
+    """Chat validates the deadline and passes it explicitly to the provider."""
+    from unittest.mock import MagicMock
+    from backend.ui.chat_logic import _chat_completion
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
+    with patch(target) as client:
+        provider_class("test-key")
+    assert "timeout" not in client.call_args.kwargs
+    provider = MagicMock(spec=provider_class)
+    _chat_completion(provider, messages=[], system_prompt="", tools=[])
+    assert provider.create_completion.call_args.kwargs["timeout_seconds"] == expected
+    if setting in {"0", "bad", "99999999999", "86401", "-1"}:
+        assert "Ignoring invalid LLM_TIMEOUT_SECONDS" in caplog.text
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+def test_chat_sdk_does_not_retry_after_deadline(provider_class):
+    import importlib
+    import httpx as legacy_httpx
+    from threading import Event, Thread
+    from backend.llm.llm_providers import _completion_client
+
+    release, finished = Event(), Event()
+    requests = []
+    workers = []
+
+    def worker(**kwargs):
+        thread = Thread(**kwargs)
+        workers.append(thread)
+        return thread
+
+    def fail_after_deadline(request):
+        requests.append(request)
+        assert release.wait(2)
+        finished.set()
+        return httpx.Response(
+            500, json={"error": {"message": "test", "type": "api_error"}}
+        )
+
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(fail_after_deadline))
+    )
+    assert (
+        _completion_client(
+            provider.client, 1, type(provider.client.timeout)
+        ).max_retries
+        == 0
+    )
+    with patch("backend.llm.llm_providers.Thread", side_effect=worker):
+        try:
+            with pytest.raises(TimeoutError, match="0.05 seconds"):
+                provider.create_completion([], "", [], timeout_seconds=0.05)
+        finally:
+            release.set()
+        workers[0].join(2)
+    assert not workers[0].is_alive()
+    assert finished.is_set()
+    assert len(requests) == 1

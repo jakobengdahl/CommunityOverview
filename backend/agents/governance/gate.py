@@ -32,6 +32,8 @@ from backend.core.events.causation import current_agent_mutation_context
 from .models import AutonomyLevel, Proposal
 from .store import ProposalStore
 
+from backend.runtime.content_logging import log_failure
+
 logger = logging.getLogger(__name__)
 
 # Tools (by their original, un-namespaced name) that change persistent state.
@@ -147,6 +149,16 @@ class AutonomyGate:
     def wrap(self, raw_executor: ToolExecutor) -> ToolExecutor:
         def governed(namespaced_name: str, input_args: Dict[str, Any]) -> Any:
             if self._allowlist is not None and namespaced_name not in self._allowlist:
+                from backend.service.attachment_tools import (
+                    audit_attachment_refusal,
+                    tool_caller,
+                )
+
+                with tool_caller("agent", self._agent_id):
+                    audit_attachment_refusal(
+                        original_tool_name(self._mcp_loader, namespaced_name),
+                        "access_denied",
+                    )
                 return {
                     "error": (
                         f"Tool '{namespaced_name}' is not in this agent's "
@@ -163,6 +175,13 @@ class AutonomyGate:
                     original, access, self._authorization_hook
                 )
                 if refused is not None:
+                    from backend.service.attachment_tools import (
+                        audit_attachment_refusal,
+                        tool_caller,
+                    )
+
+                    with tool_caller("agent", self._agent_id):
+                        audit_attachment_refusal(original, refused["error_code"])
                     return refused
                 if self._store is None and original in ATTACHMENT_WRITE_TOOLS:
                     return {
@@ -219,7 +238,9 @@ class AutonomyGate:
             }
         except Exception as exc:
             # A governance-store failure must fail closed: do not execute.
-            logger.error("Governance: failed to record proposal: %s", exc)
+            log_failure(
+                logger, logging.ERROR, "proposal_record_failed", exc, redact=True
+            )
             return {
                 "error": (
                     f"Mutating tool '{namespaced_name}' could not be recorded "

@@ -435,7 +435,7 @@ def test_ui_chat_accepts_valid_credentials_when_auth_enabled(auth_enabled_app):
     ],
 )
 async def test_chat_attachment_hook_sees_request_actor(
-    chat_service, graph_storage, path, name
+    chat_service, graph_storage, path, name, monkeypatch
 ):
     """Each chat route binds the user before an attachment tool checks the hook."""
     from types import SimpleNamespace
@@ -443,6 +443,7 @@ async def test_chat_attachment_hook_sees_request_actor(
     from starlette.requests import Request
     from backend.ui.rest_api import ChatRequest, SimpleChatRequest
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     _, llm = chat_service
     hook = MagicMock()
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=False)
@@ -503,3 +504,85 @@ def test_stream_tool_authorization_keeps_requesting_actor(hooked_client):
     assert steps[-1]["response"]["toolResult"]["error_code"] == "access_denied"
     assert hook.seen_actor_ids and set(hook.seen_actor_ids) == {"viewer"}
     assert graph_service.get_node_details(_NEW_NODE["id"]).get("success") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/propose-nodes", "/upload"])
+async def test_analysis_keeps_loop_live_and_graph_on_loop(chat_service, path):
+    """LLM waits release the loop; graph work retains its thread and caller."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from starlette.requests import Request
+    from backend.llm.llm_providers import LLMResponse
+    from backend.ui.rest_api import ProposeNodesRequest
+
+    service, llm = chat_service
+    loop_thread = threading.get_ident()
+    started, release = threading.Event(), threading.Event()
+    workers, graph_calls = [], []
+
+    def complete(**kwargs):
+        if path == "/upload" and llm.call_count == 0:
+            return type(llm).create_completion(llm, **kwargs)
+        workers.append(threading.get_ident())
+        started.set()
+        assert release.wait(3)
+        return LLMResponse(
+            content=[{"type": "text", "text": '[{"name": "Agency"}]'}],
+            stop_reason="end_turn",
+        )
+
+    def graph(**kwargs):
+        graph_calls.append(
+            (threading.get_ident(), get_current_request_authorization_inputs())
+        )
+        return {"success": True, "results": {}}
+
+    documents = SimpleNamespace(
+        process_upload=AsyncMock(return_value={"success": True, "text": "text"})
+    )
+    endpoint = next(
+        route.endpoint
+        for route in create_ui_router(service, documents).routes
+        if route.path == path
+    )
+    request = Request(
+        {"type": "http", "headers": [(ACTOR_ID_HEADER.encode(), b"viewer")]}
+    )
+    with (
+        patch.object(llm, "create_completion", side_effect=complete),
+        patch.dict(service._processor.tools_map, {"find_similar_nodes_batch": graph}),
+        patch.object(
+            service._graph_service, "find_similar_nodes_batch", side_effect=graph
+        ),
+    ):
+        if path == "/propose-nodes":
+            call = endpoint(ProposeNodesRequest(text="Agency"), request)
+        else:
+            llm.mock_tool_calls = [
+                {"name": "find_similar_nodes_batch", "input": {"names": ["Agency"]}}
+            ]
+            call = endpoint(
+                request,
+                SimpleNamespace(read=AsyncMock(return_value=b"text"), filename="a.txt"),
+                message="analyze",
+                analyze=True,
+                api_key=None,
+                provider=None,
+                model_profile_id=None,
+            )
+        task = asyncio.create_task(call)
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            assert not task.done()
+        finally:
+            release.set()
+            result = await task
+    assert workers and all(worker != loop_thread for worker in workers)
+    assert graph_calls and all(thread == loop_thread for thread, _ in graph_calls)
+    assert all(
+        inputs["headers"][ACTOR_ID_HEADER] == "viewer" for _, inputs in graph_calls
+    )
+    assert result["success"] if path == "/propose-nodes" else result.success

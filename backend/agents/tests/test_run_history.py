@@ -181,6 +181,29 @@ class TestWorkerRecordsRuns:
         assert runs[0]["status"] == "failed"
         assert "boom" in (runs[0]["error"] or "")
 
+    def test_tainted_processing_failure_stores_only_code_and_class(
+        self, config, settings
+    ):
+        rec = AgentRunRecorder(_store())
+        worker = self._worker(config, settings, rec)
+        worker.mcp_loader.create_tool_executor.return_value = MagicMock(
+            return_value={"untrusted_content": True, "content": "private attachment"}
+        )
+
+        def read_then_fail(**kwargs):
+            result = kwargs["tool_executor"]("GRAPH__read_node_attachment", {})
+            assert result["untrusted_content"] is True
+            raise RuntimeError("boom: private attachment")
+
+        worker._llm_client.execute_with_tools.side_effect = read_then_fail
+
+        worker._process_event(self._item(worker))
+
+        runs = rec.list_runs()
+        assert len(runs) == 1
+        assert runs[0]["status"] == "failed"
+        assert runs[0]["error"] == "event_failed (RuntimeError)"
+
     def test_no_recorder_processes_without_error(self, config, settings):
         worker = self._worker(config, settings, None)
         worker._llm_client.execute_with_tools.return_value = {

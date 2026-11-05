@@ -175,7 +175,7 @@ class AppConfig:
     )
 
     assistant_attachment_access: str = field(
-        default_factory=lambda: os.getenv("ASSISTANT_ATTACHMENT_ACCESS", "read")
+        default_factory=lambda: os.getenv("ASSISTANT_ATTACHMENT_ACCESS", "off")
     )
     mcp_attachment_tools: str = field(
         default_factory=lambda: os.getenv("MCP_ATTACHMENT_TOOLS", "off")

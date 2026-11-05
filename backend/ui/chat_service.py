@@ -52,7 +52,7 @@ class ChatService:
     """
 
     def __init__(
-        self, graph_service: GraphService, *, assistant_attachment_access: str = "read"
+        self, graph_service: GraphService, *, assistant_attachment_access: str = "off"
     ):
         """
         Initialize ChatService with a GraphService instance.
@@ -101,6 +101,15 @@ class ChatService:
         """
         return {
             **make_system_create_tools(self._graph_service),
+            **(
+                {
+                    "list_node_attachments": self._graph_service.attachment_tool_list,
+                    "read_node_attachment": self._graph_service.attachment_tool_read,
+                    "search_node_attachments": self._graph_service.attachment_tool_search,
+                }
+                if self._graph_service.attachment_settings is not None
+                else {}
+            ),
             "search_graph": self._search_graph_tool,
             "get_node_details": self._graph_service.get_node_details,
             "get_related_nodes": self._graph_service.get_related_nodes,
@@ -917,19 +926,24 @@ class ChatService:
             # AFTER the base system prompt (recency precedence for behavioral overrides).
             # extra_context (expert persona) stays BEFORE the base prompt.
             # visualization_context comes last — most immediate situational snapshot.
-            return self._processor.process_message(
-                messages=messages,
-                api_key=api_key,
-                provider=provider,
-                model_profile_id=model_profile_id,
-                extra_context=extra_context,
-                skills_override=skills_context or None,
-                tools_override=tools_override,
-                visualization_context=visualization_context,
-                tool_allowlist=tool_allowlist,
-                llm_provider=llm_provider,
-                attachment_access=attachment_access,
-            )
+            from backend.service.attachment_tools import tool_caller
+
+            with tool_caller(
+                "kiosk" if collection_short_name else "user", collection_short_name
+            ):
+                return self._processor.process_message(
+                    messages=messages,
+                    api_key=api_key,
+                    provider=provider,
+                    model_profile_id=model_profile_id,
+                    extra_context=extra_context,
+                    skills_override=skills_context or None,
+                    tools_override=tools_override,
+                    visualization_context=visualization_context,
+                    tool_allowlist=tool_allowlist,
+                    llm_provider=llm_provider,
+                    attachment_access=attachment_access,
+                )
         finally:
             _request_federation_depth.reset(federation_depth_token)
 
@@ -1120,8 +1134,12 @@ Respond with ONLY a JSON array of extracted entities, no other text. Example for
                 names = [
                     node.get("name", "") for node in proposed_nodes if node.get("name")
                 ]
-                similar_results = self._graph_service.find_similar_nodes_batch(
-                    names=names, node_type=node_type, threshold=0.7, limit=3
+                similar_results = run_on_event_loop(
+                    self._graph_service.find_similar_nodes_batch,
+                    names=names,
+                    node_type=node_type,
+                    threshold=0.7,
+                    limit=3,
                 )
                 if similar_results.get("success") is False:
                     # A denied duplicate check is reported, never read as

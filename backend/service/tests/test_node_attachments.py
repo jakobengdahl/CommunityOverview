@@ -1,3 +1,4 @@
+# covers: backend/service/attachments.py, backend/service/service.py, backend/core/storage.py
 """
 Node attachment routes and service functions (ADR 0008 sections 4-8).
 
@@ -883,6 +884,98 @@ class TestReusedNodeId:
         (target,) = quarantine.iterdir()
         assert (target / "blobs" / orphan.id).read_bytes() == b"seeded"
 
+    def test_snapshot_excludes_a_concurrent_create_upload_delete(
+        self, service, store, monkeypatch
+    ):
+        """A competing lifecycle cannot leave new orphans after the snapshot."""
+        from concurrent.futures import ThreadPoolExecutor
+        from backend.service import attachments
+
+        service.delete_nodes(["doc"], confirmed=True)
+        snapshot = attachments.leftover_attachments_of_absent_nodes
+
+        def competing_lifecycle():
+            if service.storage.node_lifecycle_lock.acquire(timeout=0.05):
+                try:
+                    service.storage.add_nodes(
+                        [Node(id="doc", type="Document", name="Competing")], []
+                    )
+                    _seed(store, "doc")
+                    service.storage.delete_nodes(["doc"], confirmed=True)
+                finally:
+                    service.storage.node_lifecycle_lock.release()
+
+        def snapshot_then_compete(*args):
+            leftovers = snapshot(*args)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(competing_lifecycle).result(timeout=5)
+            return leftovers
+
+        monkeypatch.setattr(
+            attachments, "leftover_attachments_of_absent_nodes", snapshot_then_compete
+        )
+        assert service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )["success"]
+        assert store.list(NS, "doc") == []
+
+    @pytest.mark.parametrize("has_leftovers", [False, True])
+    def test_attachment_io_does_not_hold_the_graph_write_lock(
+        self, service, store, monkeypatch, has_leftovers
+    ):
+        from concurrent.futures import ThreadPoolExecutor
+
+        if has_leftovers:
+            self._leave_orphan(service, store, monkeypatch)
+        else:
+            service.delete_nodes(["doc"], confirmed=True)
+        real_list, real_quarantine = store.list, store.quarantine
+        checked = []
+
+        def check_io(operation, *args):
+            def acquire_graph_lock():
+                acquired = service.storage.write_lock.acquire(timeout=0.1)
+                if acquired:
+                    service.storage.write_lock.release()
+                return acquired
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                assert executor.submit(acquire_graph_lock).result(timeout=5)
+            checked.append(operation)
+            return operation(*args)
+
+        monkeypatch.setattr(store, "list", lambda *a: check_io(real_list, *a))
+        monkeypatch.setattr(
+            store, "quarantine", lambda *a: check_io(real_quarantine, *a)
+        )
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}], []
+        )
+        assert result["success"]
+        assert checked == [real_list] + ([real_quarantine] if has_leftovers else [])
+
+    def test_unknown_partial_create_quarantines_after_a_store_reread(
+        self, service, store, monkeypatch
+    ):
+        """A landed node loses old files even when reread as a new object."""
+        from backend.core.storage_backends import GraphWriteOutcomeUnknown
+
+        orphan = self._leave_orphan(service, store, monkeypatch)
+        storage = service.storage
+
+        def reread(changes, undo, *args, **kwargs):
+            storage.nodes["doc"] = Node.from_dict(storage.nodes["doc"].to_dict())
+            raise GraphWriteOutcomeUnknown("acknowledgement lost")
+
+        monkeypatch.setattr(storage, "_commit", reread)
+        result = service.add_nodes(
+            [{"id": "doc", "type": "Document", "name": "New"}],
+            [{"source": "doc", "target": "missing"}],
+        )
+        assert result["success"] is False
+        assert storage.get_node("doc").name == "New"
+        assert store.get_record(NS, "doc", orphan.id) is None
+
     def test_new_nodes_own_uploads_are_kept(self, service, client, store, monkeypatch):
         self._leave_orphan(service, store, monkeypatch)
         service.add_nodes([{"id": "doc", "type": "Document", "name": "New"}], [])
@@ -1767,6 +1860,7 @@ def test_mcp_attachment_registration_filters_map_and_mount(
     )
     from backend.service.mcp_tools import register_mcp_tools
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     functions = {}
     calls = []
     for name in ATTACHMENT_TOOLS:
