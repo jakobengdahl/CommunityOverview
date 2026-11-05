@@ -807,3 +807,66 @@ def test_provider_request_timeout_is_configured(
     assert client.call_args.kwargs["timeout"] == (
         expected if setting == "900" else DEFAULT_LLM_TIMEOUT_SECONDS
     )
+
+
+@pytest.mark.parametrize(
+    "provider_class, target",
+    [(OpenAIProvider, "openai.OpenAI"), (ClaudeProvider, "anthropic.Anthropic")],
+)
+def test_total_provider_timeout_recovers_while_sdk_keeps_making_progress(
+    provider_class, target
+):
+    from threading import Event
+    from time import monotonic
+
+    entered, release, finished = Event(), Event(), Event()
+
+    def dribbling_response(**kwargs):
+        entered.set()
+        try:
+            # Simulate an SDK that receives bytes often enough to avoid its
+            # per-read timeout, but never completes the provider call.
+            while not release.wait(0.005):
+                pass
+        finally:
+            finished.set()
+
+    with patch(target) as client:
+        provider = provider_class("test-key")
+        create = (
+            client.return_value.messages.create
+            if provider_class is ClaudeProvider
+            else client.return_value.chat.completions.create
+        )
+        create.side_effect = dribbling_response
+        with patch("backend.llm.llm_providers.positive_int_setting", return_value=0.05):
+            start = monotonic()
+            try:
+                with pytest.raises(TimeoutError):
+                    provider.create_completion([], "", [])
+                assert entered.is_set()
+                assert not finished.is_set()
+                assert monotonic() - start < 1
+            finally:
+                release.set()
+                assert finished.wait(1)
+
+
+def test_provider_deadline_preserves_context_results_and_errors():
+    from contextvars import ContextVar
+    from backend.llm.llm_providers import _provider_call
+
+    context = ContextVar("provider_test_context")
+    token = context.set(object())
+    try:
+        assert _provider_call(context.get) is context.get()
+        error = ValueError("provider failure")
+
+        def fail():
+            raise error
+
+        with pytest.raises(ValueError) as caught:
+            _provider_call(fail)
+        assert caught.value is error
+    finally:
+        context.reset(token)

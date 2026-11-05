@@ -4,6 +4,9 @@ Supports both Claude (Anthropic) and OpenAI APIs.
 """
 
 from abc import ABC, abstractmethod
+from concurrent.futures import Future
+from contextvars import copy_context
+from threading import Thread
 from typing import Any, Dict, List, Optional
 import json
 import logging
@@ -30,6 +33,27 @@ def positive_int_setting(name: str, default: int) -> int:
         pass
     logger.warning("Ignoring invalid %s; using %d", name, default)
     return default
+
+
+def _provider_call(create, **kwargs):
+    """Bound the whole SDK call, including reads and internal retries.
+
+    SDK timeouts only bound individual network operations. A daemon worker lets
+    the caller recover even when an endpoint keeps dribbling response bytes.
+    The worker only obtains a model response; a late response cannot run tools.
+    """
+    timeout = positive_int_setting("LLM_TIMEOUT_SECONDS", DEFAULT_LLM_TIMEOUT_SECONDS)
+    result = Future()
+    context = copy_context()
+
+    def invoke():
+        try:
+            result.set_result(context.run(create, **kwargs))
+        except BaseException as exc:
+            result.set_exception(exc)
+
+    Thread(target=invoke, daemon=True, name="llm-provider-call").start()
+    return result.result(timeout=timeout)
 
 
 # The anthropic SDK refuses a non-streaming request it expects to run over 10
@@ -196,7 +220,8 @@ class ClaudeProvider(LLMProvider):
             resolve_max_tokens(self.options) if max_tokens is None else max_tokens
         )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
-        response = self.client.messages.create(
+        response = _provider_call(
+            self.client.messages.create,
             model=self.model,
             max_tokens=max_tokens,
             system=system_prompt,
@@ -284,7 +309,8 @@ class OpenAIProvider(LLMProvider):
             else {}
         )
         get_runtime_extensions().require_admission(runtime_context("model_invocation"))
-        response = self.client.chat.completions.create(
+        response = _provider_call(
+            self.client.chat.completions.create,
             model=self.model,
             max_tokens=max_tokens,
             messages=openai_messages,
