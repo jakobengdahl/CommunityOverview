@@ -1053,7 +1053,7 @@ def test_all_run_proposals_keep_taint_through_storage(tmp_path, durable):
 
 
 @pytest.mark.parametrize("durable", [False, True])
-def test_proposal_taint_failure_prevents_read_and_blocks_run(
+def test_proposal_taint_failure_withholds_result_and_blocks_run(
     monkeypatch, tmp_path, durable
 ):
     store = (
@@ -1094,17 +1094,15 @@ def test_proposal_taint_failure_prevents_read_and_blocks_run(
     monkeypatch.setattr(store, "create", unexpected_create)
     for tool in ("graph.update_node", "graph.search_graph", "web.fetch"):
         assert execute(tool, {}) == result
-    # The run never read untrusted content, so its earlier clean proposal is
-    # safe to approve. Withholding a result AFTER reading would not be safe.
-    assert calls == []
-    assert GovernanceManager(store).approve(before)["tainted"] is False
+    # The result is withheld and no subsequent execution is allowed.
+    assert calls == ["graph.search_graph"]
     if durable:
         store.close()
 
 
 @pytest.mark.parametrize("durable", [False, True])
 @pytest.mark.parametrize("outcome", ["clean", "untrusted", "raised"])
-def test_proposals_are_durably_protected_before_tool_execution(
+def test_proposals_publish_taint_only_after_untrusted_result(
     tmp_path, durable, outcome
 ):
     db_path = tmp_path / "barrier.db"
@@ -1119,12 +1117,13 @@ def test_proposals_are_durably_protected_before_tool_execution(
     proposal_ids = []
 
     def raw_executor(*_):
-        # A separate approver/connection must already see the taint before any
-        # content can enter the run, even if the process dies during this read.
+        # An approver must not see speculative taint during a raw execution.
         reader = SqliteProposalStore(db_path) if durable else store
         try:
             for proposal_id in proposal_ids:
-                assert GovernanceManager(reader).get_proposal(proposal_id)["tainted"]
+                assert not GovernanceManager(reader).get_proposal(proposal_id)[
+                    "tainted"
+                ]
         finally:
             if durable:
                 reader.close()
@@ -1150,34 +1149,56 @@ def test_proposals_are_durably_protected_before_tool_execution(
 
 
 @pytest.mark.parametrize("durable", [False, True])
-def test_provisional_taint_cleanup_failure_keeps_proposals_protected(
-    monkeypatch, tmp_path, durable
+@pytest.mark.parametrize("outcome", ["clean", "raised"])
+def test_concurrent_approval_during_clean_execution_preserves_logging_context(
+    tmp_path, durable, outcome
 ):
-    store = (
-        SqliteProposalStore(tmp_path / "cleanup.db")
-        if durable
-        else InMemoryProposalStore()
-    )
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.runtime.content_logging import is_tainted
+
+    db_path = tmp_path / "clean-approval.db"
+    store = SqliteProposalStore(db_path) if durable else InMemoryProposalStore()
     gate = AutonomyGate(
-        autonomy_level=AutonomyLevel.PROPOSE,
+        autonomy_level=AutonomyLevel.ACT_AFTER_APPROVAL,
         tool_allowlist=None,
         mcp_loader=FakeLoader(),
         proposal_store=store,
         agent_id="a1",
     )
-    raw = MagicMock(return_value={"success": True})
-    execute = gate.wrap(raw)
-    proposal_id = execute("graph.update_node", {})["proposal_id"]
+    applied = []
 
-    def fail_clear(_):
-        raise RuntimeError("store unavailable")
+    def apply(name, args):
+        applied.append((name, args, is_tainted()))
+        return {"success": True}
 
-    monkeypatch.setattr(store, "clear_provisional_taint", fail_clear)
-    denied = execute("graph.search_graph", {})
-    assert denied["error_code"] == "access_denied"
-    assert store.get(proposal_id).tainted
-    assert execute("graph.search_graph", {}) == denied
-    assert raw.call_count == 1
+    def approve():
+        reader = SqliteProposalStore(db_path) if durable else store
+        try:
+            manager = GovernanceManager(reader, executor_factory=lambda _: apply)
+            assert manager.get_proposal(proposal_id)["tainted"] is False
+            result = manager.approve(proposal_id)
+            assert result["tainted"] is False
+            assert result["status"] == "applied"
+        finally:
+            if durable:
+                reader.close()
+
+    def raw_executor(*_):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(approve).result(timeout=10)
+        if outcome == "raised":
+            raise ValueError("clean tool failure")
+        return {"success": True}
+
+    execute = gate.wrap(raw_executor)
+    proposal_id = execute("graph.update_node", {"name": "clean-value"})["proposal_id"]
+    if outcome == "raised":
+        with pytest.raises(ValueError, match="clean tool failure"):
+            execute("graph.search_graph", {})
+    else:
+        assert execute("graph.search_graph", {}) == {"success": True}
+    assert applied == [("graph.update_node", {"name": "clean-value"}, False)]
+    assert store.get(proposal_id).tainted is False
     if durable:
         store.close()
 

@@ -257,28 +257,15 @@ class AutonomyGate:
                     }
                 return self._record_proposal(namespaced_name, input_args)
 
-            # Persist a conservative taint barrier BEFORE a tool can return
-            # untrusted content. A failed write must leave the tool unexecuted,
-            # rather than leave proposals approvable as clean after a read.
-            protected = self._proposal_ids if not self._tainted else []
-            if protected:
-                try:
-                    self._store.mark_tainted(protected)
-                except Exception as exc:
-                    return self._block_taint_failure(exc)
-
-            result = None
-            try:
-                result = raw_executor(namespaced_name, input_args)
-                if isinstance(result, dict) and result.get("untrusted_content") is True:
-                    self._tainted = True
-                    mark_tainted()
-            finally:
-                # Only this gate's still-clean run may undo its provisional
-                # barrier. Actual taint remains sticky, including stale saves.
-                if protected and not self._tainted:
+            result = raw_executor(namespaced_name, input_args)
+            if isinstance(result, dict) and result.get("untrusted_content") is True:
+                self._tainted = True
+                mark_tainted()
+                # Publish actual taint before exposing the result to the run.
+                # Clean executions must never change approver-visible taint.
+                if self._proposal_ids:
                     try:
-                        self._store.clear_provisional_taint(protected)
+                        self._store.mark_tainted(self._proposal_ids)
                     except Exception as exc:
                         return self._block_taint_failure(exc)
             return result

@@ -62,10 +62,6 @@ class ProposalStore(Protocol):
 
     def mark_tainted(self, proposal_ids: Sequence[str]) -> None: ...
 
-    def clear_provisional_taint(self, proposal_ids: Sequence[str]) -> None:
-        """Undo a gate's pre-execution barrier only after a clean tool result."""
-        ...
-
     def decide(
         self,
         proposal_id: str,
@@ -125,12 +121,6 @@ class InMemoryProposalStore:
             for proposal_id in proposal_ids:
                 if proposal_id in self._items:
                     self._items[proposal_id].tainted = True
-
-    def clear_provisional_taint(self, proposal_ids: Sequence[str]) -> None:
-        with self._lock:
-            for proposal_id in proposal_ids:
-                if proposal_id in self._items:
-                    self._items[proposal_id].tainted = False
 
     def decide(
         self,
@@ -369,14 +359,6 @@ class SqliteProposalStore:
         with self._lock:
             self._conn.executemany(
                 "UPDATE proposals SET tainted = 1 WHERE id = ?",
-                [(proposal_id,) for proposal_id in proposal_ids],
-            )
-            self._conn.commit()
-
-    def clear_provisional_taint(self, proposal_ids: Sequence[str]) -> None:
-        with self._lock:
-            self._conn.executemany(
-                "UPDATE proposals SET tainted = 0 WHERE id = ?",
                 [(proposal_id,) for proposal_id in proposal_ids],
             )
             self._conn.commit()
