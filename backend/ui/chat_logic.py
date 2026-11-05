@@ -25,6 +25,7 @@ from backend.config.model_profiles import (
 )
 from backend.llm.language_policy import format_language_policy_for_prompt
 from backend.service.attachment_tools import (
+    attachment_graph_dispatch,
     tool_definitions as attachment_tool_definitions,
 )
 from backend.service.system_nodes import system_create_tool_definitions
@@ -597,7 +598,8 @@ async def run_chat_off_event_loop(func: Callable, /, **kwargs) -> Any:
     def chat_on_worker():
         _chat_worker.active = True
         try:
-            return func(**kwargs)
+            with attachment_graph_dispatch(run_on_event_loop):
+                return func(**kwargs)
         finally:
             _chat_worker.active = False
 
@@ -1773,7 +1775,11 @@ class ChatProcessor:
                         k: v for k, v in tool_input.items() if k in sig.parameters
                     }
 
-                    tool_result = run_on_event_loop(func, **valid_args)
+                    tool_result = (
+                        func(**valid_args)
+                        if tool_name in ATTACHMENT_TOOLS
+                        else run_on_event_loop(func, **valid_args)
+                    )
                 except Exception as e:
                     tool_result = {"error": str(e)}
             else:

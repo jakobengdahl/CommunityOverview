@@ -34,7 +34,7 @@ def agent_attachment_access(value, *, agent_id: str) -> str:
 def attachment_tool_allowed(name: str, access: str) -> bool:
     if name not in ATTACHMENT_TOOLS:
         return True
-    ceiling = os.getenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+    ceiling = os.getenv("ATTACHMENT_CONTENT_ACCESS", "off")
     return (
         ceiling in ("read", "read_write")
         and (ceiling == "read_write" or name in ATTACHMENT_READ_TOOLS)

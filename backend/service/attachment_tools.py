@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
 import functools
+import json
 import logging
 import os
 import threading
@@ -21,7 +22,10 @@ from backend.core.attachment_store import (
     AttachmentNotFound,
     is_valid_attachment_id,
 )
-from backend.runtime.authorization import build_graph_authorization_context
+from backend.runtime.authorization import (
+    build_graph_authorization_context,
+    get_current_request_authorization_inputs,
+)
 from . import access, attachments
 
 ATTACHMENT_READ_DEFAULT_CHARS = 20_000
@@ -33,6 +37,7 @@ CONTENT_NOTICE = (
 ENVELOPE = {"untrusted_content": True, "content_notice": CONTENT_NOTICE}
 audit_logger = logging.getLogger("attachments.audit")
 
+_graph_dispatch = ContextVar("attachment_graph_dispatch", default=None)
 _caller = ContextVar("attachment_tool_caller", default=("user", None))
 _slot_lock = threading.Lock()
 _process_slots = None
@@ -98,6 +103,21 @@ def error(code):
     }
 
 
+@contextmanager
+def attachment_graph_dispatch(dispatch):
+    """Bind a graph dispatcher for workers whose graph belongs to another thread."""
+    token = _graph_dispatch.set(dispatch)
+    try:
+        yield
+    finally:
+        _graph_dispatch.reset(token)
+
+
+def graph_call(func, *args, **kwargs):
+    dispatch = _graph_dispatch.get()
+    return dispatch(func, *args, **kwargs) if dispatch else func(*args, **kwargs)
+
+
 def guarded(tool):
     @functools.wraps(tool)
     def call(self, **kwargs):
@@ -111,7 +131,7 @@ def guarded(tool):
             }[tool.__name__]
             # Per-caller grants are enforced at dispatch; the instance ceiling also
             # applies to direct in-process wrapper calls.
-            if os.getenv("ATTACHMENT_CONTENT_ACCESS", "read_write") == "off":
+            if os.getenv("ATTACHMENT_CONTENT_ACCESS", "off") == "off":
                 result = attachment_tool_refusal(
                     name, "off", self.service.authorization_hook
                 )
@@ -136,7 +156,7 @@ class AttachmentReadTools:
         from backend.runtime.attachment_access import validate_attachment_setting
 
         validate_attachment_setting(
-            os.getenv("ATTACHMENT_CONTENT_ACCESS", "read_write"),
+            os.getenv("ATTACHMENT_CONTENT_ACCESS", "off"),
             "ATTACHMENT_CONTENT_ACCESS",
         )
         self.limits = ReadLimits.from_env()
@@ -190,7 +210,7 @@ class AttachmentReadTools:
         return None, decisions
 
     def resolve(self, node_id, narrowings):
-        node = self.service.storage.get_node(node_id)
+        node = graph_call(self.service.storage.get_node, node_id)
         return (
             node if all(access.is_node_visible(node, n) for n in narrowings) else None
         )
@@ -204,29 +224,38 @@ class AttachmentReadTools:
             if actor.get("actor_id")
             else None
         )
-        audit_logger.info(
-            "attachment_content_read",
-            extra={
-                "event": "attachment_content_read",
-                "tool": {
-                    "read": "read_node_attachment",
-                    "search": "search_node_attachments",
-                }[tool],
-                "actor": {
-                    "type": kind,
-                    "id": caller_id
-                    if kind in ("agent", "kiosk")
-                    else actor.get("actor_id") or None,
-                },
-                "on_behalf_of": request_actor if kind == "kiosk" else None,
-                "node_id": node_id,
-                "attachment_id": record.id if record else None,
-                "sha256": record.sha256 if record else None,
-                "chars": chars,
-                "outcome": outcome,
-                "correlation_id": None,
-            },
+        from backend.runtime.extensions import runtime_context
+
+        headers = get_current_request_authorization_inputs().get("headers") or {}
+        correlation_id = runtime_context(tool).correlation_id or next(
+            (
+                value
+                for key, value in headers.items()
+                if key.lower() == "x-correlation-id"
+            ),
+            None,
         )
+        payload = {
+            "event": "attachment_content_read",
+            "tool": {
+                "read": "read_node_attachment",
+                "search": "search_node_attachments",
+            }[tool],
+            "actor": {
+                "type": kind,
+                "id": caller_id
+                if kind in ("agent", "kiosk")
+                else actor.get("actor_id") or None,
+            },
+            "on_behalf_of": request_actor if kind == "kiosk" else None,
+            "node_id": node_id,
+            "attachment_id": record.id if record else None,
+            "sha256": record.sha256 if record else None,
+            "chars": chars,
+            "outcome": outcome,
+            "correlation_id": correlation_id,
+        }
+        audit_logger.info(json.dumps(payload), extra=payload)
 
     def extracted(self, node_id, record, deadline, *, search=False, max_chars=None):
         settings = self.service.attachment_settings
@@ -303,7 +332,7 @@ class AttachmentReadTools:
     def list(self, node_id):
         if not isinstance(node_id, str):
             return error("invalid_arguments")
-        result = self.service.list_node_attachments(node_id)
+        result = graph_call(self.service.list_node_attachments, node_id)
         if result.get("success") is False:
             return (
                 result
@@ -325,7 +354,7 @@ class AttachmentReadTools:
             or max_chars < 1
         ):
             return error("invalid_arguments")
-        refused, narrowings = self.authorize(content=True)
+        refused, narrowings = graph_call(self.authorize, content=True)
         if refused:
             return refused
         node = self.resolve(node_id, narrowings)
@@ -385,7 +414,7 @@ class AttachmentReadTools:
             return error("invalid_arguments")
         if len(node_ids) > self.limits.search_max_nodes:
             return error("too_many_nodes")
-        refused, narrowings = self.authorize(content=True)
+        refused, narrowings = graph_call(self.authorize, content=True)
         if refused:
             return refused
         settings = self.service.attachment_settings

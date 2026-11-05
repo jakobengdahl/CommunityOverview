@@ -52,7 +52,7 @@ class ChatService:
     """
 
     def __init__(
-        self, graph_service: GraphService, *, assistant_attachment_access: str = "read"
+        self, graph_service: GraphService, *, assistant_attachment_access: str = "off"
     ):
         """
         Initialize ChatService with a GraphService instance.

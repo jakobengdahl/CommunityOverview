@@ -11,6 +11,8 @@ from starlette.requests import Request
 
 from backend.service import GraphService, json_serializer
 from backend.runtime.authorization import use_request_authorization
+from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+from backend.ui.chat_logic import run_chat_off_event_loop
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,11 @@ def register_tool_routes(
 
             func = tools_map[tool_name]
             with use_request_authorization(headers=request.headers):
-                result = func(**arguments)
+                result = (
+                    await run_chat_off_event_loop(func, **arguments)
+                    if tool_name in ATTACHMENT_TOOLS
+                    else func(**arguments)
+                )
 
             access_denied_response = access_denied_json_response(result)
             if access_denied_response is not None:

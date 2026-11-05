@@ -21,6 +21,11 @@ from backend.service.tests.test_node_attachments import (
 )
 
 
+@pytest.fixture(autouse=True)
+def enable_attachment_ceiling(monkeypatch):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+
+
 # ADR 0010: the tool shape remains separate from REST attachment responses.
 def test_attachment_tools_hide_missing_and_invisible_nodes(service, storage):
     """G1: invisible and missing nodes have identical tool responses."""
@@ -51,7 +56,9 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     record = _upload(client, "doc", b"policy human review").json()
     with (
         caplog.at_level("INFO", logger="attachments.audit"),
-        use_request_authorization(actor_id="reader"),
+        use_request_authorization(
+            actor_id="reader", headers={"x-correlation-id": "read-123"}
+        ),
     ):
         result = service.attachment_tool_search("policy", ["doc"])
     passage = result["passages"][0]
@@ -67,6 +74,38 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     assert audits[0].chars == len(passage["text"])
     assert audits[0].sha256 == record["sha256"]
     assert audits[0].actor == {"type": "user", "id": "reader"}
+    import json
+    import logging
+    from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
+
+    for formatter in (logging.Formatter(TEXT_LOG_FORMAT), StructuredJsonFormatter()):
+        line = formatter.format(audits[0])
+        message = (
+            json.loads(line)["message"]
+            if isinstance(formatter, StructuredJsonFormatter)
+            else line.split(": ", 1)[1]
+        )
+        emitted = json.loads(message)
+        assert {
+            k: emitted[k]
+            for k in (
+                "actor",
+                "node_id",
+                "attachment_id",
+                "sha256",
+                "chars",
+                "outcome",
+                "correlation_id",
+            )
+        } == {
+            "actor": {"type": "user", "id": "reader"},
+            "node_id": "doc",
+            "attachment_id": record["id"],
+            "sha256": record["sha256"],
+            "chars": len(passage["text"]),
+            "outcome": "ok",
+            "correlation_id": "read-123",
+        }
 
 
 @pytest.mark.parametrize(
@@ -446,3 +485,116 @@ def test_attachment_read_dispatchers_use_tool_wrappers(service, client, caplog):
     assert "list_node_attachments" not in register_mcp_tools(
         mcp, empty, attachment_access="read"
     )
+
+
+def test_attachment_defaults_require_explicit_opt_in(service, monkeypatch):
+    from backend.api_host.config import AppConfig
+    from backend.runtime.attachment_access import attachment_tool_allowed
+
+    monkeypatch.delenv("ATTACHMENT_CONTENT_ACCESS")
+    monkeypatch.delenv("ASSISTANT_ATTACHMENT_ACCESS", raising=False)
+    assert not attachment_tool_allowed("read_node_attachment", "read")
+    assert service.attachment_tool_list("doc")["error_code"] == "access_denied"
+    assert AppConfig().assistant_attachment_access == "off"
+
+
+@pytest.mark.parametrize("kind", ["xlsx", "ods"])
+def test_nameless_sheets_have_distinct_locators(kind):
+    from backend.core import attachment_extract as ae
+    from backend.core.tests.test_attachment_extract import _xlsx, _odf, _replace_member
+
+    if kind == "xlsx":
+        data = _xlsx({"A": [["i:one"]], "B": [["i:two"]]})
+        import zipfile
+        import io
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            body = (
+                archive.read("xl/workbook.xml")
+                .decode()
+                .replace('name="A"', "")
+                .replace('name="B"', "")
+            )
+        data = _replace_member(data, "xl/workbook.xml", body)
+        result = ae.extract(data, ae.XLSX)
+    else:
+        table = "<table:table><table:table-row><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row></table:table>"
+        result = ae.extract(
+            _odf(ae.ODS, "<office:spreadsheet>" + table * 2 + "</office:spreadsheet>"),
+            ae.ODS,
+        )
+    assert result.status == "ok"
+    assert [s.locator for s in result.segments] == [{"sheet": 1}, {"sheet": 2}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatcher", ["chat", "execute_tool"])
+async def test_attachment_dispatch_keeps_extraction_off_loop(
+    service, client, monkeypatch, dispatcher
+):
+    import threading
+    from backend.service import attachment_tools
+    from backend.ui.chat_logic import run_chat_off_event_loop
+    from backend.core.attachment_extract import ExtractionResult, Segment
+    from backend.runtime.authorization import use_request_authorization
+
+    record = _upload(client, "doc", b"policy").json()
+    loop_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    graph_threads = []
+    original = service.storage.get_node
+
+    def get_node(node_id):
+        graph_threads.append(threading.get_ident())
+        return original(node_id)
+
+    def extract(*args):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(3)
+        return ExtractionResult("ok", (Segment("policy", {"line": 1}),))
+
+    monkeypatch.setattr(service.storage, "get_node", get_node)
+    monkeypatch.setattr(attachment_tools.extraction, "extract", extract)
+    name = "read_node_attachment"
+    args = {"node_id": "doc", "attachment_id": record["id"]}
+    if dispatcher == "chat":
+        from backend.ui.chat_logic import ChatProcessor
+        from backend.ui.tests.conftest import MockLLMProvider
+
+        processor = ChatProcessor({name: service.attachment_tool_read})
+        llm = MockLLMProvider()
+        llm.mock_tool_calls = [{"name": name, "input": args}]
+        call = run_chat_off_event_loop(
+            processor.process_message,
+            messages=[{"role": "user", "content": "read"}],
+            llm_provider=llm,
+            attachment_access=lambda _: "read",
+        )
+    else:
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+        from backend.api_host.tool_routes import register_tool_routes
+
+        app = FastAPI()
+        register_tool_routes(app, service, {name: service.attachment_tool_read}, True)
+
+        async def execute():
+            async with AsyncClient(
+                transport=ASGITransport(app), base_url="http://test"
+            ) as http:
+                response = await http.post(
+                    "/execute_tool", json={"tool_name": name, "arguments": args}
+                )
+                assert response.status_code == 200
+                assert response.json()["returned_chars"] == 6
+
+        call = execute()
+    with use_request_authorization(actor_id="reader"):
+        pending = asyncio.create_task(call)
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert graph_threads == [loop_thread]
+        finally:
+            release.set()
+        await pending

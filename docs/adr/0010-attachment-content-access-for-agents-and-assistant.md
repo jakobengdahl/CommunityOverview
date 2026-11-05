@@ -17,6 +17,9 @@
   `backend/service/attachments.py`, `backend/core/attachment_store.py`,
   `backend/core/attachment_types.py`
 
+The read-tools review implementation keeps both the instance ceiling and
+assistant grant off by default; operators must opt in. Both defaults below reflect that opt-in policy.
+
 ## Context
 
 ADR 0008 gives a node a set of attached files that people upload, list,
@@ -166,7 +169,7 @@ round. It does not implement anything.
 
 Extracted attachment text may be sent to the configured LLM provider:
 
-- **by default for the interactive assistant**, acting under the requesting
+- **for the interactive assistant only with an explicit grant**, acting under the requesting
   user's own access;
 - **for unattended Agents and for kiosks only with an explicit grant**
   (§2);
@@ -483,8 +486,8 @@ not waste turns) and, authoritatively, where the call is executed.
 
 | Setting | Values | Default | Meaning |
 |---|---|---|---|
-| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `read_write` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default grants nothing by itself; it only does not cap. `off` stops the tools; it cannot stop HTTP clients from using the REST download routes, so a deployment whose REST attachment routes answer without authentication exposes the files to any client that reaches them, an Agent's `WEB` fetch included. A deployment relying on `off` to keep files from every LLM enables authentication. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an Agent workspace that contains, or lies inside, the attachment root: it compares the `realpath` of the effective workspace (`agent_workspace_dir()`, default included, not only `AGENTS_WORKSPACE_DIR`) with the `realpath` of the effective attachment root (`ATTACHMENT_DIR` or the store's default root), in both directions. |
-| `ASSISTANT_ATTACHMENT_ACCESS` | `off`, `read`, `read_write` | `read` | What the interactive assistant gets (D1). Writes need an explicit `read_write`. |
+| `ATTACHMENT_CONTENT_ACCESS` | `off`, `read`, `read_write` | `off` | Instance ceiling for every caller. `off` is the single switch that stops attachment tools — and so any attachment text reaching any LLM — for the assistant, Agents, kiosks and MCP alike. The default disables attachment tools for every caller. `off` stops the tools; it cannot stop HTTP clients from using the REST download routes, so a deployment whose REST attachment routes answer without authentication exposes the files to any client that reaches them, an Agent's `WEB` fetch included. A deployment relying on `off` to keep files from every LLM enables authentication. Agents' `FS` integration could otherwise read the stored blobs past this switch, so boot refuses an Agent workspace that contains, or lies inside, the attachment root: it compares the `realpath` of the effective workspace (`agent_workspace_dir()`, default included, not only `AGENTS_WORKSPACE_DIR`) with the `realpath` of the effective attachment root (`ATTACHMENT_DIR` or the store's default root), in both directions. |
+| `ASSISTANT_ATTACHMENT_ACCESS` | `off`, `read`, `read_write` | `off` | What the interactive assistant gets (D1). Writes need an explicit `read_write`. |
 | `MCP_ATTACHMENT_TOOLS` | `off`, `read`, `read_write` | `off` | Which attachment tools the MCP mount registers for external MCP clients. `off` registers none. |
 
 An unknown value for any of these is refused at boot, as ADR 0008 does for
@@ -770,15 +773,14 @@ per-node visibility on every call.
 
 | Caller | Grant | When the grant is unset or empty | Writes |
 |---|---|---|---|
-| Interactive assistant | `ASSISTANT_ATTACHMENT_ACCESS` | `read` — a named default set by D1, logged at boot; not inferred from a missing check | only with `read_write` |
+| Interactive assistant | `ASSISTANT_ATTACHMENT_ACCESS` | `off` — requires an explicit grant and enabled ceiling | only with `read_write` |
 | Agent | `metadata.attachment_access`, and the allowlist when non-empty | `none` — no attachment tool, even with an empty allowlist | only with `read_write`, and then always a proposal or blocked |
 | Kiosk | non-empty `tool_allowlist` naming the tool | none — no attachment tool | only when the allowlist names the write tool and the target node's type has `update` in `node_type_permissions` |
 | External MCP client | `MCP_ATTACHMENT_TOOLS`, allowed only with the MCP paths authenticated | `off` — not registered | only with `read_write` |
 | `POST /execute_tool` | `MCP_ATTACHMENT_TOOLS` (same tool map), same boot rule | `off` — not in the map | only with `read_write` |
 
 No row grants an attachment tool because an allowlist is empty or a setting
-is absent, except the assistant's `read`, which is the owner's explicit
-default under D1 and is withdrawn by one setting.
+is absent. Every caller requires an explicit grant and an enabled ceiling.
 
 ### 3. Extraction: limits and isolation
 
@@ -1164,9 +1166,11 @@ structured log record, at INFO, to the `attachments.audit` logger:
 | `outcome` | `ok` or the `error_code` |
 | `correlation_id` | the request's or run's correlation id, when it has one |
 
-A search call writes one record per file whose text contributed a returned
-passage. A search call that ends in an error (`access_denied`,
-`too_many_nodes`, `invalid_arguments`, …) or contributes no passage writes
+A search call writes one record per attempted file extraction, including
+cache hits, even when no passage is returned. Each records the extraction
+outcome and the characters actually returned from that file. If a later step
+fails, those records remain, and the error adds a null record. A search call that ends in an error (`access_denied`,
+`too_many_nodes`, `invalid_arguments`, …) or attempts no extraction writes
 one record with `node_id`, `attachment_id` and `sha256` `null`, `chars: 0`
 and its `outcome`, so refused and empty searches are audited too. The record **never** contains extracted text, passage text, file
 bytes, the query or the file name.
@@ -1232,10 +1236,8 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   another processor, which D1 does not cover.
 - **Extract in the server process.** Rejected: a parser bug or a bomb would
   take the server down or exhaust its memory; a child process can be killed.
-- **Off by default for the assistant too.** Considered (it was option B of
-  the owner decision) and not chosen: it would hide the feature from the
-  users it is for, while `/ui/upload` already sends document text to the
-  same provider.
+- **Off by default for the assistant too.** Selected by the read-tools
+  review: both assistant grant and instance ceiling require explicit opt-in.
 
 ## Consequences
 
@@ -1252,7 +1254,7 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   and `SECURITY.md` covers reporting.
 - **Purely additive by default for automation.** Existing Agents, kiosks and
   MCP clients see no new tool until someone grants it. The interactive
-  assistant gains read access by default (D1).
+  assistant requires an explicit read grant (D1).
 - **Rollback, level 1:** `ATTACHMENT_CONTENT_ACCESS=off` and a restart remove
   every attachment tool for every caller, without a code change.
 - **Rollback, level 2:** deploy a build without the tools. Nothing is

@@ -221,7 +221,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
 | `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
-| `ASSISTANT_ATTACHMENT_ACCESS` | `read` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
+| `ASSISTANT_ATTACHMENT_ACCESS` | `off` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
 | `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
@@ -600,11 +600,12 @@ accounting includes segment and entry overhead, including unsuccessful
 extractions. Slots are shared across callers in the process. No file text or
 attachment embeddings are persisted. Ranking uses BM25 and may use the already
 loaded local embedding model. `attachments.audit` receives one structured record
-per read or contributing search file, or one empty/error search record; it never
+per read or attempted search extraction (including cache hits), plus one null
+record on search errors or when no extraction was attempted; it never
 receives text, queries or filenames.
 
 `ATTACHMENT_CONTENT_ACCESS=off` stops all read tools, including direct wrapper
-calls. The default ceiling is `read_write`; it does not itself grant a caller
+calls. The default ceiling is `off`; it does not itself grant a caller
 access. Existing assistant, kiosk, Agent and MCP grants remain independent.
 The following read limits are validated when GraphService is constructed:
 

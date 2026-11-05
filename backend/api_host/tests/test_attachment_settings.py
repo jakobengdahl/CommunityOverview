@@ -1,3 +1,4 @@
+# covers: backend/api_host/attachments.py, backend/api_host/config.py
 """Boot-time attachment settings (ADR 0008 sections 1, 4, 5 and 11)."""
 
 from types import SimpleNamespace
@@ -141,7 +142,7 @@ def test_attachment_tool_setting_defaults(monkeypatch):
     monkeypatch.delenv("ASSISTANT_ATTACHMENT_ACCESS", raising=False)
     monkeypatch.delenv("MCP_ATTACHMENT_TOOLS", raising=False)
     config = AppConfig.from_env()
-    assert config.assistant_attachment_access == "read"
+    assert config.assistant_attachment_access == "off"
     assert config.mcp_attachment_tools == "off"
 
 

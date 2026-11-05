@@ -1,3 +1,4 @@
+# covers: backend/ui/chat_service.py, backend/ui/chat_logic.py
 """
 Tests for ChatService.
 
@@ -2521,13 +2522,17 @@ class TestNonObjectToolInput:
         "deny_hook",
     ],
 )
-def test_attachment_tools_require_caller_grant_and_hook(chat_service, name, mode):
+def test_attachment_tools_require_caller_grant_and_hook(
+    chat_service, name, mode, monkeypatch
+):
     """Hidden tools stay blocked even when the model calls them anyway."""
     from unittest.mock import MagicMock
     from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
     from backend.runtime.authorization import GraphAuthorizationDecision
 
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     service, llm = chat_service
+    service._assistant_attachment_access = "read"
     if mode == "kiosk_unresolved":
         service._assistant_attachment_access = "read_write"
     raw = MagicMock(return_value={"success": True})
@@ -2621,7 +2626,10 @@ def test_attachment_tools_are_absent_from_the_default_execution_map(chat_service
     assert ATTACHMENT_TOOLS.isdisjoint(service._processor.tools_map)
 
 
-def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(chat_service):
+def test_kiosk_attachment_revocation_takes_effect_in_tool_chain(
+    chat_service, monkeypatch
+):
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
     from unittest.mock import MagicMock
 
     service, llm = chat_service

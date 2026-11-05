@@ -832,7 +832,7 @@ def _extract_xlsx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
     rels = _relationships(archive, workbook_name)
     shared = _xlsx_shared_strings(archive, rels)
     seen = set()
-    for sheet in workbook.iter("{*}sheet"):
+    for index, sheet in enumerate(workbook.iter("{*}sheet"), 1):
         target = rels.get(_relationship_id(sheet) or "")
         if target is None or target[1] not in archive.NameToInfo or target[1] in seen:
             continue
@@ -847,7 +847,7 @@ def _extract_xlsx(data: bytes, out: _Collector, limits: ExtractionLimits) -> str
                     yield line
 
         text = _bounded_join(rows(), "\n", out.remaining)
-        if not out.add(text, {"sheet": sheet.get("name") or ""}):
+        if not out.add(text, {"sheet": sheet.get("name") or index}):
             break
     return STATUS_OK
 
@@ -953,7 +953,7 @@ def _extract_ods(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
     content = _odf_body(data, limits, "spreadsheet")
     if content is None:
         return STATUS_OK
-    for table in content.iter(f"{{{_ODF_TABLE}}}table"):
+    for index, table in enumerate(content.iter(f"{{{_ODF_TABLE}}}table"), 1):
 
         def rows(table=table):
             for row in table.iter(f"{{{_ODF_TABLE}}}table-row"):
@@ -967,7 +967,7 @@ def _extract_ods(data: bytes, out: _Collector, limits: ExtractionLimits) -> str:
                     yield line
 
         text = _bounded_join(rows(), "\n", out.remaining)
-        if not out.add(text, {"sheet": table.get(f"{{{_ODF_TABLE}}}name") or ""}):
+        if not out.add(text, {"sheet": table.get(f"{{{_ODF_TABLE}}}name") or index}):
             break
     return STATUS_OK
 
