@@ -74,6 +74,14 @@ class TestChatServiceInit:
         for tool in expected_tools:
             assert tool in service._tools_map, f"Missing tool: {tool}"
 
+    def test_assistant_attachment_access_defaults_off(self, graph_service):
+        """Without an explicit setting the assistant gets no attachment tools."""
+        from backend.ui import ChatService
+
+        with patch("backend.ui.chat_logic.create_provider"):
+            service = ChatService(graph_service)
+        assert service._assistant_attachment_access == "off"
+
     def test_tools_map_routes_to_graph_service(self, graph_service):
         """All tools in the map should route to GraphService methods."""
         from backend.ui import ChatService
