@@ -25,7 +25,7 @@ from backend.core.actor_attribution import replace_attribution, validate_erasure
 
 from .models import Proposal, ProposalStatus, utcnow
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _CREATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS proposals (
@@ -59,6 +59,8 @@ class ProposalStore(Protocol):
     def get(self, proposal_id: str) -> Optional[Proposal]: ...
 
     def save(self, proposal: Proposal) -> Proposal: ...
+
+    def mark_tainted(self, proposal_ids: Sequence[str]) -> None: ...
 
     def decide(
         self,
@@ -109,8 +111,16 @@ class InMemoryProposalStore:
     def save(self, proposal: Proposal) -> Proposal:
         with self._lock:
             stored = proposal.copy()
+            existing = self._items.get(stored.id)
+            stored.tainted = stored.tainted or bool(existing and existing.tainted)
             self._items[stored.id] = stored
             return stored.copy()
+
+    def mark_tainted(self, proposal_ids: Sequence[str]) -> None:
+        with self._lock:
+            for proposal_id in proposal_ids:
+                if proposal_id in self._items:
+                    self._items[proposal_id].tainted = True
 
     def decide(
         self,
@@ -285,6 +295,10 @@ class SqliteProposalStore:
                     self._conn.execute(
                         "ALTER TABLE proposals ADD COLUMN causation_depth INTEGER NOT NULL DEFAULT 1"
                     )
+                if "tainted" not in columns:
+                    self._conn.execute(
+                        "ALTER TABLE proposals ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0"
+                    )
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 self._conn.commit()
 
@@ -299,8 +313,8 @@ class SqliteProposalStore:
                 INSERT INTO proposals (
                     id, agent_id, agent_name, tool, input_args, autonomy_level,
                     status, run_id, correlation_id, decided_by, apply_result,
-                    apply_error, created_at, updated_at, decided_at, session_id, causation_depth
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    apply_error, created_at, updated_at, decided_at, session_id, causation_depth, tainted
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 self._to_row(proposal),
             )
@@ -314,7 +328,7 @@ class SqliteProposalStore:
                 UPDATE proposals SET
                     agent_name = ?, tool = ?, input_args = ?, autonomy_level = ?,
                     status = ?, run_id = ?, correlation_id = ?, decided_by = ?,
-                    apply_result = ?, apply_error = ?, updated_at = ?, decided_at = ?
+                    apply_result = ?, apply_error = ?, updated_at = ?, decided_at = ?, tainted = MAX(tainted, ?)
                 WHERE id = ?
                 """,
                 (
@@ -334,11 +348,20 @@ class SqliteProposalStore:
                     proposal.apply_error,
                     _to_epoch(proposal.updated_at),
                     _to_epoch(proposal.decided_at),
+                    int(proposal.tainted),
                     proposal.id,
                 ),
             )
             self._conn.commit()
             return self._get_locked(proposal.id)
+
+    def mark_tainted(self, proposal_ids: Sequence[str]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE proposals SET tainted = 1 WHERE id = ?",
+                [(proposal_id,) for proposal_id in proposal_ids],
+            )
+            self._conn.commit()
 
     def decide(
         self,
@@ -521,6 +544,7 @@ class SqliteProposalStore:
             _to_epoch(p.decided_at),
             p.session_id,
             p.causation_depth,
+            int(p.tainted),
         )
 
     @staticmethod
@@ -532,6 +556,7 @@ class SqliteProposalStore:
             autonomy_level=row["autonomy_level"],
             agent_name=row["agent_name"],
         )
+        p.tainted = bool(row["tainted"]) if "tainted" in row.keys() else False
         p.id = row["id"]
         p.status = ProposalStatus(row["status"])
         p.run_id = row["run_id"]

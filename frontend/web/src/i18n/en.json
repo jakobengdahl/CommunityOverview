@@ -47,6 +47,7 @@
     "status_rejected": "Rejected",
     "status_applied": "Applied",
     "status_apply_failed": "Apply failed",
+    "tainted_notice": "Warning: file content was in this run’s context. Review this proposal carefully.",
     "detail_autonomy": "Autonomy level",
     "detail_args": "Arguments",
     "detail_decided_by": "Decided by",

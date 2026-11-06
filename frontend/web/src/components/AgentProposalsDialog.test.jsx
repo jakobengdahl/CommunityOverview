@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import AgentProposalsDialog from './AgentProposalsDialog';
 
 vi.mock('../i18n', () => ({
@@ -36,6 +36,30 @@ describe('AgentProposalsDialog', () => {
     expect(global.fetch).toHaveBeenCalledWith('/agents/proposals?agent_id=a1');
     expect(screen.getByText('agent_proposals.approve')).toBeInTheDocument();
     expect(screen.getByText('agent_proposals.reject')).toBeInTheDocument();
+  });
+
+  it('shows a notice on every tainted proposal before expansion, but not clean proposals', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { ...PENDING, tainted: false },
+        { ...PENDING, id: 'prop-2', agent_name: 'Tainted One', tainted: true },
+        { ...PENDING, id: 'prop-3', agent_name: 'Tainted Two', tainted: true },
+      ],
+    });
+    render(<AgentProposalsDialog onClose={() => {}} />);
+    await screen.findByText('Agent One');
+
+    expect(
+      within(screen.getByText('Agent One').closest('tr')).queryByText(
+        'agent_proposals.tainted_notice'
+      )
+    ).not.toBeInTheDocument();
+    for (const name of ['Tainted One', 'Tainted Two']) {
+      expect(
+        within(screen.getByText(name).closest('tr')).getByText('agent_proposals.tainted_notice')
+      ).toBeInTheDocument();
+    }
   });
 
   it('approves a proposal via POST and reloads', async () => {
