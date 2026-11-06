@@ -62,10 +62,18 @@ from backend.ui.attachment_confirmation import (
 def _chat_logging_boundary(method):
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
-        with content_logging(
-            known_tools={*self.tools_map, *(t["name"] for t in self.tool_definitions)}
-        ):
-            return method(self, *args, **kwargs)
+        tainted = False
+        try:
+            with content_logging(
+                known_tools={*self.tools_map, *(t["name"] for t in self.tool_definitions)}
+            ) as state:
+                try:
+                    return method(self, *args, **kwargs)
+                finally:
+                    tainted = state["tainted"]
+        finally:
+            if tainted:
+                mark_tainted()
 
     return wrapped
 
@@ -1666,8 +1674,8 @@ class ChatProcessor:
             }
 
         except Exception as e:
-            logger.error("Error in process_message: %s", type(e).__name__)
             error_msg = type(e).__name__ if is_tainted() else str(e)
+            logger.error("Error in process_message: %s", error_msg)
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:

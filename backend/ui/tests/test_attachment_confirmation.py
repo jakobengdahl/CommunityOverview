@@ -262,9 +262,10 @@ def test_confirmation_rechecks_attachment_permission_layers(
     tool.assert_not_called()
 
 
-@pytest.mark.parametrize("endpoint", ["chat", "chat/simple", "upload"])
-def test_route_exception_logs_only_error_class(
-    fastapi_test_client, monkeypatch, caplog, endpoint
+@pytest.mark.parametrize("endpoint", ["chat", "chat/simple", "upload", "chat/stream", "chat/confirm"])
+@pytest.mark.parametrize("tainted", [False, True])
+def test_route_exception_logging_respects_taint(
+    fastapi_test_client, monkeypatch, caplog, endpoint, tainted
 ):
     from backend.ui.chat_service import ChatService
 
@@ -272,9 +273,14 @@ def test_route_exception_logs_only_error_class(
     secret = "PRIVATE-EXCEPTION-CONTENT"
 
     def fail(*args, **kwargs):
+        from backend.runtime.content_logging import mark_tainted
+
+        if tainted:
+            mark_tainted()
         raise ValueError(secret)
 
     monkeypatch.setattr(ChatService, "process_message", fail)
+    monkeypatch.setattr(ChatService, "confirm_action", fail)
     with caplog.at_level(logging.ERROR):
         if endpoint == "upload":
             response = client.post(
@@ -283,14 +289,22 @@ def test_route_exception_logs_only_error_class(
         else:
             body = (
                 {"messages": [{"role": "user", "content": "read"}]}
-                if endpoint == "chat"
+                if endpoint in {"chat", "chat/stream"}
+                else {"token": "test-token"} if endpoint == "chat/confirm"
                 else {"message": "read"}
             )
             response = client.post("/ui/" + endpoint, json=body)
-    assert response.status_code == 500
-    formatted = "\n".join(logging.Formatter().format(r) for r in caplog.records)
-    assert secret not in formatted
-    assert any(r.args == ("ValueError",) and r.exc_info is None for r in caplog.records)
+    assert response.status_code == (200 if endpoint == "chat/stream" else 500)
+    records = [r for r in caplog.records if r.name == "backend.ui.rest_api"]
+    assert len(records) == 1
+    formatted = logging.Formatter().format(records[0])
+    if tainted:
+        assert secret not in formatted
+        assert "ValueError" in formatted
+        assert records[0].exc_info is None
+    else:
+        assert secret in formatted
+        assert records[0].exc_info[0] is ValueError
 
 
 def test_model_error_redacts_and_keeps_pending(chat_service, caplog):
@@ -338,3 +352,26 @@ def test_attachment_exceptions_and_inputs_are_redacted_even_before_taint(
     assert secret not in "\n".join(
         logging.Formatter().format(r) for r in caplog.records
     )
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_processor_exception_logging_respects_taint(chat_service, caplog, tainted):
+    from backend.runtime.content_logging import content_logging, is_tainted, mark_tainted
+
+    service, llm = chat_service
+    secret = "PRIVATE-PROCESSOR-ERROR"
+
+    def fail(*args, **kwargs):
+        if tainted:
+            mark_tainted()
+        raise ValueError(secret)
+
+    llm.create_completion = fail
+    with content_logging(), caplog.at_level(logging.ERROR):
+        result = service.process_message([{"role": "user", "content": "hello"}])
+        assert is_tainted() is tainted
+    records = [r for r in caplog.records if "Error in process_message" in r.getMessage()]
+    assert len(records) == 1
+    assert (secret in logging.Formatter().format(records[0])) is (not tainted)
+    assert records[0].exc_info is None
+    assert result["content"] == ("ValueError" if tainted else secret)
