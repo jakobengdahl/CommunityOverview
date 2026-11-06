@@ -81,6 +81,11 @@ class PendingActions:
             "notice": "File content was in this turn.",
         }
 
+    def peek(self, token):
+        with self._lock:
+            entry = self._entries.get(token)
+        return entry if entry and entry[0] > time.monotonic() else None
+
     def take(self, token):
         with self._lock:
             entry = self._entries.pop(token, None)

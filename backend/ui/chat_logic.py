@@ -717,9 +717,15 @@ def _tool_calls_cut_off(response) -> bool:
 
 
 def _tool_calls_not_run(response) -> str:
-    logger.warning(
-        "Reply hit the token limit; tool calls not run: %s", _tool_names(response)
-    )
+    names = _tool_names(response)
+    if is_tainted():
+        logger.warning(
+            "Reply hit the token limit; tool calls not run: count=%s names=%s",
+            len(names),
+            [safe_tool_name(name) for name in names],
+        )
+        return TOOL_CALLS_NOT_RUN_MESSAGE
+    logger.warning("Reply hit the token limit; tool calls not run: %s", names)
     return TOOL_CALLS_NOT_RUN_MESSAGE
 
 

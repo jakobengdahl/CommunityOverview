@@ -1015,7 +1015,7 @@ class ChatService:
             _request_federation_depth.reset(federation_depth_token)
 
     def confirm_action(self, token: str) -> Dict[str, Any]:
-        entry = pending_actions.take(token)
+        entry = pending_actions.peek(token)
         if entry is None:
             return refusal("confirmation_unknown")
         _, name, arguments, context = entry
@@ -1024,6 +1024,8 @@ class ChatService:
         # Sibling confirmations share the original turn's touched ids. Serialize
         # writes and response saves so the latter observes completed writes.
         with context["lock"]:
+            if pending_actions.take(token) is None:
+                return refusal("confirmation_unknown")
             return self.process_message(
                 messages=[],
                 collection_short_name=context["collection"],

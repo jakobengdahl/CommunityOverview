@@ -375,3 +375,85 @@ def test_processor_exception_logging_respects_taint(chat_service, caplog, tainte
     assert (secret in logging.Formatter().format(records[0])) is (not tainted)
     assert records[0].exc_info is None
     assert result["content"] == ("ValueError" if tainted else secret)
+
+
+@pytest.mark.parametrize("header", ["actor-id", "actor-type"])
+def test_confirmation_route_denied_actor_preserves_owner_token(
+    fastapi_test_client, header
+):
+    client, llm, graph = fastapi_test_client
+    owner = {
+        "x-communityoverview-actor-id": "owner",
+        "x-communityoverview-actor-type": "user",
+    }
+    original = graph.search_graph
+    graph.search_graph = lambda **kwargs: {
+        **original(**kwargs),
+        "untrusted_content": True,
+    }
+    llm.mock_tool_call_sequence = [
+        [call("search_graph", query="")],
+        [call("add_nodes", nodes=[{"name": "Owned", "type": "Actor"}], edges=[])],
+    ]
+    response = client.post(
+        "/ui/chat",
+        headers=owner,
+        json={"messages": [{"role": "user", "content": "read"}]},
+    ).json()
+    body = {"token": response["pending_actions"][0]["token"]}
+    other = {**owner, "x-communityoverview-" + header: "other"}
+    assert (
+        client.post("/ui/chat/confirm", headers=other, json=body).json()["error_code"]
+        == "access_denied"
+    )
+    assert not any(n.name == "Owned" for n in graph.storage.nodes.values())
+    count = llm.call_count
+    assert client.post("/ui/chat/confirm", headers=owner, json=body).json()["success"]
+    assert llm.call_count == count
+    assert sum(n.name == "Owned" for n in graph.storage.nodes.values()) == 1
+    assert (
+        client.post("/ui/chat/confirm", headers=owner, json=body).json()["error_code"]
+        == "confirmation_unknown"
+    )
+
+
+@pytest.mark.parametrize("after_read", [False, True])
+def test_tainted_cutoff_formatted_log_redacts_unknown_tool_names(
+    chat_service, caplog, after_read
+):
+    from backend.llm.llm_providers import LLMResponse
+    from backend.runtime.content_logging import mark_tainted
+
+    service, llm = chat_service
+    secret = "PRIVATE-FILE-TEXT-AS-TOOL-NAME"
+    replies = []
+    if after_read:
+        replies.append(
+            LLMResponse(
+                content=[{"type": "tool_use", "id": "read", **call("get_schema")}],
+                stop_reason="tool_use",
+            )
+        )
+        service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
+    replies.append(
+        LLMResponse(
+            content=[
+                {"type": "tool_use", "id": str(i), **call(name)}
+                for i, name in enumerate(["get_schema", secret])
+            ],
+            stop_reason="max_tokens",
+        )
+    )
+    iterator = iter(replies)
+
+    def completion(**kwargs):
+        if not after_read:
+            mark_tainted()
+        return next(iterator)
+
+    llm.create_completion = completion
+    with caplog.at_level(logging.WARNING):
+        service.process_message([{"role": "user", "content": "read"}])
+    formatted = "\n".join(logging.Formatter().format(r) for r in caplog.records)
+    assert secret not in formatted
+    assert "count=2 names=['get_schema', 'unknown_tool']" in formatted
