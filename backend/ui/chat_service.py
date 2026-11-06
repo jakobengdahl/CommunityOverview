@@ -13,10 +13,12 @@ consistency and proper validation.
 
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
+import functools
 import contextvars
 import logging
 import json
 import re
+import threading
 from datetime import datetime, timezone
 
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
@@ -25,6 +27,8 @@ from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 from backend.runtime.attachment_access import validate_attachment_setting
+
+from backend.ui.attachment_confirmation import pending_actions, request_actor, refusal
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +292,7 @@ class ChatService:
         names = [t for t in raw if isinstance(t, str) and t]
         return names or None
 
-    def _resolve_collection(self, short_name: str) -> tuple:
+    def _resolve_collection(self, short_name: str, *, fresh=False) -> tuple:
         """Resolve an AKC short_name → (system_prompt_prefix, permissions_dict, collect_responses).
 
         Returns:
@@ -310,7 +314,7 @@ class ChatService:
         a cached entry is served only to a caller who may read the collection node.
         """
         try:
-            cached = self._collection_cache.get(short_name)
+            cached = None if fresh else self._collection_cache.get(short_name)
             if cached is not None:
                 # The cache is shared by every caller: serve it only to a caller
                 # who may read the collection node, else resolve again as them.
@@ -598,8 +602,25 @@ class ChatService:
                 "error": "System-node creation is not permitted in collection mode.",
             }
 
+        def typed_attachment_write(func):
+            @functools.wraps(func)
+            def enforced(node_id, **kwargs):
+                node_type = run_on_event_loop(_get_node_type, node_id)
+                if node_type is None or not perms.get(node_type, {}).get("update"):
+                    return refusal("access_denied")
+                return func(node_id=node_id, **kwargs)
+
+            return enforced
+
+        attachment_overrides = {
+            name: typed_attachment_write(self._tools_map[name])
+            for name in ("add_node_attachment", "delete_node_attachment")
+            if name in self._tools_map
+        }
+
         return {
             **{name: _system_create_blocked for name in SYSTEM_CREATE_MODELS},
+            **attachment_overrides,
             "add_nodes": add_nodes_enforced,
             "update_node": update_node_enforced,
             "delete_nodes": delete_nodes_enforced,
@@ -785,6 +806,7 @@ class ChatService:
         visible_node_ids: Optional[List[str]] = None,
         selected_node_ids: Optional[List[str]] = None,
         llm_provider: Optional[Any] = None,
+        _confirmation: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
         Process a chat message and return the response.
@@ -826,10 +848,20 @@ class ChatService:
             - toolResult: Result from the tool (if any)
         """
         effective_prefix, collection_perms, collect_responses = (
-            run_on_event_loop(self._resolve_collection, collection_short_name)
+            run_on_event_loop(
+                self._resolve_collection, collection_short_name, fresh=True
+            )
             if collection_short_name
             else (None, None, True)
         )
+
+        if _confirmation and collection_short_name:
+            identity = self._collection_nodes.get(collection_short_name) or {}
+            if (
+                not effective_prefix
+                or identity.get("id") != _confirmation["collection_id"]
+            ):
+                return refusal("access_denied")
 
         federation_depth_token = _request_federation_depth.set(federation_depth)
         try:
@@ -848,7 +880,11 @@ class ChatService:
             # this single agentic loop, so save_collection_response can link the response
             # to them. Scoped per request — the frontend does not replay prior tool
             # results, so a collection run's writes and its save land in the same call.
-            touched_nodes = [] if collection_perms is not None else None
+            touched_nodes = (
+                _confirmation["touched"]
+                if _confirmation
+                else ([] if collection_perms is not None else None)
+            )
             tools_override = (
                 self._make_enforced_tools(collection_perms, touched=touched_nodes)
                 if collection_perms is not None
@@ -922,6 +958,35 @@ class ChatService:
                 except Exception:
                     return "off"
 
+            if _confirmation and _confirmation["allowlist"] is not None:
+                recorded = _confirmation["allowlist"]
+                tool_allowlist = [
+                    name
+                    for name in recorded
+                    if tool_allowlist is None or name in tool_allowlist
+                ]
+                # Empty recorded intersection must still deny every tool.
+                if not tool_allowlist:
+                    tool_allowlist = ["__no_tools__"]
+            context = {
+                "actor": request_actor(),
+                "caller_kind": "kiosk"
+                if collection_short_name and effective_prefix is not None
+                else "user",
+                "collection": collection_short_name
+                if effective_prefix is not None
+                else None,
+                "collection_id": (
+                    self._collection_nodes.get(collection_short_name) or {}
+                ).get("id"),
+                "allowlist": list(tool_allowlist)
+                if tool_allowlist is not None
+                else None,
+                "touched": touched_nodes,
+                "lock": threading.Lock(),
+                "api_key_override": api_key is not None,
+            }
+
             # skills_context is passed separately as skills_override so it lands
             # AFTER the base system prompt (recency precedence for behavioral overrides).
             # extra_context (expert persona) stays BEFORE the base prompt.
@@ -943,9 +1008,38 @@ class ChatService:
                     tool_allowlist=tool_allowlist,
                     llm_provider=llm_provider,
                     attachment_access=attachment_access,
+                    confirmation_context=context,
+                    confirmed_call=_confirmation.get("call") if _confirmation else None,
                 )
         finally:
             _request_federation_depth.reset(federation_depth_token)
+
+    def confirm_action(self, token: str) -> Dict[str, Any]:
+        entry = pending_actions.peek(token)
+        if entry is None:
+            return refusal("confirmation_unknown")
+        _, name, arguments, context = entry
+        if context is None or request_actor() != context["actor"]:
+            return refusal("access_denied")
+        # Sibling confirmations share the original turn's touched ids. Serialize
+        # writes and response saves so the latter observes completed writes.
+        with context["lock"]:
+            if pending_actions.take(token) is None:
+                return refusal("confirmation_unknown")
+            return self.process_message(
+                messages=[],
+                collection_short_name=context["collection"],
+                api_key="" if context["api_key_override"] else None,
+                _confirmation={
+                    **context,
+                    "call": {
+                        "type": "tool_use",
+                        "id": "confirmed",
+                        "name": name,
+                        "input": arguments,
+                    },
+                },
+            )
 
     def process_chat_request(
         self,

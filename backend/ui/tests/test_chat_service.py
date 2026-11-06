@@ -2526,6 +2526,7 @@ class TestNonObjectToolInput:
         "assistant",
         "kiosk",
         "kiosk_granted",
+        "kiosk_wrong_type",
         "kiosk_federated",
         "kiosk_failed",
         "kiosk_unresolved",
@@ -2547,11 +2548,15 @@ def test_attachment_tools_require_caller_grant_and_hook(
     if mode == "kiosk_unresolved":
         service._assistant_attachment_access = "read_write"
     raw = MagicMock(return_value={"success": True})
-    service._processor.tools_map[name] = raw
+
+    def tool(node_id):
+        return raw(node_id=node_id)
+
+    service._processor.tools_map[name] = tool
     service._processor.tool_definitions.append(
         {"name": name, "input_schema": {"type": "object"}}
     )
-    llm.mock_tool_calls = [{"name": name, "input": {}}]
+    llm.mock_tool_calls = [{"name": name, "input": {"node_id": "target"}}]
     if mode == "deny_hook":
         service._assistant_attachment_access = "read_write"
         service._processor._authorization_hook = MagicMock()
@@ -2562,7 +2567,9 @@ def test_attachment_tools_require_caller_grant_and_hook(
     node = _make_akc_node(
         "coll",
         ACTOR_ONLY_PERMS,
-        tool_allowlist=[name] if mode in ("kiosk_granted", "kiosk_federated") else [],
+        tool_allowlist=[name]
+        if mode in ("kiosk_granted", "kiosk_federated", "kiosk_wrong_type")
+        else [],
     )
     if mode == "kiosk_federated":
         node["id"] = "federated::remote::akc-coll"
@@ -2573,21 +2580,30 @@ def test_attachment_tools_require_caller_grant_and_hook(
             return_value={"nodes": [] if mode == "kiosk_unresolved" else [node]},
         ),
         patch.object(
-            service._graph_service, "get_node_details", return_value={"node": node}
+            service._graph_service,
+            "get_node_details",
+            side_effect=lambda node_id: {
+                "node": {
+                    "type": "Initiative" if mode == "kiosk_wrong_type" else "Actor"
+                }
+                if node_id == "target"
+                else node
+            },
         ),
     ):
         if mode == "kiosk_failed":
-            service._resolve_collection = lambda _: ("", {}, False)
+            service._resolve_collection = lambda _, **kwargs: ("", {}, False)
         service.process_message(
             messages=[{"role": "user", "content": "read files"}],
             collection_short_name="coll" if kiosk else None,
             api_key="override-key" if mode == "override" else None,
         )
-    allowed = mode == "kiosk_granted" or (
+    granted = mode in ("kiosk_granted", "kiosk_wrong_type") or (
         mode == "assistant" and name in ATTACHMENT_READ_TOOLS
     )
+    allowed = granted and (mode != "kiosk_wrong_type" or name in ATTACHMENT_READ_TOOLS)
     advertised = {t["name"] for t in llm.received_tools[0]}
-    assert (name in advertised) == (allowed or mode == "deny_hook")
+    assert (name in advertised) == (granted or mode == "deny_hook")
     if allowed:
         raw.assert_called_once()
     else:

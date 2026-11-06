@@ -8,6 +8,74 @@ import pytest
 from backend.ui.tests.test_chat_service import _tool_result_payloads
 
 
+@pytest.mark.parametrize("chained", [False, True])
+def test_refused_arguments_stay_out_of_model_and_history(
+    chat_service, monkeypatch, chained
+):
+    import json
+
+    monkeypatch.setenv("ATTACHMENT_PENDING_ACTIONS_PER_TURN", "1")
+    service, llm = chat_service
+    processor = service._processor
+    processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
+    write = MagicMock()
+    processor.tools_map["future_write"] = write
+    arguments = {"nested": {"values": ["private-bound-argument"]}}
+    calls = [
+        {"name": "future_write", "input": arguments},
+        {"name": "future_write", "input": {"value": "private-over-limit"}},
+    ]
+    read = {"name": "get_schema", "input": {}}
+    llm.mock_tool_call_sequence = [[read], calls] if chained else [[read, *calls]]
+    messages = [{"role": "user", "content": "read files"}]
+
+    result = processor.process_message(messages, llm_provider=llm)
+
+    write.assert_not_called()
+    (action,) = result["pending_actions"]
+    assert action["tool"] == "future_write"
+    assert action["arguments"] == arguments
+    for history in [messages, *llm.received_messages]:
+        serialized = json.dumps(history)
+        assert "private-bound-argument" not in serialized
+        assert "private-over-limit" not in serialized
+        assert action["token"] not in serialized
+    blocks = [
+        block
+        for message in messages
+        if message["role"] == "assistant"
+        for block in message["content"]
+        if block.get("name") == "future_write"
+    ]
+    assert len(blocks) == 2
+    assert all(block["input"] == {} for block in blocks)
+    refused = [
+        block
+        for message in messages
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for block in message["content"]
+        if json.loads(block["content"]).get("error_code") == "confirmation_required"
+    ]
+    assert [block["tool_use_id"] for block in refused] == [
+        block["id"] for block in blocks
+    ]
+
+
+def test_clean_tool_arguments_remain_in_history(chat_service):
+    service, llm = chat_service
+    write = MagicMock(return_value={"success": True})
+    service._processor.tools_map["future_write"] = write
+    arguments = {"value": "ordinary-input"}
+    llm.mock_tool_calls = [{"name": "future_write", "input": arguments}]
+    messages = [{"role": "user", "content": "write"}]
+
+    result = service._processor.process_message(messages, llm_provider=llm)
+
+    write.assert_called_once()
+    assert result["pending_actions"] == []
+    assert messages[1]["content"][0]["input"] == arguments
+
+
 @pytest.mark.parametrize("name", ["read_node_attachment", "search_node_attachments"])
 def test_attachment_hook_refusal_formatted_audit(
     chat_service, monkeypatch, caplog, name
