@@ -32,7 +32,7 @@ def test_refused_arguments_stay_out_of_model_and_history(
     result = processor.process_message(messages, llm_provider=llm)
 
     write.assert_not_called()
-    action, = result["pending_actions"]
+    (action,) = result["pending_actions"]
     assert action["tool"] == "future_write"
     assert action["arguments"] == arguments
     for history in [messages, *llm.received_messages]:

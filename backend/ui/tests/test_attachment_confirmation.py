@@ -1,4 +1,4 @@
-# covers: backend/ui/attachment_confirmation.py, backend/ui/chat_logic.py, backend/ui/chat_service.py, backend/ui/rest_api.py
+# covers: backend/ui/attachment_confirmation.py, backend/ui/rest_api.py
 """Within-turn taint and confirmation guarantees."""
 
 import json
