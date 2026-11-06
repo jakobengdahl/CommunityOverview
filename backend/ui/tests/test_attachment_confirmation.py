@@ -98,9 +98,7 @@ def test_store_bounds_expiry_copies_and_atomic_consumption(monkeypatch):
     assert PendingActions().take("unknown") is None
 
 
-def test_confirmation_is_actor_bound_exact_once_and_model_free(
-    chat_service,
-):
+def test_confirmation_is_actor_bound_exact_once_and_model_free(chat_service):
     service, llm = chat_service
     called = []
     service._processor.tools_map["write"] = lambda value: (
@@ -135,12 +133,7 @@ def test_kiosk_confirmation_resolves_current_identity_and_permissions(
     card = taint(
         service,
         llm,
-        [
-            {
-                "name": "add_nodes",
-                "input": {"nodes": [{"type": "Actor", "name": "Bound"}], "edges": []},
-            }
-        ],
+        [call("add_nodes", nodes=[{"type": "Actor", "name": "Bound"}], edges=[])],
         collection_short_name="collect",
     )["pending_actions"][0]
     node = graph.storage.nodes[node_id]
@@ -170,8 +163,8 @@ def test_formatted_logs_redact_tainted_tools_queries_and_failures(chat_service, 
             service,
             llm,
             [
-                {"name": "search_graph", "input": {"query": secret}},
-                {"name": "get_node_details", "input": {"query": secret}},
+                call("search_graph", query=secret),
+                call("get_node_details", query=secret),
             ],
         )
     formatted = "\n".join(logging.Formatter().format(r) for r in caplog.records)
@@ -179,9 +172,7 @@ def test_formatted_logs_redact_tainted_tools_queries_and_failures(chat_service, 
     assert result["toolResult"] == {"error": "ValueError"}
 
 
-def test_confirmation_route_exposes_cards_and_runs_once(
-    fastapi_test_client,
-):
+def test_confirmation_route_exposes_cards_and_runs_once(fastapi_test_client):
     client, llm, graph = fastapi_test_client
     llm.mock_tool_calls = [{"name": "search_graph", "input": {"query": ""}}]
     # A real graph read can carry the envelope regardless of which tool produced it.
@@ -262,7 +253,9 @@ def test_confirmation_rechecks_attachment_permission_layers(
     tool.assert_not_called()
 
 
-@pytest.mark.parametrize("endpoint", ["chat", "chat/simple", "upload", "chat/stream", "chat/confirm"])
+@pytest.mark.parametrize(
+    "endpoint", ["chat", "chat/simple", "upload", "chat/stream", "chat/confirm"]
+)
 @pytest.mark.parametrize("tainted", [False, True])
 def test_route_exception_logging_respects_taint(
     fastapi_test_client, monkeypatch, caplog, endpoint, tainted
@@ -290,7 +283,8 @@ def test_route_exception_logging_respects_taint(
             body = (
                 {"messages": [{"role": "user", "content": "read"}]}
                 if endpoint in {"chat", "chat/stream"}
-                else {"token": "test-token"} if endpoint == "chat/confirm"
+                else {"token": "test-token"}
+                if endpoint == "chat/confirm"
                 else {"message": "read"}
             )
             response = client.post("/ui/" + endpoint, json=body)
@@ -356,7 +350,11 @@ def test_attachment_exceptions_and_inputs_are_redacted_even_before_taint(
 
 @pytest.mark.parametrize("tainted", [False, True])
 def test_processor_exception_logging_respects_taint(chat_service, caplog, tainted):
-    from backend.runtime.content_logging import content_logging, is_tainted, mark_tainted
+    from backend.runtime.content_logging import (
+        content_logging,
+        is_tainted,
+        mark_tainted,
+    )
 
     service, llm = chat_service
     secret = "PRIVATE-PROCESSOR-ERROR"
@@ -370,7 +368,9 @@ def test_processor_exception_logging_respects_taint(chat_service, caplog, tainte
     with content_logging(), caplog.at_level(logging.ERROR):
         result = service.process_message([{"role": "user", "content": "hello"}])
         assert is_tainted() is tainted
-    records = [r for r in caplog.records if "Error in process_message" in r.getMessage()]
+    records = [
+        r for r in caplog.records if "Error in process_message" in r.getMessage()
+    ]
     assert len(records) == 1
     assert (secret in logging.Formatter().format(records[0])) is (not tainted)
     assert records[0].exc_info is None

@@ -65,7 +65,10 @@ def _chat_logging_boundary(method):
         tainted = False
         try:
             with content_logging(
-                known_tools={*self.tools_map, *(t["name"] for t in self.tool_definitions)}
+                known_tools={
+                    *self.tools_map,
+                    *(t["name"] for t in self.tool_definitions),
+                }
             ) as state:
                 try:
                     return method(self, *args, **kwargs)
