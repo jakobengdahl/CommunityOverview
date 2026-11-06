@@ -1,4 +1,4 @@
-# covers: backend/agents/governance/gate.py
+# covers: backend/agents/governance/gate.py, backend/agents/governance/models.py, backend/agents/governance/store.py, backend/agents/governance/manager.py, backend/agents/mcp_loader.py, backend/runtime/content_logging.py
 """Tests for governance gate taint and proposal approval boundaries."""
 
 from types import SimpleNamespace
@@ -490,3 +490,28 @@ def test_approval_logging_observes_taint_after_clean_snapshot(
         if durable:
             publisher.close()
             store.close()
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_taint_schema_migrates_existing_proposals(tmp_path, version):
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    store = SqliteProposalStore(db)
+    proposal = store.create(
+        Proposal("a", "graph.update_node", {}, AutonomyLevel.ACT_AFTER_APPROVAL)
+    )
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE proposals DROP COLUMN tainted")
+        if version == 2:
+            conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
+        conn.execute(f"PRAGMA user_version={version}")
+    store = SqliteProposalStore(db)
+    try:
+        assert store.get(proposal.id).causation_depth == 1
+        assert store.get(proposal.id).tainted is False
+        store.mark_tainted([proposal.id])
+        assert store.get(proposal.id).tainted is True
+    finally:
+        store.close()

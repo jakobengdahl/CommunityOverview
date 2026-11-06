@@ -603,11 +603,9 @@ def test_causation_schema_migrates_existing_v2_proposals(tmp_path):
     store.close()
     with sqlite3.connect(db) as conn:
         conn.execute("ALTER TABLE proposals DROP COLUMN causation_depth")
-        conn.execute("ALTER TABLE proposals DROP COLUMN tainted")
         conn.execute("PRAGMA user_version=2")
     migrated = SqliteProposalStore(db)
     assert migrated.get(p.id).causation_depth == 1
-    assert migrated.get(p.id).tainted is False
     migrated.close()
 
 
