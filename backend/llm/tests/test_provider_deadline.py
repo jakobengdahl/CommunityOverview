@@ -152,27 +152,14 @@ def test_transient_error_retries_within_total_deadline(provider_class, hang_on_r
         if hang_on_retry:
             release.wait(2)
         finished.set()
-        payload = (
-            {
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "model": provider.model,
+        return httpx.Response(
+            200,
+            json={
                 "content": [{"type": "text", "text": "Recovered"}],
+                "choices": [{"message": {"content": "Recovered"}}],
                 "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            }
-            if provider_class is ClaudeProvider
-            else {
-                "id": "chat_test",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "Recovered"},
-                    "finish_reason": "stop",
-                }],
-            }
+            },
         )
-        return httpx.Response(200, json=payload)
 
     provider.client = provider.client.with_options(
         http_client=httpx.Client(transport=httpx.MockTransport(respond))

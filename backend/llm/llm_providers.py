@@ -70,9 +70,7 @@ def _completion_client(client, timeout_seconds, timeout_type):
     # Preserve SDK recovery from transient errors; _provider_call bounds the
     # entire call, including retry backoff and subsequent attempts.
     # Use the SDK export: newer SDKs use httpx2.Timeout, older ones httpx.Timeout.
-    return client.with_options(
-        timeout=timeout_type(timeout_seconds, connect=5.0)
-    )
+    return client.with_options(timeout=timeout_type(timeout_seconds, connect=5.0))
 
 
 # The anthropic SDK refuses a non-streaming request it expects to run over 10
