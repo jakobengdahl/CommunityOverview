@@ -108,7 +108,7 @@ def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch)
         bounded_client = _completion_client(
             provider.client, 17, type(provider.client.timeout)
         )
-        assert bounded_client.max_retries == original_retries
+        assert bounded_client.max_retries == 0
         assert provider.client.max_retries == original_retries == 2
     with pytest.raises(Exception) as caught:
         provider.create_completion(
@@ -125,11 +125,10 @@ def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch)
 
 
 @pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
-@pytest.mark.parametrize("hang_on_retry", [False, True])
+@pytest.mark.parametrize("hang_on_retry", [False, True, "backoff"])
 def test_transient_error_retries_within_total_deadline(provider_class, hang_on_retry):
     import importlib
-    from threading import Event
-
+    from threading import Event, current_thread
     import httpx as legacy_httpx
 
     provider = provider_class("test-key")
@@ -139,16 +138,14 @@ def test_transient_error_retries_within_total_deadline(provider_class, hang_on_r
         else "httpx2"
     )
     release, finished = Event(), Event()
-    requests = []
+    requests, workers = [], []
 
     def respond(request):
+        workers.append(current_thread())
         requests.append(request)
         if len(requests) == 1:
-            return httpx.Response(
-                500,
-                headers={"retry-after-ms": "1"},
-                json={"error": {"message": "transient", "type": "api_error"}},
-            )
+            delay = "1000" if hang_on_retry == "backoff" else "1"
+            return httpx.Response(500, headers={"retry-after-ms": delay})
         if hang_on_retry:
             release.wait(2)
         finished.set()
@@ -172,8 +169,11 @@ def test_transient_error_retries_within_total_deadline(provider_class, hang_on_r
         else:
             response = provider.create_completion([], "", [], timeout_seconds=1)
             assert response.content == [{"type": "text", "text": "Recovered"}]
-        assert len(requests) == 2
+        assert len(requests) == (1 if hang_on_retry == "backoff" else 2)
     finally:
         release.set()
-        assert finished.wait(1)
+        workers[0].join(1)
+        assert not workers[0].is_alive()
+        if hang_on_retry != "backoff":
+            assert finished.wait(1)
         provider.client.close()

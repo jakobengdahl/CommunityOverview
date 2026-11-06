@@ -6,7 +6,8 @@ Supports both Claude (Anthropic) and OpenAI APIs.
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from contextvars import copy_context
-from threading import Thread
+from threading import Event, Thread
+from time import monotonic
 from typing import Any, Dict, List, Optional
 import json
 import logging
@@ -36,7 +37,7 @@ def positive_int_setting(name: str, default: int, maximum: Optional[int] = None)
     return default
 
 
-def _provider_call(create, *, deadline_seconds=None, **kwargs):
+def _provider_call(create, *, deadline_seconds=None, retry_client=None, **kwargs):
     """Bound the whole SDK call, including reads and internal retries.
 
     SDK timeouts only bound individual network operations. A daemon worker lets
@@ -46,12 +47,57 @@ def _provider_call(create, *, deadline_seconds=None, **kwargs):
     if deadline_seconds is None:
         return create(**kwargs)
     timeout = deadline_seconds
+    deadline = monotonic() + timeout
+    cancelled = Event()
+
+    def complete():
+        # SDK retries are disabled on this call's client. Keep its retry policy,
+        # but make backoff interruptible and check the deadline before each try.
+        retries = retry_client.max_retries if retry_client is not None else 0
+        for attempt in range(retries + 1):
+            if cancelled.is_set() or monotonic() >= deadline:
+                raise TimeoutError(f"LLM call exceeded {timeout:g} seconds")
+            try:
+                return create(**kwargs)
+            except Exception as exc:
+                from openai import APIConnectionError as OpenAIConnectionError
+                from openai import APIStatusError as OpenAIStatusError
+                from anthropic import APIConnectionError as ClaudeConnectionError
+                from anthropic import APIStatusError as ClaudeStatusError
+                from types import SimpleNamespace
+
+                if not isinstance(
+                    exc,
+                    (
+                        OpenAIConnectionError,
+                        ClaudeConnectionError,
+                        OpenAIStatusError,
+                        ClaudeStatusError,
+                    ),
+                ):
+                    raise
+                if cancelled.is_set() or monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"LLM call exceeded {timeout:g} seconds"
+                    ) from exc
+                response = getattr(exc, "response", None)
+                if attempt == retries or (
+                    response is not None and not retry_client._should_retry(response)
+                ):
+                    raise
+                delay = retry_client._calculate_retry_timeout(
+                    retries - attempt,
+                    SimpleNamespace(get_max_retries=lambda default: default),
+                    response.headers if response is not None else None,
+                )
+                cancelled.wait(min(delay, max(0, deadline - monotonic())))
+
     result = Future()
     context = copy_context()
 
     def invoke():
         try:
-            result.set_result(context.run(create, **kwargs))
+            result.set_result(context.run(complete))
         except BaseException as exc:
             result.set_exception(exc)
 
@@ -61,16 +107,18 @@ def _provider_call(create, *, deadline_seconds=None, **kwargs):
     except TimeoutError as exc:
         if result.done() and result.exception() is exc:
             raise
+        cancelled.set()
         raise TimeoutError(f"LLM call exceeded {timeout:g} seconds") from exc
 
 
 def _completion_client(client, timeout_seconds, timeout_type):
     if timeout_seconds is None:
         return client
-    # Preserve SDK recovery from transient errors; _provider_call bounds the
-    # entire call, including retry backoff and subsequent attempts.
+    # The deadline worker owns retries so SDK backoff cannot outlive the call.
     # Use the SDK export: newer SDKs use httpx2.Timeout, older ones httpx.Timeout.
-    return client.with_options(timeout=timeout_type(timeout_seconds, connect=5.0))
+    return client.with_options(
+        timeout=timeout_type(timeout_seconds, connect=5.0), max_retries=0
+    )
 
 
 # The anthropic SDK refuses a non-streaming request it expects to run over 10
@@ -242,6 +290,7 @@ class ClaudeProvider(LLMProvider):
         response = _provider_call(
             client.messages.create,
             deadline_seconds=timeout_seconds,
+            retry_client=self.client,
             model=self.model,
             max_tokens=max_tokens,
             system=system_prompt,
@@ -333,6 +382,7 @@ class OpenAIProvider(LLMProvider):
         response = _provider_call(
             client.chat.completions.create,
             deadline_seconds=timeout_seconds,
+            retry_client=self.client,
             model=self.model,
             max_tokens=max_tokens,
             messages=openai_messages,
