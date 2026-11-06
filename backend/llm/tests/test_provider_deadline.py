@@ -108,7 +108,7 @@ def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch)
         bounded_client = _completion_client(
             provider.client, 17, type(provider.client.timeout)
         )
-        assert bounded_client.max_retries == 0
+        assert bounded_client.max_retries == original_retries
         assert provider.client.max_retries == original_retries == 2
     with pytest.raises(Exception) as caught:
         provider.create_completion(
@@ -122,3 +122,71 @@ def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch)
     assert timeout["write"] == (17 if bounded else original_timeout.write)
     assert timeout["pool"] == (17 if bounded else original_timeout.pool)
     provider.client.close()
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+@pytest.mark.parametrize("hang_on_retry", [False, True])
+def test_transient_error_retries_within_total_deadline(provider_class, hang_on_retry):
+    import importlib
+    from threading import Event
+
+    import httpx as legacy_httpx
+
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    release, finished = Event(), Event()
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                500,
+                headers={"retry-after-ms": "1"},
+                json={"error": {"message": "transient", "type": "api_error"}},
+            )
+        if hang_on_retry:
+            release.wait(2)
+        finished.set()
+        payload = (
+            {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": provider.model,
+                "content": [{"type": "text", "text": "Recovered"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+            if provider_class is ClaudeProvider
+            else {
+                "id": "chat_test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Recovered"},
+                    "finish_reason": "stop",
+                }],
+            }
+        )
+        return httpx.Response(200, json=payload)
+
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(respond))
+    )
+    try:
+        if hang_on_retry:
+            with pytest.raises(TimeoutError, match="LLM call exceeded"):
+                provider.create_completion([], "", [], timeout_seconds=0.1)
+            assert not finished.is_set()
+        else:
+            response = provider.create_completion([], "", [], timeout_seconds=1)
+            assert response.content == [{"type": "text", "text": "Recovered"}]
+        assert len(requests) == 2
+    finally:
+        release.set()
+        assert finished.wait(1)
+        provider.client.close()

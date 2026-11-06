@@ -67,11 +67,11 @@ def _provider_call(create, *, deadline_seconds=None, **kwargs):
 def _completion_client(client, timeout_seconds, timeout_type):
     if timeout_seconds is None:
         return client
-    # A running synchronous request cannot be cancelled by the daemon deadline.
-    # Disable SDK retries so it cannot start more paid requests after we return.
+    # Preserve SDK recovery from transient errors; _provider_call bounds the
+    # entire call, including retry backoff and subsequent attempts.
     # Use the SDK export: newer SDKs use httpx2.Timeout, older ones httpx.Timeout.
     return client.with_options(
-        timeout=timeout_type(timeout_seconds, connect=5.0), max_retries=0
+        timeout=timeout_type(timeout_seconds, connect=5.0)
     )
 
 
