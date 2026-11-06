@@ -1811,6 +1811,10 @@ class ChatProcessor:
                     pending_actions_for_turn.append(
                         pending_actions.add(tool_name, tool_input, confirmation_context)
                     )
+                # Keep the call/result pairing, but never replay bound arguments
+                # into the model or retain them in conversation history. The
+                # pending store has already copied them, if capacity permits.
+                tool_use["input"] = {}
                 tool_results.append(
                     {"tool_use_id": tool_id, "result": refusal("confirmation_required")}
                 )
