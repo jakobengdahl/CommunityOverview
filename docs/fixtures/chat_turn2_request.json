@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Delete the agency\n\n[Selected nodes in the visualization:]\n- Actor: \"Agency\" (ID: n1)\n"
+    },
+    { "role": "assistant", "content": "Mock response from LLM" },
+    { "role": "user", "content": "Keep it after all" }
+  ],
+  "conversation_state": "<conversation_state>",
+  "federation_depth": 1,
+  "visible_node_ids": ["n1"],
+  "selected_node_ids": []
+}

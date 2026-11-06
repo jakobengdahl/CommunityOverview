@@ -19,7 +19,10 @@ describe('chat API federation depth payloads', () => {
   });
 
   it('includes federation_depth in /ui/chat payload when provided', async () => {
-    await sendChatMessage([{ role: 'user', content: 'hello' }], null, { federationDepth: 3 });
+    await sendChatMessage([{ role: 'user', content: 'hello' }], null, {
+      federationDepth: 3,
+      conversationId: 'c',
+    });
 
     expect(global.fetch).toHaveBeenCalledTimes(1);
     const [, options] = global.fetch.mock.calls[0];
@@ -69,7 +72,7 @@ describe('chat progress stream', () => {
       body: { getReader: () => ({ read, cancel, releaseLock }) },
     });
     const onProgress = vi.fn();
-    expect(await sendChatMessage([], null, { onProgress })).toEqual(answer);
+    expect(await sendChatMessage([], null, { onProgress, conversationId: 'c' })).toEqual(answer);
     expect(onProgress.mock.calls).toEqual([[step], [{ kind: 'chat_finished' }]]);
     expect(cancel).toHaveBeenCalledOnce();
     expect(releaseLock).toHaveBeenCalledOnce();
@@ -86,7 +89,9 @@ describe('chat progress stream', () => {
       status: 500,
       json: async () => payload,
     });
-    const ordinary = await sendChatMessage([]).catch((error) => error);
+    const ordinary = await sendChatMessage([], null, { conversationId: 'c' }).catch(
+      (error) => error
+    );
     const read = vi.fn().mockResolvedValueOnce({
       value: new TextEncoder().encode(
         `data: ${JSON.stringify({ kind: 'error', status: 500, response: payload })}\n\n`
@@ -100,7 +105,9 @@ describe('chat progress stream', () => {
       body: { getReader: () => ({ read, cancel, releaseLock }) },
     });
     const onProgress = vi.fn();
-    const streamed = await sendChatMessage([], null, { onProgress }).catch((error) => error);
+    const streamed = await sendChatMessage([], null, { onProgress, conversationId: 'c' }).catch(
+      (error) => error
+    );
     expect(streamed).toBeInstanceOf(Error);
     for (const key of ['message', 'status', 'code', 'data', 'statusOnly'])
       expect(streamed[key]).toEqual(ordinary[key]);
@@ -125,9 +132,27 @@ describe('chat progress stream', () => {
         ok: true,
         body: { getReader: () => ({ read, cancel: vi.fn(), releaseLock: vi.fn() }) },
       });
-      await expect(sendChatMessage([], null, { onProgress: vi.fn() })).rejects.toBeInstanceOf(
-        Error
-      );
+      await expect(
+        sendChatMessage([], null, { onProgress: vi.fn(), conversationId: 'c' })
+      ).rejects.toBeInstanceOf(Error);
     }
   );
+});
+
+describe('chat conversation state', () => {
+  it('refuses a request without a key and replays each key its latest state', async () => {
+    global.fetch.mockReset();
+    await expect(sendChatMessage([])).rejects.toBeInstanceOf(Error);
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    let n = 0;
+    global.fetch.mockImplementation(async () => {
+      n += 1;
+      return { ok: true, json: async () => ({ content: 'ok', conversation_state: `s${n}` }) };
+    });
+    for (const conversationId of ['state-a', 'state-a', 'state-b', 'state-a'])
+      await sendChatMessage([], null, { conversationId });
+    const sent = global.fetch.mock.calls.map(([, o]) => JSON.parse(o.body).conversation_state);
+    expect(sent).toEqual([undefined, 's1', undefined, 's2']);
+  });
 });

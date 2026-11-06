@@ -14,6 +14,7 @@ import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
+import PendingActionCard from './PendingActionCard';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -26,6 +27,17 @@ const formatAnswerValue = (value) => {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   return String(value ?? '');
 };
+
+/**
+ * The history to send: exactly what earlier requests sent and received, so the
+ * server can verify the conversation's signed state (ADR 0010 §5). The welcome
+ * text, system notes and display-only entries (error notices, "deletion
+ * cancelled") were never sent, so they stay out.
+ */
+const historyForLLM = (chatMessages) =>
+  chatMessages
+    .filter((m) => m.role !== 'system' && m.id !== 'welcome' && !m.displayOnly)
+    .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
 
 /** Max characters of node context to include with a message to the LLM */
 const MAX_SELECTION_CONTEXT_CHARS = 6000;
@@ -44,6 +56,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const isSheet = variant === 'sheet';
   const {
     chatMessages,
+    chatConversationId,
     sessionEpoch,
     addChatMessage,
     updateChatMessage,
@@ -258,6 +271,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const userMessage = {
       role: 'user',
       content: messageContent, // Show only the user's text in chat
+      llmContent: messageForLLM,
       timestamp: new Date(),
       hasFile: !!uploadedFile,
       filename: uploadedFile?.filename,
@@ -276,13 +290,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const requestSteps = [];
 
     try {
-      const conversationMessages = chatMessages
-        .filter((m) => m.role !== 'system' && m.id !== 'welcome')
-        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      const conversationMessages = historyForLLM(chatMessages);
 
       conversationMessages.push({ role: 'user', content: messageForLLM });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        conversationId: chatConversationId,
         onProgress: (step) => {
           if (!isStaleSessionEpoch(requestEpoch)) {
             requestSteps.push(step);
@@ -308,6 +321,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       const assistantMessage = {
         role: 'assistant',
         content: response.content,
+        pendingActions: response.pending_actions,
+        untrustedContentUsed: response.untrusted_content_used,
         timestamp: new Date(),
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
@@ -333,6 +348,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        displayOnly: true,
         progressSteps: requestSteps,
         timestamp: new Date(),
       });
@@ -400,12 +416,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const requestSteps = [];
 
     try {
-      const conversationMessages = chatMessages
-        .filter((m) => m.id !== 'welcome')
-        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      const conversationMessages = historyForLLM(chatMessages);
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        conversationId: chatConversationId,
         onProgress: (step) => {
           if (!isStaleSessionEpoch(requestEpoch)) {
             requestSteps.push(step);
@@ -431,6 +446,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: response.content,
+        pendingActions: response.pending_actions,
+        untrustedContentUsed: response.untrusted_content_used,
         timestamp: new Date(),
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
@@ -440,6 +457,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        displayOnly: true,
         progressSteps: requestSteps,
         timestamp: new Date(),
       });
@@ -457,12 +475,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const requestSteps = [];
 
     try {
-      const conversationMessages = chatMessages
-        .filter((m) => m.id !== 'welcome')
-        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      const conversationMessages = historyForLLM(chatMessages);
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        conversationId: chatConversationId,
         onProgress: (step) => {
           if (!isStaleSessionEpoch(requestEpoch)) {
             requestSteps.push(step);
@@ -478,6 +495,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: response.content,
+        pendingActions: response.pending_actions,
+        untrustedContentUsed: response.untrusted_content_used,
         progressSteps: requestSteps,
         timestamp: new Date(),
       });
@@ -497,12 +516,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const requestSteps = [];
 
     try {
-      const conversationMessages = chatMessages
-        .filter((m) => m.id !== 'welcome')
-        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      const conversationMessages = historyForLLM(chatMessages);
       conversationMessages.push({ role: 'user', content: msg });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        conversationId: chatConversationId,
         onProgress: (step) => {
           if (!isStaleSessionEpoch(requestEpoch)) {
             requestSteps.push(step);
@@ -529,6 +547,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: response.content,
+        pendingActions: response.pending_actions,
+        untrustedContentUsed: response.untrusted_content_used,
         timestamp: new Date(),
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
@@ -538,6 +558,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        displayOnly: true,
         progressSteps: requestSteps,
         timestamp: new Date(),
       });
@@ -550,6 +571,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     addChatMessage({
       role: 'assistant',
       content: t('chat.delete_cancelled'),
+      displayOnly: true,
       timestamp: new Date(),
     });
   };
@@ -576,12 +598,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     const requestSteps = [];
 
     try {
-      const conversationMessages = chatMessages
-        .filter((m) => m.role !== 'system' && m.id !== 'welcome')
-        .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+      const conversationMessages = historyForLLM(chatMessages);
       conversationMessages.push({ role: 'user', content: llmContent });
 
       const response = await api.sendChatMessage(conversationMessages, null, {
+        conversationId: chatConversationId,
         onProgress: (step) => {
           if (!isStaleSessionEpoch(requestEpoch)) {
             requestSteps.push(step);
@@ -601,6 +622,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: response.content,
+        pendingActions: response.pending_actions,
+        untrustedContentUsed: response.untrusted_content_used,
         timestamp: new Date(),
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
@@ -611,6 +634,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       addChatMessage({
         role: 'assistant',
         content: t('chat.error_prefix', { message: err.message }),
+        displayOnly: true,
         progressSteps: requestSteps,
         timestamp: new Date(),
       });
@@ -952,6 +976,14 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                     </div>
                   </div>
                 )}
+
+                {msg.untrustedContentUsed && (
+                  <div className="message-untrusted-notice">{t('chat.untrusted_content_used')}</div>
+                )}
+
+                {msg.pendingActions?.map((action) => (
+                  <PendingActionCard key={action.token} action={action} disabled={isProcessing} />
+                ))}
 
                 {msg.form && (
                   <CollectionForm
