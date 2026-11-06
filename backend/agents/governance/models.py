@@ -98,6 +98,7 @@ class Proposal:
     # staged session stages, never skipping the layer.
     session_id: Optional[str] = None
     causation_depth: int = 1
+    tainted: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.autonomy_level, AutonomyLevel):
@@ -134,6 +135,7 @@ class Proposal:
             "decided_at": _iso(self.decided_at),
             "session_id": self.session_id,
             "causation_depth": self.causation_depth,
+            "tainted": self.tainted,
         }
 
     @classmethod
@@ -147,6 +149,7 @@ class Proposal:
         )
         prop.id = data.get("id", prop.id)
         prop.status = ProposalStatus(data.get("status", ProposalStatus.PENDING.value))
+        prop.tainted = bool(data.get("tainted", False))
         prop.run_id = data.get("run_id")
         prop.correlation_id = data.get("correlation_id")
         prop.decided_by = data.get("decided_by")

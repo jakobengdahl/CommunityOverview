@@ -407,7 +407,15 @@ Attachment writes follow the autonomy table above: blocked under `observe` and
 call also requires the authorization hook to allow it. These gates do not add
 attachment tool implementations; see [Node attachments](../backend/DEVELOPMENT.md#node-attachments).
 
-Other read-only tools always run (subject to the allowlist). A mutating call under
+Once any tool returns `untrusted_content: true`, the run is tainted. For the
+rest of that run, tools outside the `GRAPH` integration and graph tools outside
+the fixed `ATTACHMENT_TAINT_PERMITTED_TOOLS` set are refused, except for graph
+writes governed by the autonomy table. Without a proposal store, tainted runs
+refuse all writes. All proposals from that run expose `tainted: true`, including
+proposals recorded before the read. Applying one preserves tainted logging:
+tool names and argument sizes, without argument values or exception text.
+
+In a clean run, other read-only tools run subject to the allowlist. A mutating call under
 `propose` / `act_after_approval` is **not executed** — it becomes a durable
 `Proposal` (tool, arguments, agent, autonomy level, run correlation) with a
 persistent approve/reject decision and attribution. Advanced multi-approver /
