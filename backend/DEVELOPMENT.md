@@ -221,6 +221,9 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
 | `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
+| `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | Lifetime in seconds of a single-use chat confirmation token |
+| `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | Maximum pending actions recorded by one chat turn |
+| `ATTACHMENT_PENDING_ACTIONS_MAX` | `1000` | Process-local pending action limit; oldest entries are evicted first |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
 | `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
@@ -1940,6 +1943,7 @@ own.
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
 | POST | `/ui/chat/stream` | POST SSE: LLM rounds, optional capped reasoning, tool start/finish, final chat response; 15-second keep-alive comments |
+| POST | `/ui/chat/confirm` | Execute one bound pending action with `{ "token": "…" }` under the confirming request's authorization |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -1947,6 +1951,19 @@ own.
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
 | GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
+
+Chat replies include ordered `pending_actions` cards when a tool result marks the
+turn as containing untrusted file content. Only the fixed read/view tool set runs
+subsequently; other calls return `confirmation_required` to the model. Tokens and
+bound arguments appear only in the API cards. Confirmations recheck the actor,
+collection identity, current permissions and allowlist and execute the recorded
+call once, without another model call. Expired, evicted, used or unknown tokens
+return `confirmation_unknown`; actor or collection mismatches return
+`access_denied`. Pending actions live only in the process that minted them and
+are lost on restart: use a single worker or sticky routing. The three confirmation
+settings above accept positive integers; invalid values use their defaults.
+Conversation taint across turns and client confirmation rendering are separate
+from this within-turn guard.
 
 `/ui/chat/stream` accepts the same body as `/ui/chat`. SSE `data` frames contain
 `kind`: `llm_started` (with `round`), `tool_started` or `tool_finished` (with

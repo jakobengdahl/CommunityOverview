@@ -670,6 +670,13 @@ round is limited to 12,000 characters. Reasoning stays in memory for the open
 chat and is never included in later prompts or saved to graph/session history.
 Models without separate reasoning show only the usual progress and answer.
 
+When the assistant reads text from node attachments, that text is treated as
+untrusted data. For the rest of that request, it can continue reading and adjusting
+your view, but actions that write data require a separate confirmation. Clients
+that support the confirmation API can show the exact pending tool and arguments;
+chat text alone cannot approve an action. This safeguard applies to collection
+kiosks as well.
+
 The assistant responds in whatever language you write in — switch mid-conversation freely.
 
 Responses support **Markdown**: bold text, bullet lists, tables, and inline code are

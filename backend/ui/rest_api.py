@@ -123,6 +123,11 @@ class ChatResponse(BaseModel):
     content: str = Field(..., description="LLM response text")
     toolUsed: Optional[str] = Field(None, description="Name of tool used (if any)")
     toolResult: Optional[Any] = Field(None, description="Result from tool (if any)")
+    pending_actions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ConfirmActionRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=256)
 
 
 class UploadResponse(BaseModel):
@@ -220,9 +225,21 @@ def create_ui_router(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
+                pending_actions=result.get("pending_actions", []),
             )
-        except Exception:
-            logger.exception("Error in /chat endpoint")
+        except Exception as exc:
+            logger.error("Error in /chat endpoint: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    @router.post("/chat/confirm")
+    async def confirm_action(request: ConfirmActionRequest, http_request: Request):
+        try:
+            with use_request_authorization(headers=http_request.headers):
+                return await run_chat_off_event_loop(
+                    chat_service.confirm_action, token=request.token
+                )
+        except Exception as exc:
+            logger.error("Error in /chat/confirm endpoint: %s", type(exc).__name__)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     # Retain disconnected workers until completion, matching non-streaming chats.
@@ -258,8 +275,10 @@ def create_ui_router(
                             "response": {"detail": exc.detail},
                         }
                     )
-                except Exception:
-                    logger.exception("Error encoding /chat/stream response")
+                except Exception as exc:
+                    logger.error(
+                        "Error encoding /chat/stream response: %s", type(exc).__name__
+                    )
                     emit(
                         {
                             "kind": "error",
@@ -327,9 +346,10 @@ def create_ui_router(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
+                pending_actions=result.get("pending_actions", []),
             )
-        except Exception:
-            logger.exception("Error in /chat/simple endpoint")
+        except Exception as exc:
+            logger.error("Error in /chat/simple endpoint: %s", type(exc).__name__)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/propose-nodes")
@@ -446,12 +466,13 @@ def create_ui_router(
                     content=chat_result.get("content", ""),
                     toolUsed=chat_result.get("toolUsed"),
                     toolResult=chat_result.get("toolResult"),
+                    pending_actions=chat_result.get("pending_actions", []),
                 )
 
             return response
 
-        except Exception:
-            logger.exception("Error in /upload endpoint")
+        except Exception as exc:
+            logger.error("Error in /upload endpoint: %s", type(exc).__name__)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/upload/extract")
