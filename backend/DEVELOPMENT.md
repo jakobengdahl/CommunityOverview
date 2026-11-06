@@ -1233,6 +1233,16 @@ or `Sec-Fetch-Site: none`, or a non-empty `X-Requested-With` header (for example
 `X-Requested-With: api-client`). This prevents cross-site forms from writing with
 cached browser credentials; it also applies to raw-body routes.
 
+The request actor that the authorization hook, audit records and runtime context
+see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
+`x-communityoverview-actor-id`, `-actor-type` and `-auth-source` headers on every
+request, auth active or not, and the auth middleware then supplies the Basic
+username (or the configured user, for a session cookie) with auth source `basic`
+or `session`. A bearer token carries no user, so its requests have no actor.
+`TRUST_ACTOR_HEADERS=true` keeps the inbound headers instead (filling them from
+the authenticated identity only where absent); set it only behind a proxy that
+authenticates users and overwrites those headers on every request it forwards.
+
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
 

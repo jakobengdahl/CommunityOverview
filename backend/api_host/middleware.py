@@ -13,6 +13,11 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from backend.runtime.extensions import RuntimeExtensions, bind_runtime_extensions
+from backend.runtime.request_context import (
+    ACTOR_ID_HEADER,
+    ACTOR_TYPE_HEADER,
+    AUTH_SOURCE_HEADER,
+)
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
@@ -29,6 +34,41 @@ class RuntimeExtensionsMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         with bind_runtime_extensions(self.runtime_extensions):
             await self.app(scope, receive, send)
+
+
+_ACTOR_HEADERS = tuple(
+    name.encode("latin-1")
+    for name in (ACTOR_ID_HEADER, ACTOR_TYPE_HEADER, AUTH_SOURCE_HEADER)
+)
+# Scope key the auth middleware fills with the identity it authenticated.
+AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
+
+
+class ActorHeaderMiddleware:
+    """Make the request actor headers carry the authenticated identity only.
+
+    Must sit inside the auth middleware, which records the identity in the scope.
+    """
+
+    def __init__(self, app: ASGIApp, trust_actor_headers: bool = False):
+        self.app = app
+        self.trust_actor_headers = trust_actor_headers
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] in ("http", "websocket"):
+            headers = list(scope.get("headers") or [])
+            if not self.trust_actor_headers:
+                headers = [h for h in headers if h[0].lower() not in _ACTOR_HEADERS]
+            present = {name.lower() for name, _ in headers}
+            identity = scope.get(AUTHENTICATED_ACTOR_SCOPE_KEY) or {}
+            for name, value in zip(
+                _ACTOR_HEADERS,
+                (identity.get("actor_id"), "user", identity.get("auth_source")),
+            ):
+                if identity.get("actor_id") and value and name not in present:
+                    headers.append((name, value.encode("utf-8")))
+            scope["headers"] = headers
+        await self.app(scope, receive, send)
 
 
 logger = logging.getLogger(__name__)
@@ -343,6 +383,11 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                         "detail": "Session-auth writes require a same-origin request or X-Requested-With"
                     },
                 )
+            # The cookie is only minted for the configured Basic user.
+            request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
+                "actor_id": config.auth_username,
+                "auth_source": "session",
+            }
             return await call_next(request)
 
         if not auth_header:
@@ -365,6 +410,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 ok_pass = secrets.compare_digest(password, config.auth_password)
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
+                    "actor_id": username,
+                    "auth_source": "basic",
+                }
                 # Browsers may attach cached Basic credentials to cross-site
                 # forms. Require fetch metadata or a header forms cannot set.
                 if (

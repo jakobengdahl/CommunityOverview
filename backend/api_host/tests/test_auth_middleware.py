@@ -19,6 +19,10 @@ from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 from backend.api_host.middleware import add_auth_middleware
 from backend.api_host.session_auth import SESSION_COOKIE_NAME, mint_session_cookie
+from backend.runtime.authorization import (
+    build_graph_authorization_context,
+    use_request_authorization,
+)
 
 
 def _make_config(**overrides) -> tuple:
@@ -252,6 +256,43 @@ def test_custom_header_does_not_replace_credentials(authorization):
     response = TestClient(app).post("/api/write", content=b"payload", headers=headers)
     assert response.status_code == 401
     assert writes == []
+
+
+@pytest.mark.parametrize(
+    "auth_enabled,trusted,credentials,expected",
+    [
+        (True, False, _auth_header("admin", "pw"), ("admin", "basic")),
+        (True, False, {"Authorization": "Bearer tok"}, ("", "anonymous")),
+        (False, False, {}, ("", "anonymous")),
+        (True, True, _auth_header("admin", "pw"), ("bob", "proxy")),
+    ],
+)
+def test_actor_comes_from_authenticated_identity_unless_headers_trusted(
+    auth_enabled, trusted, credentials, expected
+):
+    config, _ = _make_config(
+        auth_enabled=auth_enabled,
+        auth_password="pw",
+        auth_bearer_token="tok",
+        trust_actor_headers=trusted,
+    )
+    app = create_app(config)
+
+    async def probe(request: Request):
+        with use_request_authorization(headers=request.headers):
+            actor = build_graph_authorization_context(action="read", target="x").actor
+        return [actor["actor_id"], actor["auth_source"]]
+
+    app.add_api_route("/api/actor-probe", probe)
+    spoofed = {
+        "x-communityoverview-actor-id": "bob",
+        "x-communityoverview-auth-source": "proxy",
+    }
+    with patch.dict(os.environ, {"COMMUNITYOVERVIEW_ACTOR_ID": ""}):
+        response = TestClient(app).get(
+            "/api/actor-probe", headers={**spoofed, **credentials}
+        )
+    assert tuple(response.json()) == expected
 
 
 class TestMcpBasicAuth:

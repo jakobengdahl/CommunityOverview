@@ -357,6 +357,8 @@ def app_config(temp_graph_file, temp_static_dirs, tmp_path) -> AppConfig:
         api_prefix="/api",
         auth_enabled=False,
         mcp_basic_auth=False,
+        # Tests pass the request actor as a header, as an authenticating proxy would.
+        trust_actor_headers=True,
     )
 
 
