@@ -101,10 +101,21 @@
     "delete_cancelled": "Borttagning avbruten.",
     "selected_nodes": "{count} noder markerade",
     "minimize": "Minimera",
+    "new_conversation": "Nytt samtal",
+    "new_conversation_tooltip": "Starta ett nytt samtal; tidigare meddelanden och filinnehåll skickas inte längre",
     "clear_selection": "Rensa markering",
     "placeholder_with_selection": "Ställ en fråga om de markerade noderna...",
     "model_profile": "Modellprofil",
-    "model_profile_selection_disabled": "Val av modellprofil är inaktiverat"
+    "model_profile_selection_disabled": "Val av modellprofil är inaktiverat",
+    "untrusted_content_used": "Svaret använde text från bifogade filer. Skrivningar kräver din bekräftelse.",
+    "pending_action_title": "Åtgärd som väntar på din bekräftelse",
+    "pending_action_notice": "Filinnehåll fanns i samtalet. Assistenten bad om att köra åtgärden nedan; kontrollera exakt verktyg och argument innan du bekräftar.",
+    "pending_action_tool": "Verktyg:",
+    "pending_action_confirm": "Bekräfta och kör",
+    "pending_action_done": "Klart.",
+    "pending_action_unknown": "Bekräftelsen gäller inte längre. Skicka begäran igen.",
+    "pending_action_denied": "Du får inte bekräfta den här åtgärden.",
+    "pending_action_failed": "Åtgärden misslyckades: {message}"
   },
   "detail": {
     "summary": "Sammanfattning",

@@ -111,6 +111,12 @@ class ChatRequest(BaseModel):
         None,
         description="IDs of nodes the user has selected in the canvas",
     )
+    conversation_state: Optional[str] = Field(
+        None,
+        max_length=4096,
+        description="Signed state from the previous response; without a valid "
+        "clean one a continued conversation starts tainted",
+    )
 
     @field_validator("visible_node_ids", "selected_node_ids", mode="before")
     @classmethod
@@ -151,6 +157,12 @@ class ChatResponse(BaseModel):
     toolUsed: Optional[str] = Field(None, description="Name of tool used (if any)")
     toolResult: Optional[Any] = Field(None, description="Result from tool (if any)")
     pending_actions: List[Dict[str, Any]] = Field(default_factory=list)
+    conversation_state: Optional[str] = Field(
+        None, description="Signed state to send with the next request"
+    )
+    untrusted_content_used: bool = Field(
+        False, description="Attachment file content was in this turn"
+    )
 
 
 class ConfirmActionRequest(BaseModel):
@@ -247,6 +259,7 @@ def create_ui_router(
                     collection_short_name=request.collection_short_name,
                     visible_node_ids=request.visible_node_ids,
                     selected_node_ids=request.selected_node_ids,
+                    conversation_state=request.conversation_state,
                 )
 
             return ChatResponse(
@@ -254,6 +267,8 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
                 pending_actions=result.get("pending_actions", []),
+                conversation_state=result.get("conversation_state"),
+                untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
         except Exception as exc:
             _log_chat_exception("Error in /chat endpoint", exc)
@@ -377,6 +392,8 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
                 pending_actions=result.get("pending_actions", []),
+                conversation_state=result.get("conversation_state"),
+                untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
         except Exception as exc:
             _log_chat_exception("Error in /chat/simple endpoint", exc)
@@ -498,6 +515,10 @@ def create_ui_router(
                     toolUsed=chat_result.get("toolUsed"),
                     toolResult=chat_result.get("toolResult"),
                     pending_actions=chat_result.get("pending_actions", []),
+                    conversation_state=chat_result.get("conversation_state"),
+                    untrusted_content_used=bool(
+                        chat_result.get("untrusted_content_used")
+                    ),
                 )
 
             return response

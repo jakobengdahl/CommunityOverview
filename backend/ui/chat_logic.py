@@ -65,13 +65,20 @@ def _chat_logging_boundary(method):
         tainted = False
         try:
             with content_logging(
+                tainted=kwargs.get("start_tainted", False),
                 known_tools={
                     *self.tools_map,
                     *(t["name"] for t in self.tool_definitions),
-                }
+                },
             ) as state:
                 try:
-                    return method(self, *args, **kwargs)
+                    result = method(self, *args, **kwargs)
+                    if (
+                        isinstance(result, dict)
+                        and kwargs.get("confirmed_call") is None
+                    ):
+                        result["untrusted_content_used"] = state["tainted"]
+                    return result
                 finally:
                     tainted = state["tainted"]
         finally:
@@ -1540,6 +1547,7 @@ class ChatProcessor:
         attachment_access: Optional[Callable[[str], str]] = None,
         confirmation_context: Optional[Dict] = None,
         confirmed_call: Optional[Dict] = None,
+        start_tainted: bool = False,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1573,6 +1581,9 @@ class ChatProcessor:
             confirmed_call: Internal single-call execution entry point. The service
                 consumes and validates its token before passing this bound call; no
                 model is invoked and all ordinary tool permission gates still apply.
+            start_tainted: The turn continues a conversation the server cannot vouch
+                is clean, so the taint guard applies from its first tool call. The
+                result's ``untrusted_content_used`` reports whether the turn was tainted.
             llm_provider: Optional ready-made LLMProvider to use verbatim,
                 bypassing provider resolution entirely (api_key, provider and
                 model_profile_id are then unused). Used by the evaluation harness

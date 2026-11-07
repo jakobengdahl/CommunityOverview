@@ -13,6 +13,7 @@ consistency and proper validation.
 
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
+import copy
 import functools
 import contextvars
 import logging
@@ -29,6 +30,7 @@ from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_creat
 from backend.runtime.attachment_access import validate_attachment_setting
 
 from backend.ui.attachment_confirmation import pending_actions, request_actor, refusal
+from backend.ui import conversation_state as conversation_states
 
 logger = logging.getLogger(__name__)
 
@@ -806,6 +808,7 @@ class ChatService:
         visible_node_ids: Optional[List[str]] = None,
         selected_node_ids: Optional[List[str]] = None,
         llm_provider: Optional[Any] = None,
+        conversation_state: Optional[str] = None,
         _confirmation: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
@@ -840,12 +843,17 @@ class ChatService:
                 resolving one from env/model profiles. Passed through to
                 ChatProcessor.process_message for the evaluation harness
                 (backend/evaluation); see that parameter's docstring there.
+            conversation_state: The token the previous response returned. Without
+                a valid, clean one, a request continuing a conversation starts
+                tainted (ADR 0010 §5).
 
         Returns:
             Dict with:
             - content: The text response from the LLM
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
+            - conversation_state, untrusted_content_used: The signed state for
+              the next request and whether this turn was tainted
         """
         effective_prefix, collection_perms, collect_responses = (
             run_on_event_loop(
@@ -993,10 +1001,22 @@ class ChatService:
             # visualization_context comes last — most immediate situational snapshot.
             from backend.service.attachment_tools import tool_caller
 
+            start_tainted = False
+            if _confirmation is None:
+                # Snapshot before the tool loop appends to the history.
+                received = copy.deepcopy(
+                    [
+                        {"role": m.get("role"), "content": m.get("content")}
+                        for m in messages
+                    ]
+                )
+                start_tainted = not conversation_states.starts_clean(
+                    received, conversation_state, context["actor"]
+                )
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name
             ):
-                return self._processor.process_message(
+                result = self._processor.process_message(
                     messages=messages,
                     api_key=api_key,
                     provider=provider,
@@ -1010,7 +1030,19 @@ class ChatService:
                     attachment_access=attachment_access,
                     confirmation_context=context,
                     confirmed_call=_confirmation.get("call") if _confirmation else None,
+                    start_tainted=start_tainted,
                 )
+            if _confirmation is None:
+                result["content"] = (
+                    result.get("content") or conversation_states.EMPTY_REPLY_TEXT
+                )
+                result["conversation_state"] = conversation_states.issue(
+                    tainted=result.get("untrusted_content_used", True),
+                    actor=context["actor"],
+                    messages=received,
+                    reply=result["content"],
+                )
+            return result
         finally:
             _request_federation_depth.reset(federation_depth_token)
 

@@ -671,11 +671,17 @@ chat and is never included in later prompts or saved to graph/session history.
 Models without separate reasoning show only the usual progress and answer.
 
 When the assistant reads text from node attachments, that text is treated as
-untrusted data. For the rest of that request, it can continue reading and adjusting
-your view, but actions that write data require a separate confirmation. Clients
-that support the confirmation API can show the exact pending tool and arguments;
-chat text alone cannot approve an action. This safeguard applies to collection
-kiosks as well.
+untrusted data. For the rest of that conversation, it can continue reading and
+adjusting your view, but actions that write data require your confirmation. The
+answer then says that it used text from attached files, and each write the
+assistant asked for appears as a card showing the exact tool and arguments with a
+**Confirm and run** button; only that button runs it, never chat text. If the
+card says the confirmation is no longer valid, send the request again. The
+**New conversation** button below the chat input starts a new conversation
+without this restriction; earlier messages and file text are no longer sent. The same applies in
+collection kiosks, where a new conversation starts each time the kiosk is opened.
+
+![Pending action card in the chat](images/chat-pending-action.png)
 
 The assistant responds in whatever language you write in — switch mid-conversation freely.
 
