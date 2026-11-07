@@ -1,6 +1,6 @@
 // covers: frontend/web/src/components/ChatPanel.jsx, frontend/web/src/components/PendingActionCard.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import ChatPanel from './ChatPanel';
 import useGraphStore from '../store/graphStore';
 import fixture from '../../../../docs/fixtures/chat_turn2_request.json';
@@ -163,7 +163,7 @@ describe('ChatPanel conversation state', () => {
     expect(sentBody(5).messages).toEqual([{ role: 'user', content: 'fresh' }]);
   });
 
-  it('shows a pending action exactly as recorded and runs it only through the confirmation route', async () => {
+  it('shows a pending action exactly as recorded, runs it only through the confirmation route and applies its result', async () => {
     resetStore();
     const action = { token: 't-1', tool: 'add_nodes', arguments: { nodes: [{ name: 'X' }] } };
     global.fetch
@@ -174,7 +174,13 @@ describe('ChatPanel conversation state', () => {
           untrusted_content_used: true,
         })
       )
-      .mockResolvedValueOnce(json({ success: true }));
+      .mockResolvedValueOnce(
+        json({
+          content: 'Added X',
+          toolUsed: 'add_nodes',
+          toolResult: { nodes: [{ id: 'x1', type: 'Actor', name: 'X' }], edges: [] },
+        })
+      );
     render(<ChatPanel />);
     await send('read the file');
 
@@ -188,7 +194,11 @@ describe('ChatPanel conversation state', () => {
     const [url, options] = global.fetch.mock.calls[1];
     expect(url).toMatch(/\/ui\/chat\/confirm$/);
     expect(JSON.parse(options.body)).toEqual({ token: 't-1' });
-    expect(await screen.findByRole('status')).toBeInTheDocument();
+    const status = await screen.findByRole('status');
+    expect(within(status).getByText('Added X')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useGraphStore.getState().nodes.map((node) => node.id)).toEqual(['x1'])
+    );
     expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
   });
 });

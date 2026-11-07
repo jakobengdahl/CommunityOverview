@@ -983,7 +983,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                 )}
 
                 {msg.pendingActions?.map((action) => (
-                  <PendingActionCard key={action.token} action={action} disabled={isProcessing} />
+                  <PendingActionCard
+                    key={action.token}
+                    action={action}
+                    disabled={isProcessing}
+                    onConfirmed={(result) => applyToolResultSideEffects(result?.toolResult)}
+                  />
                 ))}
 
                 {msg.form && (
