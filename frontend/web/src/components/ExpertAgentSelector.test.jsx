@@ -27,6 +27,19 @@ function renderWithExperts(availableExperts) {
   return view;
 }
 
+describe('ExpertAgentSelector while a chat request is in flight', () => {
+  it('cannot toggle an expert, even from an already open panel', () => {
+    const { container, rerender, getByTitle } = renderWithExperts([
+      { id: 'expert', name: 'Expert', specialty: 'none', color: '#000000' },
+    ]);
+    expect(container.querySelector('.expert-selector-item')).not.toBeNull();
+
+    rerender(<ExpertAgentSelector disabled />);
+    expect(container.querySelector('.expert-selector-item')).toBeNull();
+    expect(getByTitle('experts.toggle_panel').disabled).toBe(true);
+  });
+});
+
 describe('ExpertAgentSelector icon resolution', () => {
   it('falls back to the default agent glyph when the icon name is an Object prototype member', () => {
     const { container } = renderWithExperts([

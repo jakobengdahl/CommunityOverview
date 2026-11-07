@@ -1112,7 +1112,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         )}
 
         <div className="button-row">
-          <ExpertAgentSelector />
+          <ExpertAgentSelector disabled={isProcessing} />
           {modelProfiles.length > 0 && (
             <select
               className="model-profile-select"
