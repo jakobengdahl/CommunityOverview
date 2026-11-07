@@ -64,32 +64,49 @@ def issue(*, tainted, actor, messages, reply):
     return f"{body}.{_sign(body)}"
 
 
-def starts_clean(messages, token, actor):
-    """Whether a request may start untainted; anything unverifiable is tainted."""
+# Outcomes of taint_status.
+CLEAN = "clean"
+TAINTED = "tainted"
+UNVERIFIED = "unverified"
+
+
+def taint_status(messages, token, actor):
+    """CLEAN, TAINTED (a valid token says so) or UNVERIFIED (treat as tainted)."""
     last = max(
         (i for i, m in enumerate(messages) if m.get("role") == "assistant"),
         default=-1,
     )
     if last < 0:
-        return True
+        return CLEAN
     # Non-ASCII would make compare_digest or body.encode() raise, not refuse.
     if not isinstance(token, str) or not token.isascii() or token.count(".") != 1:
-        return False
+        return UNVERIFIED
     body, signature = token.split(".")
     if not hmac.compare_digest(signature, _sign(body)):
-        return False
+        return UNVERIFIED
     try:
         state = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except ValueError:
-        return False
+        return UNVERIFIED
     if not isinstance(state, dict):
-        return False
+        return UNVERIFIED
     issued_at = state.get("issued_at")
     ttl = positive_int_setting("ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS", 86400)
-    return (
-        state.get("tainted") is False
-        and state.get("actor") == actor
+    if not (
+        state.get("actor") == actor
         and isinstance(issued_at, int)
         and 0 <= time.time() - issued_at <= ttl
-        and state.get("hash") == conversation_hash(messages[: last + 1])
-    )
+    ):
+        return UNVERIFIED
+    # A signed taint holds even if the history was edited since: dropping the
+    # attachment-derived turns must not launder it.
+    if state.get("tainted") is not False:
+        return TAINTED
+    if state.get("hash") != conversation_hash(messages[: last + 1]):
+        return UNVERIFIED
+    return CLEAN
+
+
+def starts_clean(messages, token, actor):
+    """Whether a request may start untainted; anything unverifiable is tainted."""
+    return taint_status(messages, token, actor) == CLEAN

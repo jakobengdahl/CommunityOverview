@@ -1013,14 +1013,20 @@ class ChatService:
                         for m in messages
                     ]
                 )
-                inherited_taint = not conversation_states.starts_clean(
+                status = conversation_states.taint_status(
                     received, conversation_state, context["actor"]
                 )
+                inherited_taint = status != conversation_states.CLEAN
                 # Only attachment reads taint. Without access an unverifiable
                 # state (restart, another worker) must not turn writes into
-                # pending actions; the taint is still carried in the token.
-                start_tainted = inherited_taint and any(
-                    attachment_access(name) != "off" for name in ATTACHMENT_READ_TOOLS
+                # pending actions; the taint is still carried in the token. A
+                # verified taint holds whatever the current access.
+                start_tainted = status == conversation_states.TAINTED or (
+                    inherited_taint
+                    and any(
+                        attachment_access(name) != "off"
+                        for name in ATTACHMENT_READ_TOOLS
+                    )
                 )
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name

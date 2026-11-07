@@ -50,6 +50,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
         ("other_process_no_access", False),
         ("replayed", True),
         ("tainted", True),
+        ("tainted_no_access", True),
     ],
 )
 def test_continued_conversation_is_clean_only_with_valid_clean_state(
@@ -62,14 +63,14 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     if change == "shared_key":
         monkeypatch.setenv("ATTACHMENT_CONVERSATION_STATE_KEY", "shared")
     first_calls = ()
-    if change == "tainted":
+    if change in ("tainted", "tainted_no_access"):
         service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
         first_calls = [{"name": "get_schema", "input": {}}]
     # A lone surrogate passes JSON validation; it is hashed, not a 500.
     text = "hi\ud800" if change == "surrogate_message" else "hi"
     messages = [{"role": "user", "content": text}]
     first = turn(service, llm, messages, calls=first_calls)
-    assert first["untrusted_content_used"] is (change == "tainted")
+    assert first["untrusted_content_used"] is change.startswith("tainted")
     messages += [
         {"role": "assistant", "content": first["content"]},
         {"role": "user", "content": text.replace("hi", "write")},
@@ -95,6 +96,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         headers = {**ACTOR, "x-communityoverview-actor-id": "b"}
     elif change in ("other_process", "other_process_no_access", "shared_key"):
         monkeypatch.setattr(conversation_state, "_PROCESS_KEY", secrets.token_bytes(32))
+    elif change == "tainted_no_access":
+        # A verified taint holds even where no attachment can be read now.
+        service._assistant_attachment_access = "off"
     elif change == "replayed":
         second = turn(service, llm, messages, state)
         assert second["untrusted_content_used"] is False
