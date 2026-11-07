@@ -21,7 +21,7 @@ UNKNOWN = "1111-2222-3333-4444"
 def client(app_config, mock_llm_provider):
     config = dataclasses.replace(app_config, graph_staged_sessions="true")
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
-        yield TestClient(create_app(config))
+        yield TestClient(create_app(config), client=("127.0.0.1", 50000))
 
 
 def _staged(client) -> str:

@@ -25,6 +25,9 @@ from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
 from .session_auth import request_has_valid_session
 
 
+logger = logging.getLogger(__name__)
+
+
 class RuntimeExtensionsMiddleware:
     """Keep the selected runtime bound through requests and streamed responses."""
 
@@ -56,20 +59,21 @@ class ActorHeaderMiddleware:
     def __init__(self, app: ASGIApp, trusted_actor_proxies=()):
         self.app = app
         self._proxy_networks = []
-        self._proxy_hosts = set()
         for entry in trusted_actor_proxies:
             try:
                 self._proxy_networks.append(ipaddress.ip_network(entry, strict=False))
             except ValueError:
-                # Not an address: matched verbatim against the reported peer.
-                self._proxy_hosts.add(entry)
+                # A hostname or typo would never match a peer address; say so
+                # instead of silently trusting nothing.
+                logger.warning(
+                    "Ignoring TRUSTED_ACTOR_PROXIES entry %r: not an IP or CIDR range",
+                    entry,
+                )
 
     def _peer_is_trusted_proxy(self, scope: Scope) -> bool:
         client = scope.get("client")
         if not client or not client[0]:
             return False
-        if client[0] in self._proxy_hosts:
-            return True
         try:
             peer = ipaddress.ip_address(client[0])
         except ValueError:
@@ -92,8 +96,6 @@ class ActorHeaderMiddleware:
             scope["headers"] = headers
         await self.app(scope, receive, send)
 
-
-logger = logging.getLogger(__name__)
 
 # Sign-in page shown to browsers on an unauthenticated navigation. It carries a
 # real credential form that POSTs to /auth/login and sets a session cookie, so

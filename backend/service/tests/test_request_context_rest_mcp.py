@@ -35,10 +35,10 @@ def app_client(tmp_path, monkeypatch):
     graph_file = str(tmp_path / "graph.json")
     # Headers carry the actor here as an authenticating proxy would set them.
     config = AppConfig(
-        auth_enabled=False, graph_file=graph_file, trusted_actor_proxies=["testclient"]
+        auth_enabled=False, graph_file=graph_file, trusted_actor_proxies=["127.0.0.1"]
     )
     app = create_app(config)
-    return TestClient(app), app
+    return TestClient(app, client=("127.0.0.1", 50000)), app
 
 
 class CaptureAuthorizationHook:
@@ -374,12 +374,12 @@ class TestRequestContextMcpTools:
             config = AppConfig(
                 auth_enabled=False,
                 graph_file=str(tmp_path / "graph.json"),
-                trusted_actor_proxies=["testclient"],
+                trusted_actor_proxies=["127.0.0.1"],
             )
             app = create_app(config)
             holder["app"] = app
             app.state.graph_service._authorization_hook = hook
-            client = TestClient(app)
+            client = TestClient(app, client=("127.0.0.1", 50000))
 
         response = client.post(
             "/mcp",
@@ -455,13 +455,13 @@ class TestRequestContextMcpTools:
             config = AppConfig(
                 auth_enabled=False,
                 graph_file=str(tmp_path / "graph.json"),
-                trusted_actor_proxies=["testclient"],
+                trusted_actor_proxies=["127.0.0.1"],
             )
             app = create_app(config)
         holder["app"] = app
         app.state.graph_service._authorization_hook = hook
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             response = client.post(
                 "/mcp",
                 headers={

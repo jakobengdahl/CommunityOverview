@@ -6,6 +6,7 @@ Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 import base64
 import io
 import json
+import logging
 import os
 import tempfile
 import zipfile
@@ -284,6 +285,9 @@ def test_custom_header_does_not_replace_credentials(authorization):
         (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
         # The listed peer is the connecting address, not X-Forwarded-For.
         (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
+        # Entries must be IPs or CIDR ranges; a name equal to the peer string
+        # is not trusted.
+        (False, ["testclient"], "testclient", {}, "", ("", "anonymous")),
         # A bearer or unauthenticated request falls back to the operator's
         # configured default actor, never the spoofed header.
         (
@@ -299,7 +303,7 @@ def test_custom_header_does_not_replace_credentials(authorization):
     ],
 )
 def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
-    auth_enabled, proxies, peer, credentials, env_actor, expected
+    auth_enabled, proxies, peer, credentials, env_actor, expected, caplog
 ):
     config, _ = _make_config(
         auth_enabled=auth_enabled,
@@ -330,6 +334,12 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
             "/api/actor-probe", headers={**spoofed, **credentials}
         )
     assert tuple(response.json()) == expected
+    ignored = [
+        r.args[0]
+        for r in caplog.records
+        if r.name == "backend.api_host.middleware" and r.levelno == logging.WARNING
+    ]
+    assert ignored == [p for p in proxies if p == "testclient"]
 
 
 class TestMcpBasicAuth:

@@ -53,7 +53,7 @@ class _GatedLLM:
 
 def _http(app):
     # Actor headers count only from a trusted proxy peer (see app_config).
-    transport = httpx.ASGITransport(app, client=("testclient", 50000))
+    transport = httpx.ASGITransport(app, client=("127.0.0.1", 50000))
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 

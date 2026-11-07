@@ -1244,7 +1244,8 @@ of their own. Any field still empty after this falls back to the operator's
 variables (`backend/runtime/request_context.py`): with those set, a bearer or
 unauthenticated request gets that configured default actor, never one a client
 chose; with them unset it has no actor (auth source `anonymous`).
-`TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated) keeps the inbound
+`TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated; any other entry,
+such as a hostname, is ignored with a startup warning) keeps the inbound
 headers instead, filling them from the authenticated identity only where absent,
 but only on requests whose socket peer is in that list; every other peer still
 has them stripped. List only a proxy that authenticates users and overwrites

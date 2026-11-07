@@ -618,7 +618,8 @@ type `agent` never fires. Request actors otherwise come from the actor
 headers (`backend/runtime/request_context.py`); the API host strips the
 inbound ones and sets them from the authenticated identity
 (`ActorHeaderMiddleware`), except on requests whose socket peer is a proxy
-listed in `TRUSTED_ACTOR_PROXIES`, which sets them. The peer is the
+listed by IP or CIDR range in `TRUSTED_ACTOR_PROXIES` (other entries are
+ignored with a warning), which sets them. The peer is the
 connecting address, so that setting requires uvicorn's `X-Forwarded-For`
 rewrite to be off (`UVICORN_PROXY_HEADERS=false`); otherwise a loopback
 proxy appears as its end user. A field no header

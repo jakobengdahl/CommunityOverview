@@ -43,7 +43,7 @@ def staged_config(app_config):
 @pytest.fixture
 def client(staged_config, mock_llm_provider):
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
-        yield TestClient(create_app(staged_config))
+        yield TestClient(create_app(staged_config), client=("127.0.0.1", 50000))
 
 
 def _node(client, node_id):

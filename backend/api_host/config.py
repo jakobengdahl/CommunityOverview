@@ -240,8 +240,9 @@ class AppConfig:
     # Actor headers (x-communityoverview-actor-id/-type, auth-source) are client
     # settable, so they are stripped from every request and the actor comes from
     # the authenticated identity. TRUSTED_ACTOR_PROXIES lists the peer addresses
-    # (IPs or CIDR ranges, comma-separated) of proxies that authenticate users and
-    # overwrite those headers; they are kept only on requests from such a peer.
+    # (IPs or CIDR ranges, comma-separated; other entries are ignored) of proxies
+    # that authenticate users and overwrite those headers; they are kept only on
+    # requests from such a peer.
     trusted_actor_proxies: list[str] = field(
         default_factory=lambda: [
             p.strip()
