@@ -286,6 +286,9 @@ def test_custom_header_does_not_replace_credentials(authorization):
             ("admin", "basic"),
         ),
         (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
+        # A dual-stack bind reports an IPv4 peer as IPv4-mapped IPv6.
+        (False, ["10.0.0.0/24"], "::ffff:10.0.0.5", {}, "", ("bob", "proxy")),
+        (False, ["10.0.0.0/24"], "::ffff:10.0.1.5", {}, "", ("", "anonymous")),
         # The listed peer is the connecting address, not X-Forwarded-For.
         (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
         # Entries must be IPs or CIDR ranges; a name equal to the peer string

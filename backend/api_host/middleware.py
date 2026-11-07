@@ -78,6 +78,9 @@ class ActorHeaderMiddleware:
             peer = ipaddress.ip_address(client[0])
         except ValueError:
             return False
+        # A dual-stack bind reports IPv4 peers as ::ffff:a.b.c.d, which never
+        # matches an IPv4 entry because ipaddress does not compare across versions.
+        peer = getattr(peer, "ipv4_mapped", None) or peer
         return any(peer in network for network in self._proxy_networks)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
