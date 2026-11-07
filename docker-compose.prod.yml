@@ -43,6 +43,10 @@ services:
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD=${AUTH_PASSWORD:?AUTH_PASSWORD is required in production}
+      # Peers trusted to set actor headers (see .env.example); with any listed,
+      # set UVICORN_PROXY_HEADERS=false so the peer is the proxy's own address
+      - TRUSTED_ACTOR_PROXIES=${TRUSTED_ACTOR_PROXIES:-}
+      - UVICORN_PROXY_HEADERS=${UVICORN_PROXY_HEADERS:-true}
 
       # === Server ===
       - HOST=0.0.0.0

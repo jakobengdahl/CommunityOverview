@@ -1257,6 +1257,7 @@ end-user addresses would trust direct connections from them. So set
 `UVICORN_PROXY_HEADERS=false` (or pass `--no-proxy-headers`) whenever
 `TRUSTED_ACTOR_PROXIES` is set, and list the proxy's own address as it connects
 to the API host. Client-IP handling then relies on `TRUSTED_PROXY_HOPS` alone.
+Both Compose files pass the two variables through to the container.
 
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:

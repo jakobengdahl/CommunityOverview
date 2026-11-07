@@ -8,10 +8,13 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import zipfile
+from pathlib import Path
 
 import pytest
+import yaml
 from unittest.mock import patch
 
 from fastapi import FastAPI, Request
@@ -340,6 +343,27 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
         if r.name == "backend.api_host.middleware" and r.levelno == logging.WARNING
     ]
     assert ignored == [p for p in proxies if p == "testclient"]
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.prod.yml"]
+)
+def test_compose_passes_actor_proxy_trust_to_the_container_and_trusts_none_by_default(
+    compose_file,
+):
+    """Compose forwards TRUSTED_ACTOR_PROXIES and UVICORN_PROXY_HEADERS; unset, no
+    peer is trusted."""
+    root = Path(__file__).resolve().parents[3]
+    compose = yaml.safe_load((root / compose_file).read_text())
+    entries = dict(e.split("=", 1) for e in compose["services"]["app"]["environment"])
+
+    def resolve(name, host_env):
+        ref = re.fullmatch(r"\$\{(\w+):-([^}]*)\}", entries[name])
+        return host_env.get(ref.group(1), ref.group(2))
+
+    host_env = {"TRUSTED_ACTOR_PROXIES": "10.0.0.5", "UVICORN_PROXY_HEADERS": "false"}
+    assert {n: resolve(n, host_env) for n in host_env} == host_env
+    assert resolve("TRUSTED_ACTOR_PROXIES", {}) == ""
 
 
 class TestMcpBasicAuth:
