@@ -1,3 +1,4 @@
+# covers: backend/runtime/request_context.py
 """Targeted tests for request actor/scope REST and MCP introspection."""
 
 from unittest.mock import patch

@@ -1,3 +1,4 @@
+# covers: backend/api_host/middleware.py
 """
 Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 """
@@ -259,16 +260,17 @@ def test_custom_header_does_not_replace_credentials(authorization):
 
 
 @pytest.mark.parametrize(
-    "auth_enabled,proxies,peer,credentials,expected",
+    "auth_enabled,proxies,peer,credentials,env_actor,expected",
     [
-        (True, [], "10.0.0.5", _auth_header("admin", "pw"), ("admin", "basic")),
-        (True, [], "10.0.0.5", {"Authorization": "Bearer tok"}, ("", "anonymous")),
-        (False, [], "10.0.0.5", {}, ("", "anonymous")),
+        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "", ("admin", "basic")),
+        (True, [], "10.0.0.5", {"Authorization": "Bearer tok"}, "", ("", "anonymous")),
+        (False, [], "10.0.0.5", {}, "", ("", "anonymous")),
         (
             True,
             ["10.0.0.0/24"],
             "10.0.0.5",
             _auth_header("admin", "pw"),
+            "",
             ("bob", "proxy"),
         ),
         (
@@ -276,13 +278,26 @@ def test_custom_header_does_not_replace_credentials(authorization):
             ["10.0.0.0/24"],
             "10.0.1.5",
             _auth_header("admin", "pw"),
+            "",
             ("admin", "basic"),
         ),
-        (False, ["10.0.0.5"], "10.0.1.5", {}, ("", "anonymous")),
+        (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
+        # A bearer or unauthenticated request falls back to the operator's
+        # configured default actor, never the spoofed header.
+        (
+            True,
+            [],
+            "10.0.0.5",
+            {"Authorization": "Bearer tok"},
+            "ops",
+            ("ops", "provided"),
+        ),
+        (False, [], "10.0.0.5", {}, "ops", ("ops", "provided")),
+        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "ops", ("admin", "basic")),
     ],
 )
 def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
-    auth_enabled, proxies, peer, credentials, expected
+    auth_enabled, proxies, peer, credentials, env_actor, expected
 ):
     config, _ = _make_config(
         auth_enabled=auth_enabled,
@@ -302,7 +317,12 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
         "x-communityoverview-actor-id": "bob",
         "x-communityoverview-auth-source": "proxy",
     }
-    with patch.dict(os.environ, {"COMMUNITYOVERVIEW_ACTOR_ID": ""}):
+    env = {
+        "COMMUNITYOVERVIEW_ACTOR_ID": env_actor,
+        "COMMUNITYOVERVIEW_ACTOR_TYPE": "",
+        "COMMUNITYOVERVIEW_AUTH_SOURCE": "",
+    }
+    with patch.dict(os.environ, env):
         response = TestClient(app, client=(peer, 50000)).get(
             "/api/actor-probe", headers={**spoofed, **credentials}
         )

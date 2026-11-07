@@ -1238,7 +1238,12 @@ see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
 `x-communityoverview-actor-id`, `-actor-type` and `-auth-source` headers on every
 request, auth active or not, and the auth middleware then supplies the Basic
 username (or the configured user, for a session cookie) with auth source `basic`
-or `session`. A bearer token carries no user, so its requests have no actor.
+or `session`. A bearer token carries no user, so its requests bring no actor
+of their own. Any field still empty after this falls back to the operator's
+`COMMUNITYOVERVIEW_ACTOR_ID`, `_ACTOR_TYPE` and `_AUTH_SOURCE` environment
+variables (`backend/runtime/request_context.py`): with those set, a bearer or
+unauthenticated request gets that configured default actor, never one a client
+chose; with them unset it has no actor (auth source `anonymous`).
 `TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated) keeps the inbound
 headers instead, filling them from the authenticated identity only where absent,
 but only on requests whose socket peer is in that list; every other peer still

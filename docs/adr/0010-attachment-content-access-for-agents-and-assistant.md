@@ -618,7 +618,9 @@ type `agent` never fires. Request actors otherwise come from the actor
 headers (`backend/runtime/request_context.py`); the API host strips the
 inbound ones and sets them from the authenticated identity
 (`ActorHeaderMiddleware`), except on requests whose socket peer is a proxy
-listed in `TRUSTED_ACTOR_PROXIES`, which sets them. Since such a proxy, or a caller of the service layer, can
+listed in `TRUSTED_ACTOR_PROXIES`, which sets them. A field no header
+supplies (all of them on a bearer or unauthenticated request) falls back to
+the operator's `COMMUNITYOVERVIEW_ACTOR_*` environment defaults. Since such a proxy, or a caller of the service layer, can
 still supply any header, the actor type `agent` is reserved: the resolver
 ignores a header-supplied `agent` type and treats such a request as an
 ordinary user request, and a test checks it. The hook-author documentation describes this actor. What an
