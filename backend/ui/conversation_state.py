@@ -70,7 +70,8 @@ def starts_clean(messages, token, actor):
     )
     if last < 0:
         return True
-    if not isinstance(token, str) or token.count(".") != 1:
+    # Non-ASCII would make compare_digest or body.encode() raise, not refuse.
+    if not isinstance(token, str) or not token.isascii() or token.count(".") != 1:
         return False
     body, signature = token.split(".")
     if not hmac.compare_digest(signature, _sign(body)):

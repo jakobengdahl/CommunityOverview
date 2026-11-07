@@ -40,6 +40,8 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
         ("shared_key", False),
         ("dropped", True),
         ("forged", True),
+        ("non_ascii_signature", True),
+        ("surrogate_body", True),
         ("expired", True),
         ("edited", True),
         ("actor", True),
@@ -71,6 +73,10 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     elif change == "forged":
         body, signature = state.split(".")
         state = f"{body}.{signature[::-1]}"
+    elif change == "non_ascii_signature":
+        state = f"{state[:-1]}\u00e9"
+    elif change == "surrogate_body":
+        state = f"\ud800{state}"
     elif change == "expired":
         later = time.time() + 86401
         monkeypatch.setattr(
