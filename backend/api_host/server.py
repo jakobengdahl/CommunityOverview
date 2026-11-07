@@ -74,6 +74,7 @@ from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
 from .logging_config import configure_root_logging
 from .middleware import (
+    ActorHeaderMiddleware,
     RuntimeExtensionsMiddleware,
     add_auth_middleware,
     add_cors_middleware,
@@ -344,6 +345,10 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         sessions_unreadable=lambda: (
             app.state.write_modes.store_holds_unreadable_records()
         ),
+    )
+    # Inside auth, which records the identity this rewrites the actor headers to.
+    app.add_middleware(
+        ActorHeaderMiddleware, trusted_actor_proxies=config.trusted_actor_proxies
     )
     _auth_active = compute_auth_active(config)
     add_auth_middleware(app, config)

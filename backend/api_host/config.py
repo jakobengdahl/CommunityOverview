@@ -237,6 +237,18 @@ class AppConfig:
     trusted_proxy_hops: int = field(
         default_factory=lambda: int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
     )
+    # Actor headers (x-communityoverview-actor-id/-type, auth-source) are client
+    # settable, so they are stripped from every request and the actor comes from
+    # the authenticated identity. TRUSTED_ACTOR_PROXIES lists the peer addresses
+    # (IPs or CIDR ranges, comma-separated) of proxies that authenticate users and
+    # overwrite those headers; they are kept only on requests from such a peer.
+    trusted_actor_proxies: list[str] = field(
+        default_factory=lambda: [
+            p.strip()
+            for p in os.getenv("TRUSTED_ACTOR_PROXIES", "").split(",")
+            if p.strip()
+        ]
+    )
     # When set to False, /mcp and /execute_tool bypass auth even if auth_enabled=True.
     # When None (default / env var absent), MCP follows auth_enabled — no behaviour change.
     mcp_auth_enabled: Optional[bool] = field(

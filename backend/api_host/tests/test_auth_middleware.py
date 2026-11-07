@@ -1,3 +1,4 @@
+# covers: backend/api_host/middleware.py
 """
 Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 """
@@ -19,6 +20,10 @@ from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 from backend.api_host.middleware import add_auth_middleware
 from backend.api_host.session_auth import SESSION_COOKIE_NAME, mint_session_cookie
+from backend.runtime.authorization import (
+    build_graph_authorization_context,
+    use_request_authorization,
+)
 
 
 def _make_config(**overrides) -> tuple:
@@ -252,6 +257,79 @@ def test_custom_header_does_not_replace_credentials(authorization):
     response = TestClient(app).post("/api/write", content=b"payload", headers=headers)
     assert response.status_code == 401
     assert writes == []
+
+
+@pytest.mark.parametrize(
+    "auth_enabled,proxies,peer,credentials,env_actor,expected",
+    [
+        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "", ("admin", "basic")),
+        (True, [], "10.0.0.5", {"Authorization": "Bearer tok"}, "", ("", "anonymous")),
+        (False, [], "10.0.0.5", {}, "", ("", "anonymous")),
+        (
+            True,
+            ["10.0.0.0/24"],
+            "10.0.0.5",
+            _auth_header("admin", "pw"),
+            "",
+            ("bob", "proxy"),
+        ),
+        (
+            True,
+            ["10.0.0.0/24"],
+            "10.0.1.5",
+            _auth_header("admin", "pw"),
+            "",
+            ("admin", "basic"),
+        ),
+        (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
+        # The listed peer is the connecting address, not X-Forwarded-For.
+        (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
+        # A bearer or unauthenticated request falls back to the operator's
+        # configured default actor, never the spoofed header.
+        (
+            True,
+            [],
+            "10.0.0.5",
+            {"Authorization": "Bearer tok"},
+            "ops",
+            ("ops", "provided"),
+        ),
+        (False, [], "10.0.0.5", {}, "ops", ("ops", "provided")),
+        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "ops", ("admin", "basic")),
+    ],
+)
+def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
+    auth_enabled, proxies, peer, credentials, env_actor, expected
+):
+    config, _ = _make_config(
+        auth_enabled=auth_enabled,
+        auth_password="pw",
+        auth_bearer_token="tok",
+        trusted_actor_proxies=proxies,
+    )
+    app = create_app(config)
+
+    async def probe(request: Request):
+        with use_request_authorization(headers=request.headers):
+            actor = build_graph_authorization_context(action="read", target="x").actor
+        return [actor["actor_id"], actor["auth_source"]]
+
+    app.add_api_route("/api/actor-probe", probe)
+    spoofed = {
+        "x-communityoverview-actor-id": "bob",
+        "x-communityoverview-auth-source": "proxy",
+        "x-forwarded-for": "10.0.0.5",
+    }
+    env = {
+        "COMMUNITYOVERVIEW_ACTOR_ID": env_actor,
+        "COMMUNITYOVERVIEW_ACTOR_TYPE": "",
+        "COMMUNITYOVERVIEW_AUTH_SOURCE": "",
+    }
+    with patch.dict(os.environ, env):
+        response = TestClient(app, client=(peer, 50000)).get(
+            "/api/actor-probe", headers={**spoofed, **credentials}
+        )
+    assert tuple(response.json()) == expected
 
 
 class TestMcpBasicAuth:

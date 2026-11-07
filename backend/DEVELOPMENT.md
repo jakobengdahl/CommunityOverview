@@ -1233,6 +1233,30 @@ or `Sec-Fetch-Site: none`, or a non-empty `X-Requested-With` header (for example
 `X-Requested-With: api-client`). This prevents cross-site forms from writing with
 cached browser credentials; it also applies to raw-body routes.
 
+The request actor that the authorization hook, audit records and runtime context
+see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
+`x-communityoverview-actor-id`, `-actor-type` and `-auth-source` headers on every
+request, auth active or not, and the auth middleware then supplies the Basic
+username (or the configured user, for a session cookie) with auth source `basic`
+or `session`. A bearer token carries no user, so its requests bring no actor
+of their own. Any field still empty after this falls back to the operator's
+`COMMUNITYOVERVIEW_ACTOR_ID`, `_ACTOR_TYPE` and `_AUTH_SOURCE` environment
+variables (`backend/runtime/request_context.py`): with those set, a bearer or
+unauthenticated request gets that configured default actor, never one a client
+chose; with them unset it has no actor (auth source `anonymous`).
+`TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated) keeps the inbound
+headers instead, filling them from the authenticated identity only where absent,
+but only on requests whose socket peer is in that list; every other peer still
+has them stripped. List only a proxy that authenticates users and overwrites
+those headers on every request it forwards. The peer is the address the ASGI
+server reports, and uvicorn by default (also in the Docker image) rewrites it
+from `X-Forwarded-For` when the connection comes from loopback: a loopback
+proxy would then appear as the end user's address and never match, and listing
+end-user addresses would trust direct connections from them. So set
+`UVICORN_PROXY_HEADERS=false` (or pass `--no-proxy-headers`) whenever
+`TRUSTED_ACTOR_PROXIES` is set, and list the proxy's own address as it connects
+to the API host. Client-IP handling then relies on `TRUSTED_PROXY_HOPS` alone.
+
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
 

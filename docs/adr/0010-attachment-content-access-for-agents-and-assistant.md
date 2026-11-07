@@ -614,11 +614,19 @@ people. Agent attachment writes are never executed as the Agent: they are
 proposals, applied with the approver bound, so the write targets are
 decided for the approver (and the Agent's own grant re-resolved, above); a
 hook rule on `add_node_attachment` or `delete_node_attachment` for actor
-type `agent` never fires. Because request actors otherwise come from
-client-settable headers (`backend/runtime/request_context.py`), the actor
-type `agent` is reserved: the resolver ignores a header-supplied `agent`
-type and treats such a request as an ordinary user request, and a test
-checks it. The hook-author documentation describes this actor. What an
+type `agent` never fires. Request actors otherwise come from the actor
+headers (`backend/runtime/request_context.py`); the API host strips the
+inbound ones and sets them from the authenticated identity
+(`ActorHeaderMiddleware`), except on requests whose socket peer is a proxy
+listed in `TRUSTED_ACTOR_PROXIES`, which sets them. The peer is the
+connecting address, so that setting requires uvicorn's `X-Forwarded-For`
+rewrite to be off (`UVICORN_PROXY_HEADERS=false`); otherwise a loopback
+proxy appears as its end user. A field no header
+supplies (all of them on a bearer or unauthenticated request) falls back to
+the operator's `COMMUNITYOVERVIEW_ACTOR_*` environment defaults. Since such a proxy, or a caller of the service layer, can
+still supply any header, the actor type `agent` is reserved: the resolver
+ignores a header-supplied `agent` type and treats such a request as an
+ordinary user request, and a test checks it. The hook-author documentation describes this actor. What an
 Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
