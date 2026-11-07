@@ -289,6 +289,12 @@ def test_custom_header_does_not_replace_credentials(authorization):
         # A dual-stack bind reports an IPv4 peer as IPv4-mapped IPv6.
         (False, ["10.0.0.0/24"], "::ffff:10.0.0.5", {}, "", ("bob", "proxy")),
         (False, ["10.0.0.0/24"], "::ffff:10.0.1.5", {}, "", ("", "anonymous")),
+        # An IPv4-mapped entry matches the same peer in either form.
+        (False, ["::ffff:10.0.0.0/120"], "10.0.0.5", {}, "", ("bob", "proxy")),
+        (False, ["::ffff:10.0.0.5"], "::ffff:10.0.0.5", {}, "", ("bob", "proxy")),
+        (False, ["::ffff:10.0.0.5"], "10.0.0.6", {}, "", ("", "anonymous")),
+        # A non-ASCII authenticated username reaches hooks unchanged.
+        (True, [], "10.0.0.5", _auth_header("åsa", "pw"), "", ("åsa", "basic")),
         # The listed peer is the connecting address, not X-Forwarded-For.
         (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
         # Entries must be IPs or CIDR ranges; a name equal to the peer string
@@ -313,6 +319,7 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
 ):
     config, _ = _make_config(
         auth_enabled=auth_enabled,
+        auth_username=expected[0] if expected[1] == "basic" else "admin",
         auth_password="pw",
         auth_bearer_token="tok",
         trusted_actor_proxies=proxies,
@@ -843,12 +850,15 @@ class TestSessionCookieLogin:
         finally:
             os.unlink(path)
 
-    def test_form_login_sets_cookie_and_authenticates(self):
-        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+    @pytest.mark.parametrize("username", ["admin", "åsa"])
+    def test_form_login_sets_cookie_and_authenticates(self, username):
+        client, path = self._make_client(
+            auth_enabled=True, auth_username=username, auth_password="secret"
+        )
         try:
             resp = client.post(
                 "/auth/login",
-                data={"username": "admin", "password": "secret", "next": "/web/"},
+                data={"username": username, "password": "secret", "next": "/web/"},
                 follow_redirects=False,
             )
             assert resp.status_code == 303

@@ -61,7 +61,7 @@ class ActorHeaderMiddleware:
         self._proxy_networks = []
         for entry in trusted_actor_proxies:
             try:
-                self._proxy_networks.append(ipaddress.ip_network(entry, strict=False))
+                network = ipaddress.ip_network(entry, strict=False)
             except ValueError:
                 # A hostname or typo would never match a peer address; say so
                 # instead of silently trusting nothing.
@@ -69,6 +69,13 @@ class ActorHeaderMiddleware:
                     "Ignoring TRUSTED_ACTOR_PROXIES entry %r: not an IP or CIDR range",
                     entry,
                 )
+                continue
+            # Peers are compared as plain IPv4 (see _peer_is_trusted_proxy), so
+            # an IPv4-mapped entry must be too or it would never match.
+            mapped = getattr(network.network_address, "ipv4_mapped", None)
+            if mapped is not None and network.prefixlen >= 96:
+                network = ipaddress.ip_network((mapped, network.prefixlen - 96))
+            self._proxy_networks.append(network)
 
     def _peer_is_trusted_proxy(self, scope: Scope) -> bool:
         client = scope.get("client")
@@ -95,6 +102,7 @@ class ActorHeaderMiddleware:
                 (identity.get("actor_id"), "user", identity.get("auth_source")),
             ):
                 if identity.get("actor_id") and value and name not in present:
+                    # request_context decodes header bytes as UTF-8.
                     headers.append((name, value.encode("utf-8")))
             scope["headers"] = headers
         await self.app(scope, receive, send)
@@ -433,8 +441,13 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                     raise ValueError("basic auth not configured")
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")
-                ok_user = secrets.compare_digest(username, config.auth_username)
-                ok_pass = secrets.compare_digest(password, config.auth_password)
+                # compare_digest rejects non-ASCII str; compare UTF-8 bytes.
+                ok_user = secrets.compare_digest(
+                    username.encode(), config.auth_username.encode()
+                )
+                ok_pass = secrets.compare_digest(
+                    password.encode(), config.auth_password.encode()
+                )
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
                 request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
