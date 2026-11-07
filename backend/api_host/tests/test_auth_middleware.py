@@ -282,6 +282,8 @@ def test_custom_header_does_not_replace_credentials(authorization):
             ("admin", "basic"),
         ),
         (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
+        # The listed peer is the connecting address, not X-Forwarded-For.
+        (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
         # A bearer or unauthenticated request falls back to the operator's
         # configured default actor, never the spoofed header.
         (
@@ -316,6 +318,7 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
     spoofed = {
         "x-communityoverview-actor-id": "bob",
         "x-communityoverview-auth-source": "proxy",
+        "x-forwarded-for": "10.0.0.5",
     }
     env = {
         "COMMUNITYOVERVIEW_ACTOR_ID": env_actor,

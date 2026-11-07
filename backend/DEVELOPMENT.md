@@ -1249,8 +1249,13 @@ headers instead, filling them from the authenticated identity only where absent,
 but only on requests whose socket peer is in that list; every other peer still
 has them stripped. List only a proxy that authenticates users and overwrites
 those headers on every request it forwards. The peer is the address the ASGI
-server reports, so if uvicorn rewrites it from `X-Forwarded-For`
-(`FORWARDED_ALLOW_IPS`), list the address it resolves to, never `*` there.
+server reports, and uvicorn by default (also in the Docker image) rewrites it
+from `X-Forwarded-For` when the connection comes from loopback: a loopback
+proxy would then appear as the end user's address and never match, and listing
+end-user addresses would trust direct connections from them. So set
+`UVICORN_PROXY_HEADERS=false` (or pass `--no-proxy-headers`) whenever
+`TRUSTED_ACTOR_PROXIES` is set, and list the proxy's own address as it connects
+to the API host. Client-IP handling then relies on `TRUSTED_PROXY_HOPS` alone.
 
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
