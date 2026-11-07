@@ -711,7 +711,7 @@ def _raw_post(
                 if content_length is not None
                 else (b"transfer-encoding", b"chunked"),
             ],
-            "client": ("127.0.0.1", 50000),
+            "client": ("testclient", 50000),
             "server": ("testserver", 80),
         }
         await client.app(scope, receive, send)

@@ -6,15 +6,11 @@ Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 import base64
 import io
 import json
-import logging
 import os
-import re
 import tempfile
 import zipfile
-from pathlib import Path
 
 import pytest
-import yaml
 from unittest.mock import patch
 
 from fastapi import FastAPI, Request
@@ -263,66 +259,61 @@ def test_custom_header_does_not_replace_credentials(authorization):
     assert writes == []
 
 
+class _FrontLayer:
+    """Strips inbound actor headers and sets its own, as a hosted ingress does."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            scope["headers"] = [
+                (k, v)
+                for k, v in scope["headers"]
+                if not k.lower().startswith(b"x-communityoverview-")
+            ] + [
+                (b"x-communityoverview-actor-id", "cärol".encode()),
+                (b"x-communityoverview-auth-source", b"hosted-ingress"),
+            ]
+        await self.app(scope, receive, send)
+
+
 @pytest.mark.parametrize(
-    "auth_enabled,proxies,peer,credentials,env_actor,expected",
+    "auth_enabled,trust,front_layer,credentials,env_actor,expected",
     [
-        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "", ("admin", "basic")),
-        (True, [], "10.0.0.5", {"Authorization": "Bearer tok"}, "", ("", "anonymous")),
-        (False, [], "10.0.0.5", {}, "", ("", "anonymous")),
-        (
-            True,
-            ["10.0.0.0/24"],
-            "10.0.0.5",
-            _auth_header("admin", "pw"),
-            "",
-            ("bob", "proxy"),
-        ),
-        (
-            True,
-            ["10.0.0.0/24"],
-            "10.0.1.5",
-            _auth_header("admin", "pw"),
-            "",
-            ("admin", "basic"),
-        ),
-        (False, ["10.0.0.5"], "10.0.1.5", {}, "", ("", "anonymous")),
-        # A dual-stack bind reports an IPv4 peer as IPv4-mapped IPv6.
-        (False, ["10.0.0.0/24"], "::ffff:10.0.0.5", {}, "", ("bob", "proxy")),
-        (False, ["10.0.0.0/24"], "::ffff:10.0.1.5", {}, "", ("", "anonymous")),
-        # An IPv4-mapped entry matches the same peer in either form.
-        (False, ["::ffff:10.0.0.0/120"], "10.0.0.5", {}, "", ("bob", "proxy")),
-        (False, ["::ffff:10.0.0.5"], "::ffff:10.0.0.5", {}, "", ("bob", "proxy")),
-        (False, ["::ffff:10.0.0.5"], "10.0.0.6", {}, "", ("", "anonymous")),
+        (True, False, False, _auth_header("admin", "pw"), "", ("admin", "basic")),
+        (True, False, False, {"Authorization": "Bearer tok"}, "", ("", "anonymous")),
+        (False, False, False, {}, "", ("", "anonymous")),
+        # Trusted, the header wins over the authenticated identity.
+        (False, True, False, {}, "", ("bob", "proxy")),
+        (True, True, False, _auth_header("admin", "pw"), "", ("bob", "proxy")),
+        # A front layer composed around the app sets the actor it resolved.
+        (False, True, True, {}, "", ("cärol", "hosted-ingress")),
         # A non-ASCII authenticated username reaches hooks unchanged.
-        (True, [], "10.0.0.5", _auth_header("åsa", "pw"), "", ("åsa", "basic")),
-        # The listed peer is the connecting address, not X-Forwarded-For.
-        (False, ["127.0.0.1"], "127.0.0.1", {}, "", ("bob", "proxy")),
-        # Entries must be IPs or CIDR ranges; a name equal to the peer string
-        # is not trusted.
-        (False, ["testclient"], "testclient", {}, "", ("", "anonymous")),
+        (True, False, False, _auth_header("åsa", "pw"), "", ("åsa", "basic")),
         # A bearer or unauthenticated request falls back to the operator's
         # configured default actor, never the spoofed header.
         (
             True,
-            [],
-            "10.0.0.5",
+            False,
+            False,
             {"Authorization": "Bearer tok"},
             "ops",
             ("ops", "provided"),
         ),
-        (False, [], "10.0.0.5", {}, "ops", ("ops", "provided")),
-        (True, [], "10.0.0.5", _auth_header("admin", "pw"), "ops", ("admin", "basic")),
+        (False, False, False, {}, "ops", ("ops", "provided")),
+        (True, False, False, _auth_header("admin", "pw"), "ops", ("admin", "basic")),
     ],
 )
-def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
-    auth_enabled, proxies, peer, credentials, env_actor, expected, caplog
+def test_actor_headers_are_kept_only_with_front_layer_trust(
+    auth_enabled, trust, front_layer, credentials, env_actor, expected
 ):
     config, _ = _make_config(
         auth_enabled=auth_enabled,
         auth_username=expected[0] if expected[1] == "basic" else "admin",
         auth_password="pw",
         auth_bearer_token="tok",
-        trusted_actor_proxies=proxies,
+        trust_front_layer_actor=trust,
     )
     app = create_app(config)
 
@@ -332,10 +323,11 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
         return [actor["actor_id"], actor["auth_source"]]
 
     app.add_api_route("/api/actor-probe", probe)
+    if front_layer:
+        app.add_middleware(_FrontLayer)
     spoofed = {
         "x-communityoverview-actor-id": "bob",
         "x-communityoverview-auth-source": "proxy",
-        "x-forwarded-for": "10.0.0.5",
     }
     env = {
         "COMMUNITYOVERVIEW_ACTOR_ID": env_actor,
@@ -343,37 +335,10 @@ def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
         "COMMUNITYOVERVIEW_AUTH_SOURCE": "",
     }
     with patch.dict(os.environ, env):
-        response = TestClient(app, client=(peer, 50000)).get(
+        response = TestClient(app).get(
             "/api/actor-probe", headers={**spoofed, **credentials}
         )
     assert tuple(response.json()) == expected
-    ignored = [
-        r.args[0]
-        for r in caplog.records
-        if r.name == "backend.api_host.middleware" and r.levelno == logging.WARNING
-    ]
-    assert ignored == [p for p in proxies if p == "testclient"]
-
-
-@pytest.mark.parametrize(
-    "compose_file", ["docker-compose.yml", "docker-compose.prod.yml"]
-)
-def test_compose_passes_actor_proxy_trust_to_the_container_and_trusts_none_by_default(
-    compose_file,
-):
-    """Compose forwards TRUSTED_ACTOR_PROXIES and UVICORN_PROXY_HEADERS; unset, no
-    peer is trusted."""
-    root = Path(__file__).resolve().parents[3]
-    compose = yaml.safe_load((root / compose_file).read_text())
-    entries = dict(e.split("=", 1) for e in compose["services"]["app"]["environment"])
-
-    def resolve(name, host_env):
-        ref = re.fullmatch(r"\$\{(\w+):-([^}]*)\}", entries[name])
-        return host_env.get(ref.group(1), ref.group(2))
-
-    host_env = {"TRUSTED_ACTOR_PROXIES": "10.0.0.5", "UVICORN_PROXY_HEADERS": "false"}
-    assert {n: resolve(n, host_env) for n in host_env} == host_env
-    assert resolve("TRUSTED_ACTOR_PROXIES", {}) == ""
 
 
 class TestMcpBasicAuth:

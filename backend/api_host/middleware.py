@@ -2,7 +2,6 @@
 
 import base64
 import html
-import ipaddress
 import logging
 import re
 import secrets
@@ -25,9 +24,6 @@ from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
 from .session_auth import request_has_valid_session
 
 
-logger = logging.getLogger(__name__)
-
-
 class RuntimeExtensionsMiddleware:
     """Keep the selected runtime bound through requests and streamed responses."""
 
@@ -40,6 +36,8 @@ class RuntimeExtensionsMiddleware:
             await self.app(scope, receive, send)
 
 
+logger = logging.getLogger(__name__)
+
 _ACTOR_HEADERS = tuple(
     name.encode("latin-1")
     for name in (ACTOR_ID_HEADER, ACTOR_TYPE_HEADER, AUTH_SOURCE_HEADER)
@@ -51,49 +49,19 @@ AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
 class ActorHeaderMiddleware:
     """Make the request actor headers carry the authenticated identity only.
 
-    Inbound actor headers survive only on requests whose socket peer is one of
-    ``trusted_actor_proxies``. Must sit inside the auth middleware, which
-    records the identity in the scope.
+    Inbound actor headers are kept only with ``trust_front_layer_actor``, set
+    when a front layer overwrites them on every request. Must sit inside the
+    auth middleware, which records the identity in the scope.
     """
 
-    def __init__(self, app: ASGIApp, trusted_actor_proxies=()):
+    def __init__(self, app: ASGIApp, trust_front_layer_actor: bool = False):
         self.app = app
-        self._proxy_networks = []
-        for entry in trusted_actor_proxies:
-            try:
-                network = ipaddress.ip_network(entry, strict=False)
-            except ValueError:
-                # A hostname or typo would never match a peer address; say so
-                # instead of silently trusting nothing.
-                logger.warning(
-                    "Ignoring TRUSTED_ACTOR_PROXIES entry %r: not an IP or CIDR range",
-                    entry,
-                )
-                continue
-            # Peers are compared as plain IPv4 (see _peer_is_trusted_proxy), so
-            # an IPv4-mapped entry must be too or it would never match.
-            mapped = getattr(network.network_address, "ipv4_mapped", None)
-            if mapped is not None and network.prefixlen >= 96:
-                network = ipaddress.ip_network((mapped, network.prefixlen - 96))
-            self._proxy_networks.append(network)
-
-    def _peer_is_trusted_proxy(self, scope: Scope) -> bool:
-        client = scope.get("client")
-        if not client or not client[0]:
-            return False
-        try:
-            peer = ipaddress.ip_address(client[0])
-        except ValueError:
-            return False
-        # A dual-stack bind reports IPv4 peers as ::ffff:a.b.c.d, which never
-        # matches an IPv4 entry because ipaddress does not compare across versions.
-        peer = getattr(peer, "ipv4_mapped", None) or peer
-        return any(peer in network for network in self._proxy_networks)
+        self._trust_front_layer_actor = trust_front_layer_actor
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] in ("http", "websocket"):
             headers = list(scope.get("headers") or [])
-            if not self._peer_is_trusted_proxy(scope):
+            if not self._trust_front_layer_actor:
                 headers = [h for h in headers if h[0].lower() not in _ACTOR_HEADERS]
             present = {name.lower() for name, _ in headers}
             identity = scope.get(AUTHENTICATED_ACTOR_SCOPE_KEY) or {}

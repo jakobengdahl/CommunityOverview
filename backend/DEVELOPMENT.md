@@ -1244,20 +1244,14 @@ of their own. Any field still empty after this falls back to the operator's
 variables (`backend/runtime/request_context.py`): with those set, a bearer or
 unauthenticated request gets that configured default actor, never one a client
 chose; with them unset it has no actor (auth source `anonymous`).
-`TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated; any other entry,
-such as a hostname, is ignored with a startup warning) keeps the inbound
-headers instead, filling them from the authenticated identity only where absent,
-but only on requests whose socket peer is in that list; every other peer still
-has them stripped. List only a proxy that authenticates users and overwrites
-those headers on every request it forwards. The peer is the address the ASGI
-server reports, and uvicorn by default (also in the Docker image) rewrites it
-from `X-Forwarded-For` when the connection comes from loopback: a loopback
-proxy would then appear as the end user's address and never match, and listing
-end-user addresses would trust direct connections from them. So set
-`UVICORN_PROXY_HEADERS=false` (or pass `--no-proxy-headers`) whenever
-`TRUSTED_ACTOR_PROXIES` is set, and list the proxy's own address as it connects
-to the API host. Client-IP handling then relies on `TRUSTED_PROXY_HOPS` alone.
-Both Compose files pass the two variables through to the container.
+`TRUST_FRONT_LAYER_ACTOR=true` (default `false`) keeps the inbound headers
+instead, filling them from the authenticated identity only where absent. It is
+safe only behind a front layer that every request passes through and that
+strips the inbound actor headers and sets its own, such as a hosted ingress
+middleware that wraps this app in-process (`app.add_middleware` after
+`create_app`), so no request reaches the app without it. Behind anything else, such
+as a reverse proxy that can be bypassed or that forwards client headers, any
+client could choose its actor.
 
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:

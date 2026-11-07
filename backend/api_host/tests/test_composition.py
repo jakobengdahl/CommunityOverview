@@ -339,9 +339,9 @@ async def test_agent_skills_obey_injected_graph_authorization(app_config, access
             ],
             [],
         )
-        # The actor header is honoured only from app_config's trusted proxy peer.
-        transport = ASGITransport(app=app, client=("127.0.0.1", 50000))
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
             response = await client.get(
                 "/agents/skills",
                 headers={

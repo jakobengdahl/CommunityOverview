@@ -357,9 +357,8 @@ def app_config(temp_graph_file, temp_static_dirs, tmp_path) -> AppConfig:
         api_prefix="/api",
         auth_enabled=False,
         mcp_basic_auth=False,
-        # Tests pass the request actor as a header, as an authenticating proxy
-        # would; the test clients connect from 127.0.0.1.
-        trusted_actor_proxies=["127.0.0.1"],
+        # Tests pass the request actor as a header, as a front layer would.
+        trust_front_layer_actor=True,
     )
 
 
@@ -377,7 +376,7 @@ def test_app(app_config, mock_llm_provider) -> TestClient:
             # Update the chat service to use our mock
             if hasattr(app.state, "chat_service"):
                 app.state.chat_service._processor.default_api_key = "test-key"
-            yield TestClient(app, client=("127.0.0.1", 50000))
+            yield TestClient(app)
 
 
 @pytest.fixture
@@ -393,7 +392,7 @@ def test_app_with_mock(app_config, mock_llm_provider):
             # Update the chat service to use our mock
             if hasattr(app.state, "chat_service"):
                 app.state.chat_service._processor.default_api_key = "test-key"
-            yield TestClient(app, client=("127.0.0.1", 50000)), mock_llm_provider
+            yield TestClient(app), mock_llm_provider
 
 
 @pytest.fixture

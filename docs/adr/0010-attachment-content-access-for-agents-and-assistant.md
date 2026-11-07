@@ -617,14 +617,12 @@ hook rule on `add_node_attachment` or `delete_node_attachment` for actor
 type `agent` never fires. Request actors otherwise come from the actor
 headers (`backend/runtime/request_context.py`); the API host strips the
 inbound ones and sets them from the authenticated identity
-(`ActorHeaderMiddleware`), except on requests whose socket peer is a proxy
-listed by IP or CIDR range in `TRUSTED_ACTOR_PROXIES` (other entries are
-ignored with a warning), which sets them. The peer is the
-connecting address, so that setting requires uvicorn's `X-Forwarded-For`
-rewrite to be off (`UVICORN_PROXY_HEADERS=false`); otherwise a loopback
-proxy appears as its end user. A field no header
+(`ActorHeaderMiddleware`) unless `TRUST_FRONT_LAYER_ACTOR` is true. That
+setting is only safe behind a front layer, such as a hosted ingress composed
+around the app in-process, that strips the inbound headers and sets its own
+on every request. A field no header
 supplies (all of them on a bearer or unauthenticated request) falls back to
-the operator's `COMMUNITYOVERVIEW_ACTOR_*` environment defaults. Since such a proxy, or a caller of the service layer, can
+the operator's `COMMUNITYOVERVIEW_ACTOR_*` environment defaults. Since such a front layer, or a caller of the service layer, can
 still supply any header, the actor type `agent` is reserved: the resolver
 ignores a header-supplied `agent` type and treats such a request as an
 ordinary user request, and a test checks it. The hook-author documentation describes this actor. What an
