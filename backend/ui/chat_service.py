@@ -27,7 +27,10 @@ from backend.llm.llm_providers import provider_max_tokens
 from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
-from backend.runtime.attachment_access import validate_attachment_setting
+from backend.runtime.attachment_access import (
+    ATTACHMENT_READ_TOOLS,
+    validate_attachment_setting,
+)
 
 from backend.ui.attachment_confirmation import pending_actions, request_actor, refusal
 from backend.ui import conversation_state as conversation_states
@@ -1001,7 +1004,7 @@ class ChatService:
             # visualization_context comes last — most immediate situational snapshot.
             from backend.service.attachment_tools import tool_caller
 
-            start_tainted = False
+            start_tainted = inherited_taint = False
             if _confirmation is None:
                 # Snapshot before the tool loop appends to the history.
                 received = copy.deepcopy(
@@ -1010,8 +1013,14 @@ class ChatService:
                         for m in messages
                     ]
                 )
-                start_tainted = not conversation_states.starts_clean(
+                inherited_taint = not conversation_states.starts_clean(
                     received, conversation_state, context["actor"]
+                )
+                # Only attachment reads taint. Without access an unverifiable
+                # state (restart, another worker) must not turn writes into
+                # pending actions; the taint is still carried in the token.
+                start_tainted = inherited_taint and any(
+                    attachment_access(name) != "off" for name in ATTACHMENT_READ_TOOLS
                 )
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name
@@ -1037,7 +1046,8 @@ class ChatService:
                     result.get("content") or conversation_states.EMPTY_REPLY_TEXT
                 )
                 result["conversation_state"] = conversation_states.issue(
-                    tainted=result.get("untrusted_content_used", True),
+                    tainted=inherited_taint
+                    or result.get("untrusted_content_used", True),
                     actor=context["actor"],
                     messages=received,
                     reply=result["content"],

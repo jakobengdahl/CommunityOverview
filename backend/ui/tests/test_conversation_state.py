@@ -47,6 +47,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
         ("edited", True),
         ("actor", True),
         ("other_process", True),
+        ("other_process_no_access", False),
         ("replayed", True),
         ("tainted", True),
     ],
@@ -55,6 +56,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     chat_service, monkeypatch, change, tainted
 ):
     service, llm = chat_service
+    # Inherited taint applies only where an attachment can be read.
+    if change != "other_process_no_access":
+        service._assistant_attachment_access = "read"
     if change == "shared_key":
         monkeypatch.setenv("ATTACHMENT_CONVERSATION_STATE_KEY", "shared")
     first_calls = ()
@@ -89,7 +93,7 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         messages[0] = {"role": "user", "content": "hi!"}
     elif change == "actor":
         headers = {**ACTOR, "x-communityoverview-actor-id": "b"}
-    elif change in ("other_process", "shared_key"):
+    elif change in ("other_process", "other_process_no_access", "shared_key"):
         monkeypatch.setattr(conversation_state, "_PROCESS_KEY", secrets.token_bytes(32))
     elif change == "replayed":
         second = turn(service, llm, messages, state)
@@ -102,7 +106,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     assert result["untrusted_content_used"] is tainted
     # Tainted from the start: the write is refused into a pending action.
     assert bool(result["pending_actions"]) is tainted
-    if change == "tainted":
+    if change in ("tainted", "other_process_no_access"):
+        # The unverifiable state is carried forward, not laundered clean.
+        service._assistant_attachment_access = "read"
         messages += [
             {"role": "assistant", "content": result["content"]},
             {"role": "user", "content": "again"},
