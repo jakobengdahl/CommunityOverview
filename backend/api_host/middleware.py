@@ -2,6 +2,7 @@
 
 import base64
 import html
+import ipaddress
 import logging
 import re
 import secrets
@@ -47,17 +48,38 @@ AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
 class ActorHeaderMiddleware:
     """Make the request actor headers carry the authenticated identity only.
 
-    Must sit inside the auth middleware, which records the identity in the scope.
+    Inbound actor headers survive only on requests whose socket peer is one of
+    ``trusted_actor_proxies``. Must sit inside the auth middleware, which
+    records the identity in the scope.
     """
 
-    def __init__(self, app: ASGIApp, trust_actor_headers: bool = False):
+    def __init__(self, app: ASGIApp, trusted_actor_proxies=()):
         self.app = app
-        self.trust_actor_headers = trust_actor_headers
+        self._proxy_networks = []
+        self._proxy_hosts = set()
+        for entry in trusted_actor_proxies:
+            try:
+                self._proxy_networks.append(ipaddress.ip_network(entry, strict=False))
+            except ValueError:
+                # Not an address: matched verbatim against the reported peer.
+                self._proxy_hosts.add(entry)
+
+    def _peer_is_trusted_proxy(self, scope: Scope) -> bool:
+        client = scope.get("client")
+        if not client or not client[0]:
+            return False
+        if client[0] in self._proxy_hosts:
+            return True
+        try:
+            peer = ipaddress.ip_address(client[0])
+        except ValueError:
+            return False
+        return any(peer in network for network in self._proxy_networks)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] in ("http", "websocket"):
             headers = list(scope.get("headers") or [])
-            if not self.trust_actor_headers:
+            if not self._peer_is_trusted_proxy(scope):
                 headers = [h for h in headers if h[0].lower() not in _ACTOR_HEADERS]
             present = {name.lower() for name, _ in headers}
             identity = scope.get(AUTHENTICATED_ACTOR_SCOPE_KEY) or {}

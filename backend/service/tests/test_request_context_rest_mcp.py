@@ -34,7 +34,7 @@ def app_client(tmp_path, monkeypatch):
     graph_file = str(tmp_path / "graph.json")
     # Headers carry the actor here as an authenticating proxy would set them.
     config = AppConfig(
-        auth_enabled=False, graph_file=graph_file, trust_actor_headers=True
+        auth_enabled=False, graph_file=graph_file, trusted_actor_proxies=["testclient"]
     )
     app = create_app(config)
     return TestClient(app), app
@@ -373,7 +373,7 @@ class TestRequestContextMcpTools:
             config = AppConfig(
                 auth_enabled=False,
                 graph_file=str(tmp_path / "graph.json"),
-                trust_actor_headers=True,
+                trusted_actor_proxies=["testclient"],
             )
             app = create_app(config)
             holder["app"] = app
@@ -454,7 +454,7 @@ class TestRequestContextMcpTools:
             config = AppConfig(
                 auth_enabled=False,
                 graph_file=str(tmp_path / "graph.json"),
-                trust_actor_headers=True,
+                trusted_actor_proxies=["testclient"],
             )
             app = create_app(config)
         holder["app"] = app

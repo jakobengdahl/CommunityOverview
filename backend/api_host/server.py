@@ -348,7 +348,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     )
     # Inside auth, which records the identity this rewrites the actor headers to.
     app.add_middleware(
-        ActorHeaderMiddleware, trust_actor_headers=config.trust_actor_headers
+        ActorHeaderMiddleware, trusted_actor_proxies=config.trusted_actor_proxies
     )
     _auth_active = compute_auth_active(config)
     add_auth_middleware(app, config)

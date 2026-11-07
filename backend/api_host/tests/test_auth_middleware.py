@@ -259,22 +259,36 @@ def test_custom_header_does_not_replace_credentials(authorization):
 
 
 @pytest.mark.parametrize(
-    "auth_enabled,trusted,credentials,expected",
+    "auth_enabled,proxies,peer,credentials,expected",
     [
-        (True, False, _auth_header("admin", "pw"), ("admin", "basic")),
-        (True, False, {"Authorization": "Bearer tok"}, ("", "anonymous")),
-        (False, False, {}, ("", "anonymous")),
-        (True, True, _auth_header("admin", "pw"), ("bob", "proxy")),
+        (True, [], "10.0.0.5", _auth_header("admin", "pw"), ("admin", "basic")),
+        (True, [], "10.0.0.5", {"Authorization": "Bearer tok"}, ("", "anonymous")),
+        (False, [], "10.0.0.5", {}, ("", "anonymous")),
+        (
+            True,
+            ["10.0.0.0/24"],
+            "10.0.0.5",
+            _auth_header("admin", "pw"),
+            ("bob", "proxy"),
+        ),
+        (
+            True,
+            ["10.0.0.0/24"],
+            "10.0.1.5",
+            _auth_header("admin", "pw"),
+            ("admin", "basic"),
+        ),
+        (False, ["10.0.0.5"], "10.0.1.5", {}, ("", "anonymous")),
     ],
 )
-def test_actor_comes_from_authenticated_identity_unless_headers_trusted(
-    auth_enabled, trusted, credentials, expected
+def test_actor_headers_are_kept_only_from_a_configured_proxy_peer(
+    auth_enabled, proxies, peer, credentials, expected
 ):
     config, _ = _make_config(
         auth_enabled=auth_enabled,
         auth_password="pw",
         auth_bearer_token="tok",
-        trust_actor_headers=trusted,
+        trusted_actor_proxies=proxies,
     )
     app = create_app(config)
 
@@ -289,7 +303,7 @@ def test_actor_comes_from_authenticated_identity_unless_headers_trusted(
         "x-communityoverview-auth-source": "proxy",
     }
     with patch.dict(os.environ, {"COMMUNITYOVERVIEW_ACTOR_ID": ""}):
-        response = TestClient(app).get(
+        response = TestClient(app, client=(peer, 50000)).get(
             "/api/actor-probe", headers={**spoofed, **credentials}
         )
     assert tuple(response.json()) == expected

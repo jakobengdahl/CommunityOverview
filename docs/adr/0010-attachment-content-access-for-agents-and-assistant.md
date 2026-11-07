@@ -617,8 +617,8 @@ hook rule on `add_node_attachment` or `delete_node_attachment` for actor
 type `agent` never fires. Request actors otherwise come from the actor
 headers (`backend/runtime/request_context.py`); the API host strips the
 inbound ones and sets them from the authenticated identity
-(`ActorHeaderMiddleware`), unless `TRUST_ACTOR_HEADERS` declares a proxy
-that sets them. Since such a proxy, or a caller of the service layer, can
+(`ActorHeaderMiddleware`), except on requests whose socket peer is a proxy
+listed in `TRUSTED_ACTOR_PROXIES`, which sets them. Since such a proxy, or a caller of the service layer, can
 still supply any header, the actor type `agent` is reserved: the resolver
 ignores a header-supplied `agent` type and treats such a request as an
 ordinary user request, and a test checks it. The hook-author documentation describes this actor. What an

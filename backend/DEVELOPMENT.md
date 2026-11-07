@@ -1239,9 +1239,13 @@ see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
 request, auth active or not, and the auth middleware then supplies the Basic
 username (or the configured user, for a session cookie) with auth source `basic`
 or `session`. A bearer token carries no user, so its requests have no actor.
-`TRUST_ACTOR_HEADERS=true` keeps the inbound headers instead (filling them from
-the authenticated identity only where absent); set it only behind a proxy that
-authenticates users and overwrites those headers on every request it forwards.
+`TRUSTED_ACTOR_PROXIES` (IPs or CIDR ranges, comma-separated) keeps the inbound
+headers instead, filling them from the authenticated identity only where absent,
+but only on requests whose socket peer is in that list; every other peer still
+has them stripped. List only a proxy that authenticates users and overwrites
+those headers on every request it forwards. The peer is the address the ASGI
+server reports, so if uvicorn rewrites it from `X-Forwarded-For`
+(`FORWARDED_ALLOW_IPS`), list the address it resolves to, never `*` there.
 
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
