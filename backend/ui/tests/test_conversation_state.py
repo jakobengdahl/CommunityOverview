@@ -38,6 +38,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
     [
         ("none", False),
         ("shared_key", False),
+        ("surrogate_message", False),
         ("dropped", True),
         ("forged", True),
         ("non_ascii_signature", True),
@@ -60,12 +61,14 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     if change == "tainted":
         service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
         first_calls = [{"name": "get_schema", "input": {}}]
-    messages = [{"role": "user", "content": "hi"}]
+    # A lone surrogate passes JSON validation; it is hashed, not a 500.
+    text = "hi\ud800" if change == "surrogate_message" else "hi"
+    messages = [{"role": "user", "content": text}]
     first = turn(service, llm, messages, calls=first_calls)
     assert first["untrusted_content_used"] is (change == "tainted")
     messages += [
         {"role": "assistant", "content": first["content"]},
-        {"role": "user", "content": "write"},
+        {"role": "user", "content": text.replace("hi", "write")},
     ]
     state, headers = first["conversation_state"], ACTOR
     if change == "dropped":

@@ -87,6 +87,36 @@ describe('ChatPanel conversation state', () => {
     expect({ ...body, conversation_state: fixture.conversation_state }).toEqual(fixture);
   });
 
+  it('keeps the signed reply in the replayed history when a tool side effect throws', async () => {
+    resetStore({
+      setNodeMarks: () => {
+        throw new Error('boom');
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    global.fetch
+      .mockResolvedValueOnce(
+        streamed({
+          content: 'marked',
+          toolResult: { action: 'mark_nodes', marks: [] },
+          conversation_state: 'state-1',
+        })
+      )
+      .mockResolvedValueOnce(streamed({ content: 'ok', conversation_state: 'state-2' }));
+    render(<ChatPanel />);
+
+    await send('mark them');
+    await waitFor(() => expect(chatInput()).not.toBeDisabled());
+    await send('next');
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+    expect(sentBody(1).messages).toEqual([
+      { role: 'user', content: 'mark them' },
+      { role: 'assistant', content: 'marked' },
+      { role: 'user', content: 'next' },
+    ]);
+  });
+
   it('carries the key through every call site and starts a new conversation from the New conversation button', async () => {
     const form = { title: 'F', fields: [{ id: 'q', label: 'Q', type: 'text' }] };
     resetStore({

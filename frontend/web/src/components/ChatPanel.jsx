@@ -317,8 +317,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       const toolResult = response.toolResult;
 
-      await applyToolResultSideEffects(toolResult);
-
       const assistantMessage = {
         role: 'assistant',
         content: response.content,
@@ -342,7 +340,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           : null,
         form: formFromResponse(response),
       };
+      // Record the reply before side effects: the signed state covers it, and a
+      // throwing side effect must not drop it from the replayed history.
       addChatMessage(assistantMessage);
+      await applyToolResultSideEffects(toolResult);
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
       console.error('[ChatPanel] Error:', err);
@@ -436,14 +437,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       if (isStaleSessionEpoch(requestEpoch)) return;
 
-      if (response.toolResult?.nodes) {
-        const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
-        const currentNodes = useGraphStore.getState().nodes;
-        const allEdges = [...edges, ...(response.toolResult.edges || [])];
-        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
-      }
-
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -453,6 +446,14 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
       });
+
+      if (response.toolResult?.nodes) {
+        const filteredNodes = filterCommunityNodes(response.toolResult.nodes);
+        const currentNodes = useGraphStore.getState().nodes;
+        const allEdges = [...edges, ...(response.toolResult.edges || [])];
+        const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
+        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
+      }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
       addChatMessage({
@@ -536,15 +537,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       if (isStaleSessionEpoch(requestEpoch)) return;
 
-      if (deleteConfirmation.node_ids) {
-        const deletedIds = new Set(deleteConfirmation.node_ids);
-        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
-        const newEdges = edges.filter(
-          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
-        );
-        updateVisualization(newNodes, newEdges);
-      }
-
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -554,6 +546,15 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         progressSteps: requestSteps,
         toolUsed: response.toolUsed,
       });
+
+      if (deleteConfirmation.node_ids) {
+        const deletedIds = new Set(deleteConfirmation.node_ids);
+        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
+        const newEdges = edges.filter(
+          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
+        );
+        updateVisualization(newNodes, newEdges);
+      }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
       addChatMessage({
@@ -618,8 +619,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       if (isStaleSessionEpoch(requestEpoch)) return;
 
-      await applyToolResultSideEffects(response.toolResult);
-
       addChatMessage({
         role: 'assistant',
         content: response.content,
@@ -630,6 +629,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         toolUsed: response.toolUsed,
         form: formFromResponse(response),
       });
+      await applyToolResultSideEffects(response.toolResult);
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
       addChatMessage({

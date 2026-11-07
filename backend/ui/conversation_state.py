@@ -24,9 +24,11 @@ def _key():
 
 
 def _canonical(value):
+    # JSON input may carry lone surrogates (\ud800); surrogatepass hashes them
+    # instead of raising, and no valid string encodes to the same bytes.
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()
+    ).encode("utf-8", "surrogatepass")
 
 
 def _b64(raw):
