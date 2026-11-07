@@ -205,4 +205,22 @@ describe('ChatPanel conversation state', () => {
     );
     expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
   });
+
+  it('shows the reason of a confirmed action whose tool result failed with only a message', async () => {
+    resetStore();
+    const action = { token: 't-2', tool: 'add_nodes', arguments: { nodes: [{ name: 'Y' }] } };
+    const reason = 'Error validating input: bad annotation';
+    global.fetch
+      .mockResolvedValueOnce(streamed({ content: 'needs confirmation', pending_actions: [action] }))
+      .mockResolvedValueOnce(
+        json({ success: false, message: reason, added_node_ids: [], added_edge_ids: [] })
+      );
+    render(<ChatPanel />);
+    await send('read the file');
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
+
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain(reason);
+    expect(useGraphStore.getState().nodes).toEqual([]);
+  });
 });

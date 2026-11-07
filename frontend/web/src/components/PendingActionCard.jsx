@@ -26,7 +26,10 @@ function PendingActionCard({ action, disabled = false, onConfirmed }) {
         setStatus(t('chat.pending_action_unknown'));
       else if (result?.error_code === 'access_denied') setStatus(t('chat.pending_action_denied'));
       else if (result?.error || result?.success === false)
-        setStatus(t('chat.pending_action_failed', { message: result.error || '' }));
+        // Tool results such as add_nodes report a refused write only in message.
+        setStatus(
+          t('chat.pending_action_failed', { message: result.error || result.message || '' })
+        );
       else {
         setStatus(t('chat.pending_action_done'));
         setReply(typeof result?.message === 'string' ? result.message : null);
