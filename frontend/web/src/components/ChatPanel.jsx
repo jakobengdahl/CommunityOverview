@@ -1156,7 +1156,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
             {isUploading ? t('chat.uploading') : t('chat.upload')}
           </button>
           <button
-            className="chat-upload-button"
+            className="chat-new-conversation-button"
             onClick={() => clearChatMessages(t, language)}
             disabled={isProcessing}
             title={t('chat.new_conversation_tooltip')}
