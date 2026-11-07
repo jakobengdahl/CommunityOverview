@@ -87,7 +87,7 @@ describe('ChatPanel conversation state', () => {
     expect({ ...body, conversation_state: fixture.conversation_state }).toEqual(fixture);
   });
 
-  it('carries the key through every call site and starts a new conversation on reset', async () => {
+  it('carries the key through every call site and starts a new conversation from the New conversation button', async () => {
     const form = { title: 'F', fields: [{ id: 'q', label: 'Q', type: 'text' }] };
     resetStore({
       chatMessages: [
@@ -126,7 +126,7 @@ describe('ChatPanel conversation state', () => {
     }
 
     await waitFor(() => expect(chatInput()).not.toBeDisabled());
-    useGraphStore.getState().clearChatMessages((key) => key);
+    fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
     await send('fresh');
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(6));
     expect(sentBody(5).conversation_state).toBeUndefined();

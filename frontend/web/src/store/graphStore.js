@@ -794,9 +794,9 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
-  clearChatMessages: (t) => {
+  clearChatMessages: (t, language) => {
     const { presentation } = get();
-    const welcomeMessage = createWelcomeMessage(presentation, t);
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
     set({ chatMessages: [welcomeMessage], chatConversationId: crypto.randomUUID() });
   },
 

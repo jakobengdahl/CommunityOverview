@@ -101,6 +101,8 @@
     "delete_cancelled": "Deletion cancelled.",
     "selected_nodes": "{count} nodes selected",
     "minimize": "Minimize",
+    "new_conversation": "New conversation",
+    "new_conversation_tooltip": "Start a new conversation; earlier messages and file content are no longer sent",
     "clear_selection": "Clear selection",
     "placeholder_with_selection": "Ask a question about the selected nodes...",
     "model_profile": "Model profile",

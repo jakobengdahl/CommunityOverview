@@ -101,6 +101,8 @@
     "delete_cancelled": "Borttagning avbruten.",
     "selected_nodes": "{count} noder markerade",
     "minimize": "Minimera",
+    "new_conversation": "Nytt samtal",
+    "new_conversation_tooltip": "Starta ett nytt samtal; tidigare meddelanden och filinnehåll skickas inte längre",
     "clear_selection": "Rensa markering",
     "placeholder_with_selection": "Ställ en fråga om de markerade noderna...",
     "model_profile": "Modellprofil",

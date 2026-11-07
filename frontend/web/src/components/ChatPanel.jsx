@@ -57,6 +57,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const {
     chatMessages,
     chatConversationId,
+    clearChatMessages,
     sessionEpoch,
     addChatMessage,
     updateChatMessage,
@@ -1148,6 +1149,14 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
             title={t('chat.upload_tooltip')}
           >
             {isUploading ? t('chat.uploading') : t('chat.upload')}
+          </button>
+          <button
+            className="chat-upload-button"
+            onClick={() => clearChatMessages(t, language)}
+            disabled={isProcessing}
+            title={t('chat.new_conversation_tooltip')}
+          >
+            {t('chat.new_conversation')}
           </button>
           <button
             className="chat-send-button"
