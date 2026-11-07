@@ -175,10 +175,14 @@ describe('ChatPanel conversation state', () => {
         })
       )
       .mockResolvedValueOnce(
+        // The route returns the raw tool result, not a chat response.
         json({
-          content: 'Added X',
-          toolUsed: 'add_nodes',
-          toolResult: { nodes: [{ id: 'x1', type: 'Actor', name: 'X' }], edges: [] },
+          success: true,
+          message: 'Added X',
+          added_node_ids: ['x1'],
+          action: 'add_to_visualization',
+          nodes: [{ id: 'x1', type: 'Actor', name: 'X' }],
+          edges: [],
         })
       );
     render(<ChatPanel />);

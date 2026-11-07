@@ -7,9 +7,10 @@ import './PendingActionCard.css';
 /**
  * A write the server refused after file content entered the conversation
  * (ADR 0010 §5). Shows the tool and arguments exactly as the server recorded
- * them; only this button runs it, through the confirmation route. A successful
- * run shows the assistant's reply and hands the result to onConfirmed, so the
- * caller applies its side effects (e.g. confirmed nodes join the view).
+ * them; only this button runs it, through the confirmation route. The route
+ * returns the raw tool result (no assistant turn): a successful run shows its
+ * message and hands it to onConfirmed, so the caller applies its side effects
+ * (e.g. confirmed nodes join the view).
  */
 function PendingActionCard({ action, disabled = false, onConfirmed }) {
   const { t } = useI18n();
@@ -28,7 +29,7 @@ function PendingActionCard({ action, disabled = false, onConfirmed }) {
         setStatus(t('chat.pending_action_failed', { message: result.error || '' }));
       else {
         setStatus(t('chat.pending_action_done'));
-        setReply(result?.content || null);
+        setReply(typeof result?.message === 'string' ? result.message : null);
         // The action already ran; a failing view update must not report it as failed.
         try {
           await onConfirmed?.(result);

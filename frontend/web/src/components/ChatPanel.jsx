@@ -987,7 +987,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                     key={action.token}
                     action={action}
                     disabled={isProcessing}
-                    onConfirmed={(result) => applyToolResultSideEffects(result?.toolResult)}
+                    onConfirmed={applyToolResultSideEffects}
                   />
                 ))}
 
