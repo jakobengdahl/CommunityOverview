@@ -1172,7 +1172,9 @@ outcome and the characters actually returned from that file. If a later step
 fails, those records remain, and the error adds a null record. A search call that ends in an error (`access_denied`,
 `too_many_nodes`, `invalid_arguments`, …) or attempts no extraction writes
 one record with `node_id`, `attachment_id` and `sha256` `null`, `chars: 0`
-and its `outcome`, so refused and empty searches are audited too. The record **never** contains extracted text, passage text, file
+and its `outcome`, so refused and empty searches are audited too.
+`list_node_attachments` returns metadata, not content (§1), and writes no
+audit record, although its file names taint the turn or run. The record **never** contains extracted text, passage text, file
 bytes, the query or the file name.
 
 **No content in other logs.** The existing logging would otherwise defeat

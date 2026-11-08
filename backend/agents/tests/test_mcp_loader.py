@@ -2935,6 +2935,28 @@ def test_graph_failure_formatted_log_locates_raising_frame(caplog):
     )
 
 
+@pytest.mark.parametrize(
+    "tool, method",
+    [
+        ("search_graph", "search_graph"),
+        ("read_node_attachment", "attachment_tool_read"),
+    ],
+)
+def test_clean_graph_tool_exception_result_redacts_only_attachment_tools(tool, method):
+    from unittest.mock import MagicMock
+
+    loader = MCPLoader([MCPIntegration(id="GRAPH", name="Graph")])
+    loader._tools_cache = {
+        t.namespaced_name: t
+        for t in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph"))
+    }
+    service = MagicMock()
+    getattr(service, method).side_effect = RuntimeError("raised-text")
+    args = {"node_id": "n1", "attachment_id": "a1"} if method != tool else {}
+    result = loader.create_tool_executor(graph_service=service)(f"GRAPH__{tool}", args)
+    assert result == {"error": "Graph tool failed" if method != tool else "raised-text"}
+
+
 def test_attachment_error_formatted_log_has_safe_code(caplog):
     from unittest.mock import MagicMock
 
@@ -2975,12 +2997,13 @@ def test_executor_formatted_log_input_boundaries(caplog, tainted):
             "GRAPH__read_node_attachment",
             {"SECRET-attachment-key": "SECRET-attachment"},
         )
-        execute("SECRET-unknown-tool", {"SECRET-unknown-key": "SECRET-unknown"})
+        execute("UNLISTED-tool", {"SECRET-unknown-key": "SECRET-unknown"})
     lines = "\n".join(
         logging.Formatter("%(message)s").format(r) for r in caplog.records
     )
     assert ("SECRET-key" in lines) is not tainted
     assert "SECRET-attachment" not in lines
     assert "SECRET-unknown" not in lines
+    assert ("Tool not found: UNLISTED-tool" in lines) is not tainted
     if tainted:
         assert "argument_count=1" in lines
