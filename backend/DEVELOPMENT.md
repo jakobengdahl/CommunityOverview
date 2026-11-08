@@ -1233,6 +1233,26 @@ or `Sec-Fetch-Site: none`, or a non-empty `X-Requested-With` header (for example
 `X-Requested-With: api-client`). This prevents cross-site forms from writing with
 cached browser credentials; it also applies to raw-body routes.
 
+The request actor that the authorization hook, audit records and runtime context
+see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
+`x-communityoverview-actor-id`, `-actor-type` and `-auth-source` headers on every
+request, auth active or not, and the auth middleware then supplies the Basic
+username (or the configured user, for a session cookie) with auth source `basic`
+or `session`. A bearer token carries no user, so its requests bring no actor
+of their own. Any field still empty after this falls back to the operator's
+`COMMUNITYOVERVIEW_ACTOR_ID`, `_ACTOR_TYPE` and `_AUTH_SOURCE` environment
+variables (`backend/runtime/request_context.py`): with those set, a bearer or
+unauthenticated request gets that configured default actor, never one a client
+chose; with them unset it has no actor (auth source `anonymous`).
+`TRUST_FRONT_LAYER_ACTOR=true` (default `false`) keeps the inbound headers
+instead, filling them from the authenticated identity only where absent. It is
+safe only behind a front layer that every request passes through and that
+strips the inbound actor headers and sets its own, such as a hosted ingress
+middleware that wraps this app in-process (`app.add_middleware` after
+`create_app`), so no request reaches the app without it. Behind anything else, such
+as a reverse proxy that can be bypassed or that forwards client headers, any
+client could choose its actor.
+
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
 

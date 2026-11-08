@@ -26,9 +26,24 @@ def _clean_string(value: Optional[Any]) -> str:
     return str(value).strip()
 
 
+def _decode_header_value(value: bytes) -> str:
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return value.decode("latin-1")
+
+
 def _coerce_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:
     if not headers:
         return {}
+    raw = getattr(headers, "raw", None)
+    if raw is not None:
+        # Starlette decodes header bytes as latin-1, which garbles a UTF-8
+        # actor id such as a non-ASCII username; read the bytes as UTF-8.
+        return {
+            key.decode("latin-1").lower(): _clean_string(_decode_header_value(value))
+            for key, value in raw
+        }
     return {str(key).lower(): _clean_string(value) for key, value in headers.items()}
 
 
