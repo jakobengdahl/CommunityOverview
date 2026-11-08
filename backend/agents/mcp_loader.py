@@ -871,7 +871,9 @@ class MCPLoader:
             tool = self.get_tool(namespaced_name)
             if not tool:
                 logger.warning(
-                    "Tool not found: unknown_tool %s", argument_sizes(input_args)
+                    "Tool not found: %s %s",
+                    "unknown_tool" if is_tainted() else namespaced_name,
+                    argument_sizes(input_args),
                 )
                 return {"error": f"Unknown tool: {namespaced_name}"}
 

@@ -93,8 +93,13 @@ def credentials_valid(config: AppConfig, username: str, password: str) -> bool:
     """Constant-time check of a submitted username/password against config."""
     if not config.auth_username or not config.auth_password:
         return False
-    ok_user = hmac.compare_digest(username or "", config.auth_username)
-    ok_pass = hmac.compare_digest(password or "", config.auth_password)
+    # compare_digest rejects non-ASCII str; compare UTF-8 bytes.
+    ok_user = hmac.compare_digest(
+        (username or "").encode(), config.auth_username.encode()
+    )
+    ok_pass = hmac.compare_digest(
+        (password or "").encode(), config.auth_password.encode()
+    )
     return ok_user and ok_pass
 
 
