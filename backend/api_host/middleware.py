@@ -13,6 +13,11 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from backend.runtime.extensions import RuntimeExtensions, bind_runtime_extensions
+from backend.runtime.request_context import (
+    ACTOR_ID_HEADER,
+    ACTOR_TYPE_HEADER,
+    AUTH_SOURCE_HEADER,
+)
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
@@ -32,6 +37,44 @@ class RuntimeExtensionsMiddleware:
 
 
 logger = logging.getLogger(__name__)
+
+_ACTOR_HEADERS = tuple(
+    name.encode("latin-1")
+    for name in (ACTOR_ID_HEADER, ACTOR_TYPE_HEADER, AUTH_SOURCE_HEADER)
+)
+# Scope key the auth middleware fills with the identity it authenticated.
+AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
+
+
+class ActorHeaderMiddleware:
+    """Make the request actor headers carry the authenticated identity only.
+
+    Inbound actor headers are kept only with ``trust_front_layer_actor``, set
+    when a front layer overwrites them on every request. Must sit inside the
+    auth middleware, which records the identity in the scope.
+    """
+
+    def __init__(self, app: ASGIApp, trust_front_layer_actor: bool = False):
+        self.app = app
+        self._trust_front_layer_actor = trust_front_layer_actor
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] in ("http", "websocket"):
+            headers = list(scope.get("headers") or [])
+            if not self._trust_front_layer_actor:
+                headers = [h for h in headers if h[0].lower() not in _ACTOR_HEADERS]
+            present = {name.lower() for name, _ in headers}
+            identity = scope.get(AUTHENTICATED_ACTOR_SCOPE_KEY) or {}
+            for name, value in zip(
+                _ACTOR_HEADERS,
+                (identity.get("actor_id"), "user", identity.get("auth_source")),
+            ):
+                if identity.get("actor_id") and value and name not in present:
+                    # request_context decodes header bytes as UTF-8.
+                    headers.append((name, value.encode("utf-8")))
+            scope["headers"] = headers
+        await self.app(scope, receive, send)
+
 
 # Sign-in page shown to browsers on an unauthenticated navigation. It carries a
 # real credential form that POSTs to /auth/login and sets a session cookie, so
@@ -343,6 +386,11 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                         "detail": "Session-auth writes require a same-origin request or X-Requested-With"
                     },
                 )
+            # The cookie is only minted for the configured Basic user.
+            request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
+                "actor_id": config.auth_username,
+                "auth_source": "session",
+            }
             return await call_next(request)
 
         if not auth_header:
@@ -361,10 +409,19 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                     raise ValueError("basic auth not configured")
                 decoded = base64.b64decode(credentials).decode("utf-8")
                 username, _, password = decoded.partition(":")
-                ok_user = secrets.compare_digest(username, config.auth_username)
-                ok_pass = secrets.compare_digest(password, config.auth_password)
+                # compare_digest rejects non-ASCII str; compare UTF-8 bytes.
+                ok_user = secrets.compare_digest(
+                    username.encode(), config.auth_username.encode()
+                )
+                ok_pass = secrets.compare_digest(
+                    password.encode(), config.auth_password.encode()
+                )
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
+                    "actor_id": username,
+                    "auth_source": "basic",
+                }
                 # Browsers may attach cached Basic credentials to cross-site
                 # forms. Require fetch metadata or a header forms cannot set.
                 if (

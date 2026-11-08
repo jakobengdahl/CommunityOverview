@@ -1,3 +1,4 @@
+# covers: backend/runtime/request_context.py
 """Targeted tests for request actor/scope REST and MCP introspection."""
 
 from unittest.mock import patch
@@ -32,7 +33,10 @@ def app_client(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     graph_file = str(tmp_path / "graph.json")
-    config = AppConfig(auth_enabled=False, graph_file=graph_file)
+    # Headers carry the actor here as a front layer would set them.
+    config = AppConfig(
+        auth_enabled=False, graph_file=graph_file, trust_front_layer_actor=True
+    )
     app = create_app(config)
     return TestClient(app), app
 
@@ -368,7 +372,9 @@ class TestRequestContextMcpTools:
             return_value=fake_mcp_transport_app,
         ):
             config = AppConfig(
-                auth_enabled=False, graph_file=str(tmp_path / "graph.json")
+                auth_enabled=False,
+                graph_file=str(tmp_path / "graph.json"),
+                trust_front_layer_actor=True,
             )
             app = create_app(config)
             holder["app"] = app
@@ -447,7 +453,9 @@ class TestRequestContextMcpTools:
             ),
         ):
             config = AppConfig(
-                auth_enabled=False, graph_file=str(tmp_path / "graph.json")
+                auth_enabled=False,
+                graph_file=str(tmp_path / "graph.json"),
+                trust_front_layer_actor=True,
             )
             app = create_app(config)
         holder["app"] = app
