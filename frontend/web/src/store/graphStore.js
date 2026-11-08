@@ -321,8 +321,10 @@ const useGraphStore = create((set, get) => ({
   searchResults: null,
   federationDepth: loadInitialFederationDepth(),
 
-  // Chat state
+  // Chat state. chatConversationId keys the conversation's signed state in
+  // api.sendChatMessage; every reset to the welcome message starts a new one.
   chatMessages: [DEFAULT_WELCOME_MESSAGE],
+  chatConversationId: crypto.randomUUID(),
 
   // Monotonic counter bumped on every visualization-session switch. Any handler
   // that awaits a network call captures it first and drops its post-await
@@ -687,6 +689,7 @@ const useGraphStore = create((set, get) => ({
       schema,
       presentation,
       chatMessages: [welcomeMessage],
+      chatConversationId: crypto.randomUUID(),
       configLoaded: true,
       availableExperts: presentation?.expert_agents || [],
     };
@@ -791,10 +794,10 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
-  clearChatMessages: (t) => {
+  clearChatMessages: (t, language) => {
     const { presentation } = get();
-    const welcomeMessage = createWelcomeMessage(presentation, t);
-    set({ chatMessages: [welcomeMessage] });
+    const welcomeMessage = createWelcomeMessage(presentation, t, language);
+    set({ chatMessages: [welcomeMessage], chatConversationId: crypto.randomUUID() });
   },
 
   // Reset all session-scoped UI state when switching visualization sessions so
@@ -813,6 +816,7 @@ const useGraphStore = create((set, get) => ({
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
     set((state) => ({
       chatMessages: [welcomeMessage],
+      chatConversationId: crypto.randomUUID(),
       activeExperts: [],
       detailNode: null,
       editingNode: null,

@@ -13,6 +13,7 @@ consistency and proper validation.
 
 from typing import List, Dict, Any, Optional, Callable
 import asyncio
+import copy
 import functools
 import contextvars
 import logging
@@ -26,9 +27,18 @@ from backend.llm.llm_providers import provider_max_tokens
 from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
-from backend.runtime.attachment_access import validate_attachment_setting
+from backend.runtime.attachment_access import (
+    attachment_content_enabled,
+    validate_attachment_setting,
+)
 
-from backend.ui.attachment_confirmation import pending_actions, request_actor, refusal
+from backend.ui.attachment_confirmation import (
+    confirmation_outcome,
+    pending_actions,
+    refusal,
+    request_actor,
+)
+from backend.ui import conversation_state as conversation_states
 
 logger = logging.getLogger(__name__)
 
@@ -806,6 +816,7 @@ class ChatService:
         visible_node_ids: Optional[List[str]] = None,
         selected_node_ids: Optional[List[str]] = None,
         llm_provider: Optional[Any] = None,
+        conversation_state: Optional[str] = None,
         _confirmation: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
@@ -840,12 +851,17 @@ class ChatService:
                 resolving one from env/model profiles. Passed through to
                 ChatProcessor.process_message for the evaluation harness
                 (backend/evaluation); see that parameter's docstring there.
+            conversation_state: The token the previous response returned. Without
+                a valid, clean one, a request continuing a conversation starts
+                tainted (ADR 0010 §5).
 
         Returns:
             Dict with:
             - content: The text response from the LLM
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
+            - conversation_state, untrusted_content_used: The signed state for
+              the next request and whether this turn was tainted
         """
         effective_prefix, collection_perms, collect_responses = (
             run_on_event_loop(
@@ -993,10 +1009,31 @@ class ChatService:
             # visualization_context comes last — most immediate situational snapshot.
             from backend.service.attachment_tools import tool_caller
 
+            start_tainted = inherited_taint = False
+            if _confirmation is None:
+                # Snapshot before the tool loop appends to the history.
+                received = copy.deepcopy(
+                    [
+                        {"role": m.get("role"), "content": m.get("content")}
+                        for m in messages
+                    ]
+                )
+                status = conversation_states.taint_status(
+                    received, conversation_state, context["actor"]
+                )
+                inherited_taint = status != conversation_states.CLEAN
+                # Only attachment reads taint, so with attachments off for the
+                # instance no continued conversation starts tainted: the token
+                # carrying an unverifiable state (restart, another worker) is
+                # tainted, and would otherwise taint every later turn. The
+                # taint stays carried in the token for when access returns. The
+                # caller's own grant is not consulted: a revoked grant must not
+                # launder an earlier taint.
+                start_tainted = inherited_taint and attachment_content_enabled()
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name
             ):
-                return self._processor.process_message(
+                result = self._processor.process_message(
                     messages=messages,
                     api_key=api_key,
                     provider=provider,
@@ -1010,23 +1047,36 @@ class ChatService:
                     attachment_access=attachment_access,
                     confirmation_context=context,
                     confirmed_call=_confirmation.get("call") if _confirmation else None,
+                    start_tainted=start_tainted,
                 )
+            if _confirmation is None:
+                result["content"] = (
+                    result.get("content") or conversation_states.EMPTY_REPLY_TEXT
+                )
+                result["conversation_state"] = conversation_states.issue(
+                    tainted=inherited_taint
+                    or result.get("untrusted_content_used", True),
+                    actor=context["actor"],
+                    messages=received,
+                    reply=result["content"],
+                )
+            return result
         finally:
             _request_federation_depth.reset(federation_depth_token)
 
     def confirm_action(self, token: str) -> Dict[str, Any]:
         entry = pending_actions.peek(token)
         if entry is None:
-            return refusal("confirmation_unknown")
+            return confirmation_outcome(refusal("confirmation_unknown"))
         _, name, arguments, context = entry
         if context is None or request_actor() != context["actor"]:
-            return refusal("access_denied")
+            return confirmation_outcome(refusal("access_denied"))
         # Sibling confirmations share the original turn's touched ids. Serialize
         # writes and response saves so the latter observes completed writes.
         with context["lock"]:
             if pending_actions.take(token) is None:
-                return refusal("confirmation_unknown")
-            return self.process_message(
+                return confirmation_outcome(refusal("confirmation_unknown"))
+            result = self.process_message(
                 messages=[],
                 collection_short_name=context["collection"],
                 api_key="" if context["api_key_override"] else None,
@@ -1040,6 +1090,7 @@ class ChatService:
                     },
                 },
             )
+        return confirmation_outcome(result)
 
     def process_chat_request(
         self,

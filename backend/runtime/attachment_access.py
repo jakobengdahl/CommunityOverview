@@ -31,6 +31,11 @@ def agent_attachment_access(value, *, agent_id: str) -> str:
     return value
 
 
+def attachment_content_enabled() -> bool:
+    """Whether the instance ceiling lets any caller read attachment content."""
+    return os.getenv("ATTACHMENT_CONTENT_ACCESS", "off") in ("read", "read_write")
+
+
 def attachment_tool_allowed(name: str, access: str) -> bool:
     if name not in ATTACHMENT_TOOLS:
         return True

@@ -101,10 +101,22 @@
     "delete_cancelled": "Deletion cancelled.",
     "selected_nodes": "{count} nodes selected",
     "minimize": "Minimize",
+    "new_conversation": "New conversation",
+    "new_conversation_tooltip": "Start a new conversation; earlier messages and file content are no longer sent",
     "clear_selection": "Clear selection",
     "placeholder_with_selection": "Ask a question about the selected nodes...",
     "model_profile": "Model profile",
-    "model_profile_selection_disabled": "Model profile selection is disabled"
+    "model_profile_selection_disabled": "Model profile selection is disabled",
+    "untrusted_content_used": "This answer used text from attached files. Writes need your confirmation.",
+    "pending_action_title": "Action waiting for your confirmation",
+    "pending_action_notice": "File content was in this conversation. The assistant asked to run the action below; check the exact tool and arguments before you confirm.",
+    "pending_action_tool": "Tool:",
+    "pending_action_confirm": "Confirm and run",
+    "pending_action_done": "Done.",
+    "pending_action_unknown": "This confirmation is no longer valid. Send the request again.",
+    "pending_action_denied": "You are not allowed to confirm this action.",
+    "pending_action_failed": "The action failed: {message}",
+    "pending_action_failed_no_reason": "The action failed."
   },
   "detail": {
     "summary": "Summary",

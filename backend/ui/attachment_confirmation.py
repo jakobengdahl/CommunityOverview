@@ -57,6 +57,25 @@ def refusal(code):
     }
 
 
+def confirmation_outcome(result):
+    """The confirm route's response: an explicit outcome over the raw result.
+
+    Tools report a refused write as success: false with the reason in message
+    (add_nodes validation) or in error, so success is not implied by a result.
+    """
+    raw = result if isinstance(result, dict) else {}
+    failed = raw.get("success") is False or bool(raw.get("error"))
+    texts = (raw.get("error"), raw.get("message")) if failed else (raw.get("message"),)
+    response = {
+        "outcome": "failed" if failed else "ok",
+        "message": next((t for t in texts if isinstance(t, str) and t), None),
+        "result": result,
+    }
+    if raw.get("error_code"):
+        response["error_code"] = raw["error_code"]
+    return response
+
+
 class PendingActions:
     def __init__(self):
         self._entries = OrderedDict()
