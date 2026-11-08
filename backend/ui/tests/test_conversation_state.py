@@ -116,13 +116,25 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     # Tainted from the start: the write is refused into a pending action.
     assert bool(result["pending_actions"]) is tainted
     if change in ("tainted", "other_process_attachments_off"):
+        state = result["conversation_state"]
+        if change == "other_process_attachments_off":
+            # With access still off, the carried taint does not hold writes.
+            messages += [
+                {"role": "assistant", "content": result["content"]},
+                {"role": "user", "content": "write"},
+            ]
+            later = turn(service, llm, messages, state, calls=[WRITE])
+            assert later["untrusted_content_used"] is False
+            assert not later["pending_actions"]
+            state = later["conversation_state"]
+            result = later
         # The unverifiable state is carried forward, not laundered clean.
         monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
         messages += [
             {"role": "assistant", "content": result["content"]},
             {"role": "user", "content": "again"},
         ]
-        again = turn(service, llm, messages, result["conversation_state"])
+        again = turn(service, llm, messages, state)
         assert again["untrusted_content_used"] is True
 
 

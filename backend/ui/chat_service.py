@@ -1023,14 +1023,13 @@ class ChatService:
                 )
                 inherited_taint = status != conversation_states.CLEAN
                 # Only attachment reads taint, so with attachments off for the
-                # instance an unverifiable state (restart, another worker) must
-                # not turn writes into pending actions; the taint is still
-                # carried in the token. The caller's own grant is not consulted:
-                # a revoked grant must not launder an earlier taint. A verified
-                # taint holds whatever the current access.
-                start_tainted = status == conversation_states.TAINTED or (
-                    inherited_taint and attachment_content_enabled()
-                )
+                # instance no continued conversation starts tainted: the token
+                # carrying an unverifiable state (restart, another worker) is
+                # tainted, and would otherwise taint every later turn. The
+                # taint stays carried in the token for when access returns. The
+                # caller's own grant is not consulted: a revoked grant must not
+                # launder an earlier taint.
+                start_tainted = inherited_taint and attachment_content_enabled()
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name
             ):

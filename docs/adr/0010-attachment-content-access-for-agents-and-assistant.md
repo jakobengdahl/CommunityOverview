@@ -1065,13 +1065,14 @@ tainted treatment:
   tainted (more confirmations, never fewer). Several processes that should
   share conversations, and an instance whose conversations should stay clean
   across restarts, set the same key.
-- Only attachment text taints, so a token that fails verification starts the
-  request tainted only while `ATTACHMENT_CONTENT_ACCESS` is not `off` for the
+- Only attachment text taints, so an inherited taint (a token that fails
+  verification, or one that verifies and says tainted) starts the request
+  tainted only while `ATTACHMENT_CONTENT_ACCESS` is not `off` for the
   instance; an instance with attachments off never starts a continued
-  conversation tainted after a restart. The caller's own grant is not
-  consulted, so a revoked or narrowed grant cannot turn an unverifiable
-  conversation clean. A token that verifies and says tainted holds whatever
-  the current access.
+  conversation tainted, also not on the turns after a restart. The taint is
+  still carried in the issued token, so it applies again once access is
+  turned back on. The caller's own grant is not consulted, so a revoked or
+  narrowed grant cannot turn an inherited taint clean.
 
 The web client stores the latest `conversation_state` per conversation and
 sends it back, together with exactly the messages it sent and received:
