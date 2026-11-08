@@ -919,7 +919,9 @@ def test_governance_exception_formatted_logs_hide_content(caplog):
         for line in lines
     )
     assert any(
-        "error_code=proposal_apply_failed error_class=ValueError" in line
+        f"Proposal {proposal.id} error_code=proposal_apply_failed "
+        "error_class=ValueError"
+        in line
         and "raising_frame=" in line
         for line in lines
     )
