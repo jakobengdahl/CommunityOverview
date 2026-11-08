@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import ChatPanel from './ChatPanel';
 import useGraphStore from '../store/graphStore';
+import en from '../i18n/en.json';
 import fixture from '../../../../docs/fixtures/chat_turn2_request.json';
 
 // The real api.js and store: the signed conversation_state is kept and sent by
@@ -175,14 +176,18 @@ describe('ChatPanel conversation state', () => {
         })
       )
       .mockResolvedValueOnce(
-        // The route returns the raw tool result, not a chat response.
+        // An explicit outcome over the raw tool result, not a chat response.
         json({
-          success: true,
+          outcome: 'ok',
           message: 'Added X',
-          added_node_ids: ['x1'],
-          action: 'add_to_visualization',
-          nodes: [{ id: 'x1', type: 'Actor', name: 'X' }],
-          edges: [],
+          result: {
+            success: true,
+            message: 'Added X',
+            added_node_ids: ['x1'],
+            action: 'add_to_visualization',
+            nodes: [{ id: 'x1', type: 'Actor', name: 'X' }],
+            edges: [],
+          },
         })
       );
     render(<ChatPanel />);
@@ -206,21 +211,26 @@ describe('ChatPanel conversation state', () => {
     expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
   });
 
-  it('shows the reason of a confirmed action whose tool result failed with only a message', async () => {
+  it('shows a failed confirmed action as failed with its message and applies nothing', async () => {
     resetStore();
     const action = { token: 't-2', tool: 'add_nodes', arguments: { nodes: [{ name: 'Y' }] } };
     const reason = 'Error validating input: bad annotation';
     global.fetch
       .mockResolvedValueOnce(streamed({ content: 'needs confirmation', pending_actions: [action] }))
       .mockResolvedValueOnce(
-        json({ success: false, message: reason, added_node_ids: [], added_edge_ids: [] })
+        json({
+          outcome: 'failed',
+          message: reason,
+          // A raw result that would apply nodes if the card ignored the outcome.
+          result: { success: false, message: reason, nodes: [{ id: 'y1', name: 'Y' }] },
+        })
       );
     render(<ChatPanel />);
     await send('read the file');
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
 
     const status = await screen.findByRole('status');
-    expect(status.textContent).toContain(reason);
+    expect(status.textContent).toBe(en.chat.pending_action_failed.replace('{message}', reason));
     expect(useGraphStore.getState().nodes).toEqual([]);
   });
 });

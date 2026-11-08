@@ -47,7 +47,8 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
         ("edited", True),
         ("actor", True),
         ("other_process", True),
-        ("other_process_no_access", False),
+        ("other_process_no_grant", True),
+        ("other_process_attachments_off", False),
         ("replayed", True),
         ("tainted", True),
         ("tainted_no_access", True),
@@ -57,9 +58,10 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     chat_service, monkeypatch, change, tainted
 ):
     service, llm = chat_service
-    # Inherited taint applies only where an attachment can be read.
-    if change != "other_process_no_access":
-        service._assistant_attachment_access = "read"
+    # Inherited taint applies only where the instance enables attachments.
+    if change != "other_process_attachments_off":
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    service._assistant_attachment_access = "read"
     if change == "shared_key":
         monkeypatch.setenv("ATTACHMENT_CONVERSATION_STATE_KEY", "shared")
     first_calls = ()
@@ -94,8 +96,11 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         messages[0] = {"role": "user", "content": "hi!"}
     elif change == "actor":
         headers = {**ACTOR, "x-communityoverview-actor-id": "b"}
-    elif change in ("other_process", "other_process_no_access", "shared_key"):
+    elif change.startswith("other_process") or change == "shared_key":
         monkeypatch.setattr(conversation_state, "_PROCESS_KEY", secrets.token_bytes(32))
+        if change == "other_process_no_grant":
+            # A revoked grant must not launder an unverifiable state clean.
+            service._assistant_attachment_access = "off"
     elif change == "tainted_no_access":
         # A verified taint holds even where no attachment can be read now.
         service._assistant_attachment_access = "off"
@@ -110,9 +115,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     assert result["untrusted_content_used"] is tainted
     # Tainted from the start: the write is refused into a pending action.
     assert bool(result["pending_actions"]) is tainted
-    if change in ("tainted", "other_process_no_access"):
+    if change in ("tainted", "other_process_attachments_off"):
         # The unverifiable state is carried forward, not laundered clean.
-        service._assistant_attachment_access = "read"
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
         messages += [
             {"role": "assistant", "content": result["content"]},
             {"role": "user", "content": "again"},

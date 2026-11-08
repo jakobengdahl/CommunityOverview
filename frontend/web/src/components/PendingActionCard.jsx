@@ -8,9 +8,10 @@ import './PendingActionCard.css';
  * A write the server refused after file content entered the conversation
  * (ADR 0010 §5). Shows the tool and arguments exactly as the server recorded
  * them; only this button runs it, through the confirmation route. The route
- * returns the raw tool result (no assistant turn): a successful run shows its
- * message and hands it to onConfirmed, so the caller applies its side effects
- * (e.g. confirmed nodes join the view).
+ * answers with an explicit outcome (no assistant turn): a failure shows its
+ * message; a successful run shows its message and hands the raw tool result to
+ * onConfirmed, so the caller applies its side effects (e.g. confirmed nodes
+ * join the view).
  */
 function PendingActionCard({ action, disabled = false, onConfirmed }) {
   const { t } = useI18n();
@@ -21,21 +22,23 @@ function PendingActionCard({ action, disabled = false, onConfirmed }) {
   const confirm = async () => {
     setBusy(true);
     try {
-      const result = await api.confirmChatAction(action.token);
-      if (result?.error_code === 'confirmation_unknown')
+      const response = await api.confirmChatAction(action.token);
+      if (response?.error_code === 'confirmation_unknown')
         setStatus(t('chat.pending_action_unknown'));
-      else if (result?.error_code === 'access_denied') setStatus(t('chat.pending_action_denied'));
-      else if (result?.error || result?.success === false)
-        // Tool results such as add_nodes report a refused write only in message.
+      else if (response?.error_code === 'access_denied') setStatus(t('chat.pending_action_denied'));
+      // Anything but an explicit ok is a failure.
+      else if (response?.outcome !== 'ok')
         setStatus(
-          t('chat.pending_action_failed', { message: result.error || result.message || '' })
+          response?.message
+            ? t('chat.pending_action_failed', { message: response.message })
+            : t('chat.pending_action_failed_no_reason')
         );
       else {
         setStatus(t('chat.pending_action_done'));
-        setReply(typeof result?.message === 'string' ? result.message : null);
+        setReply(response.message || null);
         // The action already ran; a failing view update must not report it as failed.
         try {
-          await onConfirmed?.(result);
+          await onConfirmed?.(response.result);
         } catch (err) {
           console.error('[PendingActionCard] Failed to apply the confirmed result:', err);
         }

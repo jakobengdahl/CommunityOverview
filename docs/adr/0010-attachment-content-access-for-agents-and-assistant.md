@@ -1025,7 +1025,10 @@ shows as "send the request again".
   §2 permission layers, the allowlist gate and, for a kiosk, the
   collection's enforced tool overrides (its node-type permissions, including
   the typed attachment writes of §2, and `save_collection_response` with
-  the recorded touched node ids).
+  the recorded touched node ids). It answers with an explicit `outcome`,
+  `ok` or `failed`, with the reason as `message` and the raw tool result
+  beside them: a tool that refuses a write by returning `success: false` or
+  an `error` is reported as failed, never as confirmed.
 
 The model can neither confirm an action nor produce a confirmation by
 writing text.
@@ -1058,9 +1061,17 @@ tainted treatment:
   server only ever issues tainted tokens for that conversation.
 - The signing key is `ATTACHMENT_CONVERSATION_STATE_KEY`. When it is unset,
   each process generates a random key at boot; a token signed by another
-  process then fails verification, which errs towards tainted (more
-  confirmations, never fewer). Several processes that should share
-  conversations set the same key.
+  process, or before a restart, then fails verification, which errs towards
+  tainted (more confirmations, never fewer). Several processes that should
+  share conversations, and an instance whose conversations should stay clean
+  across restarts, set the same key.
+- Only attachment text taints, so a token that fails verification starts the
+  request tainted only while `ATTACHMENT_CONTENT_ACCESS` is not `off` for the
+  instance; an instance with attachments off never starts a continued
+  conversation tainted after a restart. The caller's own grant is not
+  consulted, so a revoked or narrowed grant cannot turn an unverifiable
+  conversation clean. A token that verifies and says tainted holds whatever
+  the current access.
 
 The web client stores the latest `conversation_state` per conversation and
 sends it back, together with exactly the messages it sent and received:

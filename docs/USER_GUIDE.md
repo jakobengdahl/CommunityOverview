@@ -676,6 +676,7 @@ adjusting your view, but actions that write data require your confirmation. The
 answer then says that it used text from attached files, and each write the
 assistant asked for appears as a card showing the exact tool and arguments with a
 **Confirm and run** button; only that button runs it, never chat text. If the
+action fails, the card says so with the reason. If the
 card says the confirmation is no longer valid, send the request again. The
 **New conversation** button below the chat input starts a new conversation
 without this restriction; earlier messages and file text are no longer sent. The same applies in

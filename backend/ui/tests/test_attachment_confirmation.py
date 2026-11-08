@@ -108,7 +108,11 @@ def test_confirmation_is_actor_bound_exact_once_and_model_free(chat_service):
         cards = taint(service, llm, [call("write", value=[1])])["pending_actions"]
         card = cards[0]
         count = llm.call_count
-        assert service.confirm_action(card["token"]) == {"success": True}
+        assert service.confirm_action(card["token"]) == {
+            "outcome": "ok",
+            "message": None,
+            "result": {"success": True},
+        }
         assert (
             service.confirm_action(card["token"])["error_code"]
             == "confirmation_unknown"
@@ -121,6 +125,17 @@ def test_confirmation_is_actor_bound_exact_once_and_model_free(chat_service):
     with use_request_authorization(actor_id="two"):
         assert service.confirm_action(card["token"])["error_code"] == "access_denied"
     assert called == [[1]]
+
+
+def test_confirmed_tool_failing_with_only_a_message_is_a_failed_outcome(chat_service):
+    service, llm = chat_service
+    card = taint(
+        service, llm, [call("add_nodes", nodes=[{"type": "Actor"}], edges=[])]
+    )["pending_actions"][0]
+    outcome = service.confirm_action(card["token"])
+    assert outcome["result"]["success"] is False
+    assert outcome["outcome"] == "failed"
+    assert outcome["message"] == outcome["result"]["message"]
 
 
 @pytest.mark.parametrize("change", ["missing", "renamed", "permissions", "allowlist"])
@@ -145,8 +160,7 @@ def test_kiosk_confirmation_resolves_current_identity_and_permissions(
         node.metadata["node_type_permissions"] = {}
     else:
         node.metadata["tool_allowlist"] = ["get_schema"]
-    outcome = service.confirm_action(card["token"])
-    assert outcome.get("error") or outcome.get("success") is False
+    assert service.confirm_action(card["token"])["outcome"] == "failed"
     assert not any(n.name == "Bound" for n in graph.storage.nodes.values())
 
 
@@ -189,9 +203,8 @@ def test_confirmation_route_exposes_cards_and_runs_once(fastapi_test_client):
         "/ui/chat", json={"messages": [{"role": "user", "content": "read"}]}
     ).json()
     card = response["pending_actions"][0]
-    assert client.post("/ui/chat/confirm", json={"token": card["token"]}).json()[
-        "success"
-    ]
+    confirmed = client.post("/ui/chat/confirm", json={"token": card["token"]}).json()
+    assert confirmed["outcome"] == "ok" and confirmed["result"]["success"]
     assert (
         client.post("/ui/chat/confirm", json={"token": card["token"]}).json()[
             "error_code"
@@ -215,8 +228,8 @@ def test_confirmed_kiosk_writes_share_touched_nodes_with_response_save(chat_serv
         ],
         collection_short_name="collect",
     )["pending_actions"]
-    written = service.confirm_action(cards[0]["token"])
-    saved = service.confirm_action(cards[1]["token"])
+    written = service.confirm_action(cards[0]["token"])["result"]
+    saved = service.confirm_action(cards[1]["token"])["result"]
     assert written["success"] and saved["success"]
     assert saved["linked_node_count"] == 1
     assert set(written["added_node_ids"]) <= {
@@ -408,7 +421,8 @@ def test_confirmation_route_denied_actor_preserves_owner_token(
     )
     assert not any(n.name == "Owned" for n in graph.storage.nodes.values())
     count = llm.call_count
-    assert client.post("/ui/chat/confirm", headers=owner, json=body).json()["success"]
+    confirmed = client.post("/ui/chat/confirm", headers=owner, json=body).json()
+    assert confirmed["outcome"] == "ok" and confirmed["result"]["success"]
     assert llm.call_count == count
     assert sum(n.name == "Owned" for n in graph.storage.nodes.values()) == 1
     assert (

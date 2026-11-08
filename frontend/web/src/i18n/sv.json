@@ -115,7 +115,8 @@
     "pending_action_done": "Klart.",
     "pending_action_unknown": "Bekräftelsen gäller inte längre. Skicka begäran igen.",
     "pending_action_denied": "Du får inte bekräfta den här åtgärden.",
-    "pending_action_failed": "Åtgärden misslyckades: {message}"
+    "pending_action_failed": "Åtgärden misslyckades: {message}",
+    "pending_action_failed_no_reason": "Åtgärden misslyckades."
   },
   "detail": {
     "summary": "Sammanfattning",

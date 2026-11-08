@@ -115,7 +115,8 @@
     "pending_action_done": "Done.",
     "pending_action_unknown": "This confirmation is no longer valid. Send the request again.",
     "pending_action_denied": "You are not allowed to confirm this action.",
-    "pending_action_failed": "The action failed: {message}"
+    "pending_action_failed": "The action failed: {message}",
+    "pending_action_failed_no_reason": "The action failed."
   },
   "detail": {
     "summary": "Summary",

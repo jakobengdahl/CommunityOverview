@@ -28,11 +28,16 @@ from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
 from backend.service.system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 from backend.runtime.attachment_access import (
-    ATTACHMENT_READ_TOOLS,
+    attachment_content_enabled,
     validate_attachment_setting,
 )
 
-from backend.ui.attachment_confirmation import pending_actions, request_actor, refusal
+from backend.ui.attachment_confirmation import (
+    confirmation_outcome,
+    pending_actions,
+    refusal,
+    request_actor,
+)
 from backend.ui import conversation_state as conversation_states
 
 logger = logging.getLogger(__name__)
@@ -1017,16 +1022,14 @@ class ChatService:
                     received, conversation_state, context["actor"]
                 )
                 inherited_taint = status != conversation_states.CLEAN
-                # Only attachment reads taint. Without access an unverifiable
-                # state (restart, another worker) must not turn writes into
-                # pending actions; the taint is still carried in the token. A
-                # verified taint holds whatever the current access.
+                # Only attachment reads taint, so with attachments off for the
+                # instance an unverifiable state (restart, another worker) must
+                # not turn writes into pending actions; the taint is still
+                # carried in the token. The caller's own grant is not consulted:
+                # a revoked grant must not launder an earlier taint. A verified
+                # taint holds whatever the current access.
                 start_tainted = status == conversation_states.TAINTED or (
-                    inherited_taint
-                    and any(
-                        attachment_access(name) != "off"
-                        for name in ATTACHMENT_READ_TOOLS
-                    )
+                    inherited_taint and attachment_content_enabled()
                 )
             with tool_caller(
                 "kiosk" if collection_short_name else "user", collection_short_name
@@ -1065,16 +1068,16 @@ class ChatService:
     def confirm_action(self, token: str) -> Dict[str, Any]:
         entry = pending_actions.peek(token)
         if entry is None:
-            return refusal("confirmation_unknown")
+            return confirmation_outcome(refusal("confirmation_unknown"))
         _, name, arguments, context = entry
         if context is None or request_actor() != context["actor"]:
-            return refusal("access_denied")
+            return confirmation_outcome(refusal("access_denied"))
         # Sibling confirmations share the original turn's touched ids. Serialize
         # writes and response saves so the latter observes completed writes.
         with context["lock"]:
             if pending_actions.take(token) is None:
-                return refusal("confirmation_unknown")
-            return self.process_message(
+                return confirmation_outcome(refusal("confirmation_unknown"))
+            result = self.process_message(
                 messages=[],
                 collection_short_name=context["collection"],
                 api_key="" if context["api_key_override"] else None,
@@ -1088,6 +1091,7 @@ class ChatService:
                     },
                 },
             )
+        return confirmation_outcome(result)
 
     def process_chat_request(
         self,
