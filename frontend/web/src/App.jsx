@@ -2959,12 +2959,15 @@ function App() {
         // the shared fixture lists as valid resolved against the app's own
         // origin instead of the author's page.
         //
-        // The trim also strips a leading or trailing C0 control (a tab), so
-        // the gate's control check only sees inner ones. That is accepted
-        // here: the trimmed string is what gets opened, so no scheme or
-        // destination is gained, and refusing a control-bearing target of any
-        // kind is the backend's rule (`_has_control_characters` in
-        // session_annotations.py), applied before a target is stored.
+        // The trim also strips the C0 controls that are in the gate's
+        // whitespace class (U+0009-U+000D) from either end, so the gate's
+        // control check never sees those edge ones; every other C0 control
+        // (U+0000-U+0008, U+000E-U+001F) is not trimmed and is refused
+        // wherever it sits. That is accepted here: the trimmed string is what
+        // gets opened, so no scheme or destination is gained, and refusing a
+        // control-bearing target of any kind is the backend's rule
+        // (`_has_control_characters` in session_annotations.py), applied
+        // before a target is stored.
         const safeTarget = trimReferenceTarget(target);
         if (!isSafeReferenceUrl(safeTarget)) {
           showNotification('error', t('context_menu.reference_unsafe_target'));
