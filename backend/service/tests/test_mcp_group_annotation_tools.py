@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """Tests for the group MCP annotation tools (``create_group_annotation``,
 ``update_group_members``, ``delete_group_annotation``) registered in
 ``backend/service/mcp_tools.py``.

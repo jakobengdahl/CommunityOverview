@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GroupNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import GroupNode, { GROUP_TEXT_COLORS } from '../src/components/GroupNode';
