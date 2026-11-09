@@ -779,7 +779,10 @@ def tool_definitions():
 
 def audit_attachment_refusal(name, outcome):
     """Audit a dispatcher refusal before any node or attachment is resolved."""
-    if name != "list_node_attachments":
+    from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+    # Gates call this for every tool; only attachment content tools are audited.
+    if name in ATTACHMENT_TOOLS and name != "list_node_attachments":
         AttachmentReadTools.audit(
             {"read_node_attachment": "read", "search_node_attachments": "search"}.get(
                 name, name

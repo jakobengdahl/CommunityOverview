@@ -583,14 +583,18 @@ class AgentRegistry:
         )
 
         def apply(tool, arguments):
+            original = original_tool_name(self._mcp_loader, tool)
             worker = self._workers.get(agent_id)
-            if worker is None or not worker.config.enabled:
-                raise ValueError("Agent is unavailable or disabled")
-            if worker.get_status()["paused"]:
+            unavailable = worker is None or not worker.config.enabled
+            if unavailable or worker.get_status()["paused"]:
+                if original in ATTACHMENT_WRITE_TOOLS:
+                    with tool_caller("agent", agent_id), approved_write():
+                        audit_attachment_refusal(original, "agent_unavailable")
+                if unavailable:
+                    raise ValueError("Agent is unavailable or disabled")
                 raise ValueError(
                     "Agent is paused; retry with a new proposal after recovery"
                 )
-            original = original_tool_name(self._mcp_loader, tool)
             if original in ATTACHMENT_WRITE_TOOLS:
                 # Re-resolve the proposing Agent's grant from storage, so a
                 # grant revoked or an Agent deleted since also stops queued writes.

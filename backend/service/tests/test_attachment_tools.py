@@ -948,6 +948,7 @@ def test_agent_attachment_writes_become_proposals(
     args = {"node_id": "doc", "filename": "a.txt", "content_text": "hello"}
     first = run("GRAPH__add_node_attachment", args)["proposal_id"]
     second = run("GRAPH__add_node_attachment", args)["proposal_id"]
+    third = run("GRAPH__add_node_attachment", args)["proposal_id"]
     assert store.list(NS, "doc") == []
 
     registry = AgentRegistry.__new__(AgentRegistry)
@@ -971,15 +972,23 @@ def test_agent_attachment_writes_become_proposals(
         narrowed = manager.approve(first)["status"]
         storage.update_node("a1", {"metadata": {"attachment_access": "read_write"}})
         granted = manager.approve(second)["status"]
+        worker.get_status = lambda: {"paused": True}
+        paused = manager.approve(third)["status"]
     applies = level == "act_after_approval"
-    assert (narrowed, granted) == (
-        ("apply_failed", "applied") if applies else ("approved", "approved")
+    assert (narrowed, granted, paused) == (
+        ("apply_failed", "applied", "apply_failed")
+        if applies
+        else ("approved", "approved", "approved")
     )
     assert len(store.list(NS, "doc")) == int(applies)
-    # G4: both applied attempts are audited as the Agent, for the approver.
+    # G4: every applied attempt is audited as the Agent, for the approver.
     audits = [r for r in caplog.records if r.name == "attachments.audit"]
     assert [(a.event, a.outcome) for a in audits] == (
-        [("attachment_added", "access_denied"), ("attachment_added", "ok")]
+        [
+            ("attachment_added", "access_denied"),
+            ("attachment_added", "ok"),
+            ("attachment_added", "agent_unavailable"),
+        ]
         if applies
         else []
     )
@@ -988,6 +997,30 @@ def test_agent_attachment_writes_become_proposals(
             {"type": "agent", "id": "a1"},
             {"type": "user", "id": "approver"},
         )
+
+
+def test_non_attachment_tool_refusals_write_no_attachment_audit(service, caplog):
+    """Refusals of non-attachment tools never reach attachments.audit."""
+    from backend.agents.governance import AutonomyGate, AutonomyLevel
+    from backend.agents.mcp_loader import MCPLoader
+    from unittest.mock import MagicMock
+
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel.OBSERVE,
+        tool_allowlist=["GRAPH__search_graph"],
+        mcp_loader=MCPLoader([]),
+        proposal_store=None,
+        agent_id="a1",
+    )
+    raw = MagicMock()
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        gate.wrap(raw)("GRAPH__add_nodes", {"nodes": []})
+        gate.wrap(raw)("GRAPH__add_node_attachment", {"node_id": "doc"})
+    raw.assert_not_called()
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert [(a.tool, a.outcome) for a in audits] == [
+        ("add_node_attachment", "access_denied")
+    ]
 
 
 @pytest.mark.parametrize("failure", [False, True])
