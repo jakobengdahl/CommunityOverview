@@ -122,3 +122,58 @@ def test_built_request_timeout_and_retries(provider_class, bounded, monkeypatch)
     assert timeout["write"] == (17 if bounded else original_timeout.write)
     assert timeout["pool"] == (17 if bounded else original_timeout.pool)
     provider.client.close()
+
+
+@pytest.mark.parametrize("provider_class", [OpenAIProvider, ClaudeProvider])
+@pytest.mark.parametrize("hang_on_retry", [False, True, "backoff"])
+def test_transient_error_retries_within_total_deadline(provider_class, hang_on_retry):
+    import importlib
+    from threading import Event, current_thread
+    import httpx as legacy_httpx
+
+    provider = provider_class("test-key")
+    httpx = importlib.import_module(
+        "httpx"
+        if isinstance(provider.client.timeout, legacy_httpx.Timeout)
+        else "httpx2"
+    )
+    release, finished = Event(), Event()
+    requests, workers = [], []
+
+    def respond(request):
+        workers.append(current_thread())
+        requests.append(request)
+        if len(requests) == 1:
+            delay = "1000" if hang_on_retry == "backoff" else "1"
+            return httpx.Response(500, headers={"retry-after-ms": delay})
+        if hang_on_retry:
+            release.wait(2)
+        finished.set()
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "Recovered"}],
+                "choices": [{"message": {"content": "Recovered"}}],
+                "stop_reason": "end_turn",
+            },
+        )
+
+    provider.client = provider.client.with_options(
+        http_client=httpx.Client(transport=httpx.MockTransport(respond))
+    )
+    try:
+        if hang_on_retry:
+            with pytest.raises(TimeoutError, match="LLM call exceeded"):
+                provider.create_completion([], "", [], timeout_seconds=0.1)
+            assert not finished.is_set()
+        else:
+            response = provider.create_completion([], "", [], timeout_seconds=1)
+            assert response.content == [{"type": "text", "text": "Recovered"}]
+        assert len(requests) == (1 if hang_on_retry == "backoff" else 2)
+    finally:
+        release.set()
+        workers[0].join(1)
+        assert not workers[0].is_alive()
+        if hang_on_retry != "backoff":
+            assert finished.wait(1)
+        provider.client.close()

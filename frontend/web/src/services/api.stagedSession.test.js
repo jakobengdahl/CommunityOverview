@@ -1,3 +1,4 @@
+// covers: frontend/web/src/services/api.js
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 import * as api from './api';
@@ -236,7 +237,9 @@ describe('mode-unknown hold, more cases', () => {
     const calls = mockFetch();
     api.setActiveSessionForRequests('5555-6666-7777-8888');
     api.setSessionModeUnknown('5555-6666-7777-8888');
-    const error = await api.sendChatMessage([{ role: 'user', content: 'hi' }]).catch((e) => e);
+    const error = await api
+      .sendChatMessage([{ role: 'user', content: 'hi' }], null, { conversationId: 'c' })
+      .catch((e) => e);
     expect(error.code).toBe('session_mode_unknown');
     expect(calls).toHaveLength(0);
     api.setSessionModeDirect('5555-6666-7777-8888');

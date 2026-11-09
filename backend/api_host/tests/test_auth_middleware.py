@@ -1,3 +1,4 @@
+# covers: backend/api_host/middleware.py
 """
 Tests for Basic Auth middleware modes (auth_enabled vs mcp_basic_auth).
 """
@@ -19,6 +20,10 @@ from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 from backend.api_host.middleware import add_auth_middleware
 from backend.api_host.session_auth import SESSION_COOKIE_NAME, mint_session_cookie
+from backend.runtime.authorization import (
+    build_graph_authorization_context,
+    use_request_authorization,
+)
 
 
 def _make_config(**overrides) -> tuple:
@@ -252,6 +257,88 @@ def test_custom_header_does_not_replace_credentials(authorization):
     response = TestClient(app).post("/api/write", content=b"payload", headers=headers)
     assert response.status_code == 401
     assert writes == []
+
+
+class _FrontLayer:
+    """Strips inbound actor headers and sets its own, as a hosted ingress does."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            scope["headers"] = [
+                (k, v)
+                for k, v in scope["headers"]
+                if not k.lower().startswith(b"x-communityoverview-")
+            ] + [
+                (b"x-communityoverview-actor-id", "cärol".encode()),
+                (b"x-communityoverview-auth-source", b"hosted-ingress"),
+            ]
+        await self.app(scope, receive, send)
+
+
+@pytest.mark.parametrize(
+    "auth_enabled,trust,front_layer,credentials,env_actor,expected",
+    [
+        (True, False, False, _auth_header("admin", "pw"), "", ("admin", "basic")),
+        (True, False, False, {"Authorization": "Bearer tok"}, "", ("", "anonymous")),
+        (False, False, False, {}, "", ("", "anonymous")),
+        # Trusted, the header wins over the authenticated identity.
+        (False, True, False, {}, "", ("bob", "proxy")),
+        (True, True, False, _auth_header("admin", "pw"), "", ("bob", "proxy")),
+        # A front layer composed around the app sets the actor it resolved.
+        (False, True, True, {}, "", ("cärol", "hosted-ingress")),
+        # A non-ASCII authenticated username reaches hooks unchanged.
+        (True, False, False, _auth_header("åsa", "pw"), "", ("åsa", "basic")),
+        # A bearer or unauthenticated request falls back to the operator's
+        # configured default actor, never the spoofed header.
+        (
+            True,
+            False,
+            False,
+            {"Authorization": "Bearer tok"},
+            "ops",
+            ("ops", "provided"),
+        ),
+        (False, False, False, {}, "ops", ("ops", "provided")),
+        (True, False, False, _auth_header("admin", "pw"), "ops", ("admin", "basic")),
+    ],
+)
+def test_actor_headers_are_kept_only_with_front_layer_trust(
+    auth_enabled, trust, front_layer, credentials, env_actor, expected
+):
+    config, _ = _make_config(
+        auth_enabled=auth_enabled,
+        auth_username=expected[0] if expected[1] == "basic" else "admin",
+        auth_password="pw",
+        auth_bearer_token="tok",
+        trust_front_layer_actor=trust,
+    )
+    app = create_app(config)
+
+    async def probe(request: Request):
+        with use_request_authorization(headers=request.headers):
+            actor = build_graph_authorization_context(action="read", target="x").actor
+        return [actor["actor_id"], actor["auth_source"]]
+
+    app.add_api_route("/api/actor-probe", probe)
+    if front_layer:
+        app.add_middleware(_FrontLayer)
+    spoofed = {
+        "x-communityoverview-actor-id": "bob",
+        "x-communityoverview-auth-source": "proxy",
+    }
+    env = {
+        "COMMUNITYOVERVIEW_ACTOR_ID": env_actor,
+        "COMMUNITYOVERVIEW_ACTOR_TYPE": "",
+        "COMMUNITYOVERVIEW_AUTH_SOURCE": "",
+    }
+    with patch.dict(os.environ, env):
+        response = TestClient(app).get(
+            "/api/actor-probe", headers={**spoofed, **credentials}
+        )
+    assert tuple(response.json()) == expected
 
 
 class TestMcpBasicAuth:
@@ -728,12 +815,15 @@ class TestSessionCookieLogin:
         finally:
             os.unlink(path)
 
-    def test_form_login_sets_cookie_and_authenticates(self):
-        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+    @pytest.mark.parametrize("username", ["admin", "åsa"])
+    def test_form_login_sets_cookie_and_authenticates(self, username):
+        client, path = self._make_client(
+            auth_enabled=True, auth_username=username, auth_password="secret"
+        )
         try:
             resp = client.post(
                 "/auth/login",
-                data={"username": "admin", "password": "secret", "next": "/web/"},
+                data={"username": username, "password": "secret", "next": "/web/"},
                 follow_redirects=False,
             )
             assert resp.status_code == 303

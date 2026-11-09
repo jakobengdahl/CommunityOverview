@@ -52,6 +52,7 @@ def test_attachment_tools_hide_missing_and_invisible_nodes(service, storage):
 def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, caplog):
     """G2: every passage identifies its source; audit counts only returned text."""
     from backend.runtime.authorization import use_request_authorization
+    from backend.runtime.extensions import RuntimeContext, bind_execution_context
 
     record = _upload(client, "doc", b"policy human review").json()
     with (
@@ -61,6 +62,8 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
         ),
     ):
         result = service.attachment_tool_search("policy", ["doc"])
+        with bind_execution_context(RuntimeContext(correlation_id="run-7")):
+            service.attachment_tool_search("policy", ["doc"])
     passage = result["passages"][0]
     assert (passage["node_id"], passage["attachment_id"], passage["filename"]) == (
         "doc",
@@ -70,7 +73,9 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     assert passage["locator"]
     assert result["untrusted_content"] is True
     audits = [r for r in caplog.records if r.name == "attachments.audit"]
-    assert len(audits) == 1
+    assert len(audits) == 2
+    # A bound run's correlation id wins over the request header.
+    assert audits[1].correlation_id == "run-7"
     assert audits[0].chars == len(passage["text"])
     assert audits[0].sha256 == record["sha256"]
     assert audits[0].actor == {"type": "user", "id": "reader"}
@@ -78,6 +83,15 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
     import logging
     from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
 
+    expected = {
+        "actor": {"type": "user", "id": "reader"},
+        "node_id": "doc",
+        "attachment_id": record["id"],
+        "sha256": record["sha256"],
+        "chars": len(passage["text"]),
+        "outcome": "ok",
+        "correlation_id": "read-123",
+    }
     for formatter in (logging.Formatter(TEXT_LOG_FORMAT), StructuredJsonFormatter()):
         line = formatter.format(audits[0])
         message = (
@@ -86,26 +100,7 @@ def test_attachment_tool_passages_cite_sources_and_audit_once(service, client, c
             else line.split(": ", 1)[1]
         )
         emitted = json.loads(message)
-        assert {
-            k: emitted[k]
-            for k in (
-                "actor",
-                "node_id",
-                "attachment_id",
-                "sha256",
-                "chars",
-                "outcome",
-                "correlation_id",
-            )
-        } == {
-            "actor": {"type": "user", "id": "reader"},
-            "node_id": "doc",
-            "attachment_id": record["id"],
-            "sha256": record["sha256"],
-            "chars": len(passage["text"]),
-            "outcome": "ok",
-            "correlation_id": "read-123",
-        }
+        assert {k: emitted[k] for k in expected} == expected
 
 
 @pytest.mark.parametrize(

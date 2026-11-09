@@ -3,6 +3,8 @@ import { FunnelFill, SendFill, ArrowRightCircleFill } from 'react-bootstrap-icon
 import * as api from '../services/api';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
+import PendingActionCard from './PendingActionCard';
+import { useI18n } from '../i18n';
 import './CollectKioskView.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -15,6 +17,31 @@ function formatAnswerValue(value) {
   if (Array.isArray(value)) return value.join(', ');
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   return String(value ?? '');
+}
+
+/**
+ * The history to send: exactly what earlier requests sent and received, so the
+ * server can verify the conversation's signed state (ADR 0010 §5). The hidden
+ * kickstart was sent and stays; client-made error notices were not.
+ */
+function historyForLLM(messages) {
+  return messages
+    .filter((m) => !m.displayOnly)
+    .map((m) => ({ role: m.role, content: m.llmContent ?? m.content }));
+}
+
+/** An assistant message from a chat response; its content is replayed unchanged. */
+function assistantMessage(response) {
+  return {
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    content: response.content,
+    timestamp: new Date(),
+    toolUsed: response.toolUsed,
+    form: formFromResponse(response),
+    pendingActions: response.pending_actions,
+    untrustedContentUsed: response.untrusted_content_used,
+  };
 }
 
 /** Build the visible summary and the LLM-facing content for a submitted form. */
@@ -41,6 +68,9 @@ function buildFormSubmission(answers) {
  * `node_type_permissions`.
  */
 function CollectKioskView({ shortName }) {
+  const { t } = useI18n();
+  // Opening a kiosk starts a new conversation with its own key.
+  const [conversationId] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -96,19 +126,9 @@ function CollectKioskView({ shortName }) {
     setIsProcessing(true);
 
     api
-      .sendChatMessage([kickstartMsg], null, { collectionShortName: shortName })
+      .sendChatMessage([kickstartMsg], null, { collectionShortName: shortName, conversationId })
       .then((response) => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: response.content || '(no response)',
-            timestamp: new Date(),
-            toolUsed: response.toolUsed,
-            form: formFromResponse(response),
-          },
-        ]);
+        setMessages((prev) => [...prev, assistantMessage(response)]);
       })
       .catch((err) => {
         console.error('[CollectKioskView] Kickstart error:', err);
@@ -119,6 +139,7 @@ function CollectKioskView({ shortName }) {
             role: 'assistant',
             content: 'Error starting the collection session. Please type a message to begin.',
             timestamp: new Date(),
+            displayOnly: true,
           },
         ]);
       })
@@ -138,10 +159,7 @@ function CollectKioskView({ shortName }) {
     // Hidden messages (e.g. the [COLLECTION_START] kickstart) must stay in the API history
     // so the conversation starts with a user turn as required by the Anthropic API.
     // A form submission carries its structured payload in llmContent (not shown in chat).
-    const conversationHistory = [
-      ...messages.map((m) => ({ role: m.role, content: m.llmContent ?? m.content })),
-      { role: 'user', content: userText },
-    ];
+    const conversationHistory = [...historyForLLM(messages), { role: 'user', content: userText }];
 
     setMessages((prev) => [
       ...prev,
@@ -159,19 +177,10 @@ function CollectKioskView({ shortName }) {
     try {
       const response = await api.sendChatMessage(conversationHistory, null, {
         collectionShortName: shortName,
+        conversationId,
       });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: response.content || '(no response)',
-          timestamp: new Date(),
-          toolUsed: response.toolUsed,
-          form: formFromResponse(response),
-        },
-      ]);
+      setMessages((prev) => [...prev, assistantMessage(response)]);
     } catch (err) {
       console.error('[CollectKioskView] Chat error:', err);
       setChatError(err.message);
@@ -182,13 +191,14 @@ function CollectKioskView({ shortName }) {
           role: 'assistant',
           content: `Error: ${err.message}`,
           timestamp: new Date(),
+          displayOnly: true,
         },
       ]);
     } finally {
       setIsProcessing(false);
       setTimeout(() => textareaRef.current?.focus(), 100);
     }
-  }, [inputValue, isProcessing, messages, shortName]);
+  }, [inputValue, isProcessing, messages, shortName, conversationId]);
 
   const handleFormSubmit = useCallback(
     async (messageId, answers) => {
@@ -202,7 +212,7 @@ function CollectKioskView({ shortName }) {
       );
 
       const conversationHistory = [
-        ...messages.map((m) => ({ role: m.role, content: m.llmContent ?? m.content })),
+        ...historyForLLM(messages),
         { role: 'user', content: llmContent },
       ];
 
@@ -222,18 +232,9 @@ function CollectKioskView({ shortName }) {
       try {
         const response = await api.sendChatMessage(conversationHistory, null, {
           collectionShortName: shortName,
+          conversationId,
         });
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: response.content || '(no response)',
-            timestamp: new Date(),
-            toolUsed: response.toolUsed,
-            form: formFromResponse(response),
-          },
-        ]);
+        setMessages((prev) => [...prev, assistantMessage(response)]);
       } catch (err) {
         console.error('[CollectKioskView] Form submit error:', err);
         setChatError(err.message);
@@ -244,6 +245,7 @@ function CollectKioskView({ shortName }) {
             role: 'assistant',
             content: `Error: ${err.message}`,
             timestamp: new Date(),
+            displayOnly: true,
           },
         ]);
       } finally {
@@ -251,7 +253,7 @@ function CollectKioskView({ shortName }) {
         setTimeout(() => textareaRef.current?.focus(), 100);
       }
     },
-    [isProcessing, messages, shortName]
+    [isProcessing, messages, shortName, conversationId]
   );
 
   const handleKeyPress = (e) => {
@@ -361,6 +363,12 @@ function CollectKioskView({ shortName }) {
                     msg.content
                   )}
                 </div>
+                {msg.untrustedContentUsed && (
+                  <div className="kiosk-untrusted-notice">{t('chat.untrusted_content_used')}</div>
+                )}
+                {msg.pendingActions?.map((action) => (
+                  <PendingActionCard key={action.token} action={action} disabled={isProcessing} />
+                ))}
                 {msg.form && (
                   <CollectionForm
                     form={msg.form}

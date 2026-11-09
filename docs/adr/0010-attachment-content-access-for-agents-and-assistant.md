@@ -614,11 +614,18 @@ people. Agent attachment writes are never executed as the Agent: they are
 proposals, applied with the approver bound, so the write targets are
 decided for the approver (and the Agent's own grant re-resolved, above); a
 hook rule on `add_node_attachment` or `delete_node_attachment` for actor
-type `agent` never fires. Because request actors otherwise come from
-client-settable headers (`backend/runtime/request_context.py`), the actor
-type `agent` is reserved: the resolver ignores a header-supplied `agent`
-type and treats such a request as an ordinary user request, and a test
-checks it. The hook-author documentation describes this actor. What an
+type `agent` never fires. Request actors otherwise come from the actor
+headers (`backend/runtime/request_context.py`); the API host strips the
+inbound ones and sets them from the authenticated identity
+(`ActorHeaderMiddleware`) unless `TRUST_FRONT_LAYER_ACTOR` is true. That
+setting is only safe behind a front layer, such as a hosted ingress composed
+around the app in-process, that strips the inbound headers and sets its own
+on every request. A field no header
+supplies (all of them on a bearer or unauthenticated request) falls back to
+the operator's `COMMUNITYOVERVIEW_ACTOR_*` environment defaults. Since such a front layer, or a caller of the service layer, can
+still supply any header, the actor type `agent` is reserved: the resolver
+ignores a header-supplied `agent` type and treats such a request as an
+ordinary user request, and a test checks it. The hook-author documentation describes this actor. What an
 Agent reads can reappear in its run summary and its proposals; so the
 `/agents/*` read routes (`GET /agents/runs`, `/agents/runs/{id}`,
 `/agents/proposals`, `/agents/proposals/{id}`) run inside
@@ -1025,7 +1032,10 @@ shows as "send the request again".
   §2 permission layers, the allowlist gate and, for a kiosk, the
   collection's enforced tool overrides (its node-type permissions, including
   the typed attachment writes of §2, and `save_collection_response` with
-  the recorded touched node ids).
+  the recorded touched node ids). It answers with an explicit `outcome`,
+  `ok` or `failed`, with the reason as `message` and the raw tool result
+  beside them: a tool that refuses a write by returning `success: false` or
+  an `error` is reported as failed, never as confirmed.
 
 The model can neither confirm an action nor produce a confirmation by
 writing text.
@@ -1058,9 +1068,18 @@ tainted treatment:
   server only ever issues tainted tokens for that conversation.
 - The signing key is `ATTACHMENT_CONVERSATION_STATE_KEY`. When it is unset,
   each process generates a random key at boot; a token signed by another
-  process then fails verification, which errs towards tainted (more
-  confirmations, never fewer). Several processes that should share
-  conversations set the same key.
+  process, or before a restart, then fails verification, which errs towards
+  tainted (more confirmations, never fewer). Several processes that should
+  share conversations, and an instance whose conversations should stay clean
+  across restarts, set the same key.
+- Only attachment text taints, so an inherited taint (a token that fails
+  verification, or one that verifies and says tainted) starts the request
+  tainted only while `ATTACHMENT_CONTENT_ACCESS` is not `off` for the
+  instance; an instance with attachments off never starts a continued
+  conversation tainted, also not on the turns after a restart. The taint is
+  still carried in the issued token, so it applies again once access is
+  turned back on. The caller's own grant is not consulted, so a revoked or
+  narrowed grant cannot turn an inherited taint clean.
 
 The web client stores the latest `conversation_state` per conversation and
 sends it back, together with exactly the messages it sent and received:
@@ -1172,7 +1191,9 @@ outcome and the characters actually returned from that file. If a later step
 fails, those records remain, and the error adds a null record. A search call that ends in an error (`access_denied`,
 `too_many_nodes`, `invalid_arguments`, …) or attempts no extraction writes
 one record with `node_id`, `attachment_id` and `sha256` `null`, `chars: 0`
-and its `outcome`, so refused and empty searches are audited too. The record **never** contains extracted text, passage text, file
+and its `outcome`, so refused and empty searches are audited too.
+`list_node_attachments` returns metadata, not content (§1), and writes no
+audit record, although its file names taint the turn or run. The record **never** contains extracted text, passage text, file
 bytes, the query or the file name.
 
 **No content in other logs.** The existing logging would otherwise defeat

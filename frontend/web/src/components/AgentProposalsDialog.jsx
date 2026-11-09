@@ -115,6 +115,9 @@ export default function AgentProposalsDialog({ agentId = null, onClose }) {
                         <span className={`agent-run-status ${STATUS_CLASS[p.status] || ''}`}>
                           {t(`agent_proposals.status_${p.status}`)}
                         </span>
+                        {p.tainted && (
+                          <p className="agent-run-error">{t('agent_proposals.tainted_notice')}</p>
+                        )}
                       </td>
                       <td>{p.agent_name || p.agent_id}</td>
                       <td>

@@ -18,7 +18,7 @@ from backend.core.events.causation import agent_mutation_context
 from .models import Proposal, ProposalStatus, utcnow
 from .store import ProposalStore
 
-from backend.runtime.content_logging import log_failure
+from backend.runtime.content_logging import content_logging, log_failure
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,10 @@ class GovernanceManager:
     # -- internal -----------------------------------------------------------
 
     def _apply(self, p: Proposal) -> None:
+        def current_taint() -> bool:
+            current = self._store.get(p.id)
+            return current is None or current.tainted
+
         if self._executor_factory is None:
             p.status = ProposalStatus.APPLY_FAILED
             p.apply_error = "No executor configured to apply the approved action."
@@ -123,6 +127,11 @@ class GovernanceManager:
             if type(p.causation_depth) is not int or p.causation_depth < 1:
                 raise ValueError("Invalid proposal causation depth")
             with (
+                content_logging(
+                    tainted=p.tainted,
+                    known_tools=(p.tool,),
+                    taint_probe=current_taint,
+                ),
                 bind_session(p.session_id),
                 agent_mutation_context(
                     p.agent_id,
@@ -143,7 +152,12 @@ class GovernanceManager:
                 p.apply_result = _small_result(result)
         except Exception as exc:
             log_failure(
-                logger, logging.ERROR, "proposal_apply_failed", exc, redact=True
+                logger,
+                logging.ERROR,
+                "proposal_apply_failed",
+                exc,
+                redact=True,
+                context=f"Proposal {p.id}",
             )
             p.status = ProposalStatus.APPLY_FAILED
             p.apply_error = str(exc)

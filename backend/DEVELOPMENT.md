@@ -221,6 +221,11 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_MAX_FILES_PER_NODE` | `10` | Most files on one node; `0` or less fails at boot |
 | `ATTACHMENT_MAX_BYTES_PER_NODE` | `104857600` (100 MiB) | Most bytes on one node; `0` or less fails at boot |
 | `ATTACHMENT_ALLOWED_TYPES` | every detected type | Comma-separated MIME types narrowing the accepted set; a type the detector does not know, or a value naming no type at all, fails at boot |
+| `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | Lifetime in seconds of a single-use chat confirmation token |
+| `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | Maximum pending actions recorded by one chat turn |
+| `ATTACHMENT_PENDING_ACTIONS_MAX` | `1000` | Process-local pending action limit; oldest entries are evicted first |
+| `ATTACHMENT_CONVERSATION_STATE_KEY` | random per process | HMAC-SHA-256 key signing chat `conversation_state`. Unset, a token from another process or from before a restart fails verification, and while `ATTACHMENT_CONTENT_ACCESS` is not `off` the conversation counts as tainted. Set one shared value on every process to keep conversations clean across restarts and workers |
+| `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` | `86400` | Age after which a `conversation_state` no longer vouches for a clean conversation |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
 | `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
@@ -1230,6 +1235,26 @@ or `Sec-Fetch-Site: none`, or a non-empty `X-Requested-With` header (for example
 `X-Requested-With: api-client`). This prevents cross-site forms from writing with
 cached browser credentials; it also applies to raw-body routes.
 
+The request actor that the authorization hook, audit records and runtime context
+see is the authenticated identity: `ActorHeaderMiddleware` strips the inbound
+`x-communityoverview-actor-id`, `-actor-type` and `-auth-source` headers on every
+request, auth active or not, and the auth middleware then supplies the Basic
+username (or the configured user, for a session cookie) with auth source `basic`
+or `session`. A bearer token carries no user, so its requests bring no actor
+of their own. Any field still empty after this falls back to the operator's
+`COMMUNITYOVERVIEW_ACTOR_ID`, `_ACTOR_TYPE` and `_AUTH_SOURCE` environment
+variables (`backend/runtime/request_context.py`): with those set, a bearer or
+unauthenticated request gets that configured default actor, never one a client
+chose; with them unset it has no actor (auth source `anonymous`).
+`TRUST_FRONT_LAYER_ACTOR=true` (default `false`) keeps the inbound headers
+instead, filling them from the authenticated identity only where absent. It is
+safe only behind a front layer that every request passes through and that
+strips the inbound actor headers and sets its own, such as a hosted ingress
+middleware that wraps this app in-process (`app.add_middleware` after
+`create_app`), so no request reaches the app without it. Behind anything else, such
+as a reverse proxy that can be bypassed or that forwards client headers, any
+client could choose its actor.
+
 When auth is **not** active (the default standalone posture), the instance is an
 open read/write surface by design:
 
@@ -1940,6 +1965,7 @@ own.
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
 | POST | `/ui/chat/stream` | POST SSE: LLM rounds, optional capped reasoning, tool start/finish, final chat response; 15-second keep-alive comments |
+| POST | `/ui/chat/confirm` | Execute one bound pending action with `{ "token": "…" }` under the confirming request's authorization; returns `{ "outcome": "ok" \| "failed", "message", "result" }` (`result` is the raw tool result; refusals also carry `error_code`) |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -1947,6 +1973,37 @@ own.
 | GET | `/ui/info` | Get service info (provider, tools) |
 | GET | `/ui/supported-formats` | Get supported document formats |
 | GET | `/ui/capabilities` | UI feature availability: `llm_available`, `llm_provider`, `model_profiles`, and `staged_sessions` (whether a session can be staged here, i.e. `GRAPH_STAGED_SESSIONS`) with `session_write_mode_default`. The web app offers the staged choice only when `staged_sessions` is true |
+
+Chat replies include ordered `pending_actions` cards when a tool result marks the
+turn as containing untrusted file content. Only the fixed read/view tool set runs
+subsequently; other calls return `confirmation_required` to the model. Tokens and
+bound arguments appear only in the API cards. Confirmations recheck the actor,
+collection identity, current permissions and allowlist and execute the recorded
+call once, without another model call. Expired, evicted, used or unknown tokens
+return `confirmation_unknown`; actor or collection mismatches return
+`access_denied`. The response's `outcome` is `failed` for a refusal and for a
+tool result with `success: false` or an `error` (its reason, from `error` or
+`message`, is the response's `message`), otherwise `ok`. Pending actions live only in the process that minted them and
+are lost on restart: use a single worker or sticky routing. The three confirmation
+settings above accept positive integers; invalid values use their defaults.
+
+The taint outlives the turn. Every chat response carries `conversation_state`,
+a signed token over whether the conversation is tainted, the request actor, the
+issue time and a SHA-256 of the conversation as the server saw it (role and
+content of every message received, plus the returned reply), and
+`untrusted_content_used` when the turn was tainted. `/ui/chat` and
+`/ui/chat/stream` accept it back as `conversation_state`. A request whose
+`messages` hold no assistant message starts clean; a token that verifies and
+says tainted starts it tainted; any other starts tainted, when
+`ATTACHMENT_CONTENT_ACCESS` is not `off` for the instance (whatever the caller's
+own grant), unless its token verifies, names the same actor, is younger than
+`ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, hashes equal to its messages up to
+the last assistant message, and says untainted. A reply with no text is
+returned, and hashed, as a fixed non-empty text. The web client keeps the latest
+token per conversation key in `api.sendChatMessage` (`options.conversationId` is
+required) and replays exactly the messages it sent and received; client-made
+notices stay out. `docs/fixtures/chat_turn2_request.json` is the turn-2 request
+both the client and server tests drive.
 
 `/ui/chat/stream` accepts the same body as `/ui/chat`. SSE `data` frames contain
 `kind`: `llm_started` (with `round`), `tool_started` or `tool_finished` (with

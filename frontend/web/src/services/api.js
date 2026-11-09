@@ -696,14 +696,42 @@ export async function executeTool(toolName, args) {
 
 const UI_API_BASE = getPathRoot() + '/ui';
 
+// Latest signed conversation_state per conversation key. The server treats a
+// continued conversation without a valid clean one as tainted (ADR 0010 §5).
+const conversationStates = new Map();
+
 /**
  * Send a chat message to the backend
- * @param {Array} messages - Conversation history
+ * @param {Array} messages - Conversation history, exactly as earlier sent and received
  * @param {string} documentContext - Optional document text to include
+ * @param {Object} options - options.conversationId is required: the conversation's key
  * @returns {Promise<{content: string, toolUsed: string|null, toolResult: Object|null}>}
  */
 export async function sendChatMessage(messages, documentContext = null, options = {}) {
+  const key = options.conversationId;
+  if (!key) throw new Error('sendChatMessage requires options.conversationId');
   const body = { messages };
+  if (conversationStates.has(key)) {
+    body.conversation_state = conversationStates.get(key);
+  }
+  const response = await postChat(body, documentContext, options);
+  if (response?.conversation_state) conversationStates.set(key, response.conversation_state);
+  return response;
+}
+
+/**
+ * Run a pending action the server recorded, by its single-use token.
+ * @param {string} token
+ * @returns {Promise<Object>} The tool result, or `{ error_code }` when refused
+ */
+export async function confirmChatAction(token) {
+  return apiFetch(`${UI_API_BASE}/chat/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+}
+
+async function postChat(body, documentContext, options) {
   if (documentContext) {
     body.document_context = documentContext;
   }

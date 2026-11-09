@@ -117,3 +117,52 @@ describe('CollectKioskView rich-text rendering', () => {
     expect(document.querySelector('img')).toBeNull();
   });
 });
+
+describe('CollectKioskView conversation replay', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('replays only what was sent and received, under one key per opened kiosk', async () => {
+    api.getCollectConfig.mockResolvedValue({ name: 'Survey' });
+    const form = { title: 'Q1', fields: [{ id: 'q', label: 'Q', type: 'text' }] };
+    api.sendChatMessage
+      .mockResolvedValueOnce({
+        content: 'Welcome',
+        toolResult: { action: 'present_form', form },
+        pending_actions: [{ token: 't', tool: 'add_nodes', arguments: {} }],
+      })
+      .mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValue({ content: 'Thanks' });
+    const input = () => document.querySelector('.kiosk-input');
+
+    const { unmount } = render(<CollectKioskView shortName="survey" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Start/i }));
+    // The server's pending action is shown as a card.
+    expect(await screen.findByText('add_nodes')).toBeInTheDocument();
+    await waitFor(() => expect(input()).not.toBeDisabled());
+    fireEvent.change(input(), { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(input()).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+    await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(3));
+
+    const [kickstart, message, submit] = api.sendChatMessage.mock.calls;
+    const key = kickstart[2].conversationId;
+    expect(key).toBeTruthy();
+    expect([message[2].conversationId, submit[2].conversationId]).toEqual([key, key]);
+    // The failed turn's error notice is display-only and stays out of the history.
+    expect(submit[0].slice(0, 3)).toEqual([
+      { role: 'user', content: '[COLLECTION_START]' },
+      { role: 'assistant', content: 'Welcome' },
+      { role: 'user', content: 'first' },
+    ]);
+    expect(submit[0]).toHaveLength(4);
+
+    unmount();
+    render(<CollectKioskView shortName="survey" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Start/i }));
+    await waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(4));
+    expect(api.sendChatMessage.mock.calls[3][2].conversationId).not.toBe(key);
+  });
+});

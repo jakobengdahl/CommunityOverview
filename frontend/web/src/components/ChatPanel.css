@@ -560,7 +560,8 @@
   gap: 0.4rem;
 }
 
-.chat-upload-button {
+.chat-upload-button,
+.chat-new-conversation-button {
   padding: 0.4rem 0.6rem;
   background-color: #10b981;
   color: white;
@@ -572,11 +573,13 @@
   transition: background-color 0.2s;
 }
 
-.chat-upload-button:hover:not(:disabled) {
+.chat-upload-button:hover:not(:disabled),
+.chat-new-conversation-button:hover:not(:disabled) {
   background-color: #059669;
 }
 
-.chat-upload-button:disabled {
+.chat-upload-button:disabled,
+.chat-new-conversation-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -872,6 +875,7 @@
   }
 
   .chat-upload-button,
+  .chat-new-conversation-button,
   .chat-send-button,
   .approve-button,
   .reject-button {
@@ -907,4 +911,10 @@
   overflow-wrap: anywhere;
   max-height: 18rem;
   overflow-y: auto;
+}
+
+.message-untrusted-notice {
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  opacity: 0.8;
 }

@@ -5,7 +5,10 @@ import { useI18n } from '../i18n';
 import { ICON_REGISTRY } from './FloatingToolbar';
 import './ExpertAgentSelector.css';
 
-function ExpertAgentSelector() {
+// Disabled while a chat request is in flight: an expert join/leave message added
+// then would land between the sent user message and its reply, so the replayed
+// history would no longer match the conversation the server signed.
+function ExpertAgentSelector({ disabled = false }) {
   const [isOpen, setIsOpen] = useState(false);
   const panelRef = useRef(null);
 
@@ -34,6 +37,7 @@ function ExpertAgentSelector() {
       <button
         className={`expert-selector-trigger ${activeCount > 0 ? 'has-active' : ''}`}
         onClick={() => setIsOpen(!isOpen)}
+        disabled={disabled}
         title={t('experts.toggle_panel')}
       >
         <Robot size={13} />
@@ -41,7 +45,7 @@ function ExpertAgentSelector() {
         {activeCount > 0 && <span className="expert-selector-badge">{activeCount}</span>}
       </button>
 
-      {isOpen && (
+      {isOpen && !disabled && (
         <div className="expert-selector-panel">
           <div className="expert-selector-header">
             <span className="expert-selector-title">{t('experts.title')}</span>

@@ -36,6 +36,7 @@ from backend.service.attachment_tools import (
     attachment_graph_dispatch,
     audit_attachment_refusal,
     tool_definitions as attachment_tool_definitions,
+    error as attachment_error,
 )
 from backend.service.system_nodes import system_create_tool_definitions
 from backend.runtime.attachment_access import (
@@ -43,6 +44,49 @@ from backend.runtime.attachment_access import (
     attachment_tool_allowed,
     attachment_tool_refusal,
 )
+
+from backend.runtime.content_logging import (
+    content_logging,
+    is_tainted,
+    mark_tainted,
+    argument_sizes,
+    safe_tool_name,
+)
+from backend.ui.attachment_confirmation import (
+    ATTACHMENT_TAINT_PERMITTED_TOOLS,
+    pending_actions,
+    refusal,
+)
+
+
+def _chat_logging_boundary(method):
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        tainted = False
+        try:
+            with content_logging(
+                tainted=kwargs.get("start_tainted", False),
+                known_tools={
+                    *self.tools_map,
+                    *(t["name"] for t in self.tool_definitions),
+                },
+            ) as state:
+                try:
+                    result = method(self, *args, **kwargs)
+                    if (
+                        isinstance(result, dict)
+                        and kwargs.get("confirmed_call") is None
+                    ):
+                        result["untrusted_content_used"] = state["tainted"]
+                    return result
+                finally:
+                    tainted = state["tainted"]
+        finally:
+            if tainted:
+                mark_tainted()
+
+    return wrapped
+
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -680,9 +724,15 @@ def _tool_calls_cut_off(response) -> bool:
 
 
 def _tool_calls_not_run(response) -> str:
-    logger.warning(
-        "Reply hit the token limit; tool calls not run: %s", _tool_names(response)
-    )
+    names = _tool_names(response)
+    if is_tainted():
+        logger.warning(
+            "Reply hit the token limit; tool calls not run: count=%s names=%s",
+            len(names),
+            [safe_tool_name(name) for name in names],
+        )
+        return TOOL_CALLS_NOT_RUN_MESSAGE
+    logger.warning("Reply hit the token limit; tool calls not run: %s", names)
     return TOOL_CALLS_NOT_RUN_MESSAGE
 
 
@@ -1481,6 +1531,7 @@ class ChatProcessor:
 
         return create_provider(key_to_use, provider_to_use), None
 
+    @_chat_logging_boundary
     def process_message(
         self,
         messages: List[Dict],
@@ -1494,6 +1545,9 @@ class ChatProcessor:
         tool_allowlist: Optional[List[str]] = None,
         llm_provider: Optional[LLMProvider] = None,
         attachment_access: Optional[Callable[[str], str]] = None,
+        confirmation_context: Optional[Dict] = None,
+        confirmed_call: Optional[Dict] = None,
+        start_tainted: bool = False,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1522,6 +1576,14 @@ class ChatProcessor:
                 tool-permission model (used by the collection kiosk).
             attachment_access: Resolver returning the current grant for an attachment
                 tool. Missing means no attachment access, independently of the allowlist.
+            confirmation_context: Server-bound caller and collection context recorded
+                with pending actions. It is never added to the model conversation.
+            confirmed_call: Internal single-call execution entry point. The service
+                consumes and validates its token before passing this bound call; no
+                model is invoked and all ordinary tool permission gates still apply.
+            start_tainted: The turn continues a conversation the server cannot vouch
+                is clean, so the taint guard applies from its first tool call. The
+                result's ``untrusted_content_used`` reports whether the turn was tainted.
             llm_provider: Optional ready-made LLMProvider to use verbatim,
                 bypassing provider resolution entirely (api_key, provider and
                 model_profile_id are then unused). Used by the evaluation harness
@@ -1532,7 +1594,19 @@ class ChatProcessor:
                 another. Not a request-level override surface: nothing reaches
                 this from an HTTP request.
         """
+        turn_pending = []
         try:
+            if confirmed_call is not None:
+                mark_tainted()
+                return self._handle_tool_use(
+                    [],
+                    LLMResponse(content=[confirmed_call], stop_reason="tool_use"),
+                    None,
+                    tools_override=tools_override,
+                    tool_allowlist=tool_allowlist,
+                    attachment_access=attachment_access,
+                    execution_only=True,
+                )
             if llm_provider is None:
                 llm_provider, error = self._resolve_llm_provider(
                     api_key, provider, model_profile_id
@@ -1595,6 +1669,8 @@ class ChatProcessor:
                     active_tool_definitions=active_tool_definitions,
                     attachment_access=attachment_access,
                     rounds_remaining=max_rounds,
+                    confirmation_context=confirmation_context,
+                    pending_actions_for_turn=turn_pending,
                 )
 
             # Just text response
@@ -1618,8 +1694,8 @@ class ChatProcessor:
             }
 
         except Exception as e:
-            logger.error(f"Error in process_message: {e}")
-            error_msg = str(e)
+            error_msg = type(e).__name__ if is_tainted() else str(e)
+            logger.error("Error in process_message: %s", error_msg)
 
             # Provide user-friendly message for rate limits
             if "rate_limit" in error_msg.lower() or "429" in error_msg:
@@ -1628,7 +1704,12 @@ class ChatProcessor:
                     "Try again in ~60 seconds, or request fewer nodes at a time (5-10)."
                 )
 
-            return {"content": error_msg, "toolUsed": None, "toolResult": None}
+            return {
+                "content": error_msg,
+                "toolUsed": None,
+                "toolResult": None,
+                "pending_actions": turn_pending,
+            }
 
     def _handle_tool_use(
         self,
@@ -1647,6 +1728,9 @@ class ChatProcessor:
         attachment_access: Optional[Callable[[str], str]] = None,
         rounds_remaining: Optional[int] = None,
         completed_tools: Optional[List[str]] = None,
+        confirmation_context: Optional[Dict] = None,
+        pending_actions_for_turn: Optional[List[Dict]] = None,
+        execution_only: bool = False,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1667,6 +1751,8 @@ class ChatProcessor:
         replace. Preserving it — and defaulting to additive when unset — is what
         keeps a plain additive request from clearing the current view.
         """
+        if pending_actions_for_turn is None:
+            pending_actions_for_turn = []
         if rounds_remaining is None:
             rounds_remaining = positive_int_setting(
                 "CHAT_MAX_ROUNDS", DEFAULT_CHAT_MAX_ROUNDS
@@ -1722,10 +1808,34 @@ class ChatProcessor:
             tool_id = tool_use.get("id")
             last_tool_name = tool_name
 
-            if tool_name in ATTACHMENT_TOOLS:
-                logger.info("Executing attachment tool: %s", tool_name)
+            if is_tainted() or tool_name in ATTACHMENT_TOOLS:
+                logger.info(
+                    "Executing tool: %s %s",
+                    safe_tool_name(tool_name),
+                    argument_sizes(tool_input),
+                )
             else:
-                logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+                logger.info("Executing tool: %s with input: %s", tool_name, tool_input)
+
+            if (
+                is_tainted()
+                and not execution_only
+                and tool_name not in ATTACHMENT_TAINT_PERMITTED_TOOLS
+            ):
+                if len(pending_actions_for_turn) < positive_int_setting(
+                    "ATTACHMENT_PENDING_ACTIONS_PER_TURN", 5
+                ):
+                    pending_actions_for_turn.append(
+                        pending_actions.add(tool_name, tool_input, confirmation_context)
+                    )
+                # Keep the call/result pairing, but never replay bound arguments
+                # into the model or retain them in conversation history. The
+                # pending store has already copied them, if capacity permits.
+                tool_use["input"] = {}
+                tool_results.append(
+                    {"tool_use_id": tool_id, "result": refusal("confirmation_required")}
+                )
+                continue
 
             # Server-side allowlist gate — mirrors AIAgent AutonomyGate.wrap
             # (backend/agents/governance/gate.py). A tool outside the request's
@@ -1836,10 +1946,19 @@ class ChatProcessor:
                         )
                     )
                 except Exception as e:
-                    tool_result = {"error": str(e)}
+                    tool_result = (
+                        attachment_error("failed")
+                        if tool_name in ATTACHMENT_TOOLS
+                        else {"error": type(e).__name__ if is_tainted() else str(e)}
+                    )
             else:
                 tool_result = {"error": f"Tool {tool_name} not found"}
 
+            if (
+                isinstance(tool_result, dict)
+                and tool_result.get("untrusted_content") is True
+            ):
+                mark_tainted()
             _report_step("tool_finished", tool=tool_name)
             outcome = (
                 "failed"
@@ -1902,6 +2021,9 @@ class ChatProcessor:
 
             # Store tool result with its ID for the response
             tool_results.append({"tool_use_id": tool_id, "result": tool_result})
+
+        if execution_only:
+            return tool_results[0]["result"]
 
         # Send the results back to LLM
         messages.append({"role": "assistant", "content": response.content})
@@ -1966,6 +2088,8 @@ class ChatProcessor:
                 attachment_access=attachment_access,
                 rounds_remaining=rounds_remaining - 1,
                 completed_tools=completed_tools,
+                confirmation_context=confirmation_context,
+                pending_actions_for_turn=pending_actions_for_turn,
             )
 
         final_text = (
@@ -2017,6 +2141,7 @@ class ChatProcessor:
 
         return {
             "content": final_text,
+            "pending_actions": pending_actions_for_turn,
             "toolUsed": last_tool_name,  # Return the name of the last tool executed
             "toolResult": final_tool_result,
         }

@@ -14,6 +14,7 @@ authorized as the caller rather than as an anonymous request.
 """
 
 import logging
+import functools
 import asyncio
 import json
 from typing import List, Dict, Any, Optional
@@ -21,6 +22,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from starlette.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from backend.runtime.content_logging import content_logging, is_tainted, mark_tainted
 from backend.runtime.authorization import use_request_authorization
 
 from .chat_logic import run_chat_off_event_loop, report_chat_progress
@@ -28,6 +30,31 @@ from .chat_service import ChatService
 from .document_service import DocumentService
 
 logger = logging.getLogger(__name__)
+
+
+def _chat_logging_boundary(method):
+    @functools.wraps(method)
+    async def wrapped(*args, **kwargs):
+        tainted = False
+        try:
+            with content_logging() as state:
+                try:
+                    return await method(*args, **kwargs)
+                finally:
+                    tainted = state["tainted"]
+        finally:
+            if tainted:
+                mark_tainted()
+
+    return wrapped
+
+
+def _log_chat_exception(message, exc):
+    if is_tainted():
+        logger.error("%s: %s", message, type(exc).__name__)
+    else:
+        logger.exception(message)
+
 
 CHAT_KEEPALIVE_SECONDS = 15
 
@@ -84,6 +111,12 @@ class ChatRequest(BaseModel):
         None,
         description="IDs of nodes the user has selected in the canvas",
     )
+    conversation_state: Optional[str] = Field(
+        None,
+        max_length=4096,
+        description="Signed state from the previous response; without a valid "
+        "clean one a continued conversation starts tainted",
+    )
 
     @field_validator("visible_node_ids", "selected_node_ids", mode="before")
     @classmethod
@@ -123,6 +156,17 @@ class ChatResponse(BaseModel):
     content: str = Field(..., description="LLM response text")
     toolUsed: Optional[str] = Field(None, description="Name of tool used (if any)")
     toolResult: Optional[Any] = Field(None, description="Result from tool (if any)")
+    pending_actions: List[Dict[str, Any]] = Field(default_factory=list)
+    conversation_state: Optional[str] = Field(
+        None, description="Signed state to send with the next request"
+    )
+    untrusted_content_used: bool = Field(
+        False, description="Attachment file content was in this turn"
+    )
+
+
+class ConfirmActionRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=256)
 
 
 class UploadResponse(BaseModel):
@@ -184,6 +228,7 @@ def create_ui_router(
     # ==================== Chat Endpoints ====================
 
     @router.post("/chat", response_model=ChatResponse)
+    @_chat_logging_boundary
     async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
         """
         Process a chat message with the LLM.
@@ -214,21 +259,38 @@ def create_ui_router(
                     collection_short_name=request.collection_short_name,
                     visible_node_ids=request.visible_node_ids,
                     selected_node_ids=request.selected_node_ids,
+                    conversation_state=request.conversation_state,
                 )
 
             return ChatResponse(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
+                pending_actions=result.get("pending_actions", []),
+                conversation_state=result.get("conversation_state"),
+                untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
-        except Exception:
-            logger.exception("Error in /chat endpoint")
+        except Exception as exc:
+            _log_chat_exception("Error in /chat endpoint", exc)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    @router.post("/chat/confirm")
+    @_chat_logging_boundary
+    async def confirm_action(request: ConfirmActionRequest, http_request: Request):
+        try:
+            with use_request_authorization(headers=http_request.headers):
+                return await run_chat_off_event_loop(
+                    chat_service.confirm_action, token=request.token
+                )
+        except Exception as exc:
+            _log_chat_exception("Error in /chat/confirm endpoint", exc)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     # Retain disconnected workers until completion, matching non-streaming chats.
     running_chats = set()
 
     @router.post("/chat/stream")
+    @_chat_logging_boundary
     async def chat_stream(request: ChatRequest, http_request: Request):
         async def events():
             queue = asyncio.Queue()
@@ -238,6 +300,7 @@ def create_ui_router(
                 if connected:
                     queue.put_nowait(step)
 
+            @_chat_logging_boundary
             async def produce():
                 try:
                     with report_chat_progress(emit):
@@ -258,8 +321,8 @@ def create_ui_router(
                             "response": {"detail": exc.detail},
                         }
                     )
-                except Exception:
-                    logger.exception("Error encoding /chat/stream response")
+                except Exception as exc:
+                    _log_chat_exception("Error encoding /chat/stream response", exc)
                     emit(
                         {
                             "kind": "error",
@@ -296,6 +359,7 @@ def create_ui_router(
         )
 
     @router.post("/chat/simple", response_model=ChatResponse)
+    @_chat_logging_boundary
     async def chat_simple(
         request: SimpleChatRequest, http_request: Request
     ) -> ChatResponse:
@@ -327,9 +391,12 @@ def create_ui_router(
                 content=result.get("content", ""),
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
+                pending_actions=result.get("pending_actions", []),
+                conversation_state=result.get("conversation_state"),
+                untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
-        except Exception:
-            logger.exception("Error in /chat/simple endpoint")
+        except Exception as exc:
+            _log_chat_exception("Error in /chat/simple endpoint", exc)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/propose-nodes")
@@ -373,6 +440,7 @@ def create_ui_router(
     # ==================== Upload Endpoints ====================
 
     @router.post("/upload", response_model=UploadResponse)
+    @_chat_logging_boundary
     async def upload_document(
         http_request: Request,
         file: UploadFile = File(...),
@@ -446,12 +514,17 @@ def create_ui_router(
                     content=chat_result.get("content", ""),
                     toolUsed=chat_result.get("toolUsed"),
                     toolResult=chat_result.get("toolResult"),
+                    pending_actions=chat_result.get("pending_actions", []),
+                    conversation_state=chat_result.get("conversation_state"),
+                    untrusted_content_used=bool(
+                        chat_result.get("untrusted_content_used")
+                    ),
                 )
 
             return response
 
-        except Exception:
-            logger.exception("Error in /upload endpoint")
+        except Exception as exc:
+            _log_chat_exception("Error in /upload endpoint", exc)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/upload/extract")
