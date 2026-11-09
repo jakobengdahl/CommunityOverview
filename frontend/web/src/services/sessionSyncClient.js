@@ -394,12 +394,17 @@ export function applyOpToMirror(mirrorState, op) {
       const ann = op.annotation;
       if (ann && ann.id) {
         const idx = m.annotations.findIndex((a) => a.id === ann.id);
-        if (idx === -1) m.annotations = [...m.annotations, ann];
-        else {
-          const next = m.annotations.slice();
-          next[idx] = { ...next[idx], ...ann };
-          m.annotations = next;
+        const next = m.annotations.slice();
+        const merged = idx === -1 ? { ...ann } : { ...next[idx], ...ann };
+        // The server omits a group's unset textColor, but the canvas side
+        // (createAnnotation) always carries ''; without this the next local
+        // diff would publish a phantom `textColor: ''` patch.
+        if ((merged.type ?? merged.kind) === 'group' && typeof merged.textColor !== 'string') {
+          merged.textColor = '';
         }
+        if (idx === -1) next.push(merged);
+        else next[idx] = merged;
+        m.annotations = next;
       }
       break;
     }

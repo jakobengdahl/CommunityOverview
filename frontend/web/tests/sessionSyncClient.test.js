@@ -9,7 +9,11 @@ import {
   isAnnotationOpStale,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
-import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
+import {
+  annotationsToOverlays,
+  annotationsToGroups,
+  groupsToAnnotations,
+} from '../src/utils/sessionAnnotations';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
 class FakeEventSource {
@@ -299,6 +303,30 @@ describe('applyOpToMirror', () => {
     expect(m.annotations.find((a) => a.id === 'g').member_node_ids).toEqual(['a']);
     m = applyOpToMirror(m, { op: 'annotation_deleted', annotation_id: 'n1' });
     expect(m.annotations.map((a) => a.id)).toEqual(['g']);
+  });
+
+  it('a remote group created without textColor diffs equal to its canvas round-trip', () => {
+    // Shape of build_group_annotation's output when text_color is not given.
+    const annotation = {
+      id: 'g',
+      type: 'group',
+      kind: 'group',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 300, h: 200, rotation: 0 },
+      size: { w: 300, h: 200 },
+      label: 'G',
+      description: '',
+      z: 0,
+      locked: false,
+      color: '#10B981',
+      style: { color: '#10B981' },
+      member_node_ids: [],
+    };
+    const baseline = applyOpToMirror({ annotations: [] }, { op: 'annotation_created', annotation });
+    const { groups, parentIds } = annotationsToGroups(baseline.annotations);
+    const local = { ...baseline, annotations: groupsToAnnotations(groups, parentIds) };
+    expect(computeOps(baseline, local)).toEqual([]);
+    expect(annotation).not.toHaveProperty('textColor');
   });
 });
 

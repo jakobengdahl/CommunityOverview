@@ -109,6 +109,15 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(notifyChange).toHaveBeenCalledTimes(2);
   });
 
+  it('marks the matching text-colour swatch active regardless of stored casing', () => {
+    renderGroup({ label: 'G', color: '#646cff', textColor: '#fde047' });
+    fireEvent.contextMenu(screen.getByText('G'));
+    const active = [...document.querySelectorAll('.text-color-button')].map((b) =>
+      b.classList.contains('active')
+    );
+    expect(active).toEqual([false, ...GROUP_TEXT_COLORS.map((c) => c === '#FDE047')]);
+  });
+
   it('notifies on delete', () => {
     const { notifyChange } = renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));

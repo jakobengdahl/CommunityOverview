@@ -333,6 +333,8 @@ function GroupNode({ id, data, selected }) {
   const colors = [DEFAULT_GROUP_COLOR, '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
   const fill = data.color || DEFAULT_GROUP_COLOR;
   const textColor = resolveGroupTextColor(fill, data.textColor);
+  // MCP may store any casing; the swatch constants mix cases.
+  const activeTextColor = String(data.textColor || '').toLowerCase();
   const groupBadge = remoteEditBadge(data);
   // Groups persist rotation for round-trip compatibility, but the current group
   // renderer is not visually rotated. Keep that stored value out of the size
@@ -475,7 +477,7 @@ function GroupNode({ id, data, selected }) {
                     <button
                       key={c}
                       type="button"
-                      className={`color-button text-color-button${data.textColor === c ? ' active' : ''}`}
+                      className={`color-button text-color-button${activeTextColor === c.toLowerCase() ? ' active' : ''}`}
                       style={{ backgroundColor: c }}
                       title={c}
                       onClick={() => handleChangeTextColor(c)}
