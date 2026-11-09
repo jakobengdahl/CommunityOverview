@@ -2958,6 +2958,13 @@ function App() {
         // and U+0085 survives `String.prototype.trim()`, so a stored target
         // the shared fixture lists as valid resolved against the app's own
         // origin instead of the author's page.
+        //
+        // The trim also strips a leading or trailing C0 control (a tab), so
+        // the gate's control check only sees inner ones. That is accepted
+        // here: the trimmed string is what gets opened, so no scheme or
+        // destination is gained, and refusing a control-bearing target of any
+        // kind is the backend's rule (`_has_control_characters` in
+        // session_annotations.py), applied before a target is stored.
         const safeTarget = trimReferenceTarget(target);
         if (!isSafeReferenceUrl(safeTarget)) {
           showNotification('error', t('context_menu.reference_unsafe_target'));
