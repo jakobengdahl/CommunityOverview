@@ -677,6 +677,43 @@ def register_mcp_tools(
         """Search files on up to 20 visible nodes; report unreadable files."""
         return service.attachment_tool_search(query, node_ids, top_k)
 
+    @register_tool
+    def add_node_attachment(
+        node_id: str,
+        filename: str,
+        content_text: Optional[str] = None,
+        content_base64: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Attach one file to a node, as the REST upload does.
+
+        Give exactly one of `content_text` (stored as its UTF-8 bytes) or
+        `content_base64` (standard base64). At most
+        `ATTACHMENT_MCP_MAX_DECODED_BYTES` decoded bytes, 3,000,000 by default
+        and at most that: the MCP transport refuses request bodies over 4 MiB,
+        and 3,000,000 bytes are 4,000,000 base64 characters. Keep `content_text` well under 3 MB, since JSON escaping
+        grows it in transit. A larger file goes through
+        `POST /api/nodes/{node_id}/attachments`, which keeps the full per-file
+        limit.
+
+        The type is sniffed from the bytes; `content_type` is diagnostic only.
+        Sniffing, node-type and archive rules, limits and error codes are the
+        REST upload's.
+
+        Returns:
+            `{"success": true, "attachment": <record>}`, or an error with
+            `error_code`.
+        """
+        return service.attachment_tool_add(
+            node_id, filename, content_text, content_base64, content_type
+        )
+
+    @register_tool
+    def delete_node_attachment(node_id: str, attachment_id: str) -> Dict[str, Any]:
+        """Delete one attachment from a node, as the REST delete does."""
+        return service.attachment_tool_delete(node_id, attachment_id)
+
     # ==================== Search Tools ====================
 
     @register_tool

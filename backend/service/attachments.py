@@ -442,13 +442,17 @@ def delete_node_attachment(
     if is_federated_node_id(node.id) or not is_valid_attachment_id(attachment_id):
         return _attachment_not_found()
     try:
-        deleted = settings.store.delete(settings.namespace, node.id, attachment_id)
+        # The record is read first so the caller can audit what was deleted.
+        record = settings.store.get_record(settings.namespace, node.id, attachment_id)
+        deleted = record is not None and settings.store.delete(
+            settings.namespace, node.id, attachment_id
+        )
     except AttachmentIndexCorrupt:
         logger.exception("Attachment index unreadable for a node")
         return _index_corrupt()
     if not deleted:
         return _attachment_not_found()
-    return {"success": True}
+    return {"success": True, "attachment": serialize_attachment(record)}
 
 
 async def _iterate_bytes(content: bytes) -> AsyncIterator[bytes]:
@@ -468,6 +472,79 @@ def _cap_breach(cap_is_file_limit: bool, limits: AttachmentLimits) -> Dict[str, 
         f"The file would take the node past its {limits.max_bytes_per_node}-byte "
         "attachment total.",
     )
+
+
+def _upload_node(storage, hook, settings, node_id):
+    """Authorize an upload and resolve a node that accepts files."""
+    error, node, graph_access = _authorize_and_resolve(
+        storage,
+        hook,
+        settings,
+        action=GRAPH_ACTION_MUTATE,
+        target="add_node_attachment",
+        node_id=node_id,
+    )
+    if error is not None:
+        return error, None, None
+    if is_federated_node_id(node.id):
+        error = _error(
+            ATTACHMENT_ERROR_FEDERATED,
+            "Files cannot be attached to a node federated from another graph.",
+        )
+    elif not type_allows_attachments(node):
+        error = _error(
+            ATTACHMENT_ERROR_NOT_ALLOWED,
+            f"Node type {_node_type_name(node)!r} does not accept attachments.",
+        )
+    elif node.archived:
+        error = _error(
+            ATTACHMENT_ERROR_ARCHIVED, "Files cannot be attached to an archived node."
+        )
+    return (error, None, None) if error is not None else (None, node, graph_access)
+
+
+def _upload_cap(records, limits):
+    """The node-limit refusal, else the byte cap and whether it is the per-file one."""
+    if len(records) >= limits.max_files_per_node:
+        return (
+            _error(
+                ATTACHMENT_ERROR_NODE_LIMIT,
+                f"The node already has {limits.max_files_per_node} attachments.",
+            ),
+            0,
+            False,
+        )
+    remaining = max(limits.max_bytes_per_node - sum(r.size for r in records), 0)
+    # The smaller cap is the one reported; a tie reads as the per-file limit.
+    cap_is_file_limit = limits.max_file_bytes <= remaining
+    return (
+        None,
+        (limits.max_file_bytes if cap_is_file_limit else remaining),
+        (cap_is_file_limit),
+    )
+
+
+def upload_refusal(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    settings: Optional[AttachmentSettings],
+    node_id: str,
+    content_length: int,
+) -> Optional[Dict[str, Any]]:
+    """The refusal an upload of ``content_length`` bytes gets before any byte
+    is read, or None; lets a tool apply the REST order before decoding."""
+    error, node, _ = _upload_node(storage, hook, settings, node_id)
+    if error is not None:
+        return error
+    try:
+        records = settings.store.list(settings.namespace, node.id)
+    except AttachmentIndexCorrupt:
+        logger.exception("Attachment index unreadable for a node")
+        return _index_corrupt()
+    error, cap, cap_is_file_limit = _upload_cap(records, settings.limits)
+    if error is None and content_length > cap:
+        error = _cap_breach(cap_is_file_limit, settings.limits)
+    return error
 
 
 async def add_node_attachment(
@@ -490,30 +567,9 @@ async def add_node_attachment(
     actually received are capped either way.
     """
     target = "add_node_attachment"
-    error, node, graph_access = _authorize_and_resolve(
-        storage,
-        hook,
-        settings,
-        action=GRAPH_ACTION_MUTATE,
-        target=target,
-        node_id=node_id,
-    )
+    error, node, graph_access = _upload_node(storage, hook, settings, node_id)
     if error is not None:
         return error
-    if is_federated_node_id(node.id):
-        return _error(
-            ATTACHMENT_ERROR_FEDERATED,
-            "Files cannot be attached to a node federated from another graph.",
-        )
-    if not type_allows_attachments(node):
-        return _error(
-            ATTACHMENT_ERROR_NOT_ALLOWED,
-            f"Node type {_node_type_name(node)!r} does not accept attachments.",
-        )
-    if node.archived:
-        return _error(
-            ATTACHMENT_ERROR_ARCHIVED, "Files cannot be attached to an archived node."
-        )
 
     limits = settings.limits
     store = settings.store
@@ -523,15 +579,9 @@ async def add_node_attachment(
     except AttachmentIndexCorrupt:
         logger.exception("Attachment index unreadable for a node")
         return _index_corrupt()
-    if len(records) >= limits.max_files_per_node:
-        return _error(
-            ATTACHMENT_ERROR_NODE_LIMIT,
-            f"The node already has {limits.max_files_per_node} attachments.",
-        )
-    remaining = max(limits.max_bytes_per_node - sum(r.size for r in records), 0)
-    # The smaller cap is the one reported; a tie reads as the per-file limit.
-    cap_is_file_limit = limits.max_file_bytes <= remaining
-    cap = limits.max_file_bytes if cap_is_file_limit else remaining
+    error, cap, cap_is_file_limit = _upload_cap(records, limits)
+    if error is not None:
+        return error
 
     if isinstance(content, (bytes, bytearray, memoryview)):
         content = bytes(content)
