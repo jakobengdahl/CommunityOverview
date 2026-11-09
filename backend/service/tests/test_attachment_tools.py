@@ -860,3 +860,118 @@ async def test_fastmcp_preserves_sdk_argument_coercion(service, caplog, name, ar
     assert len(audits) == 1
     line = logging.Formatter("%(message)s").format(audits[0])
     assert json.loads(line)["outcome"] != "invalid_arguments"
+
+
+@pytest.mark.parametrize(
+    "node_id,data,seeded,status",
+    [
+        ("actor", b"hello", False, 422),
+        (FEDERATED_ID, b"hello", False, 422),
+        ("old", b"hello", False, 409),
+        ("doc", b"hello", True, 409),
+        ("doc", b"x" * 101, False, 413),
+        ("doc", b"<html>", False, 415),
+    ],
+)
+def test_attachment_write_tool_refusals_match_rest(
+    service, client, store, node_id, data, seeded, status
+):
+    """G1: every REST upload refusal has the identical MCP error code."""
+    import base64
+    from unittest.mock import MagicMock
+    from backend.service.mcp_tools import register_mcp_tools
+    from backend.service.tests.test_node_attachments import _seed
+
+    for i in range(3 if seeded else 0):
+        _seed(store, node_id, filename=f"{i}.txt")
+    tools = register_mcp_tools(MagicMock(), service, attachment_access="read_write")
+    rest = _upload(client, node_id, data)
+    result = tools["add_node_attachment"](
+        node_id=node_id,
+        filename="note.txt",
+        content_base64=base64.b64encode(data).decode(),
+    )
+    assert rest.status_code == status
+    assert result["error_code"] == rest.json()["detail"]["error"]
+
+
+@pytest.mark.parametrize("level", ["propose", "act_after_approval"])
+def test_agent_attachment_writes_become_proposals(service, storage, store, level):
+    """G2: an Agent's write is a proposal; it applies only on approval while granted."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from backend.agents.governance import (
+        AutonomyGate,
+        AutonomyLevel,
+        GovernanceManager,
+        InMemoryProposalStore,
+    )
+    from backend.agents.mcp_loader import MCPIntegration, MCPLoader
+    from backend.agents.registry import AgentRegistry
+    from backend.core import Node
+    from backend.service.tests.test_node_attachments import NS
+
+    storage.add_nodes(
+        [Node(id="a1", type="Actor", name="A", metadata={"attachment_access": "read"})],
+        [],
+    )
+    loader = MCPLoader([])
+    for tool in loader._get_graph_mcp_tools(MCPIntegration(id="GRAPH", name="Graph")):
+        loader._tools_cache[tool.namespaced_name] = tool
+    proposals = InMemoryProposalStore()
+    gate = AutonomyGate(
+        autonomy_level=AutonomyLevel(level),
+        tool_allowlist=None,
+        mcp_loader=loader,
+        proposal_store=proposals,
+        agent_id="a1",
+        attachment_access="read_write",
+    )
+    run = gate.wrap(loader.create_tool_executor(graph_service=service, agent_id="a1"))
+    args = {"node_id": "doc", "filename": "a.txt", "content_text": "hello"}
+    first = run("GRAPH__add_node_attachment", args)["proposal_id"]
+    second = run("GRAPH__add_node_attachment", args)["proposal_id"]
+    assert store.list(NS, "doc") == []
+
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._ensure_initialized = MagicMock()
+    registry._mcp_loader = loader
+    registry._service = service
+    worker = SimpleNamespace(
+        config=SimpleNamespace(enabled=True), get_status=lambda: {"paused": False}
+    )
+    registry._workers = {"a1": worker}
+    manager = GovernanceManager(
+        proposals, executor_factory=registry._build_apply_executor
+    )
+    # The grant read at apply time is the stored one, narrowed to read here.
+    narrowed = manager.approve(first)["status"]
+    storage.update_node("a1", {"metadata": {"attachment_access": "read_write"}})
+    granted = manager.approve(second)["status"]
+    applies = level == "act_after_approval"
+    assert (narrowed, granted) == (
+        ("apply_failed", "applied") if applies else ("approved", "approved")
+    )
+    assert len(store.list(NS, "doc")) == int(applies)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_attachment_write_tool_refusal_leaves_no_blob(
+    service, store, monkeypatch, failure
+):
+    """G3: no staged or committed bytes remain after a refused or failed add."""
+    from backend.service.tests.test_node_attachments import NS, _tmp_is_empty
+
+    async def broken_commit(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    if failure:
+        monkeypatch.setattr(store, "commit", broken_commit)
+    result = service.attachment_tool_add(
+        "doc", "a.txt", content_text="plain" if failure else "<html>"
+    )
+    assert result["error_code"] == (
+        "failed" if failure else "unsupported_attachment_type"
+    )
+    assert _tmp_is_empty(store)
+    assert store.list(NS, "doc") == []

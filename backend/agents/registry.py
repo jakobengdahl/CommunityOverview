@@ -31,6 +31,12 @@ from .governance import (
     ProposalStore,
     SqliteProposalStore,
 )
+from .governance.gate import original_tool_name
+from backend.runtime.attachment_access import (
+    ATTACHMENT_WRITE_TOOLS,
+    agent_attachment_access,
+    attachment_tool_refusal,
+)
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -579,6 +585,23 @@ class AgentRegistry:
                 raise ValueError(
                     "Agent is paused; retry with a new proposal after recovery"
                 )
+            original = original_tool_name(self._mcp_loader, tool)
+            if original in ATTACHMENT_WRITE_TOOLS:
+                # Re-resolve the proposing Agent's grant from storage, so a
+                # grant revoked or an Agent deleted since also stops queued writes.
+                node = self._service.storage.get_node(agent_id)
+                refused = attachment_tool_refusal(
+                    original,
+                    agent_attachment_access(
+                        (node.metadata or {}).get("attachment_access", "none")
+                        if node is not None
+                        else "none",
+                        agent_id=agent_id,
+                    ),
+                    self._service.authorization_hook,
+                )
+                if refused is not None:
+                    return refused
             return raw(tool, arguments)
 
         return apply

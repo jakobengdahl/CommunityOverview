@@ -546,9 +546,9 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | DELETE | `/api/nodes` | Delete nodes (`expected_revisions` optional) |
 | POST | `/api/nodes/archive` | Archive/unarchive nodes (`archived` flag; hide-by-default vs. permanent delete) |
 | GET | `/api/nodes/{id}/attachments` | List a node's attached files: `{attachments, limits, uploads_allowed}`. A `federated::` node lists empty with `uploads_allowed: false`. See [Node attachments](#node-attachments) |
-| POST | `/api/nodes/{id}/attachments?filename=<name>` | Attach one file; the body is the raw bytes (not multipart). `201` with the new record. Refusals: `413 attachment_too_large`, `409 node_attachment_limit`, `415 unsupported_attachment_type`, `422 attachments_not_allowed`, `422 federated_node`, `409 node_archived` |
+| POST | `/api/nodes/{id}/attachments?filename=<name>` | Attach one file; the body is the raw bytes (not multipart). `201` with the new record. Refusals: `413 attachment_too_large`, `409 node_attachment_limit`, `415 unsupported_attachment_type`, `422 attachments_not_allowed`, `422 federated_node`, `409 node_archived`. MCP tool `add_node_attachment` stores up to 3,000,000 bytes given as `content_text` or `content_base64`, with the same `error_code`s; over that it answers `attachment_too_large_for_tool` |
 | GET | `/api/nodes/{id}/attachments/{attachment_id}` | Download one file, streamed, always as `Content-Disposition: attachment` with `nosniff`, a sandboxing CSP and `no-store` |
-| DELETE | `/api/nodes/{id}/attachments/{attachment_id}` | Delete one file: `{success: true}` |
+| DELETE | `/api/nodes/{id}/attachments/{attachment_id}` | Delete one file: `{success: true}`. MCP tool `delete_node_attachment` does the same |
 | POST | `/api/edges` | Add edges |
 | PATCH | `/api/edges/{id}` | Update an edge (`expected_revision` optional) |
 | DELETE | `/api/edges/{id}` | Delete an edge (`expected_revision` optional) |
@@ -588,9 +588,18 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 
 ### Node attachments
 
-The synchronous read-tool wrappers are `GraphService.attachment_tool_list`,
-`attachment_tool_read` and `attachment_tool_search` in
-`service/attachment_tools.py`. REST-shaped methods retain their existing names.
+The synchronous tool wrappers are `GraphService.attachment_tool_list`,
+`attachment_tool_read`, `attachment_tool_search`, `attachment_tool_add` and
+`attachment_tool_delete` in `service/attachment_tools.py`. REST-shaped methods
+retain their existing names. The write wrappers decode their arguments and then
+run the REST upload and delete service path, so sniffing, limits, staging and
+error codes are the REST ones; their error messages are fixed per code. An add
+runs the async upload on a private event loop in a helper thread, carrying the
+caller's authorization context. `ATTACHMENT_MCP_MAX_DECODED_BYTES` (default
+3000000) caps the bytes one add stores, so the base64 form fits the MCP
+transport's 4 MiB body limit. An Agent's attachment write is always a proposal;
+applying an approved one re-reads the Agent's stored `attachment_access` and
+refuses with `access_denied` unless it is still `read_write`.
 MCP tools use async thread shims; the execution map stays synchronous. Chat and
 Agent dispatch explicitly select the tool wrappers. No tool is registered on
 MCP without a configured store, and chat definitions require a mapped tool.
