@@ -689,10 +689,10 @@ def register_mcp_tools(
         Attach one file to a node, as the REST upload does.
 
         Give exactly one of `content_text` (stored as its UTF-8 bytes) or
-        `content_base64` (standard base64). At most 3,000,000 decoded bytes
-        (`ATTACHMENT_MCP_MAX_DECODED_BYTES`): the MCP transport refuses request
-        bodies over 4 MiB, and that many bytes are 4,000,000 base64
-        characters. Keep `content_text` well under 3 MB, since JSON escaping
+        `content_base64` (standard base64). At most
+        `ATTACHMENT_MCP_MAX_DECODED_BYTES` decoded bytes, 3,000,000 by default
+        and at most that: the MCP transport refuses request bodies over 4 MiB,
+        and 3,000,000 bytes are 4,000,000 base64 characters. Keep `content_text` well under 3 MB, since JSON escaping
         grows it in transit. A larger file goes through
         `POST /api/nodes/{node_id}/attachments`, which keeps the full per-file
         limit.

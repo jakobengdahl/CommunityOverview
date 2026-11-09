@@ -681,6 +681,17 @@ class GraphService:
             content_length=content_length,
         )
 
+    def attachment_upload_refusal(
+        self, node_id: str, content_length: int
+    ) -> Optional[Dict[str, Any]]:
+        return attachments.upload_refusal(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            content_length,
+        )
+
     def delete_node_attachment(
         self, node_id: str, attachment_id: str
     ) -> Dict[str, Any]:

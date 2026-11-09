@@ -37,6 +37,11 @@ from backend.runtime.attachment_access import (
     agent_attachment_access,
     attachment_tool_refusal,
 )
+from backend.service.attachment_tools import (
+    approved_write,
+    audit_attachment_refusal,
+    tool_caller,
+)
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -600,8 +605,11 @@ class AgentRegistry:
                     ),
                     self._service.authorization_hook,
                 )
-                if refused is not None:
-                    return refused
+                with tool_caller("agent", agent_id), approved_write():
+                    if refused is not None:
+                        audit_attachment_refusal(original, refused["error_code"])
+                        return refused
+                    return raw(tool, arguments)
             return raw(tool, arguments)
 
         return apply

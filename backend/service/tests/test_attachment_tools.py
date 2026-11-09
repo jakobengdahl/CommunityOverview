@@ -863,18 +863,21 @@ async def test_fastmcp_preserves_sdk_argument_coercion(service, caplog, name, ar
 
 
 @pytest.mark.parametrize(
-    "node_id,data,seeded,status",
+    "node_id,data,seeded,status,payload",
     [
-        ("actor", b"hello", False, 422),
-        (FEDERATED_ID, b"hello", False, 422),
-        ("old", b"hello", False, 409),
-        ("doc", b"hello", True, 409),
-        ("doc", b"x" * 101, False, 413),
-        ("doc", b"<html>", False, 415),
+        ("actor", b"hello", False, 422, None),
+        (FEDERATED_ID, b"hello", False, 422, None),
+        ("old", b"hello", False, 409, None),
+        ("doc", b"hello", True, 409, None),
+        ("doc", b"x" * 101, False, 413, None),
+        ("doc", b"<html>", False, 415, None),
+        # Node rules and REST caps decide before decoding or the tool's cap.
+        ("old", b"hello", False, 409, "not base64!"),
+        ("doc", b"x" * 101, False, 413, "eA==" * 2000),
     ],
 )
 def test_attachment_write_tool_refusals_match_rest(
-    service, client, store, node_id, data, seeded, status
+    service, client, store, monkeypatch, node_id, data, seeded, status, payload
 ):
     """G1: every REST upload refusal has the identical MCP error code."""
     import base64
@@ -882,6 +885,12 @@ def test_attachment_write_tool_refusals_match_rest(
     from backend.service.mcp_tools import register_mcp_tools
     from backend.service.tests.test_node_attachments import _seed
 
+    from dataclasses import replace
+
+    tools_state = service._attachment_read_tools
+    monkeypatch.setattr(
+        tools_state, "limits", replace(tools_state.limits, mcp_max_decoded_bytes=50)
+    )
     for i in range(3 if seeded else 0):
         _seed(store, node_id, filename=f"{i}.txt")
     tools = register_mcp_tools(MagicMock(), service, attachment_access="read_write")
@@ -889,14 +898,22 @@ def test_attachment_write_tool_refusals_match_rest(
     result = tools["add_node_attachment"](
         node_id=node_id,
         filename="note.txt",
-        content_base64=base64.b64encode(data).decode(),
+        content_base64=payload or base64.b64encode(data).decode(),
     )
     assert rest.status_code == status
     assert result["error_code"] == rest.json()["detail"]["error"]
+    long_name = "a" * 4097
+    assert _upload(client, "doc", filename=long_name).status_code == 422
+    refused = tools["add_node_attachment"](
+        node_id="doc", filename=long_name, content_text="hi"
+    )
+    assert refused["error_code"] == "invalid_arguments"
 
 
 @pytest.mark.parametrize("level", ["propose", "act_after_approval"])
-def test_agent_attachment_writes_become_proposals(service, storage, store, level):
+def test_agent_attachment_writes_become_proposals(
+    service, storage, store, caplog, level
+):
     """G2: an Agent's write is a proposal; it applies only on approval while granted."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -945,14 +962,32 @@ def test_agent_attachment_writes_become_proposals(service, storage, store, level
         proposals, executor_factory=registry._build_apply_executor
     )
     # The grant read at apply time is the stored one, narrowed to read here.
-    narrowed = manager.approve(first)["status"]
-    storage.update_node("a1", {"metadata": {"attachment_access": "read_write"}})
-    granted = manager.approve(second)["status"]
+    from backend.runtime.authorization import use_request_authorization
+
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        use_request_authorization(actor_id="approver"),
+    ):
+        narrowed = manager.approve(first)["status"]
+        storage.update_node("a1", {"metadata": {"attachment_access": "read_write"}})
+        granted = manager.approve(second)["status"]
     applies = level == "act_after_approval"
     assert (narrowed, granted) == (
         ("apply_failed", "applied") if applies else ("approved", "approved")
     )
     assert len(store.list(NS, "doc")) == int(applies)
+    # G4: both applied attempts are audited as the Agent, for the approver.
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert [(a.event, a.outcome) for a in audits] == (
+        [("attachment_added", "access_denied"), ("attachment_added", "ok")]
+        if applies
+        else []
+    )
+    for a in audits:
+        assert (a.actor, a.on_behalf_of) == (
+            {"type": "agent", "id": "a1"},
+            {"type": "user", "id": "approver"},
+        )
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -975,3 +1010,46 @@ def test_attachment_write_tool_refusal_leaves_no_blob(
     )
     assert _tmp_is_empty(store)
     assert store.list(NS, "doc") == []
+
+
+def test_attachment_write_tools_audit_every_outcome(
+    service, store, caplog, monkeypatch
+):
+    """G4: each add and delete writes one record; the cap fits the MCP transport."""
+    from backend.runtime.authorization import use_request_authorization
+    from backend.service.attachment_tools import ReadLimits
+    from backend.service.tests.test_node_attachments import NS
+
+    with (
+        caplog.at_level("INFO", logger="attachments.audit"),
+        use_request_authorization(actor_id="u1", headers={"x-correlation-id": "c1"}),
+    ):
+        added = service.attachment_tool_add("doc", "a.txt", content_text="hello")
+        service.attachment_tool_add("old", "a.txt", content_text="hello")
+        service.attachment_tool_add("missing", "a.txt", content_text="hello")
+        deleted = service.attachment_tool_delete("doc", added["attachment"]["id"])
+    assert deleted == {"success": True} and store.list(NS, "doc") == []
+    record = added["attachment"]
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    assert [
+        (
+            a.event,
+            a.outcome,
+            a.node_id,
+            a.attachment_id,
+            a.sha256,
+            getattr(a, "size", None),
+        )
+        for a in audits
+    ] == [
+        ("attachment_added", "ok", "doc", record["id"], record["sha256"], 5),
+        ("attachment_added", "node_archived", "old", None, None, 0),
+        ("attachment_added", "not_found", None, None, None, 0),
+        ("attachment_deleted", "ok", "doc", record["id"], record["sha256"], None),
+    ]
+    assert {(a.actor["id"], a.on_behalf_of, a.correlation_id) for a in audits} == {
+        ("u1", None, "c1")
+    }
+    monkeypatch.setenv("ATTACHMENT_MCP_MAX_DECODED_BYTES", "3000001")
+    with pytest.raises(ValueError):
+        ReadLimits.from_env()

@@ -596,8 +596,12 @@ run the REST upload and delete service path, so sniffing, limits, staging and
 error codes are the REST ones; their error messages are fixed per code. An add
 runs the async upload on a private event loop in a helper thread, carrying the
 caller's authorization context. `ATTACHMENT_MCP_MAX_DECODED_BYTES` (default
-3000000) caps the bytes one add stores, so the base64 form fits the MCP
-transport's 4 MiB body limit. An Agent's attachment write is always a proposal;
+3000000, also its maximum) caps the bytes one add stores, so the base64 form
+fits the MCP transport's 4 MiB body limit. A `filename` over 4096 characters is
+`invalid_arguments`; the node rules and REST caps are applied before the tool's
+cap and before decoding, so the codes match REST for the same node. Every add
+and delete through a tool, refused or not, writes an `attachments.audit` record
+(ADR 0010 §6). An Agent's attachment write is always a proposal;
 applying an approved one re-reads the Agent's stored `attachment_access` and
 refuses with `access_denied` unless it is still `read_write`.
 MCP tools use async thread shims; the execution map stays synchronous. Chat and
