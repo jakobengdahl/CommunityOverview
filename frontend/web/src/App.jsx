@@ -3624,6 +3624,8 @@ function App() {
             groupLayer: t('context_menu.group_layer'),
             groupLayerFront: t('context_menu.group_layer_front'),
             groupLayerBack: t('context_menu.group_layer_back'),
+            groupTextColor: t('context_menu.group_text_color'),
+            groupTextColorAuto: t('context_menu.group_text_color_auto'),
             annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
             annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
             annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),

@@ -61,6 +61,29 @@ class TestCreateGroupAnnotation:
         assert group["content"]["member_node_ids"] == ["n1", "n2"]
         assert group["style"] == {"color": "#ff0000"}
 
+    def test_text_color_is_stored_kept_on_omitted_upsert_and_refused_if_not_string(
+        self, annotation_tools
+    ):
+        """text_color lands as content.textColor; an upsert without it keeps
+        the stored value, "" resets it to automatic."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        create = tools_map["create_group_annotation"]
+
+        created = create(
+            session_id=session.id, x=0, y=0, annotation_id="g", text_color="#111827"
+        )
+        kept = create(session_id=session.id, x=0, y=0, annotation_id="g", label="L")
+        reset = create(
+            session_id=session.id, x=0, y=0, annotation_id="g", text_color=""
+        )
+        bad = create(session_id=session.id, x=0, y=0, text_color=1)
+
+        assert created["group"]["content"]["textColor"] == "#111827"
+        assert kept["group"]["content"]["textColor"] == "#111827"
+        assert reset["group"]["content"]["textColor"] == ""
+        assert bad["error"] == "invalid_content"
+
     def test_default_size_when_omitted(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

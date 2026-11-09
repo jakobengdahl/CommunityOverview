@@ -5590,6 +5590,7 @@ def register_mcp_tools(
         label: str = "",
         description: str = "",
         color: Optional[str] = None,
+        text_color: Optional[str] = None,
         member_node_ids: Optional[List[str]] = None,
         z: Optional[float] = None,
         locked: bool = False,
@@ -5629,6 +5630,9 @@ def register_mcp_tools(
             label: Optional group label shown on the box.
             description: Optional longer description.
             color: Optional box color (any CSS color the canvas accepts).
+            text_color: Optional label text color (any CSS color). Pass ""
+                for automatic — dark or white, whichever contrasts more with
+                `color`. Omit to keep the current value on an upsert.
             member_node_ids: Optional list of graph node ids to start the
                 group with. Omit to leave current membership alone on an
                 upsert, or create an empty group. Use `update_group_members`
@@ -5652,7 +5656,8 @@ def register_mcp_tools(
         Returns:
             Dict with success, the created/replaced group (same projected
             shape as `list_annotations`, with `label`/`description`/`color`/
-            `member_node_ids` under `content`), and the new revision.
+            `textColor`/`member_node_ids` under `content`), and the new
+            revision.
             Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for invalid_content, wrong_type, or too_large.
         """
@@ -5691,6 +5696,7 @@ def register_mcp_tools(
                 label=label,
                 description=description,
                 color=color,
+                text_color=text_color,
                 member_node_ids=member_node_ids,
                 z=z,
                 locked=locked,

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import GroupNode from '../src/components/GroupNode';
+import GroupNode, { GROUP_TEXT_COLORS } from '../src/components/GroupNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
@@ -22,6 +22,8 @@ const LABELS = {
   groupLayer: 'Group order',
   groupLayerFront: 'Bring forward',
   groupLayerBack: 'Send backward',
+  groupTextColor: 'Text colour',
+  groupTextColorAuto: 'Automatic',
 };
 
 function renderGroup(
@@ -76,6 +78,34 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(colorButtons.length).toBeGreaterThan(0);
     fireEvent.click(colorButtons[1]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('defaults the label text to whichever of dark/white contrasts more with the fill', () => {
+    const header = (color) =>
+      renderGroup({ label: 'G', color }).container.querySelector('.graph-group-header');
+    expect(header('#FEF3C7').style.color).toBe('rgb(17, 24, 39)');
+    expect(header('#1E3A8A').style.color).toBe('rgb(255, 255, 255)');
+  });
+
+  it('writes the chosen text colour, marks it active, and Auto clears it', () => {
+    const { notifyChange } = renderGroup({ label: 'G', color: '#646cff', textColor: '#FDE047' });
+    expect(document.querySelector('.graph-group-header').style.color).toBe('rgb(253, 224, 71)');
+    fireEvent.contextMenu(screen.getByText('G'));
+    const swatches = [...document.querySelectorAll('.text-color-button')];
+    expect(swatches.map((b) => b.classList.contains('active'))).toEqual([
+      false,
+      ...GROUP_TEXT_COLORS.map((c) => c === '#FDE047'),
+    ]);
+    fireEvent.click(swatches[1]);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    expect(updater([{ id: 'group-1', data: { label: 'G' } }])[0].data.textColor).toBe(
+      GROUP_TEXT_COLORS[0]
+    );
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: 'Automatic' }));
+    const cleared = hoisted.setNodes.mock.calls.at(-1)[0];
+    expect(cleared([{ id: 'group-1', data: { textColor: '#FDE047' } }])[0].data.textColor).toBe('');
+    expect(notifyChange).toHaveBeenCalledTimes(2);
   });
 
   it('notifies on delete', () => {
@@ -295,19 +325,20 @@ describe('GroupNode locked context menu', () => {
     // suite's LABELS constant does not define `width`, so it renders empty
     // rather than absent; still a real title slot, just an untranslated one
     // in this test's fixture.
-    expect(titles).toEqual(['Group Color', 'Group order', '']);
-    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
+    expect(titles).toEqual(['Group Color', 'Text colour', 'Group order', '']);
+    expect(document.querySelectorAll('.color-button:not(.text-color-button)')).toHaveLength(6);
+    expect(document.querySelectorAll('.text-color-button')).toHaveLength(
+      GROUP_TEXT_COLORS.length + 1
+    );
     const menu = document.querySelector('.graph-group-context-menu');
     // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
     // working control that a role query reports as absent. Text sees it.
     expect(menu.textContent).not.toMatch(/hid(e|den|ing)/i);
-    // Six swatches, two group-order buttons, the non-drag size control's
-    // Apply button (task-annotation-accessible-shared-controls'
-    // AnnotationSizeControl — its two <input type="number"> elements are not
-    // <button>s, so only this one adds to the count) and Delete Group — ten
-    // total, consciously updated from the pre-existing nine per this test's
-    // own comment above.
-    expect(menu.querySelectorAll('button')).toHaveLength(10);
+    // Six fill swatches, the text-colour swatches (Auto plus
+    // GROUP_TEXT_COLORS), two group-order buttons, the non-drag size
+    // control's Apply button (its number inputs are not <button>s) and
+    // Delete Group.
+    expect(menu.querySelectorAll('button')).toHaveLength(10 + GROUP_TEXT_COLORS.length + 1);
   });
 
   it('unlocks the group and publishes the change', () => {
@@ -349,7 +380,7 @@ describe('GroupNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.queryByRole('button', { name: /unlock/i })).toBeNull();
     expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
-    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
+    expect(document.querySelectorAll('.color-button:not(.text-color-button)')).toHaveLength(6);
   });
 
   // smallfix-groupnode-colour-swatch-no-active-marker: the swatch grid had no

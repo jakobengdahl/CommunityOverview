@@ -843,6 +843,7 @@ def build_group_annotation(
     label: str = "",
     description: str = "",
     color: Optional[str] = None,
+    text_color: Optional[str] = None,
     member_node_ids: Optional[List[str]] = None,
     z: Optional[float] = None,
     locked: bool = False,
@@ -866,8 +867,12 @@ def build_group_annotation(
     simply created empty — the canvas and ``project_annotation`` both treat
     an absent list the same as an empty one.
 
+    ``text_color`` is stored as ``textColor``, the label's text colour; an
+    empty string means automatic (the canvas derives dark or white from the
+    fill for contrast) and ``None`` leaves the stored value alone on upsert.
+
     ``ValueError`` is raised for a non-list-of-strings ``member_node_ids``,
-    matching how the generic builders report a malformed payload as
+    or a non-string ``text_color``, matching how the generic builders report a malformed payload as
     ``invalid_content`` at the MCP tool layer.
     """
     if member_node_ids is not None and (
@@ -875,6 +880,8 @@ def build_group_annotation(
         or not all(isinstance(m, str) for m in member_node_ids)
     ):
         raise ValueError("member_node_ids must be a list of strings")
+    if text_color is not None and not isinstance(text_color, str):
+        raise ValueError("text_color must be a string")
     size = {
         "w": w if w is not None else DEFAULT_GROUP_SIZE["w"],
         "h": h if h is not None else DEFAULT_GROUP_SIZE["h"],
@@ -895,6 +902,8 @@ def build_group_annotation(
     if color is not None:
         annotation["color"] = color
         annotation["style"] = {"color": color}
+    if text_color is not None:
+        annotation["textColor"] = text_color
     if member_node_ids is not None:
         annotation["member_node_ids"] = list(member_node_ids)
     return annotation

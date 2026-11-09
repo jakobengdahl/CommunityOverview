@@ -11,6 +11,36 @@ import { reorderNodesForParentChild } from './GraphCanvas';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GroupNode.css';
 
+const DEFAULT_GROUP_COLOR = '#646cff';
+const DARK_GROUP_TEXT = '#111827';
+const LIGHT_GROUP_TEXT = '#ffffff';
+export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
+
+function relativeLuminance(hex) {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return null;
+  const digits = m[1].length === 3 ? [...m[1]].map((d) => d + d).join('') : m[1];
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const c = parseInt(digits.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * The header label's text colour: the group's chosen `textColor`, else
+ * whichever of dark/white contrasts more with the header fill. A fill this
+ * cannot parse (a named or rgb() CSS colour from MCP) falls back to dark,
+ * the readable choice on the light canvas.
+ */
+export function resolveGroupTextColor(fill, textColor) {
+  if (textColor) return textColor;
+  const l = relativeLuminance(fill || DEFAULT_GROUP_COLOR);
+  if (l === null) return DARK_GROUP_TEXT;
+  // WCAG contrast against white (L=1) vs the dark text (L≈0.012).
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.062 ? LIGHT_GROUP_TEXT : DARK_GROUP_TEXT;
+}
+
 /**
  * GroupNode - A container node for organizing related nodes
  *
@@ -177,7 +207,8 @@ function GroupNode({ id, data, selected }) {
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
-  const handleChangeColor = (color) => {
+  // Shared by the fill and text-colour swatches; `textColor: ''` is "Auto".
+  const patchStyle = (patch) => {
     if (remoteLocked) {
       setContextMenu(null);
       notifyRemoteLockedAttempt();
@@ -186,7 +217,7 @@ function GroupNode({ id, data, selected }) {
     setNodes((nds) =>
       nds.map((n) => {
         if (n.id === id) {
-          return { ...n, data: { ...n.data, color } };
+          return { ...n, data: { ...n.data, ...patch } };
         }
         return n;
       })
@@ -194,6 +225,8 @@ function GroupNode({ id, data, selected }) {
     setContextMenu(null);
     notifyChange('style');
   };
+  const handleChangeColor = (color) => patchStyle({ color });
+  const handleChangeTextColor = (textColor) => patchStyle({ textColor });
 
   // Un-parent children and remove the group node from the canvas
   const removeGroupKeepChildren = () => {
@@ -297,7 +330,9 @@ function GroupNode({ id, data, selected }) {
     }
   };
 
-  const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const colors = [DEFAULT_GROUP_COLOR, '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const fill = data.color || DEFAULT_GROUP_COLOR;
+  const textColor = resolveGroupTextColor(fill, data.textColor);
   const groupBadge = remoteEditBadge(data);
   // Groups persist rotation for round-trip compatibility, but the current group
   // renderer is not visually rotated. Keep that stored value out of the size
@@ -315,11 +350,11 @@ function GroupNode({ id, data, selected }) {
           endEditing?.([id]);
         }}
         isVisible={selected && !remoteLocked && !locked}
-        lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
+        lineStyle={{ stroke: fill, strokeWidth: 4 }}
         handleStyle={{
           width: 14,
           height: 14,
-          background: data.color || '#646cff',
+          background: fill,
           border: '2px solid white',
           borderRadius: '3px',
         }}
@@ -328,8 +363,8 @@ function GroupNode({ id, data, selected }) {
         ref={groupRef}
         className="graph-group-node"
         style={{
-          borderColor: data.color || '#646cff',
-          backgroundColor: `${data.color || '#646cff'}15`,
+          borderColor: fill,
+          backgroundColor: `${fill}15`,
           outline: groupBadge ? `2px solid ${groupBadge.color}` : undefined,
           outlineOffset: groupBadge ? '2px' : undefined,
         }}
@@ -345,7 +380,7 @@ function GroupNode({ id, data, selected }) {
         )}
         <div
           className="graph-group-header"
-          style={{ backgroundColor: data.color || '#646cff', color: 'white' }}
+          style={{ backgroundColor: fill, color: textColor }}
           onContextMenu={handleContextMenu}
           onDoubleClick={handleDoubleClick}
         >
@@ -401,9 +436,9 @@ function GroupNode({ id, data, selected }) {
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The unlocked menu has exactly four other
-              // actions — recolour, the group-order row, the non-drag size
-              // control, all edits, and Delete Group, which destroys the
+              // every other kind. The unlocked menu has exactly five other
+              // actions — recolour, text colour, the group-order row, the
+              // non-drag size control, all edits, and Delete Group, which destroys the
               // box — so there is nothing a lock could allow through.
               // Anything added to the unlocked menu later has to be decided
               // against this branch as well, not just dropped in.
@@ -417,9 +452,33 @@ function GroupNode({ id, data, selected }) {
                   {colors.map((c) => (
                     <button
                       key={c}
-                      className={`color-button${(data.color || '#646cff') === c ? ' active' : ''}`}
+                      className={`color-button${fill === c ? ' active' : ''}`}
                       style={{ backgroundColor: c }}
                       onClick={() => handleChangeColor(c)}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.groupTextColor}</div>
+                <div className="context-menu-colors">
+                  {/* "Auto" previews the contrast-derived colour on the fill. */}
+                  <button
+                    type="button"
+                    className={`color-button text-color-button${data.textColor ? '' : ' active'}`}
+                    style={{ backgroundColor: fill, color: resolveGroupTextColor(fill) }}
+                    aria-label={labels.groupTextColorAuto}
+                    title={labels.groupTextColorAuto}
+                    onClick={() => handleChangeTextColor('')}
+                  >
+                    A
+                  </button>
+                  {GROUP_TEXT_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`color-button text-color-button${data.textColor === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      title={c}
+                      onClick={() => handleChangeTextColor(c)}
                     />
                   ))}
                 </div>
