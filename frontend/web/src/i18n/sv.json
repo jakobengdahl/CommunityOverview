@@ -637,6 +637,8 @@
     "group_layer": "Gruppordning",
     "group_layer_front": "Flytta framåt",
     "group_layer_back": "Flytta bakåt",
+    "group_text_color": "Textfärg",
+    "group_text_color_auto": "Automatisk (bästa kontrast)",
     "freehand_color": "Färg",
     "freehand_width": "Streckbredd",
     "freehand_smoothing": "Utjämning",

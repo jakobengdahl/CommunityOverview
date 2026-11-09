@@ -482,12 +482,14 @@ describe('group envelope round-trip (locked, z, rotation)', () => {
         geometry: { x: 1, y: 2, w: 300, h: 200, rotation: 15 },
         locked: true,
         z: 5,
+        textColor: '#FDE047',
       },
     ]);
     const [ann] = groupsToAnnotations(groups, parentIds);
     expect(ann.locked).toBe(true);
     expect(ann.z).toBe(5);
     expect(ann.geometry.rotation).toBe(15);
+    expect(ann.textColor).toBe('#FDE047');
   });
 
   it('keeps the envelope fields through the legacy saved-view metadata leg', () => {

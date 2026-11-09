@@ -130,6 +130,8 @@ export const AnnotationContext = createContext({
     groupLayer: 'Group order',
     groupLayerFront: 'Bring forward',
     groupLayerBack: 'Send backward',
+    groupTextColor: 'Text colour',
+    groupTextColorAuto: 'Automatic (best contrast)',
     nearbyMenu: 'Add nearby',
     nearbyLabel: 'Label',
     nearbyIcon: 'Icon',

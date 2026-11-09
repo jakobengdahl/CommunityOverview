@@ -37,7 +37,9 @@
   background: rgba(255, 255, 255, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: 4px;
-  color: white;
+  /* Follows the header's resolved text colour (data.textColor or the
+     contrast default) instead of a fixed white. */
+  color: inherit;
   padding: 2px 6px;
   font-size: 14px;
   font-weight: 600;
@@ -106,6 +108,13 @@
    .graph-annotation-context-menu .color-button.active (NoteNode.css). */
 .graph-group-context-menu .color-button.active {
   border-color: white;
+}
+
+.graph-group-context-menu .text-color-button {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
 }
 
 /* Group backgrounds relative to each other only

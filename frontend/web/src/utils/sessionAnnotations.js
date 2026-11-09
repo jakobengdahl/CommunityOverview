@@ -87,6 +87,7 @@ export function annotationsToGroups(annotations) {
       position: a.position || { x: 0, y: 0 },
       style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
       color: a.color ?? a.style?.color,
+      textColor: a.textColor || '',
       // The same envelope fields every overlay kind's translator already
       // carries. A group could always be locked over MCP, but the flag stopped
       // here, so the canvas never saw it and the next save diffed it back to
@@ -140,6 +141,7 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           label: g.label || '',
           description: g.description || '',
           color: g.color,
+          textColor: g.textColor || '',
           size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
           member_node_ids: membersByGroup[g.id] || [],
           z: g.z ?? 0,

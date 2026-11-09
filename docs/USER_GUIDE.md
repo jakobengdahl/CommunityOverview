@@ -232,7 +232,10 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+A group's right-click menu offers a colour, a **Text colour** for its label, a **Group
+order** row, and **Delete Group**. The label's text colour defaults to **Automatic**
+(the "A" swatch), which picks dark or white text, whichever reads better on the group's
+colour.
 Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
 where they appear, and are simply no longer grouped. The deletion is recorded in the
 session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone

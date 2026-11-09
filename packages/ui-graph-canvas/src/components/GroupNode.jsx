@@ -11,6 +11,90 @@ import { reorderNodesForParentChild } from './GraphCanvas';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GroupNode.css';
 
+const DEFAULT_GROUP_COLOR = '#646cff';
+const DARK_GROUP_TEXT = '#111827';
+const LIGHT_GROUP_TEXT = '#ffffff';
+export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
+
+const RGB_FN = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i;
+
+const computedCssColors = new Map();
+
+// A CSS colour painted onto a 1x1 canvas, as an rgba() string, or null
+// without a 2D context. Covers what computed style keeps in its own notation
+// (oklch(), lab(), color(), color-mix()): the canvas pixel is always sRGB.
+function rasterizedCssColor(color) {
+  const ctx = document.createElement('canvas').getContext?.('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+}
+
+// Any other CSS colour (named, hsl(), oklch(), ...) as an rgb()/rgba()
+// string, or null when it is not a colour or there is no DOM to ask.
+function computedCssColor(color) {
+  if (typeof document === 'undefined' || !document.body) return null;
+  if (!computedCssColors.has(color)) {
+    const probe = document.createElement('span');
+    probe.style.color = color;
+    let computed = null;
+    if (probe.style.color) {
+      // Computed style needs an attached element in browsers.
+      document.body.appendChild(probe);
+      computed = getComputedStyle(probe).color || null;
+      probe.remove();
+      if (!RGB_FN.test(computed || '')) computed = rasterizedCssColor(color);
+    }
+    computedCssColors.set(color, computed);
+  }
+  return computedCssColors.get(color);
+}
+
+// [r, g, b] in 0-255 composited over the white canvas, or null for a value
+// that is not a CSS colour.
+function parseFill(color) {
+  const s = String(color || '').trim();
+  let rgba = null;
+  const hex = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
+  if (hex) {
+    const d = hex[1].length <= 4 ? [...hex[1]].map((c) => c + c).join('') : hex[1];
+    rgba = [0, 2, 4, 6].map((i) => (i < d.length ? parseInt(d.slice(i, i + 2), 16) : 255));
+    rgba[3] /= 255;
+  } else {
+    const fn = RGB_FN.exec(s) || RGB_FN.exec(computedCssColor(s) || '');
+    if (!fn) return null;
+    const a = fn[4] === undefined ? 1 : Number(fn[4]) / (fn[5] ? 100 : 1);
+    rgba = [Number(fn[1]), Number(fn[2]), Number(fn[3]), a];
+  }
+  const a = Math.min(Math.max(rgba[3], 0), 1);
+  return rgba.slice(0, 3).map((c) => Math.min(c, 255) * a + 255 * (1 - a));
+}
+
+function relativeLuminance(rgb) {
+  const [r, g, b] = rgb.map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * The header label's text colour: the group's chosen `textColor`, else
+ * whichever of dark/white contrasts more with the header fill (the label sits
+ * on the fill, not the canvas). A fill that is not a colour draws nothing, so
+ * the label sits on the light canvas and gets the dark text.
+ */
+export function resolveGroupTextColor(fill, textColor) {
+  if (textColor) return textColor;
+  const rgb = parseFill(fill || DEFAULT_GROUP_COLOR);
+  if (rgb === null) return DARK_GROUP_TEXT;
+  const l = relativeLuminance(rgb);
+  // WCAG contrast against white (L=1) vs the dark text (L≈0.012).
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.062 ? LIGHT_GROUP_TEXT : DARK_GROUP_TEXT;
+}
+
 /**
  * GroupNode - A container node for organizing related nodes
  *
@@ -177,7 +261,8 @@ function GroupNode({ id, data, selected }) {
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
-  const handleChangeColor = (color) => {
+  // Shared by the fill and text-colour swatches; `textColor: ''` is "Auto".
+  const patchStyle = (patch) => {
     if (remoteLocked) {
       setContextMenu(null);
       notifyRemoteLockedAttempt();
@@ -186,7 +271,7 @@ function GroupNode({ id, data, selected }) {
     setNodes((nds) =>
       nds.map((n) => {
         if (n.id === id) {
-          return { ...n, data: { ...n.data, color } };
+          return { ...n, data: { ...n.data, ...patch } };
         }
         return n;
       })
@@ -194,6 +279,8 @@ function GroupNode({ id, data, selected }) {
     setContextMenu(null);
     notifyChange('style');
   };
+  const handleChangeColor = (color) => patchStyle({ color });
+  const handleChangeTextColor = (textColor) => patchStyle({ textColor });
 
   // Un-parent children and remove the group node from the canvas
   const removeGroupKeepChildren = () => {
@@ -297,7 +384,11 @@ function GroupNode({ id, data, selected }) {
     }
   };
 
-  const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const colors = [DEFAULT_GROUP_COLOR, '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const fill = data.color || DEFAULT_GROUP_COLOR;
+  const textColor = resolveGroupTextColor(fill, data.textColor);
+  // MCP may store any casing; the swatch constants mix cases.
+  const activeTextColor = String(data.textColor || '').toLowerCase();
   const groupBadge = remoteEditBadge(data);
   // Groups persist rotation for round-trip compatibility, but the current group
   // renderer is not visually rotated. Keep that stored value out of the size
@@ -315,11 +406,11 @@ function GroupNode({ id, data, selected }) {
           endEditing?.([id]);
         }}
         isVisible={selected && !remoteLocked && !locked}
-        lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
+        lineStyle={{ stroke: fill, strokeWidth: 4 }}
         handleStyle={{
           width: 14,
           height: 14,
-          background: data.color || '#646cff',
+          background: fill,
           border: '2px solid white',
           borderRadius: '3px',
         }}
@@ -328,8 +419,10 @@ function GroupNode({ id, data, selected }) {
         ref={groupRef}
         className="graph-group-node"
         style={{
-          borderColor: data.color || '#646cff',
-          backgroundColor: `${data.color || '#646cff'}15`,
+          borderColor: fill,
+          // The `15` alpha suffix only tints a 6-digit hex; on #rgba it would
+          // spell an opaque #rrggbb under a label judged against the canvas.
+          backgroundColor: /^#[0-9a-f]{6}$/i.test(fill) ? `${fill}15` : undefined,
           outline: groupBadge ? `2px solid ${groupBadge.color}` : undefined,
           outlineOffset: groupBadge ? '2px' : undefined,
         }}
@@ -345,7 +438,7 @@ function GroupNode({ id, data, selected }) {
         )}
         <div
           className="graph-group-header"
-          style={{ backgroundColor: data.color || '#646cff', color: 'white' }}
+          style={{ backgroundColor: fill, color: textColor }}
           onContextMenu={handleContextMenu}
           onDoubleClick={handleDoubleClick}
         >
@@ -401,9 +494,9 @@ function GroupNode({ id, data, selected }) {
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The unlocked menu has exactly four other
-              // actions — recolour, the group-order row, the non-drag size
-              // control, all edits, and Delete Group, which destroys the
+              // every other kind. The unlocked menu has exactly five other
+              // actions — recolour, text colour, the group-order row, the
+              // non-drag size control, all edits, and Delete Group, which destroys the
               // box — so there is nothing a lock could allow through.
               // Anything added to the unlocked menu later has to be decided
               // against this branch as well, not just dropped in.
@@ -417,9 +510,33 @@ function GroupNode({ id, data, selected }) {
                   {colors.map((c) => (
                     <button
                       key={c}
-                      className={`color-button${(data.color || '#646cff') === c ? ' active' : ''}`}
+                      className={`color-button${fill === c ? ' active' : ''}`}
                       style={{ backgroundColor: c }}
                       onClick={() => handleChangeColor(c)}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.groupTextColor}</div>
+                <div className="context-menu-colors">
+                  {/* "Auto" previews the contrast-derived colour on the fill. */}
+                  <button
+                    type="button"
+                    className={`color-button text-color-button${data.textColor ? '' : ' active'}`}
+                    style={{ backgroundColor: fill, color: resolveGroupTextColor(fill) }}
+                    aria-label={labels.groupTextColorAuto}
+                    title={labels.groupTextColorAuto}
+                    onClick={() => handleChangeTextColor('')}
+                  >
+                    A
+                  </button>
+                  {GROUP_TEXT_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`color-button text-color-button${activeTextColor === c.toLowerCase() ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      title={c}
+                      onClick={() => handleChangeTextColor(c)}
                     />
                   ))}
                 </div>

@@ -637,6 +637,8 @@
     "group_layer": "Group order",
     "group_layer_front": "Bring forward",
     "group_layer_back": "Send backward",
+    "group_text_color": "Text colour",
+    "group_text_color_auto": "Automatic (best contrast)",
     "freehand_color": "Colour",
     "freehand_width": "Stroke width",
     "freehand_smoothing": "Smoothing",

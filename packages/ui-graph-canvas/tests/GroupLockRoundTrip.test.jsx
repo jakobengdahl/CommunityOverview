@@ -1,8 +1,9 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-// The canvas leg of the group `locked`/`z`/`rotation` round trip. The translators in
+// The canvas leg of the group `locked`/`z`/`rotation`/`textColor` round trip. The translators in
 // frontend/web/src/utils/sessionAnnotations.js are covered by their own suite;
 // what those cannot show is that the flag survives the trip *through* the
 // canvas. Three sites carry it — the groupsToRestore effect, the remote
@@ -88,6 +89,7 @@ describe('group envelope round trip through the canvas', () => {
               locked: true,
               z: 3,
               rotation: 30,
+              textColor: '#1E3A8A',
             },
           ],
           parentIds: {},
@@ -95,6 +97,7 @@ describe('group envelope round trip through the canvas', () => {
       />
     );
     const [group] = producedGroups();
+    expect(group.data.textColor).toBe('#1E3A8A');
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(3);
     expect(group.data.rotation).toBe(30);
@@ -144,6 +147,7 @@ describe('group envelope round trip through the canvas', () => {
               locked: true,
               z: 2,
               rotation: 45,
+              textColor: '#FDE047',
             },
             members: [],
           },
@@ -151,6 +155,7 @@ describe('group envelope round trip through the canvas', () => {
       />
     );
     const [group] = producedGroups();
+    expect(group.data.textColor).toBe('#FDE047');
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(2);
     expect(group.data.rotation).toBe(45);
@@ -244,6 +249,7 @@ describe('group envelope round trip through the canvas', () => {
           locked: true,
           z: 3,
           rotation: 60,
+          textColor: '#ffffff',
         },
         style: { width: 300, height: 200 },
         draggable: false,
@@ -257,7 +263,13 @@ describe('group envelope round trip through the canvas', () => {
     // The autosave path. Omitting any envelope field here overwrites server
     // state even when nobody touched the group.
     expect(onSaveView.mock.calls.at(-1)[0].groups[0]).toEqual(
-      expect.objectContaining({ id: 'g1', locked: true, z: 3, rotation: 60 })
+      expect.objectContaining({
+        id: 'g1',
+        locked: true,
+        z: 3,
+        rotation: 60,
+        textColor: '#ffffff',
+      })
     );
   });
 
