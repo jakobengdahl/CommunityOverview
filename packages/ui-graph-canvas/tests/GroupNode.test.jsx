@@ -101,6 +101,10 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(header('navy').style.color).toBe(white);
     // A mostly transparent dark fill shows the light canvas through it.
     expect(header('rgba(0, 0, 0, 0.1)').style.color).toBe('rgb(17, 24, 39)');
+    // So does a 4-digit hex one: no opaque tint is painted under its label.
+    const { container } = renderGroup({ label: 'G', color: '#0002' });
+    expect(container.querySelector('.graph-group-node').style.backgroundColor).toBe('');
+    expect(container.querySelector('.graph-group-header').style.color).toBe('rgb(17, 24, 39)');
   });
 
   it('judges CSS Color 4 fills by their rendered sRGB pixel', () => {

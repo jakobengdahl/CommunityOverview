@@ -420,7 +420,9 @@ function GroupNode({ id, data, selected }) {
         className="graph-group-node"
         style={{
           borderColor: fill,
-          backgroundColor: `${fill}15`,
+          // The `15` alpha suffix only tints a 6-digit hex; on #rgba it would
+          // spell an opaque #rrggbb under a label judged against the canvas.
+          backgroundColor: /^#[0-9a-f]{6}$/i.test(fill) ? `${fill}15` : undefined,
           outline: groupBadge ? `2px solid ${groupBadge.color}` : undefined,
           outlineOffset: groupBadge ? '2px' : undefined,
         }}
