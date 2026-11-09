@@ -86,6 +86,10 @@ describe('GroupNode host notification (design step 6)', () => {
       renderGroup({ label: 'G', color }).container.querySelector('.graph-group-header');
     expect(header('#FEF3C7').style.color).toBe('rgb(17, 24, 39)');
     expect(header('#1E3A8A').style.color).toBe('rgb(255, 255, 255)');
+    // Light named/hsl() fills (as MCP may send) and a non-colour get dark text.
+    expect(header('yellow').style.color).toBe('rgb(17, 24, 39)');
+    expect(header('hsl(60, 100%, 90%)').style.color).toBe('rgb(17, 24, 39)');
+    expect(header('not-a-colour').style.color).toBe('rgb(17, 24, 39)');
   });
 
   it('keeps the default label readable on dark rgb(), 8-digit hex and named fills', () => {

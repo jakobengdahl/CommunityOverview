@@ -16,8 +16,31 @@ const DARK_GROUP_TEXT = '#111827';
 const LIGHT_GROUP_TEXT = '#ffffff';
 export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
 
-// [r, g, b] in 0-255 composited over the white canvas, or null for a CSS
-// colour this does not parse (named, hsl(), ...).
+const computedCssColors = new Map();
+
+// Any other CSS colour (named, hsl(), ...) as the browser's computed rgb()
+// string, or null when it is not a colour or there is no DOM to ask.
+function computedCssColor(color) {
+  if (typeof document === 'undefined' || !document.body) return null;
+  if (!computedCssColors.has(color)) {
+    const probe = document.createElement('span');
+    probe.style.color = color;
+    let computed = null;
+    if (probe.style.color) {
+      // Computed style needs an attached element in browsers.
+      document.body.appendChild(probe);
+      computed = getComputedStyle(probe).color || null;
+      probe.remove();
+    }
+    computedCssColors.set(color, computed);
+  }
+  return computedCssColors.get(color);
+}
+
+const RGB_FN = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i;
+
+// [r, g, b] in 0-255 composited over the white canvas, or null for a value
+// that is not a CSS colour.
 function parseFill(color) {
   const s = String(color || '').trim();
   let rgba = null;
@@ -27,8 +50,7 @@ function parseFill(color) {
     rgba = [0, 2, 4, 6].map((i) => (i < d.length ? parseInt(d.slice(i, i + 2), 16) : 255));
     rgba[3] /= 255;
   } else {
-    const fn =
-      /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i.exec(s);
+    const fn = RGB_FN.exec(s) || RGB_FN.exec(computedCssColor(s) || '');
     if (!fn) return null;
     const a = fn[4] === undefined ? 1 : Number(fn[4]) / (fn[5] ? 100 : 1);
     rgba = [Number(fn[1]), Number(fn[2]), Number(fn[3]), a];
@@ -48,13 +70,13 @@ function relativeLuminance(rgb) {
 /**
  * The header label's text colour: the group's chosen `textColor`, else
  * whichever of dark/white contrasts more with the header fill (the label sits
- * on the fill, not the canvas). A fill this cannot parse (a named or hsl() CSS
- * colour from MCP) keeps the white label groups had before `textColor`.
+ * on the fill, not the canvas). A fill that is not a colour draws nothing, so
+ * the label sits on the light canvas and gets the dark text.
  */
 export function resolveGroupTextColor(fill, textColor) {
   if (textColor) return textColor;
   const rgb = parseFill(fill || DEFAULT_GROUP_COLOR);
-  if (rgb === null) return LIGHT_GROUP_TEXT;
+  if (rgb === null) return DARK_GROUP_TEXT;
   const l = relativeLuminance(rgb);
   // WCAG contrast against white (L=1) vs the dark text (L≈0.012).
   return 1.05 / (l + 0.05) >= (l + 0.05) / 0.062 ? LIGHT_GROUP_TEXT : DARK_GROUP_TEXT;
