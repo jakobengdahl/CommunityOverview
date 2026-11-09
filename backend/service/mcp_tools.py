@@ -5656,8 +5656,8 @@ def register_mcp_tools(
         Returns:
             Dict with success, the created/replaced group (same projected
             shape as `list_annotations`, with `label`/`description`/`color`/
-            `textColor`/`member_node_ids` under `content`), and the new
-            revision.
+            `textColor`/`member_node_ids` under `content`; no `textColor`
+            means automatic, same as ""), and the new revision.
             Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for invalid_content, wrong_type, or too_large.
         """
