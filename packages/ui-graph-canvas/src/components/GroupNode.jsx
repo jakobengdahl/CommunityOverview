@@ -16,12 +16,30 @@ const DARK_GROUP_TEXT = '#111827';
 const LIGHT_GROUP_TEXT = '#ffffff';
 export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
 
-function relativeLuminance(hex) {
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex || '').trim());
-  if (!m) return null;
-  const digits = m[1].length === 3 ? [...m[1]].map((d) => d + d).join('') : m[1];
-  const [r, g, b] = [0, 2, 4].map((i) => {
-    const c = parseInt(digits.slice(i, i + 2), 16) / 255;
+// [r, g, b] in 0-255 composited over the white canvas, or null for a CSS
+// colour this does not parse (named, hsl(), ...).
+function parseFill(color) {
+  const s = String(color || '').trim();
+  let rgba = null;
+  const hex = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
+  if (hex) {
+    const d = hex[1].length <= 4 ? [...hex[1]].map((c) => c + c).join('') : hex[1];
+    rgba = [0, 2, 4, 6].map((i) => (i < d.length ? parseInt(d.slice(i, i + 2), 16) : 255));
+    rgba[3] /= 255;
+  } else {
+    const fn =
+      /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i.exec(s);
+    if (!fn) return null;
+    const a = fn[4] === undefined ? 1 : Number(fn[4]) / (fn[5] ? 100 : 1);
+    rgba = [Number(fn[1]), Number(fn[2]), Number(fn[3]), a];
+  }
+  const a = Math.min(Math.max(rgba[3], 0), 1);
+  return rgba.slice(0, 3).map((c) => Math.min(c, 255) * a + 255 * (1 - a));
+}
+
+function relativeLuminance(rgb) {
+  const [r, g, b] = rgb.map((v) => {
+    const c = v / 255;
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -29,14 +47,15 @@ function relativeLuminance(hex) {
 
 /**
  * The header label's text colour: the group's chosen `textColor`, else
- * whichever of dark/white contrasts more with the header fill. A fill this
- * cannot parse (a named or rgb() CSS colour from MCP) falls back to dark,
- * the readable choice on the light canvas.
+ * whichever of dark/white contrasts more with the header fill (the label sits
+ * on the fill, not the canvas). A fill this cannot parse (a named or hsl() CSS
+ * colour from MCP) keeps the white label groups had before `textColor`.
  */
 export function resolveGroupTextColor(fill, textColor) {
   if (textColor) return textColor;
-  const l = relativeLuminance(fill || DEFAULT_GROUP_COLOR);
-  if (l === null) return DARK_GROUP_TEXT;
+  const rgb = parseFill(fill || DEFAULT_GROUP_COLOR);
+  if (rgb === null) return LIGHT_GROUP_TEXT;
+  const l = relativeLuminance(rgb);
   // WCAG contrast against white (L=1) vs the dark text (L≈0.012).
   return 1.05 / (l + 0.05) >= (l + 0.05) / 0.062 ? LIGHT_GROUP_TEXT : DARK_GROUP_TEXT;
 }

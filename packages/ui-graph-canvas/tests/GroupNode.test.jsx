@@ -88,6 +88,17 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(header('#1E3A8A').style.color).toBe('rgb(255, 255, 255)');
   });
 
+  it('keeps the default label readable on dark rgb(), 8-digit hex and named fills', () => {
+    const white = 'rgb(255, 255, 255)';
+    const header = (color) =>
+      renderGroup({ label: 'G', color }).container.querySelector('.graph-group-header');
+    expect(header('rgb(30, 58, 138)').style.color).toBe(white);
+    expect(header('#1E3A8AFF').style.color).toBe(white);
+    expect(header('navy').style.color).toBe(white);
+    // A mostly transparent dark fill shows the light canvas through it.
+    expect(header('rgba(0, 0, 0, 0.1)').style.color).toBe('rgb(17, 24, 39)');
+  });
+
   it('writes the chosen text colour, marks it active, and Auto clears it', () => {
     const { notifyChange } = renderGroup({ label: 'G', color: '#646cff', textColor: '#FDE047' });
     expect(document.querySelector('.graph-group-header').style.color).toBe('rgb(253, 224, 71)');
