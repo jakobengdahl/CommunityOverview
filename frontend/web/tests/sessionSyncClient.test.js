@@ -329,6 +329,26 @@ describe('applyOpToMirror', () => {
     expect(computeOps(baseline, local)).toEqual([]);
     expect(annotation).not.toHaveProperty('textColor');
   });
+
+  it('resetting a group to automatic publishes textColor as an empty string', () => {
+    const annotation = {
+      id: 'g',
+      type: 'group',
+      kind: 'group',
+      label: 'G',
+      color: '#10B981',
+      textColor: '#ffffff',
+      member_node_ids: [],
+    };
+    const baseline = applyOpToMirror({ annotations: [] }, { op: 'annotation_created', annotation });
+    const { groups, parentIds } = annotationsToGroups(baseline.annotations);
+    const reset = groups.map((g) => ({ ...g, textColor: '' }));
+    const local = { ...baseline, annotations: groupsToAnnotations(reset, parentIds) };
+    const ops = computeOps(baseline, local);
+    expect(ops).toHaveLength(1);
+    expect(ops[0].op).toBe('annotation_updated');
+    expect(ops[0].annotation.textColor).toBe('');
+  });
 });
 
 // ── SessionSyncClient transport ────────────────────────────────────────────
