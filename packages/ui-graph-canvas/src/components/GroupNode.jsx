@@ -16,9 +16,23 @@ const DARK_GROUP_TEXT = '#111827';
 const LIGHT_GROUP_TEXT = '#ffffff';
 export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
 
+const RGB_FN = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i;
+
 const computedCssColors = new Map();
 
-// Any other CSS colour (named, hsl(), ...) as the browser's computed rgb()
+// A CSS colour painted onto a 1x1 canvas, as an rgba() string, or null
+// without a 2D context. Covers what computed style keeps in its own notation
+// (oklch(), lab(), color(), color-mix()): the canvas pixel is always sRGB.
+function rasterizedCssColor(color) {
+  const ctx = document.createElement('canvas').getContext?.('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+}
+
+// Any other CSS colour (named, hsl(), oklch(), ...) as an rgb()/rgba()
 // string, or null when it is not a colour or there is no DOM to ask.
 function computedCssColor(color) {
   if (typeof document === 'undefined' || !document.body) return null;
@@ -31,13 +45,12 @@ function computedCssColor(color) {
       document.body.appendChild(probe);
       computed = getComputedStyle(probe).color || null;
       probe.remove();
+      if (!RGB_FN.test(computed || '')) computed = rasterizedCssColor(color);
     }
     computedCssColors.set(color, computed);
   }
   return computedCssColors.get(color);
 }
-
-const RGB_FN = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i;
 
 // [r, g, b] in 0-255 composited over the white canvas, or null for a value
 // that is not a CSS colour.

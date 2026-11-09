@@ -103,6 +103,29 @@ describe('GroupNode host notification (design step 6)', () => {
     expect(header('rgba(0, 0, 0, 0.1)').style.color).toBe('rgb(17, 24, 39)');
   });
 
+  it('judges CSS Color 4 fills by their rendered sRGB pixel', () => {
+    // jsdom has no canvas: paint what a browser would for these two fills.
+    const pixels = {
+      'oklch(0.3 0.1 260)': [30, 40, 90, 255],
+      'lab(95 0 20)': [250, 240, 200, 255],
+    };
+    const spy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => {
+      let fill;
+      return {
+        set fillStyle(v) {
+          fill = v;
+        },
+        fillRect() {},
+        getImageData: () => ({ data: pixels[fill] }),
+      };
+    });
+    const header = (color) =>
+      renderGroup({ label: 'G', color }).container.querySelector('.graph-group-header');
+    expect(header('oklch(0.3 0.1 260)').style.color).toBe('rgb(255, 255, 255)');
+    expect(header('lab(95 0 20)').style.color).toBe('rgb(17, 24, 39)');
+    spy.mockRestore();
+  });
+
   it('writes the chosen text colour, marks it active, and Auto clears it', () => {
     const { notifyChange } = renderGroup({ label: 'G', color: '#646cff', textColor: '#FDE047' });
     expect(document.querySelector('.graph-group-header').style.color).toBe('rgb(253, 224, 71)');
