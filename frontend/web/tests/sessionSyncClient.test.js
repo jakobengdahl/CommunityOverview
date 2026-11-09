@@ -1,3 +1,4 @@
+// covers: frontend/web/src/services/sessionSyncClient.js, frontend/web/src/utils/sessionAnnotations.js
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   computeOps,
