@@ -3031,6 +3031,7 @@ def register_mcp_tools(
         return {
             "session_id": session.id,
             "name": session.name,
+            "description": session.description,
             "lifecycle_state": "active",
             "owner": None,  # reserved; bound by the hosted layer, null in open core
             "workspace": None,  # reserved; bound by the hosted layer
@@ -3056,6 +3057,7 @@ def register_mcp_tools(
         return {
             "session_id": meta["id"],
             "name": meta.get("name"),
+            "description": meta.get("description"),
             "lifecycle_state": "active",
             "owner": None,
             "workspace": None,
@@ -3306,6 +3308,75 @@ def register_mcp_tools(
                 name,
                 client_id=_MCP_SESSION_CLIENT_ID,
                 rate_limit_label="rename_visualization_session",
+            )
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except SessionLimitReached:
+            return {
+                "success": False,
+                "error": "too_many_sessions",
+                "message": "The session limit has been reached; delete unused sessions and retry.",
+            }
+        except SessionNotFound:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
+    def describe_visualization_session(
+        session_id: str, description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Set or clear a visualization session's description: what the session
+        is for, what has been done and what the next participant should pick
+        up. Read it back as ``description`` on the session resource.
+
+        It belongs to the session, not the canvas, so clearing the
+        visualization keeps it. Last write wins. Pass ``description=null`` to
+        clear it.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+            description: The new description (at most 4000 characters), or
+                null to clear it.
+
+        Returns:
+            Dict with success and the updated session resource. Each call draws
+            one unit from a rate budget shared with no other tool; busy and
+            rate_limited are retryable.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": _INVALID_SESSION_ID_ERROR,
+            }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "describe_visualization_session"
+        )
+        if denied:
+            return denied
+        try:
+            session = session_manager.describe_session_sync(
+                session_id,
+                description,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="describe_visualization_session",
             )
         except LayoutBusy:
             return {

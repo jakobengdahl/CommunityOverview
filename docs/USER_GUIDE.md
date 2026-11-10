@@ -914,6 +914,12 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
+Adding or removing nodes is not recorded in this activity log.
+
+A session can also carry a **description** — what it
+is for and what the next participant should pick up — set with the MCP
+`describe_visualization_session` tool and returned with the session; clearing the
+canvas keeps it.
 
 
 Open **Recent activity** from the bottom of the session menu to see the activity

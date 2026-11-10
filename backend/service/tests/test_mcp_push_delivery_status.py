@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """A push carrying ``visualization_session_id`` must report whether it landed.
 
 The motivating scenario: an unattended routine refreshes a canvas every night by
