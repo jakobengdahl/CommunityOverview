@@ -1,3 +1,4 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, waitFor, act, screen, fireEvent } from '@testing-library/react';
 
