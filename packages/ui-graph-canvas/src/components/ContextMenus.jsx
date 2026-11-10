@@ -1024,13 +1024,6 @@ export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }
       <button
         type="button"
         data-menu-item="root"
-        onClick={() => createAnnotation('label', menu.flowPosition)}
-      >
-        🏷️ {cml.addLabel}
-      </button>
-      <button
-        type="button"
-        data-menu-item="root"
         onClick={() => createAnnotation('arrow', menu.flowPosition)}
       >
         ➡️ {cml.addArrow}

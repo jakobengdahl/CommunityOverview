@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useToolSlotSelection } from '../hooks/useToolSlotSelection';
-import {
-  ANNOTATION_ICONS,
-  DEFAULT_ANNOTATION_ICON,
-  resolveAnnotationIcon,
-} from '../utils/annotationIcons';
+import { ANNOTATION_ICONS, resolveAnnotationIcon } from '../utils/annotationIcons';
 import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
 import {
   FREEHAND_COLORS,
@@ -44,7 +40,6 @@ const TOOLBOX_ITEMS_LEADING = [
   },
   { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
   { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
-  { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
 ];
 
 // Every `content.shape` variant the model accepts (SHAPE_STYLES in
@@ -217,7 +212,7 @@ function renderGlyph(glyph) {
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label, a shape (via the collapsed shape slot,
+ * It creates note/text, a shape (via the collapsed shape slot,
  * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
  * `renderIconSlot` below), vote_dot (a plain coloured dot — task-annotation-
  * vote-dot-simplify), and image (which opens a file
@@ -301,7 +296,7 @@ function AnnotationToolbox({
   const [currentIcon, setCurrentIcon] = useToolSlotSelection(
     ICON_SLOT_STORAGE_KEY,
     ICON_VARIANT_KEYS,
-    DEFAULT_ANNOTATION_ICON
+    'check'
   );
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [currentVoteDotColor, setCurrentVoteDotColor] = useToolSlotSelection(
@@ -921,6 +916,7 @@ function AnnotationToolbox({
             anchorRef={iconSlotRef}
             returnFocusRef={iconCornerButtonRef}
             ariaLabel={lbl.iconPicker}
+            hideLabels
             options={pickerOptions}
             currentKey={variant.icon}
             renderGlyph={renderGlyph}
@@ -1123,6 +1119,7 @@ function AnnotationToolbox({
             anchorRef={voteDotSlotRef}
             returnFocusRef={voteDotCornerButtonRef}
             ariaLabel={lbl.voteDotPicker}
+            hideLabels
             options={pickerOptions}
             currentKey={variant.color}
             renderGlyph={renderGlyph}

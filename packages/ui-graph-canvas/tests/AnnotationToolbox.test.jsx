@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/AnnotationToolbox.jsx
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -66,7 +67,7 @@ describe('AnnotationToolbox', () => {
 
     expect(screen.getByRole('button', { name: /^note$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^text$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^label$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^label$/i })).not.toBeInTheDocument();
     // The shape slot shows the default shape (rectangle) as its own name;
     // every other variant now lives in the picker, not as a top-level button.
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
@@ -75,7 +76,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^rhombus$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^hexagon$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^process arrow$/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^icon: circle$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^icon: check$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /choose an icon/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^vote dot$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
@@ -90,7 +91,22 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
   });
 
-  it('calls onCreate with the kind for note/text/label', () => {
+  it.each([
+    [/choose an icon/i, /^icons$/i],
+    [/choose a vote dot colour/i, /^vote dot colours$/i],
+  ])('keeps picker choices named and titled without captions (%s)', (opener, group) => {
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: opener }));
+    const picker = screen.getByRole('group', { name: group });
+    expect(picker.querySelector('.tool-slot-picker-item-label')).toBeNull();
+    for (const button of within(picker).getAllByRole('button')) {
+      expect(button.getAttribute('aria-label')).toBeTruthy();
+      expect(button.title).toBe(button.getAttribute('aria-label'));
+    }
+  });
+
+  it('calls onCreate with the kind for note/text', () => {
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -101,8 +117,7 @@ describe('AnnotationToolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^text$/i }));
     expect(onCreate).toHaveBeenLastCalledWith('text', undefined);
 
-    fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('label', undefined);
+    expect(screen.queryByRole('button', { name: /^label$/i })).not.toBeInTheDocument();
   });
 
   // Every accepted content.shape variant is still offered — now via the
@@ -178,8 +193,8 @@ describe('AnnotationToolbox', () => {
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'circle' });
+    fireEvent.click(screen.getByRole('button', { name: /^icon: check$/i }));
+    expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'check' });
   });
 
   it('creates directly on Enter/Space instead of arming, so a keyboard user can still place', () => {
@@ -436,7 +451,7 @@ describe('AnnotationToolbox', () => {
     // 'select' and 'eraser' are the two mode tools (task-annotation-tool-modes)
     // and draw from the same pseudo-element glyph system as everything else,
     // rather than reaching for an emoji that renders differently per platform.
-    for (const name of ['text', 'label', 'vote-dot', 'image', 'freehand', 'select', 'eraser']) {
+    for (const name of ['text', 'vote-dot', 'image', 'freehand', 'select', 'eraser']) {
       expect(document.querySelector(`.annotation-toolbox-visual--${name}`)).toBeTruthy();
     }
     expect(document.querySelector('.annotation-toolbox-icon-glyph')).toBeTruthy();
@@ -690,11 +705,11 @@ describe('AnnotationToolbox', () => {
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
       const note = screen.getByRole('button', { name: /^note$/i });
-      // `label` stands in for the old `circle` shape button as "a different
+      // `text` stands in for the old `circle` shape button as "a different
       // item" here — any two distinct toolbox buttons prove the same
       // per-item independence; the shape slot collapsing six of them into
       // one is orthogonal to what this regression test is about.
-      const label = screen.getByRole('button', { name: /^label$/i });
+      const text = screen.getByRole('button', { name: /^text$/i });
 
       // Pointer 1 completes a drag on `note` — opens note's suppression window.
       dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
@@ -703,17 +718,17 @@ describe('AnnotationToolbox', () => {
       expect(onDragCreate).toHaveBeenCalledTimes(1);
 
       // Before note's own synthetic click arrives, pointer 2 presses and
-      // releases `label` as a plain tap (under the drag threshold) — a
+      // releases `text` as a plain tap (under the drag threshold) — a
       // genuine, unrelated click on a different button.
-      dispatch(label, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
+      dispatch(text, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
       dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 6, clientY: 5 }));
-      fireEvent.click(label);
-      // label's own click must NOT be swallowed by note's pending suppression.
-      expect(onCreate).toHaveBeenCalledWith('label', undefined);
+      fireEvent.click(text);
+      // text's own click must NOT be swallowed by note's pending suppression.
+      expect(onCreate).toHaveBeenCalledWith('text', undefined);
 
       // note's own synthetic click now arrives — it must still be suppressed.
       fireEvent.click(note);
-      expect(onCreate).toHaveBeenCalledTimes(1); // only label's, not note's
+      expect(onCreate).toHaveBeenCalledTimes(1); // only text's, not note's
       expect(onDragCreate).toHaveBeenCalledTimes(1);
     });
 
@@ -1246,8 +1261,8 @@ describe('AnnotationToolbox', () => {
       render(<AnnotationToolbox onCreate={onCreate} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-      fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
-      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'circle' });
+      fireEvent.click(screen.getByRole('button', { name: /^icon: check$/i }));
+      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'check' });
     });
 
     it('creates the selected icon after picking it from the slot picker', () => {
@@ -1284,8 +1299,8 @@ describe('AnnotationToolbox', () => {
       const onCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-      fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
-      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'circle' });
+      fireEvent.click(screen.getByRole('button', { name: /^icon: check$/i }));
+      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'check' });
     });
   });
 });
