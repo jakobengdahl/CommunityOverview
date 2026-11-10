@@ -194,6 +194,42 @@ describe('SessionDrawer — long press on touch', () => {
     expect(screen.queryByRole('menu')).toBeTruthy();
   });
 
+  it('keeps the menu and mobile drawer open after the long-press release click', () => {
+    const onClose = vi.fn();
+    const onSelectSession = vi.fn(() => onClose());
+    renderDrawer({ onClose, onSelectSession });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    fireEvent.touchStart(sessionName);
+    act(() => vi.advanceTimersByTime(500));
+    fireEvent.touchEnd(sessionName);
+    fireEvent.mouseDown(sessionName, { detail: 1 });
+    fireEvent.click(sessionName, { detail: 1 });
+
+    expect(screen.getByRole('menu')).toBeVisible();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A new tap and keyboard activation still select the session normally.
+    fireEvent.touchStart(sessionName);
+    fireEvent.touchEnd(sessionName);
+    fireEvent.click(sessionName, { detail: 1 });
+    fireEvent.click(sessionName, { detail: 0 });
+    expect(onSelectSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels a pending long press when the browser cancels the touch', () => {
+    renderDrawer();
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    fireEvent.touchStart(sessionName);
+    act(() => vi.advanceTimersByTime(250));
+    fireEvent.touchCancel(sessionName);
+    act(() => vi.advanceTimersByTime(1000));
+
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('does not open when the touch is shorter than 500 ms', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });

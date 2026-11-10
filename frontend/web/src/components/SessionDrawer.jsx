@@ -164,26 +164,40 @@ function SessionDrawer({
   // --- Long-press (touch) handlers ---
 
   const longPressTimerRef = useRef(null);
+  const longPressTargetRef = useRef(null);
 
-  const handleTouchStart = useCallback((sessionId) => {
+  const cancelLongPress = useCallback(() => {
+    clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }, []);
+
+  useEffect(() => cancelLongPress, [cancelLongPress]);
+
+  const handleTouchStart = useCallback((sessionId, e) => {
+    cancelLongPress();
+    longPressTargetRef.current = null;
+    const target = e.target;
     longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      longPressTargetRef.current = target;
       setOpenMenuId(sessionId);
       setPointerPosition(null);
     }, 500);
-  }, []);
+  }, [cancelLongPress]);
 
-  const handleTouchEnd = useCallback(() => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  }, []);
+  const handleTouchEnd = useCallback((e) => {
+    cancelLongPress();
+    if (longPressTargetRef.current) e.preventDefault();
+  }, [cancelLongPress]);
 
-  const handleTouchMove = useCallback(() => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
+  // Some browsers still synthesize mouse events after a long press. Consume
+  // release on the original target, including mousedown's outside-menu close.
+  // Keyboard clicks (detail === 0) and subsequent touches remain available.
+  const handleLongPressRelease = useCallback((e) => {
+    if (e.detail === 0 || e.target !== longPressTargetRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'click') longPressTargetRef.current = null;
   }, []);
 
   return (
@@ -266,9 +280,12 @@ function SessionDrawer({
               key={session.id}
               className={`session-drawer-session${session.id === currentSessionId ? ' current' : ''}`}
               onContextMenu={(e) => handleContextMenu(session.id, e)}
-              onTouchStart={() => handleTouchStart(session.id)}
+              onTouchStart={(e) => handleTouchStart(session.id, e)}
               onTouchEnd={handleTouchEnd}
-              onTouchMove={handleTouchMove}
+              onTouchMove={cancelLongPress}
+              onTouchCancel={cancelLongPress}
+              onMouseDownCapture={handleLongPressRelease}
+              onClickCapture={handleLongPressRelease}
             >
               <button
                 className="session-drawer-session-name"
