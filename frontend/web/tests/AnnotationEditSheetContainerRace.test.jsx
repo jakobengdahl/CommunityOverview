@@ -158,7 +158,6 @@ function AppHarness() {
         value={{
           notifyChange: () => {},
           notifyRemoteLockedAttempt: () => {},
-          attachNearby: () => {},
           labels,
           editSheet,
         }}

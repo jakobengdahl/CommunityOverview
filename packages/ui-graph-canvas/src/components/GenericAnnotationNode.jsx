@@ -415,7 +415,6 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange,
     notifyRemoteLockedAttempt,
     labels,
-    attachNearby,
     enterAttachMode,
     beginEditing,
     endEditing,
@@ -936,12 +935,6 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onDelete={remove}
       onUnlock={unlock}
       onDuplicate={duplicate}
-      // Every generic kind here — `shape` included, whatever its fill/border —
-      // is a valid nearby-attach target, the same decision
-      // computeDroppedAttachment's own candidacy filter makes (see its doc
-      // comment in utils/annotations.js) now that the former `frame` kind is
-      // folded into `shape` rather than excluded as its own special case.
-      onAttachNearby={(nearbyKind) => attachNearby(id, nearbyKind)}
       onEnterAttachMode={
         enterAttachMode
           ? () => {
@@ -1368,7 +1361,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // The right-click property editor's portal content, split out only so the
 // five kind branches above can each attach it without repeating its JSX.
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
-// layer row then the "Nearby object menu" section then duplicate then
+// layer row then duplicate then
 // Delete, matching the note/label/line/freehand menus. The colour swatches
 // show for COLORABLE_KINDS; `shape` instead gets its own independent Fill and
 // Border sections (task-annotation-merge-frame-into-shape-rectangle) — each
@@ -1420,7 +1413,6 @@ function ContextMenuPortal({
   onDelete,
   onUnlock,
   onDuplicate,
-  onAttachNearby,
   onEnterAttachMode,
   onDetach,
   referenceTargetKind,
@@ -1878,7 +1870,7 @@ function ContextMenuPortal({
       >
         <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
       </AnnotationMenuGroup>
-      {/* Duplicate, the two attachment actions and "Add nearby" are one-shot
+      {/* Duplicate and the two attachment actions are one-shot
           commands rather than settings, so they share a single overflow group
           instead of each spending a slot in the bar. Delete stays out of it,
           directly reachable, because it is the action a user most often opens
@@ -1890,13 +1882,10 @@ function ContextMenuPortal({
         open={openGroup === 'actions'}
         onToggle={toggleGroup}
       >
-        <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
         {/* Non-drag "Attach to…" target-tap mode
             (task-annotation-accessible-shared-controls) — offered only for the
             kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
-            `label` gets the identical pair in its own component). Unlike the
-            "Add nearby" section above (creates a NEW pre-attached annotation),
-            this attaches THIS existing one. */}
+            `label` gets the identical pair in its own component). */}
         {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
           <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
             🧷 {labels.attachTo}

@@ -150,9 +150,8 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
     expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
-    // No regression from the "Nearby object menu" creation-time attachment
-    // entry point: today's plain one-click toolbox creation (no target
-    // anchor involved) must still produce an unattached annotation.
+    // Plain one-click toolbox creation (no target anchor involved) must still
+    // produce an unattached annotation.
     expect(text.data.attachment).toBeUndefined();
     // Unlike `shape` (see the semantic-default-layer test below), every
     // other kind gets no explicit `zIndex` at creation, which resolves to
@@ -271,8 +270,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
-    // No regression: plain one-click creation with no nearby target produces
-    // an unattached icon, same as before the "Nearby object menu" entry point.
+    // Plain one-click creation with no target anchor produces an unattached icon.
     expect(icon.data.attachment).toBeUndefined();
   });
 

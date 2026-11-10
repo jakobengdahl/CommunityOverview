@@ -12,7 +12,7 @@ import {
 import { isRemoteLocked, withAnnotationDraggability, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
-import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import {
@@ -84,8 +84,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const smoothing = data?.smoothing ?? 0;
   const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
-    useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   // Another client's live edit lease (task-annotation-exclusive-edit-leases):
   // dragging is already refused centrally via `draggable` (GraphCanvas's
   // remote-lease effect); the context-menu guards below refuse the
@@ -388,10 +387,6 @@ function FreehandAnnotationNode({ id, data, selected }) {
                   labels={labels}
                   locked={data.locked}
                   onChangeLayer={changeLayer}
-                />
-                <NearbyObjectMenuSection
-                  labels={labels}
-                  onAttach={(kind) => attachNearby(id, kind)}
                 />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button type="button" className="context-menu-delete" onClick={remove}>
