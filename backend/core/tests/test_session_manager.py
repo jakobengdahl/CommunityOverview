@@ -3944,6 +3944,8 @@ def _delete_existing_session(mgr, sid, label):
 _MCP_UNMETERED_CALLS = {
     "claimed_elements",
     "connected_count",
+    # Like create_session, copying allocates a session without spending a bucket.
+    "copy_session",
     "create_session",
     "get_session",
     "list_activity",
@@ -4021,6 +4023,7 @@ class _RecordingBucket:
 _MCP_UNMETERED_RUNS = {
     "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
+    "copy_session": lambda mgr, sid: mgr.copy_session(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_activity": lambda mgr, sid: mgr.list_activity(sid),
