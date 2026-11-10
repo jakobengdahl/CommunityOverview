@@ -43,6 +43,33 @@ function renderDrawer(props = {}) {
 // --- Right-click on session row ---
 
 describe('SessionDrawer — right-click opens the context menu', () => {
+  it.each(['abc-123', 'def-456'])('anchors the kebab menu after closing a pointer menu and opening session %s', (sessionId) => {
+    renderDrawer({
+      sessions: [
+        { id: 'abc-123', name: 'Test session' },
+        { id: 'def-456', name: 'Other session' },
+      ],
+    });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const triggers = screen.getAllByRole('button', { name: 'Session actions' });
+
+    fireEvent.contextMenu(sessionName, { clientX: 100, clientY: 200, button: 2 });
+    expect(screen.getByRole('menu')).toHaveClass('pointer-triggered');
+
+    fireEvent.click(triggers[0]);
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(triggers[0]).toHaveAttribute('aria-expanded', 'false');
+
+    const trigger = triggers[sessionId === 'abc-123' ? 0 : 1];
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu');
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(menu).not.toHaveClass('pointer-triggered');
+    expect(menu.style.left).toBe('');
+    expect(menu.style.right).toBe('');
+    expect(menu.style.top).toBe('');
+  });
+
   it('prevents the browser menu and opens the session menu at the pointer position', async () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });

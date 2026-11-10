@@ -280,7 +280,10 @@ function SessionDrawer({
               </button>
               <SessionContextMenu
                 open={openMenuId === session.id}
-                onToggle={() => setOpenMenuId((cur) => (cur === session.id ? null : session.id))}
+                onToggle={() => {
+                  setPointerPosition(null);
+                  setOpenMenuId((cur) => (cur === session.id ? null : session.id));
+                }}
                 onClose={() => {
                   setOpenMenuId(null);
                   setPointerPosition(null);
