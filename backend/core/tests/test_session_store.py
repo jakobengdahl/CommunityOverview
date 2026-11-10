@@ -16,6 +16,7 @@ from backend.core.session_store import (
     AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
+    MAX_SESSION_DESCRIPTION_CHARS,
     OpError,
     Session,
     SessionStore,
@@ -188,6 +189,30 @@ class TestStateOps:
         assert s.state["node_refs"] == ["b"]
         assert "a" not in s.state["positions"]
         assert s.state["annotations"][0]["member_node_ids"] == ["b"]
+
+    def test_session_described_persists_and_outlives_clearing_the_canvas(
+        self, tmp_path
+    ):
+        store = _store(tmp_path)
+        s = store.create(name="n")
+        self._apply(store, s, {"op": "nodes_added", "node_ids": ["a"]})
+        self._apply(store, s, {"op": "session_described", "description": "brief"})
+        self._apply(store, s, {"op": "nodes_removed", "node_ids": ["a"]})
+        store.persist(s)
+
+        reloaded = _store(tmp_path).get(s.id)
+        assert reloaded.description == "brief"
+        assert reloaded.name == "n"
+        assert {m["id"]: m for m in store.list_meta()}[s.id]["description"] == "brief"
+
+    def test_session_described_rejects_an_oversized_description(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        too_long = "x" * (MAX_SESSION_DESCRIPTION_CHARS + 1)
+        with pytest.raises(OpError):
+            self._apply(store, s, {"op": "session_described", "description": too_long})
+        assert s.description is None
+        assert s.seq == 0
 
     def test_node_moved_is_lww(self, tmp_path):
         store = _store(tmp_path)

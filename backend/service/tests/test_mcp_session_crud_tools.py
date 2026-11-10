@@ -183,6 +183,35 @@ class TestRename:
         assert result["session"]["name"] is None
 
 
+class TestDescribe:
+    def test_describe_sets_and_clears_the_description_via_an_op(self, crud_tools):
+        tools_map, manager = crud_tools
+        sid = tools_map["create_visualization_session"](name="s")["session"][
+            "session_id"
+        ]
+
+        result = tools_map["describe_visualization_session"](
+            session_id=sid, description="Map suppliers; next: group by region"
+        )
+        assert result["success"] is True
+        fetched = tools_map["get_visualization_session"](session_id=sid)["session"]
+        assert fetched["description"] == "Map suppliers; next: group by region"
+        assert fetched["name"] == "s"
+        listed = tools_map["list_visualization_sessions"]()["sessions"]
+        assert [s["description"] for s in listed if s["session_id"] == sid] == [
+            "Map suppliers; next: group by region"
+        ]
+        assert any(
+            op.get("op") == "session_described"
+            for op in manager.store.ops_since(sid, 0)
+        )
+
+        cleared = tools_map["describe_visualization_session"](
+            session_id=sid, description=None
+        )
+        assert cleared["session"]["description"] is None
+
+
 class TestDelete:
     def test_delete_requires_confirmation(self, crud_tools):
         tools_map, manager = crud_tools
