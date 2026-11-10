@@ -56,6 +56,7 @@ from .session_hub import (
     Subscription,
 )
 from .session_store import (
+    MAX_SESSION_DESCRIPTION_CHARS,
     SERVER_ONLY_OPS,
     STATE_OPS,
     OpError,
@@ -1189,10 +1190,18 @@ class SessionManager:
     ) -> Session:
         """Set or clear a session's description, as ``rename_session_sync``
         sets its name: a ``session_described`` op applied inline, refused with
-        ``LayoutBusy`` while an ``apply_ops`` batch holds the lock.
+        ``LayoutBusy`` while an ``apply_ops`` batch holds the lock. The
+        description is checked before the rate token and ``get_or_create``, so
+        a refused call spends nothing and materialises no session.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
+        if description is not None and not isinstance(description, str):
+            raise OpError("'description' must be a string or null")
+        if description is not None and len(description) > MAX_SESSION_DESCRIPTION_CHARS:
+            raise OpError(
+                f"session description exceeds {MAX_SESSION_DESCRIPTION_CHARS} characters"
+            )
         actor = client_id or "rest"
         if not self._mcp_bucket.consume(
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0

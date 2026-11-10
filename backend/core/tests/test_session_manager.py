@@ -20,6 +20,7 @@ from backend.core.session_store import (
     AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
+    MAX_SESSION_DESCRIPTION_CHARS,
     OpError,
     Session,
     SessionStore,
@@ -3178,6 +3179,20 @@ class TestRenameDeleteSyncCharges:
             mgr.rename_session_sync(s.id, 42, client_id="mcp-agent")
 
         assert bucket.calls == []
+
+    @pytest.mark.parametrize("bad", [42, "x" * (MAX_SESSION_DESCRIPTION_CHARS + 1)])
+    async def test_an_invalid_description_charges_nothing_and_creates_no_session(
+        self, bad
+    ):
+        mgr = _manager()
+        sid = "1234-5678-9012-3456"
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.describe_session_sync(sid, bad, client_id="mcp-agent")
+
+        assert bucket.calls == []
+        assert mgr.get_session(sid) is None
 
     @pytest.mark.parametrize("bad_id", ["nope", "../1234-5678", "", "1234-5678-"])
     async def test_delete_of_an_invalid_id_is_not_found_and_charges_nothing(
