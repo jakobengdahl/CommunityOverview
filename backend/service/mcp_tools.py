@@ -3133,6 +3133,50 @@ def register_mcp_tools(
         }
 
     @register_tool
+    def copy_visualization_session(session_id: str) -> Dict[str, Any]:
+        """Create a copy of stored canvas state with fresh annotation IDs.
+
+        Graph entities remain shared. Participants, history, leases and staged
+        graph changes are excluded; the source write mode is preserved.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_visualization_session")
+        if denied:
+            return denied
+        denied = access.authorize_graph_access(
+            service.authorization_hook,
+            action=GRAPH_ACTION_READ,
+            target="get_visualization_session",
+            session_id=session_id,
+        )
+        if denied:
+            return denied
+        try:
+            session = session_manager.copy_session(session_id)
+        except WriteModeRefused as exc:
+            return exc.to_result()
+        except (
+            SessionNotFound,
+            SessionLimitReached,
+            OpBatchTooLarge,
+            LayoutBusy,
+        ) as exc:
+            codes = {
+                SessionNotFound: "session_not_found",
+                SessionLimitReached: "too_many_sessions",
+                OpBatchTooLarge: "session_too_large",
+                LayoutBusy: "session_busy",
+            }
+            return {"success": False, "error": codes[type(exc)]}
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
     def list_visualization_sessions() -> Dict[str, Any]:
         """
         List existing visualization sessions, most recently updated first.

@@ -38,6 +38,7 @@ import copy
 import json
 import logging
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
@@ -777,6 +778,75 @@ class SessionManager:
             on_allocate=(
                 self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
             ),
+        )
+
+    def copy_session(self, session_id: str) -> Session:
+        """Copy canvas state only; graph entities and staged layers stay shared/absent.
+
+        Synchronous callers refuse an in-flight state batch. REST holds the same
+        source lock, then calls the internal method without yielding.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        return self._copy_session(session_id)
+
+    async def copy_session_async(self, session_id: str) -> Session:
+        async with self._lock(session_id):
+            return self._copy_session(session_id)
+
+    def _copy_session(self, session_id: str) -> Session:
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if self.store.session_count() >= self._max_sessions:
+            raise SessionLimitReached()
+        # Check before allocating an id or cloning embedded images. History is
+        # deliberately excluded from both the copy and its document budget.
+        name = f"{source.name or 'Untitled session'} (copy)"
+        document = {
+            "state": source.state,
+            "name": name,
+            "description": source.description,
+        }
+        if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > (
+            DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024
+        ):
+            raise OpBatchTooLarge()
+        state = copy.deepcopy(source.state)
+        ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
+
+        def remap_attachment(value):
+            if isinstance(value, dict):
+                if value.get("target_type") == "annotation":
+                    value["target_id"] = ids.get(
+                        value.get("target_id"), value.get("target_id")
+                    )
+                for child in value.values():
+                    remap_attachment(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remap_attachment(child)
+
+        for annotation in state["annotations"]:
+            annotation["id"] = ids[annotation["id"]]
+            annotation["version"] = 1
+            annotation["field_versions"] = {}
+            remap_attachment(annotation)
+        document["state"] = state
+        if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > (
+            DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024
+        ):
+            raise OpBatchTooLarge()
+        mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        return self.store.create(
+            name,
+            description=source.description,
+            state=state,
+            write_mode=mode,
+            write_mode_source="explicit",
+            on_allocate=self.write_modes.record_staged
+            if mode == WRITE_MODE_STAGED
+            else None,
         )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:

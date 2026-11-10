@@ -1078,6 +1078,11 @@ export function setDisplayName(name) {
 
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 
+/** Copy stored canvas state into a new session. */
+export async function copySession(sessionId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/copy`, { method: 'POST' });
+}
+
 /**
  * Create a new server-side shared session (server-assigned id).
  * @param {string|null} name
