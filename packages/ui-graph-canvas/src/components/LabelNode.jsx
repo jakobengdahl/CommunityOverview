@@ -25,7 +25,7 @@ import './LabelNode.css';
  * the session's annotation list (kind: "label").
  */
 const LABEL_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
-const DEFAULT_LABEL_COLOR = '#64748b';
+const DEFAULT_LABEL_COLOR = '#111827';
 const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {

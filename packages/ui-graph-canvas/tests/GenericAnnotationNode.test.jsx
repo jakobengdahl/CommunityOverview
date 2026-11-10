@@ -640,6 +640,50 @@ describe('GenericAnnotationNode property editor', () => {
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
 
+  // Regression: the default text/icon/vote-dot colour is the near-black
+  // #111827 defined by DEFAULT_COLOR, never #1e293b or any other value.
+  describe('default text colour', () => {
+    it('renders text without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'hello' }} />);
+      const el = screen.getByText('hello').parentElement;
+      expect(el.style.color).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on text unchanged', () => {
+      render(
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'hello', color: '#ef4444' }} />
+      );
+      const el = screen.getByText('hello').parentElement;
+      expect(el.style.color).toBe('rgb(239, 68, 68)');
+    });
+
+    it('renders an icon without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag' }} />);
+      const el = screen.getByTitle('flag');
+      expect(el.style.color).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on icon unchanged', () => {
+      render(
+        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag', color: '#22c55e' }} />
+      );
+      const el = screen.getByTitle('flag');
+      expect(el.style.color).toBe('rgb(34, 197, 94)');
+    });
+
+    it('renders a vote_dot without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+      const el = document.querySelector('.kind-vote_dot');
+      expect(el.style.backgroundColor).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on vote_dot unchanged', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ color: '#a855f7' }} />);
+      const el = document.querySelector('.kind-vote_dot');
+      expect(el.style.backgroundColor).toBe('rgb(168, 85, 247)');
+    });
+  });
+
   // task-annotation-render-direct-manipulation remaining_scope: "No
   // color/recolor editor for any generic kind". The picker is offered only
   // for the kinds that actually paint `color` — `image` carries the field in
