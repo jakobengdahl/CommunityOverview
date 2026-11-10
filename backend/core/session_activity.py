@@ -72,7 +72,10 @@ RECORDED_ONLY_OPS = frozenset(
 )
 
 # Evicted first when the max-records cap is hit, so frequent node adds (for
-# example from a session auto-add agent) never push out undoable history.
+# example from a session auto-add agent) do not wear away undoable history:
+# the newest record is never evicted, so a node record written to a log full
+# of undoable records still costs the oldest one, but older node records go
+# before any undoable one.
 _EVICT_FIRST_OPS = frozenset({"nodes_added", "nodes_removed"})
 
 
