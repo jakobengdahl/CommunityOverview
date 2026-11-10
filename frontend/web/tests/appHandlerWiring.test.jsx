@@ -1,3 +1,4 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, waitFor, act, screen, fireEvent } from '@testing-library/react';
 
@@ -534,6 +535,11 @@ describe('App handler wiring', () => {
       '//evil.example/x',
       '/admin',
       'http:///path',
+      // C0 controls outside the trim's whitespace class stay refused at an end.
+      '\u0001https://example.org/x',
+      'https://example.org/x\u0008',
+      'https://example.org/x\u000e',
+      '\u001fhttps://example.org/x',
     ])('never opens the unsafe target %j', async (target) => {
       await renderApp();
       await act(async () => {

@@ -2958,6 +2958,16 @@ function App() {
         // and U+0085 survives `String.prototype.trim()`, so a stored target
         // the shared fixture lists as valid resolved against the app's own
         // origin instead of the author's page.
+        //
+        // The trim also strips the C0 controls that are in the gate's
+        // whitespace class (U+0009-U+000D) from either end, so the gate's
+        // control check never sees those edge ones; every other C0 control
+        // (U+0000-U+0008, U+000E-U+001F) is not trimmed and is refused
+        // wherever it sits. That is accepted here: the trimmed string is what
+        // gets opened, so no scheme or destination is gained, and refusing a
+        // control-bearing target of any kind is the backend's rule
+        // (`_has_control_characters` in session_annotations.py), applied
+        // before a target is stored.
         const safeTarget = trimReferenceTarget(target);
         if (!isSafeReferenceUrl(safeTarget)) {
           showNotification('error', t('context_menu.reference_unsafe_target'));
@@ -3626,10 +3636,6 @@ function App() {
             groupLayerBack: t('context_menu.group_layer_back'),
             groupTextColor: t('context_menu.group_text_color'),
             groupTextColorAuto: t('context_menu.group_text_color_auto'),
-            annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
-            annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
-            annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
-            annotationNearbyText: t('context_menu.annotation_nearby_text'),
             annotationOpacity: t('context_menu.annotation_opacity'),
             editAnnotation: t('context_menu.edit_annotation'),
             ariaKindNote: t('context_menu.aria_kind_note'),

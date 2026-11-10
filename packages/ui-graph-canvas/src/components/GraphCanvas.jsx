@@ -77,7 +77,6 @@ import {
   resolveAttachedPosition,
   ICON_INTRINSIC_SIZE,
   VOTE_DOT_INTRINSIC_SIZE,
-  NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
 import {
@@ -657,10 +656,6 @@ function GraphCanvasInner({
     groupLayerBack: 'Send backward',
     groupTextColor: 'Text colour',
     groupTextColorAuto: 'Automatic (best contrast)',
-    annotationNearbyMenu: 'Add nearby',
-    annotationNearbyLabel: 'Label',
-    annotationNearbyIcon: 'Icon',
-    annotationNearbyText: 'Text',
     annotationOpacity: 'Opacity',
     editAnnotation: 'Edit',
     // task-annotation-accessible-shared-controls.
@@ -1084,18 +1079,6 @@ function GraphCanvasInner({
   const notifyAnnotationChange = useCallback((kind) => {
     onAnnotationChangeRef.current?.(kind);
   }, []);
-  // `attachNearbyAnnotation` (the "Nearby object menu" creation entry point)
-  // is declared later, next to `createAnnotation` it depends on — but every
-  // annotation-node context menu needs to reach it through
-  // AnnotationContext, which this component builds well before that point.
-  // A ref (same idiom as onAnnotationChangeRef above) lets the context value
-  // below call whatever the current implementation is without forcing it out
-  // of its natural place.
-  const attachNearbyAnnotationRef = useRef(null);
-  const attachNearby = useCallback(
-    (targetId, kind) => attachNearbyAnnotationRef.current?.(targetId, kind),
-    []
-  );
   // Non-drag "Attach to…" target-tap mode (task-annotation-accessible-
   // shared-controls) — entering it is as simple as remembering which
   // annotation is choosing a target; resolving a chosen target happens in
@@ -1163,7 +1146,6 @@ function GraphCanvasInner({
       notifyRenderFailure: reportAnnotationRenderError,
       beginEditing,
       endEditing,
-      attachNearby,
       enterAttachMode,
       openReference: onReferenceOpen,
       isReferenceTargetAvailable,
@@ -1222,10 +1204,6 @@ function GraphCanvasInner({
         groupTextColor: cml.groupTextColor,
         groupTextColorAuto: cml.groupTextColorAuto,
         brokenAnnotation: cml.annotationBroken,
-        nearbyMenu: cml.annotationNearbyMenu,
-        nearbyLabel: cml.annotationNearbyLabel,
-        nearbyIcon: cml.annotationNearbyIcon,
-        nearbyText: cml.annotationNearbyText,
         opacity: cml.annotationOpacity,
         editAnnotation: cml.editAnnotation,
         ariaKindNote: cml.ariaKindNote,
@@ -1270,7 +1248,6 @@ function GraphCanvasInner({
       notifyRemoteLockedAttempt,
       beginEditing,
       endEditing,
-      attachNearby,
       enterAttachMode,
       isCompact,
       onRequestAnnotationEditSheet,
@@ -1323,10 +1300,6 @@ function GraphCanvasInner({
       cml.groupTextColor,
       cml.groupTextColorAuto,
       cml.annotationBroken,
-      cml.annotationNearbyMenu,
-      cml.annotationNearbyLabel,
-      cml.annotationNearbyIcon,
-      cml.annotationNearbyText,
       cml.ariaKindNote,
       cml.ariaKindLabel,
       cml.ariaKindText,
@@ -2502,65 +2475,6 @@ function GraphCanvasInner({
     },
     [setNodes, isCompact, annotationToolboxPortalContainer]
   );
-
-  // The "Nearby object menu" creation entry point
-  // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a new
-  // label/icon/text pre-wired to attach to an existing node or
-  // annotation, from that target's own context menu — rather than the
-  // create-then-drag-near two-step the toolbox's one-click creation still
-  // requires. `targetId` may be a graph node or any existing annotation
-  // except `group`/`arrow` (the same candidates `findSnapTarget` accepts for
-  // a post-creation drop via `computeDroppedAttachment`; `group` is a
-  // "containment/visual construct, not an attachment target" per the
-  // contract's Attachment section, and an arrow has no stable centre in the
-  // attachment-follow effect below, so it can never be resolved as a target)
-  // — callers only ever offer this control from an eligible target's own
-  // menu, but the type check here is a second, structural guarantee
-  // independent of which menus happen to render it.
-  //
-  // `frame` used to be excluded here too, on the same reasoning as `group`.
-  // Now that it is folded into `shape` (task-annotation-merge-frame-into-
-  // shape-rectangle), a `shape` — whatever its fill/border — stays a valid
-  // target, the same decision `computeDroppedAttachment` makes (see its own
-  // doc comment in utils/annotations.js for the full reasoning).
-  //
-  // Positions the new annotation at NEARBY_ATTACH_OFFSET from the target's
-  // current centre and writes `data.attachment` in exactly the shape
-  // `computeDroppedAttachment` would have produced for a drop at that same
-  // offset, so the pre-existing "keep an attached overlay glued to its
-  // target" effect (above) starts following it immediately — this reuses
-  // that mechanism outright rather than adding a second one. The new
-  // annotation is never locked: `createAnnotation` never sets `data.locked`
-  // for any kind, matching today's plain one-click creation.
-  //
-  // No remote-lock check on the target: every annotation kind's own
-  // `openContextMenu`/`onContextMenu` already refuses to open its menu at all
-  // while remote-locked (so this is never reached for an annotation target
-  // in that state), and NodeContextMenu opens for a remote-locked graph node
-  // exactly like any other — edit/hide/delete included — with no lock check
-  // of its own to match. Adding one here alone would make this the one
-  // action on that menu that silently refuses while every sibling action
-  // proceeds, which is a worse inconsistency than having none.
-  const attachNearbyAnnotation = useCallback(
-    (targetId, kind) => {
-      const target = getFlowNodes().find((n) => n.id === targetId);
-      if (!target || target.type === 'group' || target.type === 'arrow') return;
-      const center = nodeCenter(target);
-      if (!center) return;
-      const attachment = {
-        target_id: targetId,
-        target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
-        offset: { ...NEARBY_ATTACH_OFFSET },
-      };
-      const position = {
-        x: center.x + NEARBY_ATTACH_OFFSET.x,
-        y: center.y + NEARBY_ATTACH_OFFSET.y,
-      };
-      createAnnotation(kind, position, { attachment });
-    },
-    [getFlowNodes, createAnnotation]
-  );
-  attachNearbyAnnotationRef.current = attachNearbyAnnotation;
 
   // Model-space position at the current viewport's centre (used by the bottom
   // toolbox and clipboard paste, neither of which has a click position of its
@@ -5786,7 +5700,6 @@ function GraphCanvasInner({
           onRestoreNodes={onRestoreNodes}
           onDimEdges={onDimEdges}
           onRestoreEdges={onRestoreEdges}
-          onAttachNearby={attachNearbyAnnotation}
           onTeleport={
             onTeleportToSourceGraph && isFederatedNode(nodeContextMenu?.node?.data)
               ? onTeleportToSourceGraph

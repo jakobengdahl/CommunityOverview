@@ -14,7 +14,7 @@ import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerCo
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
 import AnnotationSizeControl from './AnnotationSizeControl';
-import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -43,14 +43,8 @@ function NoteNode({ id, data = {}, selected }) {
   // through this note's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const {
-    notifyChange,
-    notifyRemoteLockedAttempt,
-    labels,
-    attachNearby,
-    beginEditing,
-    endEditing,
-  } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, beginEditing, endEditing } =
+    useContext(AnnotationContext);
   // Another client's live edit lease (task-annotation-exclusive-edit-leases,
   // acquired only when real editing starts — never on mere selection):
   // every mutation below refuses to run while it is held, surfacing the
@@ -388,10 +382,6 @@ function NoteNode({ id, data = {}, selected }) {
                   labels={labels}
                   locked={data.locked}
                   onChangeLayer={changeLayer}
-                />
-                <NearbyObjectMenuSection
-                  labels={labels}
-                  onAttach={(kind) => attachNearby(id, kind)}
                 />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>

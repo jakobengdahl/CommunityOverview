@@ -12,7 +12,7 @@ import {
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
-import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -32,7 +32,7 @@ function LabelNode({ id, data, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, enterAttachMode } =
+  const { notifyChange, notifyRemoteLockedAttempt, labels, enterAttachMode } =
     useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live edit lease
   // (task-annotation-exclusive-edit-leases) refuses every mutation below.
@@ -321,15 +321,9 @@ function LabelNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
-                <NearbyObjectMenuSection
-                  labels={labels}
-                  onAttach={(kind) => attachNearby(id, kind)}
-                />
                 {/* Non-drag "Attach to…" target-tap mode
                     (task-annotation-accessible-shared-controls): `label` is
-                    one of ATTACHABLE_OVERLAY_KINDS, so — unlike the "Add
-                    nearby" section above, which creates a NEW pre-attached
-                    annotation — this attaches THIS existing one. */}
+                    one of ATTACHABLE_OVERLAY_KINDS. */}
                 <button
                   type="button"
                   className="context-menu-attach"

@@ -1,3 +1,4 @@
+// covers: frontend/web/src/components/MobileShell.jsx
 import { useMemo, useState } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
@@ -158,7 +159,6 @@ function AppHarness() {
         value={{
           notifyChange: () => {},
           notifyRemoteLockedAttempt: () => {},
-          attachNearby: () => {},
           labels,
           editSheet,
         }}

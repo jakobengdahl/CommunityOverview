@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GenericAnnotationNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode, {
@@ -1633,80 +1634,6 @@ describe('text/shape typography', () => {
     openGroup('Alignment');
     expect(document.querySelector('.context-menu-align')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
-  });
-});
-
-// task-annotation-render-direct-manipulation / task-annotation-responsive-
-// bottom-toolbox's "Nearby object menu" contract entry point: every generic
-// kind rendered by this component — `shape` included, whatever its
-// fill/border — can itself be the target this menu creates a new attachable
-// annotation near. `frame` used to be excluded here the same way it was
-// excluded from computeDroppedAttachment's own target candidacy; now that it
-// is folded into `shape` (task-annotation-merge-frame-into-shape-rectangle),
-// that exclusion is gone too — see GenericAnnotationNode's own
-// `onAttachNearby` wiring for the reasoning.
-describe('GenericAnnotationNode "Nearby object menu"', () => {
-  const nearbyLabels = {
-    nearbyMenu: 'Add nearby',
-    nearbyLabel: 'Label',
-    nearbyIcon: 'Icon',
-    nearbyText: 'Text',
-  };
-
-  it("calls the context attachNearby with this icon's id and the picked kind", () => {
-    const attachNearby = vi.fn();
-    render(
-      <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
-      >
-        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(screen.getByTitle('circle'));
-    openGroup('More actions');
-    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
-    expect(attachNearby).toHaveBeenCalledWith('i1', 'label');
-  });
-
-  // Deliberate decision (task-annotation-merge-frame-into-shape-rectangle):
-  // the retired `frame` kind used to be excluded from this menu; a `shape`
-  // stays included regardless of its fill/border, including a
-  // transparent-fill one that looks exactly like the old frame.
-  it("includes the section on a shape's menu, even with a transparent fill and a coloured border", () => {
-    const attachNearby = vi.fn();
-    render(
-      <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
-      >
-        <GenericAnnotationNode
-          id="s1"
-          type="shape"
-          data={{ shape: 'rectangle', fill: 'transparent', border: '#94a3b8' }}
-        />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
-    openGroup('More actions');
-    expect(screen.getByText('Add nearby')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
-    expect(attachNearby).toHaveBeenCalledWith('s1', 'label');
-  });
-
-  it("omits the section from a locked annotation's menu (capability baseline: only unlock/copy)", () => {
-    render(
-      <AnnotationContext.Provider
-        value={{
-          notifyChange: vi.fn(),
-          attachNearby: vi.fn(),
-          labels: { ...nearbyLabels, unlock: 'Unlock', duplicate: 'Duplicate' },
-        }}
-      >
-        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(document.querySelector('.kind-vote_dot'));
-    openGroup('More actions');
-    expect(screen.queryByText('Add nearby')).toBeNull();
   });
 });
 
