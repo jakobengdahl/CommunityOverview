@@ -47,6 +47,12 @@
   gap: 1px;
 }
 
+/* Pointer-triggered (right-click / long-press): fixed to viewport so the menu
+   can appear at the pointer coordinates instead of below the kebab button. */
+.session-context-menu-dropdown.pointer-triggered {
+  position: fixed;
+}
+
 .session-context-menu-item {
   display: flex;
   align-items: center;

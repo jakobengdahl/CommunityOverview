@@ -57,6 +57,7 @@ function SessionDrawer({
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
+  const [pointerPosition, setPointerPosition] = useState(null);
   const [wasOpen, setWasOpen] = useState(open);
   const searchInputRef = useRef(null);
   const drawerRef = useRef(null);
@@ -94,7 +95,10 @@ function SessionDrawer({
   // recommended pattern for deriving from a prop change) rather than in an effect.
   if (open !== wasOpen) {
     setWasOpen(open);
-    if (!open) setOpenMenuId(null);
+    if (!open) {
+      setOpenMenuId(null);
+      setPointerPosition(null);
+    }
   }
 
   // Modal focus management and body scroll lock for the mobile overlay only
@@ -125,6 +129,7 @@ function SessionDrawer({
         e.stopPropagation();
         if (openMenuId) {
           setOpenMenuId(null);
+          setPointerPosition(null);
           return;
         }
         closeDrawer();
@@ -147,6 +152,39 @@ function SessionDrawer({
       (s) => (s.name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
     );
   }, [sessions, query]);
+
+  // --- Right-click / context-menu handlers ---
+
+  const handleContextMenu = useCallback((sessionId, e) => {
+    e.preventDefault();
+    setOpenMenuId(sessionId);
+    setPointerPosition({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  // --- Long-press (touch) handlers ---
+
+  const longPressTimerRef = useRef(null);
+
+  const handleTouchStart = useCallback((sessionId) => {
+    longPressTimerRef.current = setTimeout(() => {
+      setOpenMenuId(sessionId);
+      setPointerPosition(null);
+    }, 500);
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTouchMove = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
 
   return (
     <>
@@ -227,6 +265,10 @@ function SessionDrawer({
             <div
               key={session.id}
               className={`session-drawer-session${session.id === currentSessionId ? ' current' : ''}`}
+              onContextMenu={(e) => handleContextMenu(session.id, e)}
+              onTouchStart={() => handleTouchStart(session.id)}
+              onTouchEnd={handleTouchEnd}
+              onTouchMove={handleTouchMove}
             >
               <button
                 className="session-drawer-session-name"
@@ -239,7 +281,10 @@ function SessionDrawer({
               <SessionContextMenu
                 open={openMenuId === session.id}
                 onToggle={() => setOpenMenuId((cur) => (cur === session.id ? null : session.id))}
-                onClose={() => setOpenMenuId(null)}
+                onClose={() => {
+                  setOpenMenuId(null);
+                  setPointerPosition(null);
+                }}
                 triggerLabel={t('sessions.session_menu')}
                 items={[
                   {
@@ -274,6 +319,7 @@ function SessionDrawer({
                     onClick: () => onDeleteSession?.(session.id),
                   },
                 ]}
+                pointerPosition={openMenuId === session.id ? pointerPosition : null}
               />
             </div>
           ))}

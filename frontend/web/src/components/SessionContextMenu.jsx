@@ -18,8 +18,12 @@ import './SessionContextMenu.css';
  * @param {Array<{key: string, label: string, icon?: React.ReactNode,
  *   onClick: () => void, danger?: boolean, disabled?: boolean}>} items
  * @param {string} triggerLabel    Accessible label for the kebab button.
+ * @param {{x: number, y: number} | null} pointerPosition
+ *   When set, positions the dropdown at the given coordinates using
+ *   `position: fixed` so a context-menu (right-click / long-press) can
+ *   open the same surface at the pointer rather than below the kebab.
  */
-function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
+function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel, pointerPosition }) {
   const rootRef = useRef(null);
 
   // Close on a click anywhere outside the menu. The kebab button lives inside
@@ -33,6 +37,30 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [open, onClose]);
+
+  // Position the dropdown at the pointer coordinates.
+  // Runs after render so the element exists for .getBoundingClientRect().
+  useEffect(() => {
+    if (!open || !pointerPosition) return;
+    const menu = rootRef.current?.querySelector('.session-context-menu-dropdown');
+    if (!menu) return;
+
+    const { x, y } = pointerPosition;
+    const rect = menu.getBoundingClientRect();
+
+    menu.style.top = `${y}px`;
+
+    // Default: align left edge with pointer. If it would overflow the
+    // right edge, align the right edge instead.
+    const rightEdge = x + rect.width;
+    if (rightEdge > window.innerWidth) {
+      menu.style.right = `${window.innerWidth - x}px`;
+      delete menu.style.left;
+    } else {
+      menu.style.left = `${x}px`;
+      delete menu.style.right;
+    }
+  }, [open, pointerPosition]);
 
   return (
     <div className="session-context-menu" ref={rootRef}>
@@ -48,7 +76,10 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
         <ThreeDotsVertical size={15} />
       </button>
       {open && (
-        <div className="session-context-menu-dropdown" role="menu">
+        <div
+          className={`session-context-menu-dropdown${pointerPosition ? ' pointer-triggered' : ''}`}
+          role="menu"
+        >
           {items.map((item) => (
             <button
               key={item.key}
