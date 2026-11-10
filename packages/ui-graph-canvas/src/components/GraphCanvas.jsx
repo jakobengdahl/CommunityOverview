@@ -454,6 +454,9 @@ function GraphCanvasInner({
   annotationsToRestore = null,
   onAnnotationsRestored,
   onAnnotationChange,
+  // Shared hosts supply actor-scoped history; standalone canvases keep move history.
+  onUndo,
+  onRedo,
   remotePositions = null,
   onRemotePositionsApplied,
   animatedLayout = null,
@@ -1895,18 +1898,20 @@ function GraphCanvasInner({
   );
 
   const handleUndo = useCallback(() => {
+    if (onUndo) return onUndo();
     const moves = undoMove();
     if (!moves) return;
     applyPositionMoves(moves);
     showNotification('info', cml.undoNotification);
-  }, [undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
+  }, [onUndo, undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
 
   const handleRedo = useCallback(() => {
+    if (onRedo) return onRedo();
     const moves = redoMove();
     if (!moves) return;
     applyPositionMoves(moves);
     showNotification('info', cml.redoNotification);
-  }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
+  }, [onRedo, redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
 
   // Discard history whenever a new position baseline is established: the session
   // identity changes, or the canvas contents are replaced wholesale within the
@@ -4521,7 +4526,8 @@ function GraphCanvasInner({
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
 
-      // Undo/redo of node-position moves. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z
+      // Session history when hosted, local move history otherwise. Ctrl/Cmd+Z
+      // undoes; Ctrl/Cmd+Shift+Z
       // and Ctrl/Cmd+Y redo (covering both the mac and Windows conventions).
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const key = e.key?.toLowerCase();

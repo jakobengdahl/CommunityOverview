@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 // End-to-end coverage for wiring createFreehandStrokeCapture into an actual
 // canvas drawing mode reachable from the annotation toolbox (remaining_scope
 // item 1 on task-annotation-freehand-vector-drawing): arming the tool,
@@ -7,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { flowNodeToOverlay } from '../src/utils/annotations';
 
 const store = vi.hoisted(() => ({ handlers: {} }));
 
@@ -144,9 +146,10 @@ describe('GraphCanvas freehand drawing mode', () => {
 
   it('draws a stroke end to end and creates a freehand annotation anchored at the first point', () => {
     const onAnnotationChange = vi.fn();
-    const { container } = render(
-      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />
-    );
+    const onUndo = vi.fn();
+    const onRedo = vi.fn();
+    const props = { nodes: [], edges: [], onAnnotationChange, onUndo, onRedo };
+    const { container, rerender } = render(<GraphCanvas {...props} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^freehand$/i }));
 
@@ -176,6 +179,26 @@ describe('GraphCanvas freehand drawing mode', () => {
       { x: 20, y: 0 },
     ]);
     expect(onAnnotationChange).toHaveBeenCalledWith('create');
+    fireEvent.keyDown(document.activeElement, { key: 'z', ctrlKey: true });
+    expect(onUndo).toHaveBeenCalledTimes(1);
+    // Apply the inverse delivered by session sync, then the redo broadcast.
+    rerender(<GraphCanvas {...props} remoteAnnotationOps={[{ action: 'delete', id: node.id }]} />);
+    expect(findCreatedFreehandNode()).toBeUndefined();
+    fireEvent.keyDown(document, { key: 'z', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(document, { key: 'y', ctrlKey: true });
+    expect(onRedo).toHaveBeenCalledTimes(2);
+    rerender(
+      <GraphCanvas
+        {...props}
+        remoteAnnotationOps={[{ action: 'upsert-overlay', overlay: flowNodeToOverlay(node) }]}
+      />
+    );
+    expect(findCreatedFreehandNode().data.points).toEqual(node.data.points);
+    const input = document.createElement('textarea');
+    document.body.append(input);
+    fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    expect(onUndo).toHaveBeenCalledTimes(1);
+    input.remove();
   });
 
   it('stays armed after a stroke, so the next press draws another line', () => {

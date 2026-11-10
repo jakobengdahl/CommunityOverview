@@ -2305,6 +2305,31 @@ class SessionManager:
         *,
         expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Revert the requesting actor's latest eligible session action."""
+        return self._replay_action(
+            session_id, client_id, expected_revision=expected_revision
+        )
+
+    def redo_last_action(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Reapply the actor's most recently undone action through session sync."""
+        return self._replay_action(
+            session_id, client_id, expected_revision=expected_revision, redo=True
+        )
+
+    def _replay_action(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+        redo: bool = False,
+    ) -> Dict[str, Any]:
         """Revert the requesting actor's latest eligible action **synchronously**.
 
         "Eligible" means: the actor's most recent not-yet-undone activity
@@ -2348,17 +2373,38 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
-        record = self.store.find_latest_undoable(session, client_id)
+        if redo:
+            record = max(
+                (
+                    r
+                    for r in session.activity_log
+                    if r.get("actor") == client_id
+                    and r.get("undone")
+                    and r.get("redo_seq")
+                    and r.get("forward_op")
+                ),
+                key=lambda r: r["redo_seq"],
+                default=None,
+            )
+        else:
+            record = self.store.find_latest_undoable(session, client_id)
         if record is None:
             raise NoUndoableAction(client_id)
-        conflict_reason = self.store.undo_conflict_reason(session, record)
+        expected_record = record
+        if redo:
+            expected_record = {**record, "after": record["before"]}
+            if record["affected"].get("kind") == "node_position":
+                expected_record["after"] = record["inverse_op"]["position"]
+            elif record["affected"].get("kind") == "layout":
+                expected_record["after"] = record["inverse_op"]["positions"]
+        conflict_reason = self.store.undo_conflict_reason(session, expected_record)
         if conflict_reason is not None:
             raise UndoConflict(record["id"], conflict_reason)
 
         # Deep, so the replay never shares objects with the record: state an
         # op later edits in place must not reach back into the activity log,
         # whose rollback copies are shallow.
-        inverse_op = copy.deepcopy(record["inverse_op"])
+        inverse_op = copy.deepcopy(record["forward_op" if redo else "inverse_op"])
         # Undo is a browser write like any other, so it answers to the same
         # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
         # undo reverts *your own* past action, but the annotation it touches
@@ -2401,10 +2447,14 @@ class SessionManager:
         # log copy, so its flags are restored here — but only while seq shows
         # nothing was committed: a broadcast that fails after the persist
         # landed must leave memory matching what is now on disk.
-        saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
+        flag_keys = ("undone", "undone_at", "redo_seq")
+        saved_flags = {k: record[k] for k in flag_keys if k in record}
         seq_before = session.seq
-        record["undone"] = True
-        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record["undone"] = not redo
+        record["undone_at"] = (
+            None if redo else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        )
+        record["redo_seq"] = None if redo else session.seq + 1
         applied = None
         try:
             applied = self._apply_op_sync(
@@ -2417,8 +2467,8 @@ class SessionManager:
             )
         finally:
             if session.seq == seq_before:
-                record.pop("undone", None)
-                record.pop("undone_at", None)
+                for key in flag_keys:
+                    record.pop(key, None)
                 record.update(saved_flags)
                 _restore_deleted_ids(session, saved_deleted_ids)
         if applied is None:
@@ -2429,8 +2479,8 @@ class SessionManager:
             raise UndoConflict(record["id"], "action could not be reverted")
 
         return {
-            "undone_activity_id": record["id"],
-            "undone_op": record["op"],
+            ("redone_activity_id" if redo else "undone_activity_id"): record["id"],
+            ("redone_op" if redo else "undone_op"): record["op"],
             "applied": applied,
             "revision": session.seq,
         }

@@ -160,6 +160,7 @@
     "session_undo_rate_limited": "Too many actions — wait a moment and try again",
     "session_undo_unavailable": "There's nothing of yours left to undo",
     "session_undo_failed": "Could not undo that action",
+    "session_redo_failed": "Could not redo that action",
     "session_undone_badge": "Undone",
     "session_other_actor": "Someone else's action — cannot undo",
     "annotation_type": {

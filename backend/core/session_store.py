@@ -857,7 +857,7 @@ class SessionStore:
         ``session.activity_log``, subject to the store's retention policy.
         ``record_activity=False`` suppresses that — used when replaying an
         undo's inverse op, so undoing an action does not itself become a new
-        undoable action (no redo stack).
+        undoable action.
 
         ``trusted_replay=True`` is set by that same undo path: the annotation
         in an inverse op is a copy of state this session already held, not
@@ -1365,6 +1365,15 @@ class SessionStore:
                 correlation_id=op.get("correlation_id"),
                 **activity_kwargs,
             )
+            record["forward_op"] = copy.deepcopy(applied)
+            # A fresh action invalidates only this actor's redo future. Replace
+            # records so the manager's shallow rollback snapshot stays intact.
+            session.activity_log[:] = [
+                {**r, "redo_seq": None}
+                if r.get("actor") == actor and r.get("redo_seq")
+                else r
+                for r in session.activity_log
+            ]
             session.activity_log.append(record)
             session.activity_log[:] = prune_activity_log(
                 session.activity_log,

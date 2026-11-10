@@ -1311,6 +1311,14 @@ export async function undoSessionAction(sessionId, clientId) {
   });
 }
 
+/** Reapply the requesting actor's most recently undone session action. */
+export async function redoSessionAction(sessionId, clientId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/redo`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId }),
+  });
+}
+
 /**
  * Summon every client connected to the session to a model-space region
  * ("Bring everyone here"). Ephemeral: nothing is stored, and only clients

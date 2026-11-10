@@ -1,3 +1,4 @@
+// covers: frontend/web/src/utils/sessionActivity.js, frontend/web/src/utils/sessionAnnotations.js
 import { describe, it, expect, vi } from 'vitest';
 import { createAnnotation, ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import {
@@ -13,6 +14,7 @@ import {
   isUndoableRecord,
   findLatestUndoable,
   classifyUndoError,
+  replayCanvasHistory,
 } from './sessionActivity';
 
 function record(overrides = {}) {
@@ -1571,5 +1573,45 @@ describe('classifyUndoError × i18n', () => {
       expect(en.history[`session_undo_${reason}`], `en: ${reason}`).toBeTruthy();
       expect(sv.history[`session_undo_${reason}`], `sv: ${reason}`).toBeTruthy();
     }
+  });
+});
+
+describe('replayCanvasHistory', () => {
+  it('publishes and confirms pending canvas edits before replay, then waits for the stream', async () => {
+    const calls = [];
+    const sync = {
+      sessionId: '1234-5678',
+      flushPending: vi.fn(async () => calls.push('flush')),
+      waitForRevision: vi.fn(async () => calls.push('stream')),
+    };
+    const replay = vi.fn(async () => {
+      calls.push('replay');
+      return { revision: 3 };
+    });
+    await replayCanvasHistory({
+      sessionId: sync.sessionId,
+      clientId: 'me',
+      getSync: () => sync,
+      replay,
+      snapshot: async () => calls.push('snapshot'),
+    });
+    expect(calls).toEqual(['snapshot', 'flush', 'replay', 'stream']);
+    expect(replay).toHaveBeenCalledWith(sync.sessionId, 'me');
+    expect(sync.waitForRevision).toHaveBeenCalledWith(3);
+  });
+
+  it('does not replay when pending writes fail or the session switches', async () => {
+    const replay = vi.fn();
+    const sync = { sessionId: '1234-5678', flushPending: vi.fn().mockRejectedValue(new Error()) };
+    const args = {
+      sessionId: sync.sessionId,
+      clientId: 'me',
+      getSync: () => sync,
+      replay,
+      snapshot: async () => {},
+    };
+    await expect(replayCanvasHistory(args)).rejects.toBeInstanceOf(Error);
+    await replayCanvasHistory({ ...args, getSync: () => ({ sessionId: '8765-4321' }) });
+    expect(replay).not.toHaveBeenCalled();
   });
 });

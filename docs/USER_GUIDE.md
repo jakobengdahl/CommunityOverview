@@ -218,13 +218,15 @@ menu opened. A submenu trigger (**Change type**, **Organize**, **Align**, **Dist
 also opens with **→** or **Enter**, and closes with **←** or **Escape** without closing
 the menu it belongs to.
 
-Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag, an
-Organize arrangement, or an Align/Distribute), and **Ctrl/Cmd+Shift+Z** (or
-**Ctrl/Cmd+Y**) reapplies it.
-The undo history covers the layout you are looking at, so it is discarded whenever the
-canvas is repopulated — switching session, loading a saved view, or clearing the board.
-Moves made by other people in the session, or by an assistant arranging the view, do not
-discard it: your undo still reverses your own last move.
+**Ctrl/Cmd+Z** undoes your latest eligible session canvas action, including a node
+move (drag, Organize, or Align/Distribute) or an annotation create, edit or delete.
+This includes pen strokes. **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies the
+most recently undone action. A new action of yours clears your redo history.
+The shortcuts use the same actor-scoped history as **Undo my last action** in the
+activity panel: other people's actions are never undone, and changes are synced to
+every viewer. If the affected content has changed since, undo or redo reports a
+conflict instead of overwriting it. While typing in an input or text editor, the
+shortcuts keep their normal text-editing behavior.
 
 ### 2.5 Groups and annotations
 
@@ -239,7 +241,7 @@ colour.
 Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
 where they appear, and are simply no longer grouped. The deletion is recorded in the
 session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
-from there while it is still your most recent undoable action.
+from there or with **Ctrl/Cmd+Z** while it is still your most recent undoable action.
 
 **Group order** moves a group's background forward or backward *among your other group
 boxes only* — it never changes where a group sits relative to your graph nodes or to any
@@ -1481,8 +1483,8 @@ leaving you in it without the controls to get out.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag, Organize, or Align/Distribute) |
-| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
+| **Ctrl+Z** / **Cmd+Z** | Undo your latest eligible canvas action, including pen strokes |
+| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo your most recently undone canvas action |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
 
