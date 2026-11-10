@@ -122,8 +122,12 @@ STATE_OPS = {
     "write_mode_changed",
 }
 
+# session_described is written only through the MCP describe tool
+# (SessionManager.describe_session_sync); the browser /ops batch has no
+# description editor, so it may not set one either.
 SERVER_ONLY_OPS = frozenset(
     {
+        "session_described",
         "graph_change_staged",
         "graph_changes_discarded",
         "graph_changes_merged",

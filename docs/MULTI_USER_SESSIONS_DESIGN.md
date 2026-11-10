@@ -169,7 +169,7 @@ Op catalogue (v1):
 | `annotation_created` / `annotation_updated` / `annotation_deleted` | annotation | LWW per annotation id; update on deleted annotation is dropped |
 | `group_membership_changed` | group_id, member_node_ids | LWW per group |
 | `session_renamed` | name | LWW |
-| `session_described` | description | LWW |
+| `session_described` | description | LWW; server-emitted only (MCP `describe_visualization_session`), refused on `POST /ops` |
 | `selection_claimed` / `selection_released` | element_ids | claim map with TTL, see 3.5 |
 | `layout_applied` | positions map | LWW batch (single op so it wins/loses atomically) |
 

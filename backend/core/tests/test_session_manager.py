@@ -238,6 +238,15 @@ class TestApplyOps:
         with pytest.raises(OpError):
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "bogus"}])
 
+    async def test_ops_batch_cannot_set_the_session_description(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "session_described", "description": "x"}]
+            )
+        assert mgr.store.get(s.id).description is None
+
     async def test_batch_is_atomic_on_mid_batch_failure(self):
         """A failing op late in a batch must not apply/broadcast earlier ops.
 
