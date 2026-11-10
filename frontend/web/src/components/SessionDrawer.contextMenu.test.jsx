@@ -1,5 +1,5 @@
+// covers: frontend/web/src/components/SessionDrawer.jsx
 /**
- * covers: frontend/web/src/components/SessionDrawer.jsx
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
