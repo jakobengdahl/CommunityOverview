@@ -30,11 +30,13 @@
 }
 
 .session-context-menu-dropdown {
-  position: absolute;
-  top: calc(100% + 2px);
-  right: 0;
+  position: fixed;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   z-index: 400;
-  min-width: 170px;
+  min-width: min(170px, calc(100vw - 16px));
   padding: 4px;
   background: rgba(38, 38, 38, 0.98);
   backdrop-filter: blur(12px);

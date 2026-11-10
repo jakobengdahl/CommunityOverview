@@ -22,6 +22,120 @@ import { useAppInstallPrompt } from '../pwa/useAppInstallPrompt';
 import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
 
+// Each row owns its pending press and the one release click it may suppress.
+function SessionRow({ children, onOpenMenu, ...props }) {
+  const press = useRef(null);
+  const heldPointer = useRef(null);
+  const suppressNextClick = useRef(false);
+  const releaseTimer = useRef(null);
+  const clearSuppression = useCallback(() => {
+    clearTimeout(releaseTimer.current);
+    releaseTimer.current = null;
+    suppressNextClick.current = false;
+  }, []);
+  const cancel = useCallback(() => {
+    clearTimeout(press.current?.timer);
+    press.current = null;
+  }, []);
+
+  useEffect(() => {
+    const reset = () => {
+      heldPointer.current = null;
+      clearSuppression();
+      cancel();
+    };
+    const handleKeyDown = () => {
+      // A held touch still owes a release click even if Escape closes its menu.
+      if (heldPointer.current === null) clearSuppression();
+      cancel();
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) reset();
+    };
+    const handlePointerDown = () => {
+      cancel();
+      // Another finger must not discard the held press's release suppression.
+      if (heldPointer.current === null) clearSuppression();
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    // After release, keyboard input clears suppression if no click was emitted.
+    document.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('blur', reset);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('blur', reset);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearSuppression();
+      cancel();
+    };
+  }, [cancel, clearSuppression]);
+
+  const consumeClick = (e) => {
+    if (!suppressNextClick.current) return false;
+    // An intervening pointer's click must not consume the held touch's release.
+    if (heldPointer.current === null) clearSuppression();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  };
+
+  return (
+    <div
+      {...props}
+      // Consume the release before descendant buttons can toggle or select.
+      onClickCapture={consumeClick}
+      onPointerDown={(e) => {
+        cancel();
+        if (heldPointer.current !== null) return;
+        if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+        heldPointer.current = e.pointerId;
+        const { clientX: x, clientY: y, pointerId } = e;
+        press.current = {
+          x,
+          y,
+          pointerId,
+          timer: setTimeout(() => {
+            press.current = null;
+            suppressNextClick.current = true;
+            onOpenMenu({ x, y });
+          }, 500),
+        };
+      }}
+      onPointerMove={(e) => {
+        const start = press.current;
+        if (
+          start &&
+          start.pointerId === e.pointerId &&
+          Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10
+        )
+          cancel();
+      }}
+      onPointerUp={(e) => {
+        if (heldPointer.current !== e.pointerId) return;
+        heldPointer.current = null;
+        cancel();
+        // The release click follows pointerup in this event turn. If the
+        // browser omits it, do not consume a later assistive activation.
+        if (suppressNextClick.current) {
+          clearTimeout(releaseTimer.current);
+          releaseTimer.current = setTimeout(clearSuppression, 0);
+        }
+      }}
+      onPointerCancel={(e) => {
+        if (heldPointer.current !== e.pointerId) return;
+        heldPointer.current = null;
+        clearSuppression();
+        cancel();
+      }}
+      onPointerLeave={cancel}
+    >
+      {children(consumeClick)}
+    </div>
+  );
+}
+
 /**
  * SessionDrawer — full-height panel opened from the hamburger button (desktop)
  * or the Menu slot (mobile). Hosts session navigation (new / search / connect
@@ -57,6 +171,7 @@ function SessionDrawer({
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
+  const [pointerPosition, setPointerPosition] = useState(null);
   const [wasOpen, setWasOpen] = useState(open);
   const searchInputRef = useRef(null);
   const drawerRef = useRef(null);
@@ -94,7 +209,10 @@ function SessionDrawer({
   // recommended pattern for deriving from a prop change) rather than in an effect.
   if (open !== wasOpen) {
     setWasOpen(open);
-    if (!open) setOpenMenuId(null);
+    if (!open) {
+      setOpenMenuId(null);
+      setPointerPosition(null);
+    }
   }
 
   // Modal focus management and body scroll lock for the mobile overlay only
@@ -125,6 +243,7 @@ function SessionDrawer({
         e.stopPropagation();
         if (openMenuId) {
           setOpenMenuId(null);
+          setPointerPosition(null);
           return;
         }
         closeDrawer();
@@ -147,6 +266,14 @@ function SessionDrawer({
       (s) => (s.name || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
     );
   }, [sessions, query]);
+
+  // --- Right-click / context-menu handlers ---
+
+  const handleContextMenu = useCallback((sessionId, e) => {
+    e.preventDefault();
+    setOpenMenuId(sessionId);
+    setPointerPosition({ x: e.clientX, y: e.clientY });
+  }, []);
 
   return (
     <>
@@ -224,58 +351,81 @@ function SessionDrawer({
             </div>
           )}
           {filteredSessions.map((session) => (
-            <div
+            <SessionRow
               key={session.id}
               className={`session-drawer-session${session.id === currentSessionId ? ' current' : ''}`}
+              onContextMenu={(e) => handleContextMenu(session.id, e)}
+              onOpenMenu={(position) => {
+                setOpenMenuId(session.id);
+                setPointerPosition(position);
+              }}
             >
-              <button
-                className="session-drawer-session-name"
-                onClick={() => onSelectSession(session.id)}
-                title={session.name ? `${session.name} (${session.id})` : session.id}
-              >
-                <span className="session-drawer-session-label">{session.name || session.id}</span>
-                {session.name && <span className="session-drawer-session-id">{session.id}</span>}
-              </button>
-              <SessionContextMenu
-                open={openMenuId === session.id}
-                onToggle={() => setOpenMenuId((cur) => (cur === session.id ? null : session.id))}
-                onClose={() => setOpenMenuId(null)}
-                triggerLabel={t('sessions.session_menu')}
-                items={[
-                  {
-                    key: 'rename',
-                    label: t('sessions.rename_session'),
-                    icon: <PencilSquare size={14} />,
-                    onClick: () => onRenameSession(session.id),
-                  },
-                  {
-                    key: 'copy-link',
-                    label: t('sessions.copy_link'),
-                    icon: <Link45deg size={16} />,
-                    onClick: () => onCopySessionLink?.(session.id),
-                  },
-                  // Only the session this browser is live on can receive pulses,
-                  // so the trigger URL is offered on the current session only.
-                  ...(session.id === currentSessionId && onCopyTriggerUrl
-                    ? [
-                        {
-                          key: 'copy-trigger-url',
-                          label: t('sessions.copy_trigger_url'),
-                          icon: <BroadcastPin size={15} />,
-                          onClick: () => onCopyTriggerUrl(session.id),
-                        },
-                      ]
-                    : []),
-                  {
-                    key: 'delete',
-                    label: t('sessions.delete_session'),
-                    icon: <Trash size={14} />,
-                    danger: true,
-                    onClick: () => onDeleteSession?.(session.id),
-                  },
-                ]}
-              />
-            </div>
+              {(consumeClick) => (
+                <>
+                  <button
+                    className="session-drawer-session-name"
+                    onClick={(e) => {
+                      if (consumeClick(e)) return;
+                      onSelectSession(session.id);
+                    }}
+                    title={session.name ? `${session.name} (${session.id})` : session.id}
+                  >
+                    <span className="session-drawer-session-label">
+                      {session.name || session.id}
+                    </span>
+                    {session.name && (
+                      <span className="session-drawer-session-id">{session.id}</span>
+                    )}
+                  </button>
+                  <SessionContextMenu
+                    open={openMenuId === session.id}
+                    onToggle={() => {
+                      setPointerPosition(null);
+                      setOpenMenuId((cur) => (cur === session.id ? null : session.id));
+                    }}
+                    onClose={() => {
+                      setOpenMenuId(null);
+                      setPointerPosition(null);
+                    }}
+                    triggerLabel={t('sessions.session_menu')}
+                    items={[
+                      {
+                        key: 'rename',
+                        label: t('sessions.rename_session'),
+                        icon: <PencilSquare size={14} />,
+                        onClick: () => onRenameSession(session.id),
+                      },
+                      {
+                        key: 'copy-link',
+                        label: t('sessions.copy_link'),
+                        icon: <Link45deg size={16} />,
+                        onClick: () => onCopySessionLink?.(session.id),
+                      },
+                      // Only the session this browser is live on can receive pulses,
+                      // so the trigger URL is offered on the current session only.
+                      ...(session.id === currentSessionId && onCopyTriggerUrl
+                        ? [
+                            {
+                              key: 'copy-trigger-url',
+                              label: t('sessions.copy_trigger_url'),
+                              icon: <BroadcastPin size={15} />,
+                              onClick: () => onCopyTriggerUrl(session.id),
+                            },
+                          ]
+                        : []),
+                      {
+                        key: 'delete',
+                        label: t('sessions.delete_session'),
+                        icon: <Trash size={14} />,
+                        danger: true,
+                        onClick: () => onDeleteSession?.(session.id),
+                      },
+                    ]}
+                    pointerPosition={openMenuId === session.id ? pointerPosition : null}
+                  />
+                </>
+              )}
+            </SessionRow>
           ))}
         </div>
 
