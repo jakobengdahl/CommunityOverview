@@ -55,10 +55,10 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel, poin
     const rightEdge = x + rect.width;
     if (rightEdge > window.innerWidth) {
       menu.style.right = `${window.innerWidth - x}px`;
-      delete menu.style.left;
+      menu.style.removeProperty('left');
     } else {
       menu.style.left = `${x}px`;
-      delete menu.style.right;
+      menu.style.removeProperty('right');
     }
   }, [open, pointerPosition]);
 

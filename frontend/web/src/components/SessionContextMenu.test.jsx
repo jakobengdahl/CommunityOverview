@@ -14,6 +14,34 @@ function makeItems(overrides = {}) {
 }
 
 describe('SessionContextMenu', () => {
+  it.each([
+    ['left to right', 100, -50],
+    ['right to left', -50, 100],
+  ])('clears the previous constraint when moving %s across the right edge', (_, firstOffset, nextOffset) => {
+    const props = {
+      open: true,
+      onToggle: vi.fn(),
+      onClose: vi.fn(),
+      triggerLabel: 'Session actions',
+      items: makeItems(),
+    };
+    const { rerender } = render(<SessionContextMenu {...props} />);
+    const menu = screen.getByRole('menu');
+    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200 });
+    try {
+      for (const offset of [firstOffset, nextOffset]) {
+        const x = offset < 0 ? window.innerWidth + offset : offset;
+        rerender(<SessionContextMenu {...props} pointerPosition={{ x, y: 80 }} />);
+        expect(screen.getByRole('menu')).toBe(menu);
+        expect(menu.style.top).toBe('80px');
+        expect(menu.style.left).toBe(offset < 0 ? '' : `${x}px`);
+        expect(menu.style.right).toBe(offset < 0 ? `${window.innerWidth - x}px` : '');
+      }
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it('hides the item list until opened', () => {
     render(
       <SessionContextMenu
