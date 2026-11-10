@@ -25,6 +25,7 @@ import './SessionDrawer.css';
 // Each row owns its pending press and the one release click it may suppress.
 function SessionRow({ children, onOpenMenu, ...props }) {
   const press = useRef(null);
+  const touchHeld = useRef(false);
   const suppressNextClick = useRef(false);
   const cancel = useCallback(() => {
     clearTimeout(press.current?.timer);
@@ -33,21 +34,26 @@ function SessionRow({ children, onOpenMenu, ...props }) {
 
   useEffect(() => {
     const reset = () => {
+      touchHeld.current = false;
       suppressNextClick.current = false;
+      cancel();
+    };
+    const handleKeyDown = () => {
+      // A held touch still owes a release click even if Escape closes its menu.
+      if (!touchHeld.current) suppressNextClick.current = false;
       cancel();
     };
     const handleVisibilityChange = () => {
       if (document.hidden) reset();
     };
     document.addEventListener('pointerdown', reset, true);
-    // Keyboard input starts a new interaction even if the touch release
-    // produced no click. Escape must also discard any pending press.
-    document.addEventListener('keydown', reset, true);
+    // After release, keyboard input clears suppression if no click was emitted.
+    document.addEventListener('keydown', handleKeyDown, true);
     window.addEventListener('blur', reset);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       document.removeEventListener('pointerdown', reset, true);
-      document.removeEventListener('keydown', reset, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('blur', reset);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       cancel();
@@ -70,6 +76,7 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       onPointerDown={(e) => {
         cancel();
         if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+        touchHeld.current = true;
         const { clientX: x, clientY: y, pointerId } = e;
         press.current = {
           x,
@@ -91,8 +98,12 @@ function SessionRow({ children, onOpenMenu, ...props }) {
         )
           cancel();
       }}
-      onPointerUp={cancel}
+      onPointerUp={() => {
+        touchHeld.current = false;
+        cancel();
+      }}
       onPointerCancel={() => {
+        touchHeld.current = false;
         suppressNextClick.current = false;
         cancel();
       }}

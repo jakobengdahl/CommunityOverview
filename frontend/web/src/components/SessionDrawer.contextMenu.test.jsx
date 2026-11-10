@@ -444,6 +444,39 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it.each(['touch', 'pen'])('suppresses the held %s release after Escape and permits subsequent interactions', (pointerType) => {
+    const onSelectSession = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSelectSession, onClose });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const trigger = screen.getByRole('button', { name: 'Session actions' });
+
+    for (const target of [name, trigger]) {
+      dispatchPointer(target, 'pointerdown', { pointerType });
+      act(() => vi.advanceTimersByTime(500));
+      expect(screen.getByRole('menu')).toBeVisible();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByRole('menu')).toBeNull();
+      dispatchPointer(target, 'pointerup', { pointerType });
+      expect(fireEvent.click(target)).toBe(false);
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(onSelectSession).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    }
+
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    dispatchPointer(name, 'pointerup', { pointerType: 'touch' });
+    fireEvent.click(name);
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu')).toBeVisible();
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('clears suppression on Escape after a release without a click', () => {
     const onSelectSession = vi.fn();
     const onClose = vi.fn();
