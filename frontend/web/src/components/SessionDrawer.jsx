@@ -37,8 +37,12 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       cancel();
     };
     document.addEventListener('pointerdown', reset, true);
+    // Keyboard input starts a new interaction even if the touch release
+    // produced no click. Escape must also discard any pending press.
+    document.addEventListener('keydown', reset, true);
     return () => {
       document.removeEventListener('pointerdown', reset, true);
+      document.removeEventListener('keydown', reset, true);
       cancel();
     };
   }, [cancel]);

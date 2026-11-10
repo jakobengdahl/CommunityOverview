@@ -375,6 +375,64 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledWith('abc-123');
   });
 
+  it.each(['Enter', ' '])('allows %s activation after a long-press release without a click', (key) => {
+    const onSelectSession = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSelectSession, onClose });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const trigger = screen.getByRole('button', { name: 'Session actions' });
+
+    for (const target of [name, trigger]) {
+      dispatchPointer(target, 'pointerdown', { pointerType: 'touch' });
+      act(() => vi.advanceTimersByTime(500));
+      dispatchPointer(target, 'pointerup', { pointerType: 'touch' });
+      expect(screen.getByRole('menu')).toBeVisible();
+
+      target.focus();
+      fireEvent.keyDown(target, { key });
+      fireEvent.keyUp(target, { key });
+      fireEvent.click(target, { detail: 0 });
+    }
+
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('clears suppression on Escape after a release without a click', () => {
+    const onSelectSession = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSelectSession, onClose });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const trigger = screen.getByRole('button', { name: 'Session actions' });
+
+    for (const target of [name, trigger]) {
+      dispatchPointer(target, 'pointerdown', { pointerType: 'touch' });
+      act(() => vi.advanceTimersByTime(500));
+      dispatchPointer(target, 'pointerup', { pointerType: 'touch' });
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByRole('menu')).toBeNull();
+      target.focus();
+      fireEvent.click(target, { detail: 0 });
+    }
+
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+    expect(screen.getByRole('menu')).not.toHaveClass('pointer-triggered');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('cancels an interrupted touch when Escape is pressed before the timer fires', () => {
+    renderDrawer();
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(250));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('does not open when the pointer is not touch or pen', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
