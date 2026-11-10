@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx, packages/ui-graph-canvas/src/components/AnnotationToolbox.jsx
 // Drag-to-create from the annotation toolbox (task-annotation-toolbox-drag-to-create):
 // dragging a toolbox item creates the annotation at the point where the
 // gesture ends, rather than always at the viewport centre (that click path is
