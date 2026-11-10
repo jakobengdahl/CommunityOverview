@@ -650,7 +650,9 @@ describe('GenericAnnotationNode property editor', () => {
     });
 
     it('renders a stored colour on text unchanged', () => {
-      render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'hello', color: '#ef4444' }} />);
+      render(
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'hello', color: '#ef4444' }} />
+      );
       const el = screen.getByText('hello').parentElement;
       expect(el.style.color).toBe('rgb(239, 68, 68)');
     });
@@ -662,7 +664,9 @@ describe('GenericAnnotationNode property editor', () => {
     });
 
     it('renders a stored colour on icon unchanged', () => {
-      render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag', color: '#22c55e' }} />);
+      render(
+        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag', color: '#22c55e' }} />
+      );
       const el = screen.getByTitle('flag');
       expect(el.style.color).toBe('rgb(34, 197, 94)');
     });

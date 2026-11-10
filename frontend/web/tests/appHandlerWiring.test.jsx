@@ -705,7 +705,7 @@ describe('App handler wiring', () => {
         await act(async () => {
           await canvas().onReferenceOpen({
             targetKind: 'url',
-            // eslint-disable-next-line no-script-url
+
             target: 'javascript:alert(1)',
           });
         });
