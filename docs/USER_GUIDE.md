@@ -928,7 +928,8 @@ browser participant added, removed or moved which nodes. Every MCP agent is
 recorded under the same `mcp-agent` actor, so the log tells agent changes apart
 from browser ones but not one agent from another. When the log is full, the
 oldest node add/remove entries are dropped first, so undoable history is kept
-longer. A session can also carry a **description** — what it
+longer; the newest entry is always kept, so the latest node change is still
+recorded. A session can also carry a **description** — what it
 is for and what the next participant should pick up — set with the MCP
 `describe_visualization_session` tool and returned with the session; clearing the
 canvas keeps it.

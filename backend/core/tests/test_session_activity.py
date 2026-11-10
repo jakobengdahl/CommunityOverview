@@ -60,7 +60,16 @@ class TestPruneActivityLog:
         records += [_record(seq=i) for i in range(2, 4)]
         records.append(_record(seq=4, op_type="nodes_removed"))
         kept = prune_activity_log(records, max_records=3, max_age_days=None)
-        assert [r["seq"] for r in kept] == [0, 2, 3]
+        assert [r["seq"] for r in kept] == [2, 3, 4]
+
+    def test_newest_node_record_survives_a_log_full_of_undoable_records(self):
+        records = [_record(seq=i) for i in range(3)]
+        records.append(_record(seq=3, op_type="nodes_added"))
+        kept = prune_activity_log(records, max_records=3, max_age_days=None)
+        assert [r["seq"] for r in kept] == [1, 2, 3]
+        kept.append(_record(seq=4, op_type="nodes_removed"))
+        kept = prune_activity_log(kept, max_records=3, max_age_days=None)
+        assert [r["seq"] for r in kept] == [1, 2, 4]
 
     def test_trims_by_age(self):
         records = [_record(seq=i) for i in range(3)]

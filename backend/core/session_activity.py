@@ -130,7 +130,8 @@ def prune_activity_log(
     Age filtering runs first, then the max-records cap keeps the newest N —
     mirroring the retention pass in ``GraphHistoryStore._compact_locked``. A record whose timestamp
     cannot be parsed is kept rather than dropped on a parse failure. Over the
-    cap, the oldest node add/remove records go before any other record.
+    cap, the oldest node add/remove records go before any other record, except
+    the newest record, so the write that just happened is always recorded.
     """
     kept = records
     if max_age_days is not None and max_age_days > 0:
@@ -140,7 +141,9 @@ def prune_activity_log(
     if max_records is not None and max_records > 0 and len(kept) > max_records:
         excess = len(kept) - max_records
         evict = set()
-        for index, record in enumerate(kept):
+        # The newest record is the one just appended; were it a candidate, a
+        # log full of undoable records would drop every node record on write.
+        for index, record in enumerate(kept[:-1]):
             if len(evict) == excess:
                 break
             if record.get("op") in _EVICT_FIRST_OPS:
