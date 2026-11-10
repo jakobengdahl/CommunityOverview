@@ -322,13 +322,16 @@ class TestSessionStoreActivityIntegration:
         assert session.activity_log == []
 
     def test_node_add_and_remove_name_their_actor_and_are_never_undoable(self):
-        """Only ids that actually changed are recorded; a no-op records nothing."""
+        """Only ids that actually changed are recorded, under the first actor to add
+        them; a no-op, such as another browser applying the same add, records nothing."""
         store = _store()
         session = store.create()
         for op in (
             {"op": "nodes_added", "node_ids": ["n1", "n2"], "client_id": "a1"},
             {"op": "nodes_added", "node_ids": ["n2", "n3"], "client_id": "a2"},
             {"op": "nodes_added", "node_ids": ["n3"], "client_id": "a2"},
+            # A second browser applying the same pushed add records nothing.
+            {"op": "nodes_added", "node_ids": ["n1", "n2", "n3"], "client_id": "a3"},
             {"op": "nodes_removed", "node_ids": ["n1", "gone"], "client_id": "a2"},
         ):
             store.apply_state_op(session, op)
