@@ -74,7 +74,8 @@ function SessionRow({ children, onOpenMenu, ...props }) {
 
   const consumeClick = (e) => {
     if (!suppressNextClick.current) return false;
-    clearSuppression();
+    // An intervening pointer's click must not consume the held touch's release.
+    if (heldPointer.current === null) clearSuppression();
     e.preventDefault();
     e.stopPropagation();
     return true;

@@ -53,9 +53,14 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['row', 'outside'])(
-    'preserves the held release suppression when a second pointer touches %s',
-    (location) => {
+  it.each([
+    ['row', 'touch'],
+    ['outside', 'touch'],
+    ['row', 'mouse'],
+    ['outside', 'mouse'],
+  ])(
+    'preserves the held release suppression when a second pointer clicks %s with %s',
+    (location, pointerType) => {
       const onClose = vi.fn();
       const onSelectSession = vi.fn(() => onClose());
       const { sessionName: name } = renderSessionRow({ onClose, onSelectSession });
@@ -65,8 +70,11 @@ describe('SessionDrawer — long press on touch', () => {
       expect(screen.getByRole('menu')).toBeVisible();
 
       const secondTarget = location === 'row' ? name : document.body;
-      dispatchPointer(secondTarget, 'pointerdown', { pointerType: 'touch', pointerId: 2 });
-      dispatchPointer(secondTarget, 'pointerup', { pointerType: 'touch', pointerId: 2 });
+      dispatchPointer(secondTarget, 'pointerdown', { pointerType, pointerId: 2 });
+      dispatchPointer(secondTarget, 'pointerup', { pointerType, pointerId: 2 });
+      fireEvent.click(secondTarget);
+      expect(onSelectSession).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
       act(() => vi.advanceTimersByTime(1000));
       dispatchPointer(name, 'pointerup', { pointerType: 'touch', pointerId: 1 });
       expect(fireEvent.click(name)).toBe(false);
