@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx, packages/ui-graph-canvas/src/components/ContextMenus.jsx, packages/ui-graph-canvas/src/utils/annotations.js
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
@@ -80,7 +81,7 @@ describe('GraphCanvas annotation creation', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     rightClickPane(screen.getByTestId('pane'));
     expect(screen.getByRole('button', { name: /add note/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /add label/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add arrow/i })).toBeInTheDocument();
   });
 

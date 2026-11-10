@@ -1292,11 +1292,10 @@ describe('PaneContextMenu', () => {
       />
     );
     fireEvent.click(screen.getByRole('button', { name: /add note/i }));
-    fireEvent.click(screen.getByRole('button', { name: /add label/i }));
+    expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /add arrow/i }));
     expect(createAnnotation).toHaveBeenNthCalledWith(1, 'note', flowPosition);
-    expect(createAnnotation).toHaveBeenNthCalledWith(2, 'label', flowPosition);
-    expect(createAnnotation).toHaveBeenNthCalledWith(3, 'arrow', flowPosition);
+    expect(createAnnotation).toHaveBeenNthCalledWith(2, 'arrow', flowPosition);
   });
 
   it('attaches the forwarded menuRef to the menu element (outside-click dismiss relies on it)', () => {
