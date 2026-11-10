@@ -176,6 +176,38 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledWith('abc-123');
   });
 
+  it.each(['touch', 'pen'])(
+    'allows assistive clicks after a %s long-press release emits no click',
+    (pointerType) => {
+      const onSelectSession = vi.fn();
+      const onClose = vi.fn();
+      renderDrawer({ onSelectSession, onClose });
+      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      const trigger = screen.getByRole('button', { name: 'Session actions' });
+
+      for (const target of [name, trigger]) {
+        dispatchPointer(target, 'pointerdown', { pointerType });
+        act(() => vi.advanceTimersByTime(500));
+        dispatchPointer(target, 'pointerup', { pointerType });
+        act(() => vi.advanceTimersByTime(0));
+        expect(screen.getByRole('menu')).toBeVisible();
+
+        // Assistive technology can activate without pointer or key events.
+        expect(fireEvent.click(target, { detail: 0 })).toBe(true);
+      }
+
+      expect(onSelectSession).toHaveBeenCalledTimes(1);
+      expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      fireEvent.click(trigger, { detail: 0 });
+      expect(screen.getByRole('menu')).not.toHaveClass('pointer-triggered');
+      dispatchPointer(document.body, 'pointerdown', { pointerType: 'mouse' });
+      fireEvent.click(document.body);
+      expect(screen.queryByRole('menu')).toBeNull();
+    }
+  );
+
   it.each(['Enter', ' '])(
     'allows %s activation after a long-press release without a click',
     (key) => {

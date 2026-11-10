@@ -27,6 +27,12 @@ function SessionRow({ children, onOpenMenu, ...props }) {
   const press = useRef(null);
   const touchHeld = useRef(false);
   const suppressNextClick = useRef(false);
+  const releaseTimer = useRef(null);
+  const clearSuppression = useCallback(() => {
+    clearTimeout(releaseTimer.current);
+    releaseTimer.current = null;
+    suppressNextClick.current = false;
+  }, []);
   const cancel = useCallback(() => {
     clearTimeout(press.current?.timer);
     press.current = null;
@@ -35,12 +41,12 @@ function SessionRow({ children, onOpenMenu, ...props }) {
   useEffect(() => {
     const reset = () => {
       touchHeld.current = false;
-      suppressNextClick.current = false;
+      clearSuppression();
       cancel();
     };
     const handleKeyDown = () => {
       // A held touch still owes a release click even if Escape closes its menu.
-      if (!touchHeld.current) suppressNextClick.current = false;
+      if (!touchHeld.current) clearSuppression();
       cancel();
     };
     const handleVisibilityChange = () => {
@@ -56,13 +62,14 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       document.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('blur', reset);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearSuppression();
       cancel();
     };
-  }, [cancel]);
+  }, [cancel, clearSuppression]);
 
   const consumeClick = (e) => {
     if (!suppressNextClick.current) return false;
-    suppressNextClick.current = false;
+    clearSuppression();
     e.preventDefault();
     e.stopPropagation();
     return true;
@@ -101,10 +108,16 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       onPointerUp={() => {
         touchHeld.current = false;
         cancel();
+        // The release click follows pointerup in this event turn. If the
+        // browser omits it, do not consume a later assistive activation.
+        if (suppressNextClick.current) {
+          clearTimeout(releaseTimer.current);
+          releaseTimer.current = setTimeout(clearSuppression, 0);
+        }
       }}
       onPointerCancel={() => {
         touchHeld.current = false;
-        suppressNextClick.current = false;
+        clearSuppression();
         cancel();
       }}
       onPointerLeave={cancel}
