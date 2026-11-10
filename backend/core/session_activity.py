@@ -71,6 +71,10 @@ RECORDED_ONLY_OPS = frozenset(
     {"graph_changes_discarded", "graph_changes_merged", "nodes_added", "nodes_removed"}
 )
 
+# Evicted first when the max-records cap is hit, so frequent node adds (for
+# example from a session auto-add agent) never push out undoable history.
+_EVICT_FIRST_OPS = frozenset({"nodes_added", "nodes_removed"})
+
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -125,7 +129,8 @@ def prune_activity_log(
 
     Age filtering runs first, then the max-records cap keeps the newest N —
     mirroring the retention pass in ``GraphHistoryStore._compact_locked``. A record whose timestamp
-    cannot be parsed is kept rather than dropped on a parse failure.
+    cannot be parsed is kept rather than dropped on a parse failure. Over the
+    cap, the oldest node add/remove records go before any other record.
     """
     kept = records
     if max_age_days is not None and max_age_days > 0:
@@ -133,6 +138,14 @@ def prune_activity_log(
         cutoff_text = cutoff.strftime(_TIMESTAMP_FORMAT)
         kept = [r for r in kept if _within_age(r, cutoff, cutoff_text)]
     if max_records is not None and max_records > 0 and len(kept) > max_records:
+        excess = len(kept) - max_records
+        evict = set()
+        for index, record in enumerate(kept):
+            if len(evict) == excess:
+                break
+            if record.get("op") in _EVICT_FIRST_OPS:
+                evict.add(index)
+        kept = [r for i, r in enumerate(kept) if i not in evict]
         kept = kept[-max_records:]
     return kept
 

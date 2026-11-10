@@ -55,6 +55,13 @@ class TestPruneActivityLog:
         kept = prune_activity_log(records, max_records=3, max_age_days=None)
         assert [r["seq"] for r in kept] == [7, 8, 9]
 
+    def test_node_membership_records_are_evicted_before_undoable_ones(self):
+        records = [_record(seq=0), _record(seq=1, op_type="nodes_added")]
+        records += [_record(seq=i) for i in range(2, 4)]
+        records.append(_record(seq=4, op_type="nodes_removed"))
+        kept = prune_activity_log(records, max_records=3, max_age_days=None)
+        assert [r["seq"] for r in kept] == [0, 2, 3]
+
     def test_trims_by_age(self):
         records = [_record(seq=i) for i in range(3)]
         stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
