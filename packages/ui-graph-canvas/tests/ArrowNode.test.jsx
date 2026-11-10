@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/ArrowNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import ArrowNode from '../src/components/ArrowNode';
@@ -270,44 +271,5 @@ describe('ArrowNode duplicate control', () => {
     const copy = updated.find((n) => n.id !== 'a1');
     expect(copy.data.locked).toBe(false);
     expect(updated.find((n) => n.id === 'a1').data.locked).toBe(true);
-  });
-});
-
-// task-annotation-render-direct-manipulation / task-annotation-responsive-
-// bottom-toolbox's "Nearby object menu" contract entry point: an arrow/line
-// can never be a valid attach target — `findSnapTarget` (the mechanism
-// `computeDroppedAttachment` and this menu both mirror) unconditionally
-// excludes `type === 'arrow'` alongside `group` (the retired `frame` kind
-// used to be excluded here too — task-annotation-merge-frame-into-shape-
-// rectangle folded it into `shape`, which is not excluded), and the
-// attachment-follow effect never builds a centre for an arrow, so an
-// attachment onto one would never resolve a position. ArrowNode's own
-// context menu therefore must not offer the section at all.
-describe('ArrowNode "Nearby object menu"', () => {
-  it('does not render the "Add nearby" section on an arrow\'s own context menu', () => {
-    const attachNearby = vi.fn();
-    const data = { dx: 100, dy: 0 };
-    hoisted.nodes = [{ id: 'a1', type: 'arrow', position: { x: 0, y: 0 }, data }];
-    render(
-      <AnnotationContext.Provider
-        value={{
-          notifyChange: vi.fn(),
-          attachNearby,
-          labels: {
-            nearbyMenu: 'Add nearby',
-            nearbyLabel: 'Label',
-            nearbyIcon: 'Icon',
-            nearbyVoteDot: 'Vote dot',
-            nearbyText: 'Text',
-          },
-        }}
-      >
-        <ArrowNode id="a1" type="arrow" data={data} selected={false} />
-      </AnnotationContext.Provider>
-    );
-    openMenu();
-    expect(screen.queryByText('Add nearby')).toBeNull();
-    expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
-    expect(attachNearby).not.toHaveBeenCalled();
   });
 });

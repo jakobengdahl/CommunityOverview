@@ -36,15 +36,6 @@ import { createContext } from 'react';
  * a bare unit test), matching that module's own fail-open reasoning for "no
  * live connection yet".
  *
- * `attachNearby(targetId, kind)` is the "Nearby object menu" creation entry
- * point (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a
- * new label/icon/text pre-wired to attach to `targetId` (this
- * annotation, or the graph node/annotation a caller anchors the control to),
- * using the exact same `content.attachment` shape and resolve/follow
- * mechanism the post-creation drag-to-attach path uses. `vote_dot` is not
- * offered here (task-annotation-vote-dot-simplify): it is no longer an
- * attachable kind.
- *
  * `editSheet` (task-annotation-responsive-bottom-toolbox) is the contextual
  * "Edit" surface's mobile-sheet wiring, consumed by
  * `hooks/useAnnotationEditTrigger.js` rather than read directly by node
@@ -86,7 +77,6 @@ export const AnnotationContext = createContext({
   notifyRemoteLockedAttempt: () => {},
   beginEditing: async (elementIds) => ({ granted: elementIds || [], denied: {} }),
   endEditing: () => {},
-  attachNearby: () => {},
   openReference: () => {},
   isReferenceTargetAvailable: () => undefined,
   editSheet: { capable: false, container: null, requestOpen: () => {}, requestClose: () => {} },
@@ -132,10 +122,6 @@ export const AnnotationContext = createContext({
     groupLayerBack: 'Send backward',
     groupTextColor: 'Text colour',
     groupTextColorAuto: 'Automatic (best contrast)',
-    nearbyMenu: 'Add nearby',
-    nearbyLabel: 'Label',
-    nearbyIcon: 'Icon',
-    nearbyText: 'Text',
     opacity: 'Opacity',
     editAnnotation: 'Edit',
     // Accessible-name kind words (task-annotation-accessible-shared-controls) —

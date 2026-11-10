@@ -366,7 +366,7 @@ icon is one property — colour, fill, border, text alignment, text size, font, 
 rotation, opacity, size, layer order — and shows what that property is currently set to,
 so a fill button carries the current fill colour. Click one to open just that property's
 controls; click another to switch. **Delete** sits directly in the row, and the remaining
-one-off commands (Duplicate, Add nearby, Attach to…) are behind the **⋯** button. The row
+one-off commands (Duplicate, Attach to…) are behind the **⋯** button. The row
 is deliberately small: the old stacked menu was taller than a phone screen and covered the
 object you were editing.
 
@@ -550,17 +550,8 @@ independent annotation you're free to edit right away. A group box does not get 
 Duplicate action — its substance is the graph nodes it groups, not its own content, so
 copying the box alone would not be a real duplicate.
 
-Right-click a node, or any annotation except a group box, and its menu has an
-**Add nearby** section with three buttons: **Label**, **Icon**, **Text**. (**Vote
-dot** is not offered here — it doesn't attach to anything, see above.)
-A transparent-fill shape is included here too — its menu offers "Add nearby" the
-same as any other shape.
-Choosing one creates that annotation already attached to whatever you right-clicked —
-positioned right next to it and following it if it moves — without the create-then-drag-near
-two steps that were previously the only way to attach a new label, icon or piece
-of text. Detach it afterward the same way as any attached annotation: drag it away from its
-target. Arrows are not offered here, since dragging either of a newly placed arrow's
-endpoints already snaps it onto a nearby target the moment you draw it.
+Right-click a node, or any annotation except a group box, and its menu provides the usual
+controls.
 
 ### 2.6 Saved views
 
