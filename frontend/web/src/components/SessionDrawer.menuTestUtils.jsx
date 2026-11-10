@@ -1,5 +1,5 @@
 import { vi, beforeEach, afterEach } from 'vitest';
-import { render, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup } from '@testing-library/react';
 import SessionDrawer from './SessionDrawer';
 
 if (typeof window.PointerEvent === 'undefined') {
@@ -88,4 +88,9 @@ export function renderDrawer(props = {}) {
     />,
     { container }
   );
+}
+
+export function renderSessionRow(props = {}) {
+  const view = renderDrawer(props);
+  return { ...view, sessionName: screen.getByRole('button', { name: 'Test session abc-123' }) };
 }

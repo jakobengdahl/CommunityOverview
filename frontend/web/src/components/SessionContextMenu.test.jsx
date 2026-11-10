@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import SessionContextMenu from './SessionContextMenu';
+import { makeItems, makeMenuProps, renderMenu, mockMenuRect } from './SessionContextMenu.testUtils';
 
 beforeEach(() => {
   vi.stubGlobal('innerWidth', 1024);
@@ -16,34 +17,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function makeItems(overrides = {}) {
-  return [
-    { key: 'rename', label: 'Rename', onClick: vi.fn(), ...(overrides.rename || {}) },
-    { key: 'copy-link', label: 'Copy link', onClick: vi.fn(), ...(overrides.copyLink || {}) },
-    { key: 'delete', label: 'Delete', danger: true, onClick: vi.fn(), ...(overrides.delete || {}) },
-  ];
-}
-
-function makeMenuProps() {
-  return {
-    open: true,
-    onToggle: vi.fn(),
-    onClose: vi.fn(),
-    triggerLabel: 'Session actions',
-    items: makeItems(),
-  };
-}
-
-function renderMenu(props = {}) {
-  return render(<SessionContextMenu {...makeMenuProps()} {...props} />);
-}
-
 describe('SessionContextMenu', () => {
   it.each([100, 200, 800])('keeps a %ipx-tall pointer menu within the viewport', (height) => {
     const props = makeMenuProps();
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
-    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200, height });
+    const rectSpy = mockMenuRect(menu, height);
     try {
       for (const y of [window.innerHeight - 10, 80]) {
         rerender(<SessionContextMenu {...props} pointerPosition={{ x: 100, y }} />);
@@ -63,9 +42,7 @@ describe('SessionContextMenu', () => {
     const props = makeMenuProps();
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
-    const rectSpy = vi
-      .spyOn(menu, 'getBoundingClientRect')
-      .mockReturnValue({ width: 200, height: 100 });
+    const rectSpy = mockMenuRect(menu);
     try {
       for (const offset of [firstOffset, nextOffset]) {
         const x = offset < 0 ? window.innerWidth + offset : offset;

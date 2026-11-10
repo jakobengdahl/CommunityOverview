@@ -4,7 +4,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, fireEvent, act } from '@testing-library/react';
-import { renderDrawer, setMobile, dispatchPointer } from './SessionDrawer.menuTestUtils';
+import {
+  renderDrawer,
+  renderSessionRow,
+  setMobile,
+  dispatchPointer,
+} from './SessionDrawer.menuTestUtils';
 
 describe('SessionDrawer — long press on touch', () => {
   beforeEach(() => {
@@ -13,8 +18,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('opens the menu after ~500 ms of continuous touch', async () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
@@ -27,8 +31,7 @@ describe('SessionDrawer — long press on touch', () => {
   it('keeps the menu and mobile drawer open after the long-press release click', () => {
     const onClose = vi.fn();
     const onSelectSession = vi.fn(() => onClose());
-    renderDrawer({ onClose, onSelectSession });
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow({ onClose, onSelectSession });
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
@@ -86,8 +89,7 @@ describe('SessionDrawer — long press on touch', () => {
   );
 
   it('cancels a pending long press when the browser cancels the touch', () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(250));
@@ -102,8 +104,7 @@ describe('SessionDrawer — long press on touch', () => {
     (event) => {
       const onSelectSession = vi.fn();
       const onClose = vi.fn();
-      renderDrawer({ onSelectSession, onClose });
-      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
 
       dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
       act(() => vi.advanceTimersByTime(250));
@@ -131,8 +132,7 @@ describe('SessionDrawer — long press on touch', () => {
 
   it.each(['blur', 'visibilitychange'])('clears release-click suppression on %s', (event) => {
     const onSelectSession = vi.fn();
-    renderDrawer({ onSelectSession });
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow({ onSelectSession });
     dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
     expect(screen.getByRole('menu')).toBeVisible();
@@ -146,8 +146,7 @@ describe('SessionDrawer — long press on touch', () => {
 
   it('allows a mouse click on the original target after a fired long press is cancelled', () => {
     const onSelectSession = vi.fn();
-    renderDrawer({ onSelectSession });
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow({ onSelectSession });
     dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
     dispatchPointer(name, 'pointercancel');
@@ -159,8 +158,7 @@ describe('SessionDrawer — long press on touch', () => {
   it('allows keyboard selection after a fired long press is cancelled', () => {
     const onSelectSession = vi.fn();
     const onClose = vi.fn();
-    renderDrawer({ onSelectSession, onClose });
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
     dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
     dispatchPointer(name, 'pointercancel');
@@ -181,8 +179,7 @@ describe('SessionDrawer — long press on touch', () => {
     (pointerType) => {
       const onSelectSession = vi.fn();
       const onClose = vi.fn();
-      renderDrawer({ onSelectSession, onClose });
-      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
       const trigger = screen.getByRole('button', { name: 'Session actions' });
 
       for (const target of [name, trigger]) {
@@ -213,8 +210,7 @@ describe('SessionDrawer — long press on touch', () => {
     (key) => {
       const onSelectSession = vi.fn();
       const onClose = vi.fn();
-      renderDrawer({ onSelectSession, onClose });
-      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
       const trigger = screen.getByRole('button', { name: 'Session actions' });
 
       for (const target of [name, trigger]) {
@@ -241,8 +237,7 @@ describe('SessionDrawer — long press on touch', () => {
     (pointerType) => {
       const onSelectSession = vi.fn();
       const onClose = vi.fn();
-      renderDrawer({ onSelectSession, onClose });
-      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
       const trigger = screen.getByRole('button', { name: 'Session actions' });
 
       for (const target of [name, trigger]) {
@@ -275,8 +270,7 @@ describe('SessionDrawer — long press on touch', () => {
   it('clears suppression on Escape after a release without a click', () => {
     const onSelectSession = vi.fn();
     const onClose = vi.fn();
-    renderDrawer({ onSelectSession, onClose });
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow({ onSelectSession, onClose });
     const trigger = screen.getByRole('button', { name: 'Session actions' });
 
     for (const target of [name, trigger]) {
@@ -296,8 +290,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('cancels an interrupted touch when Escape is pressed before the timer fires', () => {
-    renderDrawer();
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow();
     dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(250));
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -306,8 +299,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('does not open when the pointer is not touch or pen', () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'mouse' });
     act(() => vi.advanceTimersByTime(500));
@@ -316,8 +308,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('does not open when the touch is shorter than 500 ms', () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     dispatchPointer(sessionName, 'pointerup');
@@ -326,8 +317,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('cancels if the finger moves beyond ~10 px before 500 ms', () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch', clientX: 0, clientY: 0 });
     dispatchPointer(sessionName, 'pointermove', { clientX: 15, clientY: 0 });
@@ -337,8 +327,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it.each(['pointerup', 'pointerleave'])('%s cancels the timer permanently', (type) => {
-    renderDrawer();
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow();
     dispatchPointer(name, 'pointerdown', { pointerType: 'pen' });
     act(() => vi.advanceTimersByTime(250));
     if (type === 'pointerleave') fireEvent.pointerOut(name, { relatedTarget: document.body });
@@ -362,8 +351,7 @@ describe('SessionDrawer — long press on touch', () => {
 
   it('suppresses a release on the row and clears stale suppression on any new pointerdown', () => {
     const onSelectSession = vi.fn();
-    renderDrawer({ onSelectSession });
-    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName: name } = renderSessionRow({ onSelectSession });
     const row = name.closest('.session-drawer-session');
     dispatchPointer(row, 'pointerdown', { pointerType: 'pen' });
     act(() => vi.advanceTimersByTime(500));
@@ -379,8 +367,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('closes on Escape', async () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
@@ -393,8 +380,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('closes when clicking outside the menu', async () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
@@ -408,8 +394,7 @@ describe('SessionDrawer — long press on touch', () => {
 
   it('following click does not select the session after a long press', () => {
     const onSelectSession = vi.fn();
-    renderDrawer({ onSelectSession });
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow({ onSelectSession });
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
@@ -428,8 +413,7 @@ describe('SessionDrawer — long press on touch', () => {
 
   it('normal tap selects the session after a long press was suppressed', () => {
     const onSelectSession = vi.fn();
-    renderDrawer({ onSelectSession });
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow({ onSelectSession });
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
@@ -443,8 +427,7 @@ describe('SessionDrawer — long press on touch', () => {
   });
 
   it('outside click still closes the menu after a long press', async () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const { sessionName } = renderSessionRow();
 
     dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
