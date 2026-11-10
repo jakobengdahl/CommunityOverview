@@ -59,6 +59,7 @@ export function dispatchPointer(el, type, opts = {}) {
       new window.PointerEvent(type, {
         bubbles: true,
         cancelable: true,
+        pointerId: opts.pointerId ?? 0,
         pointerType: opts.pointerType || '',
         clientX: opts.clientX ?? 0,
         clientY: opts.clientY ?? 0,

@@ -53,6 +53,53 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['row', 'outside'])(
+    'preserves the held release suppression when a second pointer touches %s',
+    (location) => {
+      const onClose = vi.fn();
+      const onSelectSession = vi.fn(() => onClose());
+      const { sessionName: name } = renderSessionRow({ onClose, onSelectSession });
+      const trigger = screen.getByRole('button', { name: 'Session actions' });
+      dispatchPointer(name, 'pointerdown', { pointerType: 'touch', pointerId: 1 });
+      act(() => vi.advanceTimersByTime(500));
+      expect(screen.getByRole('menu')).toBeVisible();
+
+      const secondTarget = location === 'row' ? name : document.body;
+      dispatchPointer(secondTarget, 'pointerdown', { pointerType: 'touch', pointerId: 2 });
+      dispatchPointer(secondTarget, 'pointerup', { pointerType: 'touch', pointerId: 2 });
+      act(() => vi.advanceTimersByTime(1000));
+      dispatchPointer(name, 'pointerup', { pointerType: 'touch', pointerId: 1 });
+      expect(fireEvent.click(name)).toBe(false);
+      expect(onSelectSession).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+
+      dispatchPointer(name, 'pointerdown', { pointerType: 'touch', pointerId: 3 });
+      dispatchPointer(name, 'pointerup', { pointerType: 'touch', pointerId: 3 });
+      fireEvent.click(name);
+      expect(onSelectSession).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      fireEvent.keyDown(document, { key: 'Escape' });
+      fireEvent.click(trigger);
+      expect(screen.getByRole('menu')).toBeVisible();
+      dispatchPointer(document.body, 'pointerdown', { pointerType: 'mouse' });
+      fireEvent.click(document.body);
+      expect(screen.queryByRole('menu')).toBeNull();
+    }
+  );
+
+  it('does not restart a pending long press when another finger interrupts it', () => {
+    const { sessionName: name } = renderSessionRow();
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch', pointerId: 1 });
+    act(() => vi.advanceTimersByTime(250));
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch', pointerId: 2 });
+    dispatchPointer(name, 'pointercancel', { pointerType: 'touch', pointerId: 2 });
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+    dispatchPointer(name, 'pointerup', { pointerType: 'touch', pointerId: 1 });
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it.each(['touch', 'pen'])(
     'keeps a %s long-press menu open on kebab release and permits later activation',
     (pointerType) => {
@@ -361,6 +408,7 @@ describe('SessionDrawer — long press on touch', () => {
     expect(screen.getByRole('menu')).toBeVisible();
     dispatchPointer(name, 'pointerdown', { pointerType: 'pen' });
     act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(name, 'pointerup');
     dispatchPointer(document.body, 'pointerdown', { pointerType: 'mouse' });
     fireEvent.click(name);
     expect(onSelectSession).toHaveBeenCalledWith('abc-123');

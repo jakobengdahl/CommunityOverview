@@ -25,7 +25,7 @@ import './SessionDrawer.css';
 // Each row owns its pending press and the one release click it may suppress.
 function SessionRow({ children, onOpenMenu, ...props }) {
   const press = useRef(null);
-  const touchHeld = useRef(false);
+  const heldPointer = useRef(null);
   const suppressNextClick = useRef(false);
   const releaseTimer = useRef(null);
   const clearSuppression = useCallback(() => {
@@ -40,25 +40,30 @@ function SessionRow({ children, onOpenMenu, ...props }) {
 
   useEffect(() => {
     const reset = () => {
-      touchHeld.current = false;
+      heldPointer.current = null;
       clearSuppression();
       cancel();
     };
     const handleKeyDown = () => {
       // A held touch still owes a release click even if Escape closes its menu.
-      if (!touchHeld.current) clearSuppression();
+      if (heldPointer.current === null) clearSuppression();
       cancel();
     };
     const handleVisibilityChange = () => {
       if (document.hidden) reset();
     };
-    document.addEventListener('pointerdown', reset, true);
+    const handlePointerDown = () => {
+      cancel();
+      // Another finger must not discard the held press's release suppression.
+      if (heldPointer.current === null) clearSuppression();
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
     // After release, keyboard input clears suppression if no click was emitted.
     document.addEventListener('keydown', handleKeyDown, true);
     window.addEventListener('blur', reset);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
-      document.removeEventListener('pointerdown', reset, true);
+      document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('blur', reset);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -82,8 +87,9 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       onClickCapture={consumeClick}
       onPointerDown={(e) => {
         cancel();
+        if (heldPointer.current !== null) return;
         if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
-        touchHeld.current = true;
+        heldPointer.current = e.pointerId;
         const { clientX: x, clientY: y, pointerId } = e;
         press.current = {
           x,
@@ -105,8 +111,9 @@ function SessionRow({ children, onOpenMenu, ...props }) {
         )
           cancel();
       }}
-      onPointerUp={() => {
-        touchHeld.current = false;
+      onPointerUp={(e) => {
+        if (heldPointer.current !== e.pointerId) return;
+        heldPointer.current = null;
         cancel();
         // The release click follows pointerup in this event turn. If the
         // browser omits it, do not consume a later assistive activation.
@@ -115,8 +122,9 @@ function SessionRow({ children, onOpenMenu, ...props }) {
           releaseTimer.current = setTimeout(clearSuppression, 0);
         }
       }}
-      onPointerCancel={() => {
-        touchHeld.current = false;
+      onPointerCancel={(e) => {
+        if (heldPointer.current !== e.pointerId) return;
+        heldPointer.current = null;
         clearSuppression();
         cancel();
       }}
