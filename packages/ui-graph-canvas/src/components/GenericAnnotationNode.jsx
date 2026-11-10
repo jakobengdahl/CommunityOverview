@@ -35,7 +35,7 @@ import AnnotationDuplicateControl, { useAnnotationDuplicate } from './Annotation
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
 import AnnotationSizeControl from './AnnotationSizeControl';
 import { AnnotationMenuGroup } from './AnnotationMenuGroup';
-import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
