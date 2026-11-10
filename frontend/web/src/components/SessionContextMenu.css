@@ -30,9 +30,11 @@
 }
 
 .session-context-menu-dropdown {
-  position: absolute;
-  top: calc(100% + 2px);
-  right: 0;
+  position: fixed;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   z-index: 400;
   min-width: 170px;
   padding: 4px;
@@ -45,15 +47,6 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-}
-
-/* Pointer-triggered (right-click / long-press): fixed to viewport so the menu
-   can appear at the pointer coordinates instead of below the kebab button. */
-.session-context-menu-dropdown.pointer-triggered {
-  position: fixed;
-  box-sizing: border-box;
-  max-height: 100vh;
-  overflow-y: auto;
 }
 
 .session-context-menu-item {

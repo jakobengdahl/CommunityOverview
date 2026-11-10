@@ -1,9 +1,20 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import SessionContextMenu from './SessionContextMenu';
+
+beforeEach(() => {
+  vi.stubGlobal('innerWidth', 1024);
+  vi.stubGlobal('innerHeight', 768);
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(200);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(100);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function makeItems(overrides = {}) {
   return [
@@ -28,7 +39,9 @@ describe('SessionContextMenu', () => {
     try {
       for (const y of [window.innerHeight - 10, 80]) {
         rerender(<SessionContextMenu {...props} pointerPosition={{ x: 100, y }} />);
-        expect(menu.style.top).toBe(`${Math.max(0, Math.min(y, window.innerHeight - height))}px`);
+        expect(menu.style.top).toBe(
+          `${Math.max(8, Math.min(y + height > window.innerHeight - 8 ? y - height : y, window.innerHeight - height - 8))}px`
+        );
       }
     } finally {
       rectSpy.mockRestore();
@@ -38,7 +51,7 @@ describe('SessionContextMenu', () => {
   it.each([
     ['left to right', 100, -50],
     ['right to left', -50, 100],
-  ])('clears the previous constraint when moving %s across the right edge', (_, firstOffset, nextOffset) => {
+  ])('always sets left when moving %s across the right edge', (_, firstOffset, nextOffset) => {
     const props = {
       open: true,
       onToggle: vi.fn(),
@@ -48,15 +61,17 @@ describe('SessionContextMenu', () => {
     };
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
-    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200, height: 100 });
+    const rectSpy = vi
+      .spyOn(menu, 'getBoundingClientRect')
+      .mockReturnValue({ width: 200, height: 100 });
     try {
       for (const offset of [firstOffset, nextOffset]) {
         const x = offset < 0 ? window.innerWidth + offset : offset;
         rerender(<SessionContextMenu {...props} pointerPosition={{ x, y: 80 }} />);
         expect(screen.getByRole('menu')).toBe(menu);
+        expect(menu.style.left).toBeTruthy();
         expect(menu.style.top).toBe('80px');
-        expect(menu.style.left).toBe(offset < 0 ? '' : `${x}px`);
-        expect(menu.style.right).toBe(offset < 0 ? `${window.innerWidth - x}px` : '');
+        expect(menu.style.right).toBe('');
       }
     } finally {
       rectSpy.mockRestore();
@@ -137,7 +152,7 @@ describe('SessionContextMenu', () => {
         <button>elsewhere</button>
       </div>
     );
-    fireEvent.mouseDown(screen.getByText('elsewhere'));
+    fireEvent.pointerDown(screen.getByText('elsewhere'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -152,7 +167,7 @@ describe('SessionContextMenu', () => {
         items={makeItems()}
       />
     );
-    fireEvent.mouseDown(screen.getByLabelText('Session actions'));
+    fireEvent.pointerDown(screen.getByLabelText('Session actions'));
     expect(onClose).not.toHaveBeenCalled();
   });
 });

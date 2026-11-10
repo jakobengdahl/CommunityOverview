@@ -22,6 +22,72 @@ import { useAppInstallPrompt } from '../pwa/useAppInstallPrompt';
 import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
 
+// Each row owns its pending press and the one release click it may suppress.
+function SessionRow({ children, onOpenMenu, ...props }) {
+  const press = useRef(null);
+  const suppressNextClick = useRef(false);
+  const cancel = useCallback(() => {
+    clearTimeout(press.current?.timer);
+    press.current = null;
+  }, []);
+
+  useEffect(() => {
+    const reset = () => {
+      suppressNextClick.current = false;
+      cancel();
+    };
+    document.addEventListener('pointerdown', reset, true);
+    return () => {
+      document.removeEventListener('pointerdown', reset, true);
+      cancel();
+    };
+  }, [cancel]);
+
+  const consumeClick = (e) => {
+    if (!suppressNextClick.current) return false;
+    suppressNextClick.current = false;
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  };
+
+  return (
+    <div
+      {...props}
+      onClick={consumeClick}
+      onPointerDown={(e) => {
+        cancel();
+        if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+        const { clientX: x, clientY: y, pointerId } = e;
+        press.current = {
+          x,
+          y,
+          pointerId,
+          timer: setTimeout(() => {
+            press.current = null;
+            suppressNextClick.current = true;
+            onOpenMenu({ x, y });
+          }, 500),
+        };
+      }}
+      onPointerMove={(e) => {
+        const start = press.current;
+        if (
+          start &&
+          start.pointerId === e.pointerId &&
+          Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10
+        )
+          cancel();
+      }}
+      onPointerUp={cancel}
+      onPointerCancel={cancel}
+      onPointerLeave={cancel}
+    >
+      {children(consumeClick)}
+    </div>
+  );
+}
+
 /**
  * SessionDrawer — full-height panel opened from the hamburger button (desktop)
  * or the Menu slot (mobile). Hosts session navigation (new / search / connect
@@ -161,50 +227,6 @@ function SessionDrawer({
     setPointerPosition({ x: e.clientX, y: e.clientY });
   }, []);
 
-  // --- Long-press (touch) handlers ---
-
-  const longPressTimerRef = useRef(null);
-  const longPressTargetRef = useRef(null);
-
-  const cancelLongPress = useCallback(() => {
-    clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = null;
-  }, []);
-
-  useEffect(() => cancelLongPress, [cancelLongPress]);
-
-  const handleTouchStart = useCallback((sessionId, e) => {
-    cancelLongPress();
-    longPressTargetRef.current = null;
-    const target = e.target;
-    longPressTimerRef.current = setTimeout(() => {
-      longPressTimerRef.current = null;
-      longPressTargetRef.current = target;
-      setOpenMenuId(sessionId);
-      setPointerPosition(null);
-    }, 500);
-  }, [cancelLongPress]);
-
-  const handleTouchEnd = useCallback((e) => {
-    cancelLongPress();
-    if (longPressTargetRef.current) e.preventDefault();
-  }, [cancelLongPress]);
-
-  const handleTouchCancel = useCallback(() => {
-    cancelLongPress();
-    longPressTargetRef.current = null;
-  }, [cancelLongPress]);
-
-  // Some browsers still synthesize mouse events after a long press. Consume
-  // release on the original target, including mousedown's outside-menu close.
-  // Keyboard clicks (detail === 0) and subsequent touches remain available.
-  const handleLongPressRelease = useCallback((e) => {
-    if (e.detail === 0 || e.target !== longPressTargetRef.current) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'click') longPressTargetRef.current = null;
-  }, []);
-
   return (
     <>
       {isMobile && (
@@ -281,72 +303,81 @@ function SessionDrawer({
             </div>
           )}
           {filteredSessions.map((session) => (
-            <div
+            <SessionRow
               key={session.id}
               className={`session-drawer-session${session.id === currentSessionId ? ' current' : ''}`}
               onContextMenu={(e) => handleContextMenu(session.id, e)}
-              onTouchStart={(e) => handleTouchStart(session.id, e)}
-              onTouchEnd={handleTouchEnd}
-              onTouchMove={cancelLongPress}
-              onTouchCancel={handleTouchCancel}
-              onMouseDownCapture={handleLongPressRelease}
-              onClickCapture={handleLongPressRelease}
+              onOpenMenu={(position) => {
+                setOpenMenuId(session.id);
+                setPointerPosition(position);
+              }}
             >
-              <button
-                className="session-drawer-session-name"
-                onClick={() => onSelectSession(session.id)}
-                title={session.name ? `${session.name} (${session.id})` : session.id}
-              >
-                <span className="session-drawer-session-label">{session.name || session.id}</span>
-                {session.name && <span className="session-drawer-session-id">{session.id}</span>}
-              </button>
-              <SessionContextMenu
-                open={openMenuId === session.id}
-                onToggle={() => {
-                  setPointerPosition(null);
-                  setOpenMenuId((cur) => (cur === session.id ? null : session.id));
-                }}
-                onClose={() => {
-                  setOpenMenuId(null);
-                  setPointerPosition(null);
-                }}
-                triggerLabel={t('sessions.session_menu')}
-                items={[
-                  {
-                    key: 'rename',
-                    label: t('sessions.rename_session'),
-                    icon: <PencilSquare size={14} />,
-                    onClick: () => onRenameSession(session.id),
-                  },
-                  {
-                    key: 'copy-link',
-                    label: t('sessions.copy_link'),
-                    icon: <Link45deg size={16} />,
-                    onClick: () => onCopySessionLink?.(session.id),
-                  },
-                  // Only the session this browser is live on can receive pulses,
-                  // so the trigger URL is offered on the current session only.
-                  ...(session.id === currentSessionId && onCopyTriggerUrl
-                    ? [
-                        {
-                          key: 'copy-trigger-url',
-                          label: t('sessions.copy_trigger_url'),
-                          icon: <BroadcastPin size={15} />,
-                          onClick: () => onCopyTriggerUrl(session.id),
-                        },
-                      ]
-                    : []),
-                  {
-                    key: 'delete',
-                    label: t('sessions.delete_session'),
-                    icon: <Trash size={14} />,
-                    danger: true,
-                    onClick: () => onDeleteSession?.(session.id),
-                  },
-                ]}
-                pointerPosition={openMenuId === session.id ? pointerPosition : null}
-              />
-            </div>
+              {(consumeClick) => (
+                <>
+                  <button
+                    className="session-drawer-session-name"
+                    onClick={(e) => {
+                      if (consumeClick(e)) return;
+                      onSelectSession(session.id);
+                    }}
+                    title={session.name ? `${session.name} (${session.id})` : session.id}
+                  >
+                    <span className="session-drawer-session-label">
+                      {session.name || session.id}
+                    </span>
+                    {session.name && (
+                      <span className="session-drawer-session-id">{session.id}</span>
+                    )}
+                  </button>
+                  <SessionContextMenu
+                    open={openMenuId === session.id}
+                    onToggle={() => {
+                      setPointerPosition(null);
+                      setOpenMenuId((cur) => (cur === session.id ? null : session.id));
+                    }}
+                    onClose={() => {
+                      setOpenMenuId(null);
+                      setPointerPosition(null);
+                    }}
+                    triggerLabel={t('sessions.session_menu')}
+                    items={[
+                      {
+                        key: 'rename',
+                        label: t('sessions.rename_session'),
+                        icon: <PencilSquare size={14} />,
+                        onClick: () => onRenameSession(session.id),
+                      },
+                      {
+                        key: 'copy-link',
+                        label: t('sessions.copy_link'),
+                        icon: <Link45deg size={16} />,
+                        onClick: () => onCopySessionLink?.(session.id),
+                      },
+                      // Only the session this browser is live on can receive pulses,
+                      // so the trigger URL is offered on the current session only.
+                      ...(session.id === currentSessionId && onCopyTriggerUrl
+                        ? [
+                            {
+                              key: 'copy-trigger-url',
+                              label: t('sessions.copy_trigger_url'),
+                              icon: <BroadcastPin size={15} />,
+                              onClick: () => onCopyTriggerUrl(session.id),
+                            },
+                          ]
+                        : []),
+                      {
+                        key: 'delete',
+                        label: t('sessions.delete_session'),
+                        icon: <Trash size={14} />,
+                        danger: true,
+                        onClick: () => onDeleteSession?.(session.id),
+                      },
+                    ]}
+                    pointerPosition={openMenuId === session.id ? pointerPosition : null}
+                  />
+                </>
+              )}
+            </SessionRow>
           ))}
         </div>
 

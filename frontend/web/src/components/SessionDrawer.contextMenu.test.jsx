@@ -3,10 +3,48 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import SessionDrawer from './SessionDrawer';
+import SessionContextMenu from './SessionContextMenu';
 
-// --- Helpers ---
+if (typeof window.PointerEvent === 'undefined') {
+  window.PointerEvent = class PointerEvent extends window.Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId || 0;
+      this.pointerType = init.pointerType || '';
+      this.isPrimary = init.isPrimary || false;
+      this.clientX = init.clientX || 0;
+      this.clientY = init.clientY || 0;
+      this.screenX = init.screenX || 0;
+      this.screenY = init.screenY || 0;
+    }
+  };
+}
+
+// jsdom has no layout; positioning tests use explicit geometry.
+const _nativeGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+
+beforeEach(() => {
+  setMobile(false);
+  vi.stubGlobal('innerWidth', 1024);
+  vi.stubGlobal('innerHeight', 768);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    if (this.getAttribute('role') === 'menu') {
+      return { x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 };
+    }
+    return _nativeGetBoundingClientRect.call(this);
+  });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(200);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(100);
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  document.body.innerHTML = '';
+});
 
 function makeMql(matches) {
   return {
@@ -20,7 +58,23 @@ function setMobile(isMobile) {
   window.matchMedia = vi.fn((query) => makeMql(query === '(max-width: 768px)' ? isMobile : false));
 }
 
+function dispatchPointer(el, type, opts = {}) {
+  act(() =>
+    el.dispatchEvent(
+      new window.PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerType: opts.pointerType || '',
+        clientX: opts.clientX ?? 0,
+        clientY: opts.clientY ?? 0,
+      })
+    )
+  );
+}
+
 function renderDrawer(props = {}) {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
   return render(
     <SessionDrawer
       open
@@ -36,14 +90,13 @@ function renderDrawer(props = {}) {
       onCopyTriggerUrl={vi.fn()}
       onOpenSettings={vi.fn()}
       {...props}
-    />
+    />,
+    { container }
   );
 }
 
-// --- Right-click on session row ---
-
 describe('SessionDrawer — right-click opens the context menu', () => {
-  it.each(['abc-123', 'def-456'])('anchors the kebab menu after closing a pointer menu and opening session %s', (sessionId) => {
+  it('anchors the kebab menu after closing a pointer menu and opening session abc-123', () => {
     renderDrawer({
       sessions: [
         { id: 'abc-123', name: 'Test session' },
@@ -60,46 +113,31 @@ describe('SessionDrawer — right-click opens the context menu', () => {
     expect(screen.queryByRole('menu')).toBeNull();
     expect(triggers[0]).toHaveAttribute('aria-expanded', 'false');
 
-    const trigger = triggers[sessionId === 'abc-123' ? 0 : 1];
+    const trigger = triggers[0];
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      x: 40,
+      y: 60,
+      width: 20,
+      height: 35,
+    });
     fireEvent.click(trigger);
     const menu = screen.getByRole('menu');
     expect(trigger).toHaveAttribute('aria-expanded', 'true');
     expect(menu).not.toHaveClass('pointer-triggered');
-    expect(menu.style.left).toBe('');
-    expect(menu.style.right).toBe('');
-    expect(menu.style.top).toBe('');
+    expect(menu.style.left).toBe('40px');
+    expect(menu.style.top).toBe('95px');
   });
 
-  it('prevents the browser menu and opens the session menu at the pointer position', async () => {
+  it('flips to left-alignment when the pointer is near the right edge', async () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.contextMenu(sessionName, {
-      clientX: 100,
-      clientY: 200,
-      button: 2,
-    });
-
-    // The dropdown should appear with fixed positioning
-    const dropdown = await waitFor(() => screen.getByRole('menu', { hidden: true }));
-    expect(dropdown).toHaveClass('pointer-triggered');
-    expect(dropdown.style.left).toBe('100px');
-    expect(dropdown.style.top).toBe('200px');
-  });
-
-  it('flips to right-alignment when the pointer is near the right edge', async () => {
-    renderDrawer();
-    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
-
-    // Set a small viewport width so that the 450px coordinate is near the edge
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       value: 500,
       writable: true,
     });
 
-    // Spy on getBoundingClientRect so the menu reports as 200px wide.
-    // The positioning effect reads rect.width, rect.x and rect.right.
     const bcSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
     bcSpy.mockReturnValue({
       width: 200,
@@ -113,20 +151,21 @@ describe('SessionDrawer — right-click opens the context menu', () => {
       toJSON: () => ({}),
     });
 
-    // Right-click near the right edge.
-    fireEvent.contextMenu(sessionName, {
-      clientX: 450,
-      clientY: 100,
-      button: 2,
-    });
+    try {
+      fireEvent.contextMenu(sessionName, {
+        clientX: 450,
+        clientY: 100,
+        button: 2,
+      });
 
-    const menuEl = await waitFor(() => screen.getByRole('menu', { hidden: true }));
+      const menuEl = await waitFor(() => screen.getByRole('menu', { hidden: true }));
 
-    expect(menuEl.style.right).toBeTruthy();
-    expect(menuEl.style.left).toBe('');
-
-    bcSpy.mockRestore();
-    delete window.innerWidth;
+      expect(menuEl.style.left).toBe('250px');
+      expect(menuEl.style.top).toBe('100px');
+      expect(menuEl.style.right).toBe('');
+    } finally {
+      bcSpy.mockRestore();
+    }
   });
 
   it('opens the menu with the same items as the kebab button', () => {
@@ -135,10 +174,6 @@ describe('SessionDrawer — right-click opens the context menu', () => {
 
     fireEvent.contextMenu(sessionName, { clientX: 100, clientY: 100, button: 2 });
 
-    // Rename and Copy link are always present.
-    // Copy trigger URL appears because this session is currentSessionId
-    // and onCopyTriggerUrl is provided.
-    // Delete is always present.
     const items = screen.getAllByRole('menuitem');
     const labels = items.map((el) => el.textContent);
     expect(labels).toContain('Name session');
@@ -164,13 +199,60 @@ describe('SessionDrawer — right-click opens the context menu', () => {
     fireEvent.contextMenu(sessionName, { clientX: 100, clientY: 100, button: 2 });
     await waitFor(() => screen.getByRole('menu', { hidden: true }));
 
-    // The context menu uses mousedown (not click) to detect outside clicks.
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Close menu' }));
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Close menu' }));
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
 
-// --- Long press on touch devices ---
+describe('SessionDrawer — right-click opens the context menu (def-456)', () => {
+  it('anchors the kebab menu after closing a pointer menu and opening session def-456', async () => {
+    renderDrawer({
+      sessions: [
+        { id: 'abc-123', name: 'Test session' },
+        { id: 'def-456', name: 'Other session' },
+      ],
+    });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+    const triggers = screen.getAllByRole('button', { name: 'Session actions' });
+
+    fireEvent.contextMenu(sessionName, { clientX: 100, clientY: 200, button: 2 });
+    expect(screen.getByRole('menu')).toHaveClass('pointer-triggered');
+
+    fireEvent.click(triggers[0]);
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(triggers[0]).toHaveAttribute('aria-expanded', 'false');
+
+    const trigger = triggers[1];
+    fireEvent.click(trigger);
+    await waitFor(() => {
+      const menu = screen.getByRole('menu');
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      expect(menu).not.toHaveClass('pointer-triggered');
+      expect(menu.style.left).toBeTruthy();
+      expect(menu.style.top).toBeTruthy();
+    });
+  });
+});
+
+describe('SessionDrawer — right-click opens the context menu (prevent browser)', () => {
+  it('prevents the browser menu and opens the session menu at the pointer position', async () => {
+    renderDrawer();
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    expect(
+      fireEvent.contextMenu(sessionName, {
+        clientX: 100,
+        clientY: 200,
+        button: 2,
+      })
+    ).toBe(false);
+
+    const dropdown = await waitFor(() => screen.getByRole('menu', { hidden: true }));
+    expect(dropdown).toHaveClass('pointer-triggered');
+    expect(dropdown.style.left).toBe('100px');
+    expect(dropdown.style.top).toBe('200px');
+  });
+});
 
 describe('SessionDrawer — long press on touch', () => {
   beforeEach(() => {
@@ -178,15 +260,11 @@ describe('SessionDrawer — long press on touch', () => {
     setMobile(true);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it('opens the menu after ~500 ms of continuous touch', async () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
       vi.advanceTimersByTime(500);
     });
@@ -200,31 +278,33 @@ describe('SessionDrawer — long press on touch', () => {
     renderDrawer({ onClose, onSelectSession });
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(500));
-    fireEvent.touchEnd(sessionName);
-    fireEvent.mouseDown(sessionName, { detail: 1 });
-    fireEvent.click(sessionName, { detail: 1 });
+    dispatchPointer(sessionName, 'pointerup');
 
     expect(screen.getByRole('menu')).toBeVisible();
     expect(onSelectSession).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
 
-    // A new tap and keyboard activation still select the session normally.
-    fireEvent.touchStart(sessionName);
-    fireEvent.touchEnd(sessionName);
-    fireEvent.click(sessionName, { detail: 1 });
+    fireEvent.click(sessionName);
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('menu')).toBeVisible();
+
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(10));
+    dispatchPointer(sessionName, 'pointerup');
     fireEvent.click(sessionName, { detail: 0 });
-    expect(onSelectSession).toHaveBeenCalledTimes(2);
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
   });
 
   it('cancels a pending long press when the browser cancels the touch', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     act(() => vi.advanceTimersByTime(250));
-    fireEvent.touchCancel(sessionName);
+    dispatchPointer(sessionName, 'pointercancel');
     act(() => vi.advanceTimersByTime(1000));
 
     expect(screen.queryByRole('menu')).toBeNull();
@@ -233,46 +313,93 @@ describe('SessionDrawer — long press on touch', () => {
   it('allows a mouse click on the original target after a fired long press is cancelled', () => {
     const onSelectSession = vi.fn();
     renderDrawer({ onSelectSession });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(name, 'pointercancel');
+    dispatchPointer(name, 'pointerdown', { pointerType: 'mouse' });
+    fireEvent.click(name);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+  });
+
+  it('does not open when the pointer is not touch or pen', () => {
+    renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'mouse' });
     act(() => vi.advanceTimersByTime(500));
-    fireEvent.touchCancel(sessionName);
-    expect(screen.getByRole('menu')).toBeVisible();
 
-    fireEvent.mouseDown(sessionName, { detail: 1 });
     expect(screen.queryByRole('menu')).toBeNull();
-    fireEvent.click(sessionName, { detail: 1 });
-    expect(onSelectSession).toHaveBeenCalledTimes(1);
   });
 
   it('does not open when the touch is shorter than 500 ms', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
-    fireEvent.touchEnd(sessionName);
-    // No timer advancement — the 500 ms timer never fires
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    dispatchPointer(sessionName, 'pointerup');
 
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
-  it('cancels if the finger moves before 500 ms', () => {
+  it('cancels if the finger moves beyond ~10 px before 500 ms', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
-    fireEvent.touchMove(sessionName);
-    // Timer was cleared by touchMove
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch', clientX: 0, clientY: 0 });
+    dispatchPointer(sessionName, 'pointermove', { clientX: 15, clientY: 0 });
+    act(() => vi.advanceTimersByTime(1000));
 
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it.each(['pointerup', 'pointerleave'])('%s cancels the timer permanently', (type) => {
+    renderDrawer();
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    dispatchPointer(name, 'pointerdown', { pointerType: 'pen' });
+    act(() => vi.advanceTimersByTime(250));
+    if (type === 'pointerleave') fireEvent.pointerOut(name, { relatedTarget: document.body });
+    else dispatchPointer(name, type);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('clears a pending row timer on unmount', () => {
+    const { unmount } = renderDrawer();
+    const baselineTimers = vi.getTimerCount();
+    dispatchPointer(screen.getByRole('button', { name: 'Test session abc-123' }), 'pointerdown', {
+      pointerType: 'touch',
+    });
+    expect(vi.getTimerCount()).toBeGreaterThan(baselineTimers);
+    unmount();
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(baselineTimers);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('suppresses a release on the row and clears stale suppression on any new pointerdown', () => {
+    const onSelectSession = vi.fn();
+    renderDrawer({ onSelectSession });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    const row = name.closest('.session-drawer-session');
+    dispatchPointer(row, 'pointerdown', { pointerType: 'pen' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(row, 'pointerup');
+    fireEvent.mouseDown(row); // Compatibility events from release must leave the menu open.
+    expect(fireEvent.click(row)).toBe(false);
+    expect(screen.getByRole('menu')).toBeVisible();
+    dispatchPointer(name, 'pointerdown', { pointerType: 'pen' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(document.body, 'pointerdown', { pointerType: 'mouse' });
+    fireEvent.click(name);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
   });
 
   it('closes on Escape', async () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
       vi.advanceTimersByTime(500);
     });
@@ -286,25 +413,76 @@ describe('SessionDrawer — long press on touch', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
 
-    fireEvent.touchStart(sessionName);
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
     await act(async () => {
       vi.advanceTimersByTime(500);
     });
     expect(screen.queryByRole('menu')).toBeTruthy();
 
-    // The context menu uses mousedown to detect outside clicks.
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Close menu' }));
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Close menu' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('following click does not select the session after a long press', () => {
+    const onSelectSession = vi.fn();
+    renderDrawer({ onSelectSession });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(sessionName, 'pointerup');
+    const bubbled = vi.fn();
+    document.addEventListener('click', bubbled);
+    try {
+      expect(fireEvent.click(sessionName)).toBe(false);
+      expect(bubbled).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener('click', bubbled);
+    }
+    expect(screen.getByRole('menu')).toBeVisible();
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it('normal tap selects the session after a long press was suppressed', () => {
+    const onSelectSession = vi.fn();
+    renderDrawer({ onSelectSession });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(sessionName, 'pointerup');
+    expect(screen.getByRole('menu')).toBeVisible();
+
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    dispatchPointer(sessionName, 'pointerup');
+    fireEvent.click(sessionName, { detail: 0 });
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('outside click still closes the menu after a long press', async () => {
+    renderDrawer();
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    dispatchPointer(sessionName, 'pointerdown', { pointerType: 'touch' });
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByRole('menu')).toBeVisible();
+
+    const outside = screen.getByRole('button', { name: 'Close menu' });
+    dispatchPointer(outside, 'pointerdown', { pointerType: 'mouse' });
+    fireEvent.pointerDown(outside);
+    fireEvent.click(outside);
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.click(sessionName);
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
-
-// --- Right-click outside session rows (browser menu preserved) ---
 
 describe('SessionDrawer — context menu outside rows', () => {
   it('does not suppress the browser menu when right-clicking non-session elements', () => {
     renderDrawer();
 
-    // Right-click outside the drawer entirely — no handler will preventDefault.
     const outside = document.createElement('div');
     outside.id = 'outside-target';
     document.body.appendChild(outside);
@@ -321,10 +499,122 @@ describe('SessionDrawer — context menu outside rows', () => {
       button: 2,
     });
 
-    // No handler called preventDefault — the native browser menu is preserved.
     expect(caught).toEqual([false]);
 
     document.removeEventListener('contextmenu', handler, true);
     outside.remove();
+  });
+});
+
+describe('SessionContextMenu — positioning edge cases', () => {
+  function makeItems(overrides = {}) {
+    return [
+      { key: 'rename', label: 'Rename', onClick: vi.fn(), ...(overrides.rename || {}) },
+      { key: 'copy-link', label: 'Copy link', onClick: vi.fn(), ...(overrides.copyLink || {}) },
+      {
+        key: 'delete',
+        label: 'Delete',
+        danger: true,
+        onClick: vi.fn(),
+        ...(overrides.delete || {}),
+      },
+    ];
+  }
+
+  it('menu near the right edge stays inside the viewport', async () => {
+    const props = {
+      open: true,
+      onToggle: vi.fn(),
+      onClose: vi.fn(),
+      triggerLabel: 'Session actions',
+      items: makeItems(),
+    };
+    const { rerender } = render(<SessionContextMenu {...props} />);
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1024,
+      writable: true,
+    });
+    const vw = window.innerWidth;
+    const menu = screen.getByRole('menu');
+    const rectSpy = vi
+      .spyOn(menu, 'getBoundingClientRect')
+      .mockReturnValue({ width: 200, height: 100, x: 0, y: 0 });
+    try {
+      rerender(<SessionContextMenu {...props} pointerPosition={{ x: vw - 10, y: 80 }} />);
+      await act(async () => {
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
+      const freshMenu = screen.getByRole('menu');
+      expect(freshMenu.style.left).toBeTruthy();
+      expect(freshMenu.style.left).toBe(`${vw - 210}px`);
+      expect(freshMenu.style.top).toBe('80px');
+      expect(parseFloat(freshMenu.style.left) + 200).toBeLessThanOrEqual(vw - 8);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('menu near the bottom edge stays inside the viewport', async () => {
+    const props = {
+      open: true,
+      onToggle: vi.fn(),
+      onClose: vi.fn(),
+      triggerLabel: 'Session actions',
+      items: makeItems(),
+    };
+    const { rerender } = render(<SessionContextMenu {...props} />);
+    const vh = window.innerHeight;
+    const menu = screen.getByRole('menu');
+    const rectSpy = vi
+      .spyOn(menu, 'getBoundingClientRect')
+      .mockReturnValue({ width: 200, height: 100, x: 0, y: 0 });
+    try {
+      rerender(<SessionContextMenu {...props} pointerPosition={{ x: 100, y: vh - 10 }} />);
+      await waitFor(() => {
+        expect(screen.getByRole('menu').style.top).toBeTruthy();
+      });
+      const freshMenu = screen.getByRole('menu');
+      expect(freshMenu.style.top).toBe(`${vh - 110}px`);
+      expect(parseFloat(freshMenu.style.top)).toBeLessThanOrEqual(vh - 108); // viewport - height - 8px margin
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('kebab after a right-click uses the button anchor', async () => {
+    const props = {
+      open: true,
+      onToggle: vi.fn(),
+      onClose: vi.fn(),
+      triggerLabel: 'Session actions',
+      items: makeItems(),
+    };
+    const { rerender } = render(
+      <SessionContextMenu {...props} pointerPosition={{ x: 100, y: 100 }} />
+    );
+    const menu = screen.getByRole('menu');
+    const rectSpy = vi
+      .spyOn(menu, 'getBoundingClientRect')
+      .mockReturnValue({ width: 200, height: 100, x: 0, y: 0 });
+    try {
+      rerender(
+        <SessionContextMenu
+          {...props}
+          pointerPosition={{ x: 100, y: 100 }}
+          kebabAnchor={{ x: 300, y: 50, width: 20, height: 35 }}
+        />
+      );
+      await waitFor(() => {
+        const m = screen.getByRole('menu');
+        expect(m.style.left).toBeTruthy();
+      });
+      const freshMenu = await screen.findByRole('menu');
+      expect(freshMenu.style.left).toBe('300px');
+      expect(freshMenu.style.top).toBe('85px');
+      expect(freshMenu).not.toHaveClass('pointer-triggered');
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 });
