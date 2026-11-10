@@ -196,6 +196,8 @@
       "annotation_updated_generic": "Uppdaterade {type}",
       "node_moved": "Flyttade \"{name}\"",
       "layout_applied": "Ordnade om {count} nod(er)",
+      "nodes_added": "Lade till {count} nod(er)",
+      "nodes_removed": "Tog bort {count} nod(er)",
       "nodes_hidden": "Dolde {count} nod(er)",
       "nodes_shown": "Visade {count} nod(er)",
       "nodes_dimmed": "Tonade ned {count} nod(er)",

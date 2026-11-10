@@ -3900,6 +3900,9 @@ _MCP_BUCKET_WRITES = {
     "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
         sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
     ),
+    "describe_session_sync": lambda mgr, sid, i, label: mgr.describe_session_sync(
+        sid, f"brief-{i}", client_id="mcp-agent", rate_limit_label=label
+    ),
     "delete_session_sync": lambda mgr, sid, i, label: _delete_existing_session(
         mgr, sid, label
     ),

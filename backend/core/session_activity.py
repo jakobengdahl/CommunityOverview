@@ -64,9 +64,12 @@ UNDOABLE_OPS = frozenset(
 
 
 # Ops recorded in the activity log with no inverse: what happened to the
-# session's staged changes (docs/SESSION_OVERLAY_CONTRACT.md §12). Never
-# offered for undo - a discard or a merge is not reversed by a session op.
-RECORDED_ONLY_OPS = frozenset({"graph_changes_discarded", "graph_changes_merged"})
+# session's staged changes (docs/SESSION_OVERLAY_CONTRACT.md §12), and who
+# added or removed which nodes. Never offered for undo - a discard or a merge
+# is not reversed by a session op, and node add/remove is out of scope above.
+RECORDED_ONLY_OPS = frozenset(
+    {"graph_changes_discarded", "graph_changes_merged", "nodes_added", "nodes_removed"}
+)
 
 
 def _now_iso() -> str:

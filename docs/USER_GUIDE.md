@@ -923,12 +923,17 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
+Each entry names its `actor`, so an agent joining a session can tell who added,
+removed or moved which nodes. A session can also carry a **description** — what it
+is for and what the next participant should pick up — set with the MCP
+`describe_visualization_session` tool and returned with the session; clearing the
+canvas keeps it.
 
 
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,
-node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
+nodes added to or removed from the canvas (shown, not undoable), node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
 changes — with undo) and **Graph** (a read-only log of
 everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears

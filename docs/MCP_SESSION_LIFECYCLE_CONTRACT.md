@@ -44,6 +44,7 @@ their default in the open core; the SaaS layer populates them.
 |---|---|---|
 | `session_id` | string | Stable identity, `DDDD-DDDD-DDDD-DDDD` (legacy `DDDD-DDDD` still resolves). The id, never the name, is the identity. |
 | `name` | string \| null | Free-text display name. **Non-unique** (§4). |
+| `description` | string \| null | What the session is for, what has been done and what the next participant should pick up. Session metadata, not canvas state: `clear_visualization` keeps it. |
 | `lifecycle_state` | enum | `active` in the open core. *(reserved)* values `expired`, `deleted` are defined for the SaaS layer; core never emits them. |
 | `owner` | string \| null | *(reserved)* Optional actor/owner identifier. `null` in the anonymous open core (§7). |
 | `workspace` | string \| null | *(reserved)* Optional workspace/tenant identifier. `null` in the open core. |
@@ -72,6 +73,7 @@ session endpoints (`POST/GET/PATCH/DELETE /sessions`, see
 | **list** | Return session projections the caller is authorized to see, newest-`updated_at` first. In the open core this is all sessions; the SaaS layer scopes it to the caller's workspace. |
 | **get / inspect** | Return one session's projection by `session_id`. `404`-equivalent when absent. |
 | **rename** | Set/clear the `name`. Get-or-create semantics (as REST `PATCH`): renaming an id that only exists client-side materialises it rather than failing, so the name is not lost when the session later saves (see `MULTI_USER_SESSIONS_DESIGN.md` R7/R8). Last-write-wins (§4). |
+| **describe** | Set/clear the `description`, with the same get-or-create and last-write-wins semantics as rename, routed as a `session_described` state op. |
 | **delete** | **Confirmed hard delete** (§6). Requires explicit confirmation; enforces authorization; emits an audit event; broadcasts `session_deleted` to connected clients. No recovery in the open core. |
 
 Every operation runs through the authorization seam (§7) and, for mutations,

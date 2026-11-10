@@ -300,9 +300,28 @@ class TestSessionStoreActivityIntegration:
         session = store.create()
         store.apply_state_op(
             session,
-            {"op": "nodes_added", "node_ids": ["n1"], "client_id": "actor-1"},
+            {"op": "edges_hidden", "edge_ids": ["e1"], "client_id": "actor-1"},
         )
         assert session.activity_log == []
+
+    def test_node_add_and_remove_name_their_actor_and_are_never_undoable(self):
+        """Only ids that actually changed are recorded; a no-op records nothing."""
+        store = _store()
+        session = store.create()
+        for op in (
+            {"op": "nodes_added", "node_ids": ["n1", "n2"], "client_id": "a1"},
+            {"op": "nodes_added", "node_ids": ["n2", "n3"], "client_id": "a2"},
+            {"op": "nodes_added", "node_ids": ["n3"], "client_id": "a2"},
+            {"op": "nodes_removed", "node_ids": ["n1", "gone"], "client_id": "a2"},
+        ):
+            store.apply_state_op(session, op)
+        assert [(r["op"], r["actor"], r["affected"]) for r in session.activity_log] == [
+            ("nodes_added", "a1", {"kind": "node_refs", "ids": ["n1", "n2"]}),
+            ("nodes_added", "a2", {"kind": "node_refs", "ids": ["n3"]}),
+            ("nodes_removed", "a2", {"kind": "node_refs", "ids": ["n1"]}),
+        ]
+        assert store.find_latest_undoable(session, "a1") is None
+        assert store.find_latest_undoable(session, "a2") is None
 
     def test_retention_trims_by_max_records(self):
         store = _store(max_activity_records=3, ring_size=50)

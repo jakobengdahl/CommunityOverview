@@ -1179,6 +1179,36 @@ class SessionManager:
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
+    def describe_session_sync(
+        self,
+        session_id: str,
+        description: Optional[str],
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> Session:
+        """Set or clear a session's description, as ``rename_session_sync``
+        sets its name: a ``session_described`` op applied inline, refused with
+        ``LayoutBusy`` while an ``apply_ops`` batch holds the lock.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        actor = client_id or "rest"
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
+        ):
+            raise RateLimited()
+        self.get_or_create(session_id)
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        session = self.store.get(session_id)
+        if session is None:
+            raise SessionNotFound()
+
+        op = {"op": "session_described", "description": description, "client_id": actor}
+        self._apply_op_sync(session, session_id, actor, op)
+        return session
+
     def delete_session_sync(
         self,
         session_id: str,
@@ -1336,6 +1366,7 @@ class SessionManager:
             saved_state = copy.deepcopy(session.state)
             saved_seq = session.seq
             saved_name = session.name
+            saved_description = session.description
             saved_updated_at = session.updated_at
             saved_activity_log = list(session.activity_log)
             saved_deleted_ids = list(session._deleted_annotation_ids)
@@ -1439,6 +1470,7 @@ class SessionManager:
                 session.state = saved_state
                 session.seq = saved_seq
                 session.name = saved_name
+                session.description = saved_description
                 session.updated_at = saved_updated_at
                 session.activity_log = saved_activity_log
                 _restore_deleted_ids(session, saved_deleted_ids)
@@ -2436,7 +2468,8 @@ class SessionManager:
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
         name, seq and ring untouched — mirroring apply_ops' all-or-nothing
-        guarantee (``session_renamed`` writes ``session.name``, not the state).
+        guarantee (``session_renamed``/``session_described`` write the session's
+        name/description, not the state).
         Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
@@ -2452,6 +2485,7 @@ class SessionManager:
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
         saved_name = session.name
+        saved_description = session.description
         saved_updated_at = session.updated_at
         # Shallow, as in apply_ops: an op only appends to and prunes the log.
         saved_activity_log = list(session.activity_log)
@@ -2471,6 +2505,7 @@ class SessionManager:
             session.state = saved_state
             session.seq = saved_seq
             session.name = saved_name
+            session.description = saved_description
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
             _restore_deleted_ids(session, saved_deleted_ids)

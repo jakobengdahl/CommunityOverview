@@ -70,6 +70,7 @@ _ANNOTATION_TYPES = {
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
+MAX_SESSION_DESCRIPTION_CHARS = 4000
 
 # Per-annotation versioning (task-smallfix-whole-annotation-clobber-on-
 # concurrent-different-field-edit / dec-annotation-field-patches-and-
@@ -110,6 +111,7 @@ STATE_OPS = {
     "annotation_deleted",
     "group_membership_changed",
     "session_renamed",
+    "session_described",
     "layout_applied",
     # docs/SESSION_OVERLAY_CONTRACT.md §15. Sequenced and fanned out like any
     # other op, but emitted only by the server, after the layer store or the
@@ -237,6 +239,9 @@ class Session:
 
     id: str
     name: Optional[str] = None
+    # What the session is for and what the next participant should pick up.
+    # Session metadata like the name, so clearing the canvas keeps it.
+    description: Optional[str] = None
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
@@ -270,6 +275,7 @@ class Session:
         return {
             "id": self.id,
             "name": self.name,
+            "description": self.description,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
@@ -283,6 +289,7 @@ class Session:
         return {
             "id": self.id,
             "name": self.name,
+            "description": self.description,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
@@ -299,6 +306,11 @@ class Session:
         return cls(
             id=data["id"],
             name=data.get("name"),
+            description=(
+                data.get("description")
+                if isinstance(data.get("description"), str)
+                else None
+            ),
             created_at=data.get("created_at") or _now_iso(),
             updated_at=data.get("updated_at") or _now_iso(),
             seq=int(data.get("seq") or 0),
@@ -858,12 +870,28 @@ class SessionStore:
         activity_kwargs: Optional[Dict[str, Any]] = None
 
         if op_type == "nodes_added":
-            state["node_refs"] = _union(
-                state["node_refs"], _require_id_list(op, "node_ids")
-            )
+            requested = _require_id_list(op, "node_ids")
+            present = set(state["node_refs"])
+            newly_added = sorted({i for i in requested if i not in present})
+            state["node_refs"] = _union(state["node_refs"], requested)
+            if newly_added:
+                activity_kwargs = {
+                    "affected": {"kind": "node_refs", "ids": newly_added},
+                    "before": None,
+                    "after": newly_added,
+                    "inverse_op": None,
+                }
         elif op_type == "nodes_removed":
             removals = _require_id_list(op, "node_ids")
             drop = set(removals)
+            actually_removed = sorted(drop.intersection(state["node_refs"]))
+            if actually_removed:
+                activity_kwargs = {
+                    "affected": {"kind": "node_refs", "ids": actually_removed},
+                    "before": actually_removed,
+                    "after": None,
+                    "inverse_op": None,
+                }
             state["node_refs"] = _remove_all(state["node_refs"], removals)
             state["positions"] = {
                 k: v for k, v in state["positions"].items() if k not in drop
@@ -1257,6 +1285,20 @@ class SessionStore:
             if name is not None and not isinstance(name, str):
                 raise OpError("session_renamed 'name' must be a string or null")
             session.name = name
+        elif op_type == "session_described":
+            description = op.get("description")
+            if description is not None and not isinstance(description, str):
+                raise OpError(
+                    "session_described 'description' must be a string or null"
+                )
+            if description is not None and len(description) > (
+                MAX_SESSION_DESCRIPTION_CHARS
+            ):
+                raise OpError(
+                    "session description exceeds "
+                    f"{MAX_SESSION_DESCRIPTION_CHARS} characters"
+                )
+            session.description = description
         elif op_type == "graph_change_staged":
             # The layer itself lives in the graph backend; the op carries
             # what changed in it, for every participant's composed view.
