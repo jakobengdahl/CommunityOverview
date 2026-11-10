@@ -924,9 +924,13 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
 Each entry names its `actor`, so an agent joining a session can tell which
-browser participant added, removed or moved which nodes. Every MCP agent is
-recorded under the same `mcp-agent` actor, so the log tells agent changes apart
-from browser ones but not one agent from another. When the log is full, the
+browser participant added, removed or moved which nodes. Nodes an agent writes
+to the session itself (`add_nodes_to_session`, `remove_nodes_from_session`) are
+recorded under the shared `mcp-agent` actor, which tells them apart from browser
+changes but not one agent from another. Nodes an agent only sends to the open
+canvases — a session auto-add agent, or a tool called with
+`visualization_session_id` — are added by each browser that applies them, so
+they are recorded under that browser participant, not as an agent change. When the log is full, the
 oldest node add/remove entries are dropped first, so undoable history is kept
 longer; the newest entry is always kept, so the latest node change is still
 recorded. A session can also carry a **description** — what it

@@ -1311,3 +1311,24 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
     # Guards the enumeration itself: a tightened precondition that silently
     # skipped every state would otherwise pass vacuously.
     assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_add_is_attributed_to_the_browser_that_applies_it(wired):
+    """Only a stored-state write is recorded as ``mcp-agent``; a pushed add
+    records nothing itself, so its node record names the applying browser."""
+    tools, _registry, manager = wired
+    session_id = _new_session(tools)
+    assert _search(tools, session_id)["visualization_delivery"]["requested"]
+    session = manager.store.get(session_id)
+    assert session.activity_log == []
+    assert session.state["node_refs"] == []
+
+    await manager.apply_ops(
+        session_id, "browser-1", None, [{"op": "nodes_added", "node_ids": ["alpha"]}]
+    )
+    tools["add_nodes_to_session"](session_id=session_id, node_ids=["beta"])
+    assert [(r["actor"], r["affected"]["ids"]) for r in session.activity_log] == [
+        ("browser-1", ["alpha"]),
+        ("mcp-agent", ["beta"]),
+    ]
