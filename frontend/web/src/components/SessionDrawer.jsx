@@ -80,7 +80,10 @@ function SessionRow({ children, onOpenMenu, ...props }) {
           cancel();
       }}
       onPointerUp={cancel}
-      onPointerCancel={cancel}
+      onPointerCancel={() => {
+        suppressNextClick.current = false;
+        cancel();
+      }}
       onPointerLeave={cancel}
     >
       {children(consumeClick)}

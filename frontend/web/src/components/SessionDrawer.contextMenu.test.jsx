@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import SessionDrawer from './SessionDrawer';
 import SessionContextMenu from './SessionContextMenu';
+import { readFileSync } from 'node:fs';
 
 if (typeof window.PointerEvent === 'undefined') {
   window.PointerEvent = class PointerEvent extends window.Event {
@@ -322,6 +323,26 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledWith('abc-123');
   });
 
+  it('allows keyboard selection after a fired long press is cancelled', () => {
+    const onSelectSession = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSelectSession, onClose });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(name, 'pointercancel');
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByRole('menu')).toBeVisible();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    name.focus();
+    fireEvent.keyDown(name, { key: 'Enter' });
+    fireEvent.click(name, { detail: 0 });
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+  });
+
   it('does not open when the pointer is not touch or pen', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
@@ -520,6 +541,41 @@ describe('SessionContextMenu — positioning edge cases', () => {
       },
     ];
   }
+
+  it('allows the menu minimum width to shrink below 170px on narrow viewports', () => {
+    // jsdom does not perform CSS layout; check the sizing rule directly.
+    const menuCss = readFileSync(new URL('./SessionContextMenu.css', import.meta.url), 'utf8');
+    const dropdown = menuCss.match(/\.session-context-menu-dropdown\s*\{([^}]+)\}/)[1];
+    expect(dropdown).toMatch(/min-width:\s*min\(170px, calc\(100vw - 16px\)\)/);
+    expect(dropdown).toMatch(/max-width:\s*calc\(100vw - 16px\)/);
+  });
+
+  it.each(['resize', 'orientationchange'])(
+    'repositions an open menu on %s and uses a fresh anchor',
+    (event) => {
+      renderDrawer();
+      const name = screen.getByRole('button', { name: 'Test session abc-123' });
+      fireEvent.contextMenu(name, { clientX: 900, clientY: 650 });
+      const menu = screen.getByRole('menu');
+      expect(menu.style.left).toBe('700px');
+      expect(menu.style.top).toBe('650px');
+
+      vi.stubGlobal('innerWidth', 320);
+      vi.stubGlobal('innerHeight', 240);
+      fireEvent(window, new Event(event));
+      expect(menu.style.left).toBe('112px');
+      expect(menu.style.top).toBe('132px');
+
+      fireEvent.contextMenu(name, { clientX: 30, clientY: 40 });
+      expect(menu.style.left).toBe('30px');
+      expect(menu.style.top).toBe('40px');
+      vi.stubGlobal('innerWidth', 1024);
+      vi.stubGlobal('innerHeight', 768);
+      fireEvent(window, new Event(event));
+      expect(menu.style.left).toBe('30px');
+      expect(menu.style.top).toBe('40px');
+    }
+  );
 
   it('menu near the right edge stays inside the viewport', async () => {
     const props = {

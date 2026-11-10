@@ -65,25 +65,34 @@ function SessionContextMenu({
     if (!open) return;
     const menu = rootRef.current?.querySelector('.session-context-menu-dropdown');
     if (!menu) return;
-    const button = kebabAnchor || rootRef.current.querySelector('button').getBoundingClientRect();
-    const anchor =
-      kebabAnchor || !pointerPosition
-        ? {
-            left: button.x,
-            right: button.x + button.width,
-            top: button.y,
-            bottom: button.y + button.height,
-          }
-        : {
-            left: pointerPosition.x,
-            right: pointerPosition.x,
-            top: pointerPosition.y,
-            bottom: pointerPosition.y,
-          };
-    const { width, height } = menu.getBoundingClientRect();
-    const position = positionMenu(anchor, width, height, window.innerWidth, window.innerHeight);
-    menu.style.left = `${position.left}px`;
-    menu.style.top = `${position.top}px`;
+    const updatePosition = () => {
+      const button = kebabAnchor || rootRef.current.querySelector('button').getBoundingClientRect();
+      const anchor =
+        kebabAnchor || !pointerPosition
+          ? {
+              left: button.x,
+              right: button.x + button.width,
+              top: button.y,
+              bottom: button.y + button.height,
+            }
+          : {
+              left: pointerPosition.x,
+              right: pointerPosition.x,
+              top: pointerPosition.y,
+              bottom: pointerPosition.y,
+            };
+      const { width, height } = menu.getBoundingClientRect();
+      const position = positionMenu(anchor, width, height, window.innerWidth, window.innerHeight);
+      menu.style.left = `${position.left}px`;
+      menu.style.top = `${position.top}px`;
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('orientationchange', updatePosition);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('orientationchange', updatePosition);
+    };
   }, [open, pointerPosition, kebabAnchor]);
 
   return (
