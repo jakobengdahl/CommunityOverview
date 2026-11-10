@@ -24,15 +24,23 @@ function makeItems(overrides = {}) {
   ];
 }
 
+function makeMenuProps() {
+  return {
+    open: true,
+    onToggle: vi.fn(),
+    onClose: vi.fn(),
+    triggerLabel: 'Session actions',
+    items: makeItems(),
+  };
+}
+
+function renderMenu(props = {}) {
+  return render(<SessionContextMenu {...makeMenuProps()} {...props} />);
+}
+
 describe('SessionContextMenu', () => {
   it.each([100, 200, 800])('keeps a %ipx-tall pointer menu within the viewport', (height) => {
-    const props = {
-      open: true,
-      onToggle: vi.fn(),
-      onClose: vi.fn(),
-      triggerLabel: 'Session actions',
-      items: makeItems(),
-    };
+    const props = makeMenuProps();
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
     const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200, height });
@@ -52,13 +60,7 @@ describe('SessionContextMenu', () => {
     ['left to right', 100, -50],
     ['right to left', -50, 100],
   ])('always sets left when moving %s across the right edge', (_, firstOffset, nextOffset) => {
-    const props = {
-      open: true,
-      onToggle: vi.fn(),
-      onClose: vi.fn(),
-      triggerLabel: 'Session actions',
-      items: makeItems(),
-    };
+    const props = makeMenuProps();
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
     const rectSpy = vi
@@ -79,44 +81,20 @@ describe('SessionContextMenu', () => {
   });
 
   it('hides the item list until opened', () => {
-    render(
-      <SessionContextMenu
-        open={false}
-        onToggle={vi.fn()}
-        onClose={vi.fn()}
-        triggerLabel="Session actions"
-        items={makeItems()}
-      />
-    );
+    renderMenu({ open: false });
     expect(screen.getByLabelText('Session actions')).toBeTruthy();
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it('renders every action descriptor when open — the extension seam', () => {
-    render(
-      <SessionContextMenu
-        open
-        onToggle={vi.fn()}
-        onClose={vi.fn()}
-        triggerLabel="Session actions"
-        items={makeItems()}
-      />
-    );
+    renderMenu();
     const items = screen.getAllByRole('menuitem');
     expect(items.map((el) => el.textContent)).toEqual(['Rename', 'Copy link', 'Delete']);
   });
 
   it('toggling is delegated to the parent (single-open control)', () => {
     const onToggle = vi.fn();
-    render(
-      <SessionContextMenu
-        open={false}
-        onToggle={onToggle}
-        onClose={vi.fn()}
-        triggerLabel="Session actions"
-        items={makeItems()}
-      />
-    );
+    renderMenu({ open: false, onToggle });
     fireEvent.click(screen.getByLabelText('Session actions'));
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
@@ -124,15 +102,7 @@ describe('SessionContextMenu', () => {
   it('choosing an item closes the menu and runs its action', () => {
     const onClose = vi.fn();
     const copyLink = vi.fn();
-    render(
-      <SessionContextMenu
-        open
-        onToggle={vi.fn()}
-        onClose={onClose}
-        triggerLabel="Session actions"
-        items={makeItems({ copyLink: { onClick: copyLink } })}
-      />
-    );
+    renderMenu({ onClose, items: makeItems({ copyLink: { onClick: copyLink } }) });
     fireEvent.click(screen.getByText('Copy link'));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(copyLink).toHaveBeenCalledTimes(1);
@@ -142,13 +112,7 @@ describe('SessionContextMenu', () => {
     const onClose = vi.fn();
     render(
       <div>
-        <SessionContextMenu
-          open
-          onToggle={vi.fn()}
-          onClose={onClose}
-          triggerLabel="Session actions"
-          items={makeItems()}
-        />
+        <SessionContextMenu {...makeMenuProps()} onClose={onClose} />
         <button>elsewhere</button>
       </div>
     );
@@ -158,15 +122,7 @@ describe('SessionContextMenu', () => {
 
   it('a pointer down on the trigger does not count as outside', () => {
     const onClose = vi.fn();
-    render(
-      <SessionContextMenu
-        open
-        onToggle={vi.fn()}
-        onClose={onClose}
-        triggerLabel="Session actions"
-        items={makeItems()}
-      />
-    );
+    renderMenu({ onClose });
     fireEvent.pointerDown(screen.getByLabelText('Session actions'));
     expect(onClose).not.toHaveBeenCalled();
   });
