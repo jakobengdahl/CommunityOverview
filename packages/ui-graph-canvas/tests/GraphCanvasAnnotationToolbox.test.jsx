@@ -260,13 +260,13 @@ describe('GraphCanvas bottom annotation toolbox', () => {
   it('creates an icon annotation via the toolbox with the default icon and size', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^icon: check$/i }));
 
     placeOnPane();
 
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
-    expect(icon.data.icon).toBe('circle');
+    expect(icon.data.icon).toBe('check');
     // No `style` box (fixed intrinsic size) — geometry lives in `data.size`
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
@@ -436,16 +436,10 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(findCreatedNode('heatmap').zIndex).toBe(-1);
   });
 
-  it('creates a label annotation via the toolbox', () => {
+  it('does not offer label creation via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
-
-    placeOnPane();
-
-    const label = findCreatedNode('label');
-    expect(label).toBeTruthy();
-    expect(label.data.attachment).toBeUndefined();
+    expect(screen.queryByRole('button', { name: /^label$/i })).not.toBeInTheDocument();
   });
 
   it('honours a host-provided label override for i18n', () => {

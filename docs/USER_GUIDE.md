@@ -265,15 +265,21 @@ you open a shared board.
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
 
+The bottom annotation toolbar uses larger icons on desktop and mobile. The icon
+picker starts with Check and shows names on hover; icon tiles and voting-dot
+colour swatches have accessible names without visible captions. Label creation
+is no longer offered in the toolbar or canvas menu.
+
+Existing **labels** remain editable — a short free-floating text label. Double-click to edit, right-click to
+  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
+  another annotation and it snaps onto it (magnetic), staying attached as that target
+  moves; drag it away again to detach it, keeping wherever you dropped it.
+
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
 
 - **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
   right-click for a colour, to change the text size, to rotate it, or to delete it.
-- **Label** — a short free-floating text label. Double-click to edit, right-click to
-  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
-  another annotation and it snaps onto it (magnetic), staying attached as that target
-  moves; drag it away again to detach it, keeping wherever you dropped it.
 - **Arrow / line** — a connector you can position anywhere on the canvas. Right-click to
   recolour, toggle an arrowhead on either end (so it can be a plain line, a single arrow,
   or a double arrow), or delete. When selected, drag either endpoint; bring an endpoint

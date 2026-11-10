@@ -12,6 +12,8 @@
   max-width: 220px;
   max-height: min(360px, calc(100vh - 120px));
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
   overscroll-behavior: contain;
   padding: 8px;
   border-radius: 12px;
@@ -51,7 +53,7 @@
 }
 
 .tool-slot-picker-item-glyph {
-  font-size: 18px;
+  font-size: 28px;
   line-height: 1;
 }
 
@@ -105,4 +107,23 @@
 .freehand-options-swatch {
   min-width: 28px;
   padding: 0;
+}
+
+.tool-slot-picker::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tool-slot-picker::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tool-slot-picker::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 3px;
+}
+
+.tool-slot-picker-item-glyph .annotation-toolbox-icon-glyph {
+  width: 32px;
+  height: 32px;
+  font-size: 28px;
 }

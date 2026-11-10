@@ -143,7 +143,8 @@
 }
 
 .annotation-toolbox-item-glyph {
-  font-size: 20px;
+  transform: scale(1.2);
+  font-size: 24px;
   line-height: 1;
 }
 
@@ -375,8 +376,9 @@
   width: 17px;
   height: 11px;
   border-radius: 2px;
-  background: #fca5a5;
-  transform: rotate(-28deg);
+  border: 1.5px solid #f8fafc;
+  background: linear-gradient(90deg, #fca5a5 55%, #64748b 55%);
+  transform: rotate(-40deg);
 }
 
 .annotation-toolbox-visual--eraser::after {
