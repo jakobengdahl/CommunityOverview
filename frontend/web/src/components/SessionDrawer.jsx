@@ -36,13 +36,20 @@ function SessionRow({ children, onOpenMenu, ...props }) {
       suppressNextClick.current = false;
       cancel();
     };
+    const handleVisibilityChange = () => {
+      if (document.hidden) reset();
+    };
     document.addEventListener('pointerdown', reset, true);
     // Keyboard input starts a new interaction even if the touch release
     // produced no click. Escape must also discard any pending press.
     document.addEventListener('keydown', reset, true);
+    window.addEventListener('blur', reset);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       document.removeEventListener('pointerdown', reset, true);
       document.removeEventListener('keydown', reset, true);
+      window.removeEventListener('blur', reset);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       cancel();
     };
   }, [cancel]);

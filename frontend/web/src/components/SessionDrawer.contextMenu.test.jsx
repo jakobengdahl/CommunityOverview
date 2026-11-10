@@ -343,6 +343,50 @@ describe('SessionDrawer — long press on touch', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it.each(['blur', 'visibilitychange'])('cancels an interrupted press on %s and permits the next tap', (event) => {
+    const onSelectSession = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSelectSession, onClose });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(250));
+    if (event === 'visibilitychange') vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    fireEvent(event === 'blur' ? window : document, new Event(event));
+    // Returning to the page must not revive the interrupted press.
+    if (event === 'visibilitychange') {
+      vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+      fireEvent(document, new Event(event));
+    } else {
+      fireEvent.focus(window);
+    }
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    dispatchPointer(name, 'pointerup', { pointerType: 'touch' });
+    fireEvent.click(name);
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+  });
+
+  it.each(['blur', 'visibilitychange'])('clears release-click suppression on %s', (event) => {
+    const onSelectSession = vi.fn();
+    renderDrawer({ onSelectSession });
+    const name = screen.getByRole('button', { name: 'Test session abc-123' });
+    dispatchPointer(name, 'pointerdown', { pointerType: 'touch' });
+    act(() => vi.advanceTimersByTime(500));
+    expect(screen.getByRole('menu')).toBeVisible();
+
+    if (event === 'visibilitychange') vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    fireEvent(event === 'blur' ? window : document, new Event(event));
+    fireEvent.click(name, { detail: 0 });
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith('abc-123');
+  });
+
   it('allows a mouse click on the original target after a fired long press is cancelled', () => {
     const onSelectSession = vi.fn();
     renderDrawer({ onSelectSession });
