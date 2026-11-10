@@ -914,18 +914,9 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
-Each entry names its `actor`, so an agent joining a session can tell which
-browser participant added, removed or moved which nodes. Nodes an agent writes
-to the session itself (`add_nodes_to_session`, `remove_nodes_from_session`) are
-recorded under the shared `mcp-agent` actor, which tells them apart from browser
-changes but not one agent from another. Nodes an agent only sends to the open
-canvases — a session auto-add agent, or a tool called with
-`visualization_session_id` — are added by each open browser, and recorded once,
-under the browser participant whose change reached the server first, not as an
-agent change; the other browsers add nothing new, so they record nothing. When the log is full, the
-oldest node add/remove entries are dropped first, so undoable history is kept
-longer; the newest entry is always kept, so the latest node change is still
-recorded. A session can also carry a **description** — what it
+Adding or removing nodes is not recorded in this activity log.
+
+A session can also carry a **description** — what it
 is for and what the next participant should pick up — set with the MCP
 `describe_visualization_session` tool and returned with the session; clearing the
 canvas keeps it.
@@ -934,7 +925,7 @@ canvas keeps it.
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,
-nodes added to or removed from the canvas (shown, not undoable), node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
+node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
 changes — with undo) and **Graph** (a read-only log of
 everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears

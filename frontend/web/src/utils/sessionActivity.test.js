@@ -50,14 +50,6 @@ describe('describeActivity', () => {
     });
   });
 
-  it.each(['nodes_added', 'nodes_removed'])(
-    'counts %s by the full count, not the capped ids',
-    (op) => {
-      const r = record({ op, affected: { kind: 'node_refs', ids: ['n1'], count: 250 } });
-      expect(describeActivity(r)).toEqual({ key: `history.desc.${op}`, params: { count: 250 } });
-    }
-  );
-
   it('falls back to the unknown type key for an unrecognised annotation type', () => {
     const r = record({ op: 'annotation_created', after: { type: 'not_a_real_type' } });
     expect(describeActivity(r).params.type).toBe('history.annotation_type.unknown');

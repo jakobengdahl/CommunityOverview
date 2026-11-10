@@ -196,8 +196,6 @@
       "annotation_updated_generic": "Updated {type}",
       "node_moved": "Moved \"{name}\"",
       "layout_applied": "Rearranged {count} node(s)",
-      "nodes_added": "Added {count} node(s)",
-      "nodes_removed": "Removed {count} node(s)",
       "nodes_hidden": "Hid {count} node(s)",
       "nodes_shown": "Unhid {count} node(s)",
       "nodes_dimmed": "Dimmed {count} node(s)",

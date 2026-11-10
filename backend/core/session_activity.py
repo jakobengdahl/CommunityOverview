@@ -64,19 +64,9 @@ UNDOABLE_OPS = frozenset(
 
 
 # Ops recorded in the activity log with no inverse: what happened to the
-# session's staged changes (docs/SESSION_OVERLAY_CONTRACT.md §12), and who
-# added or removed which nodes. Never offered for undo - a discard or a merge
-# is not reversed by a session op, and node add/remove is out of scope above.
-RECORDED_ONLY_OPS = frozenset(
-    {"graph_changes_discarded", "graph_changes_merged", "nodes_added", "nodes_removed"}
-)
-
-# Evicted first when the max-records cap is hit, so frequent node adds (for
-# example from a session auto-add agent) do not wear away undoable history:
-# the newest record is never evicted, so a node record written to a log full
-# of undoable records still costs the oldest one, but older node records go
-# before any undoable one.
-_EVICT_FIRST_OPS = frozenset({"nodes_added", "nodes_removed"})
+# session's staged changes (docs/SESSION_OVERLAY_CONTRACT.md §12). Never
+# offered for undo - a discard or a merge is not reversed by a session op.
+RECORDED_ONLY_OPS = frozenset({"graph_changes_discarded", "graph_changes_merged"})
 
 
 def _now_iso() -> str:
@@ -132,9 +122,7 @@ def prune_activity_log(
 
     Age filtering runs first, then the max-records cap keeps the newest N —
     mirroring the retention pass in ``GraphHistoryStore._compact_locked``. A record whose timestamp
-    cannot be parsed is kept rather than dropped on a parse failure. Over the
-    cap, the oldest node add/remove records go before any other record, except
-    the newest record, so the write that just happened is always recorded.
+    cannot be parsed is kept rather than dropped on a parse failure.
     """
     kept = records
     if max_age_days is not None and max_age_days > 0:
@@ -142,16 +130,6 @@ def prune_activity_log(
         cutoff_text = cutoff.strftime(_TIMESTAMP_FORMAT)
         kept = [r for r in kept if _within_age(r, cutoff, cutoff_text)]
     if max_records is not None and max_records > 0 and len(kept) > max_records:
-        excess = len(kept) - max_records
-        evict = set()
-        # The newest record is the one just appended; were it a candidate, a
-        # log full of undoable records would drop every node record on write.
-        for index, record in enumerate(kept[:-1]):
-            if len(evict) == excess:
-                break
-            if record.get("op") in _EVICT_FIRST_OPS:
-                evict.add(index)
-        kept = [r for i, r in enumerate(kept) if i not in evict]
         kept = kept[-max_records:]
     return kept
 

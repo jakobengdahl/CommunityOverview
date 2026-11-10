@@ -16,7 +16,6 @@ from backend.core.session_activity import (
 )
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
-    MAX_ACTIVITY_NODE_IDS,
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
@@ -55,22 +54,6 @@ class TestPruneActivityLog:
         records = [_record(seq=i) for i in range(10)]
         kept = prune_activity_log(records, max_records=3, max_age_days=None)
         assert [r["seq"] for r in kept] == [7, 8, 9]
-
-    def test_node_membership_records_are_evicted_before_undoable_ones(self):
-        records = [_record(seq=0), _record(seq=1, op_type="nodes_added")]
-        records += [_record(seq=i) for i in range(2, 4)]
-        records.append(_record(seq=4, op_type="nodes_removed"))
-        kept = prune_activity_log(records, max_records=3, max_age_days=None)
-        assert [r["seq"] for r in kept] == [2, 3, 4]
-
-    def test_newest_node_record_survives_a_log_full_of_undoable_records(self):
-        records = [_record(seq=i) for i in range(3)]
-        records.append(_record(seq=3, op_type="nodes_added"))
-        kept = prune_activity_log(records, max_records=3, max_age_days=None)
-        assert [r["seq"] for r in kept] == [1, 2, 3]
-        kept.append(_record(seq=4, op_type="nodes_removed"))
-        kept = prune_activity_log(kept, max_records=3, max_age_days=None)
-        assert [r["seq"] for r in kept] == [1, 2, 4]
 
     def test_trims_by_age(self):
         records = [_record(seq=i) for i in range(3)]
@@ -317,49 +300,9 @@ class TestSessionStoreActivityIntegration:
         session = store.create()
         store.apply_state_op(
             session,
-            {"op": "edges_hidden", "edge_ids": ["e1"], "client_id": "actor-1"},
+            {"op": "nodes_added", "node_ids": ["n1"], "client_id": "actor-1"},
         )
         assert session.activity_log == []
-
-    def test_node_add_and_remove_name_their_actor_and_are_never_undoable(self):
-        """Only ids that actually changed are recorded, under the first actor to add
-        them; a no-op, such as another browser applying the same add, records nothing."""
-        store = _store()
-        session = store.create()
-        for op in (
-            {"op": "nodes_added", "node_ids": ["n1", "n2"], "client_id": "a1"},
-            {"op": "nodes_added", "node_ids": ["n2", "n3"], "client_id": "a2"},
-            {"op": "nodes_added", "node_ids": ["n3"], "client_id": "a2"},
-            # A second browser applying the same pushed add records nothing.
-            {"op": "nodes_added", "node_ids": ["n1", "n2", "n3"], "client_id": "a3"},
-            {"op": "nodes_removed", "node_ids": ["n1", "gone"], "client_id": "a2"},
-        ):
-            store.apply_state_op(session, op)
-        assert [(r["op"], r["actor"], r["affected"]) for r in session.activity_log] == [
-            (
-                "nodes_added",
-                "a1",
-                {"kind": "node_refs", "ids": ["n1", "n2"], "count": 2},
-            ),
-            ("nodes_added", "a2", {"kind": "node_refs", "ids": ["n3"], "count": 1}),
-            ("nodes_removed", "a2", {"kind": "node_refs", "ids": ["n1"], "count": 1}),
-        ]
-        assert store.find_latest_undoable(session, "a1") is None
-        assert store.find_latest_undoable(session, "a2") is None
-
-    def test_bulk_node_add_and_remove_records_store_a_bounded_id_sample(self):
-        store = _store()
-        session = store.create()
-        ids = [f"n{i:04d}" for i in range(MAX_ACTIVITY_NODE_IDS * 3)]
-        for op_type in ("nodes_added", "nodes_removed"):
-            store.apply_state_op(
-                session, {"op": op_type, "node_ids": ids, "client_id": "a1"}
-            )
-        assert len(session.activity_log) == 2
-        for record in session.activity_log:
-            assert record["affected"]["count"] == len(ids)
-            assert record["affected"]["ids"] == ids[:MAX_ACTIVITY_NODE_IDS]
-            assert record["before"] is None and record["after"] is None
 
     def test_retention_trims_by_max_records(self):
         store = _store(max_activity_records=3, ring_size=50)

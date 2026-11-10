@@ -71,10 +71,6 @@ _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
 MAX_SESSION_DESCRIPTION_CHARS = 4000
-# Node add/remove activity records are attribution only (never undone or
-# conflict-checked), so they keep a bounded sample of ids plus the true count:
-# bulk add/remove churn must not grow the session document towards its size cap.
-MAX_ACTIVITY_NODE_IDS = 100
 
 # Per-annotation versioning (task-smallfix-whole-annotation-clobber-on-
 # concurrent-different-field-edit / dec-annotation-field-patches-and-
@@ -496,19 +492,6 @@ def _require_id_list(op: Dict[str, Any], key: str) -> List[str]:
     return value
 
 
-def _node_refs_activity(ids: List[str]) -> Dict[str, Any]:
-    return {
-        "affected": {
-            "kind": "node_refs",
-            "ids": ids[:MAX_ACTIVITY_NODE_IDS],
-            "count": len(ids),
-        },
-        "before": None,
-        "after": None,
-        "inverse_op": None,
-    }
-
-
 def _validate_position(value: Any) -> Dict[str, float]:
     if (
         not isinstance(value, dict)
@@ -891,18 +874,12 @@ class SessionStore:
         activity_kwargs: Optional[Dict[str, Any]] = None
 
         if op_type == "nodes_added":
-            requested = _require_id_list(op, "node_ids")
-            present = set(state["node_refs"])
-            newly_added = sorted({i for i in requested if i not in present})
-            state["node_refs"] = _union(state["node_refs"], requested)
-            if newly_added:
-                activity_kwargs = _node_refs_activity(newly_added)
+            state["node_refs"] = _union(
+                state["node_refs"], _require_id_list(op, "node_ids")
+            )
         elif op_type == "nodes_removed":
             removals = _require_id_list(op, "node_ids")
             drop = set(removals)
-            actually_removed = sorted(drop.intersection(state["node_refs"]))
-            if actually_removed:
-                activity_kwargs = _node_refs_activity(actually_removed)
             state["node_refs"] = _remove_all(state["node_refs"], removals)
             state["positions"] = {
                 k: v for k, v in state["positions"].items() if k not in drop
