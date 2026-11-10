@@ -59,7 +59,7 @@ import {
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
-import { replayCanvasHistory } from './utils/sessionActivity';
+import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2052,11 +2052,10 @@ function App() {
 
   // Serialize shortcuts and drawer undo, including the canvas snapshot round
   // trip: the pen's just-completed stroke may still be waiting to publish.
-  const historyBusyRef = useRef(false);
+  const historyQueueRef = useRef(null);
+  if (!historyQueueRef.current) historyQueueRef.current = createHistoryReplayQueue();
   const replaySessionAction = useCallback(
-    async (redo = false) => {
-      if (historyBusyRef.current) return;
-      historyBusyRef.current = true;
+    (redo = false) => historyQueueRef.current(async () => {
       const targetId = sessionId;
       try {
         annotationSchedulerRef.current.clearPending();
@@ -2074,10 +2073,8 @@ function App() {
           t(redo ? 'history.session_redo_failed' : 'history.session_undo_failed')
         );
         throw err;
-      } finally {
-        historyBusyRef.current = false;
       }
-    },
+    }),
     [sessionId, requestSessionSnapshot, syncRef, showNotification, t]
   );
   const handleSessionUndo = useCallback(() => replaySessionAction(), [replaySessionAction]);

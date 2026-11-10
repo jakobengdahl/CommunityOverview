@@ -551,3 +551,14 @@ export async function replayCanvasHistory({ sessionId, snapshot, getSync, replay
   const result = await replay(sessionId, clientId);
   await sync.waitForRevision(result.revision);
 }
+
+/** Serialize complete history replays while preserving each caller's result. */
+export function createHistoryReplayQueue() {
+  let tail = Promise.resolve();
+  return (replay) => {
+    const result = tail.then(replay);
+    // A failed operation must reject its caller without blocking later requests.
+    tail = result.catch(() => {});
+    return result;
+  };
+}
