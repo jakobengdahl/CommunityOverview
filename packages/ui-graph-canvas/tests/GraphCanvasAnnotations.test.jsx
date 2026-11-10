@@ -80,7 +80,7 @@ describe('GraphCanvas annotation creation', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     rightClickPane(screen.getByTestId('pane'));
     expect(screen.getByRole('button', { name: /add note/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /add label/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add arrow/i })).toBeInTheDocument();
   });
 
