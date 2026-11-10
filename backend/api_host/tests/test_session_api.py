@@ -1,3 +1,4 @@
+# covers: backend/service/rest_api.py
 """
 Tests for the shared-session REST endpoints under /api/sessions (steps 1 & 3).
 
@@ -487,6 +488,19 @@ class TestSessionActivityAndUndo:
 
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"] == []
+
+        assert (
+            test_app.post(
+                f"/api/sessions/{sid}/redo", json={"client_id": "c2"}
+            ).status_code
+            == 404
+        )
+        redone = test_app.post(f"/api/sessions/{sid}/redo", json={"client_id": "c1"})
+        assert redone.status_code == 200
+        assert redone.json()["redone_activity_id"] == resp.json()["undone_activity_id"]
+        assert redone.json()["redone_op"] == "annotation_created"
+        restored = test_app.get(f"/api/sessions/{sid}").json()["state"]["annotations"]
+        assert restored[0]["id"] == "note-1"
 
     def test_undo_is_409_while_another_client_holds_the_lease(
         self, test_app: TestClient

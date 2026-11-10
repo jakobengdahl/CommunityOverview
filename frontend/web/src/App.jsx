@@ -59,6 +59,7 @@ import {
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
+import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2049,6 +2050,44 @@ function App() {
     return () => annotationSchedulerRef.current?.clearPending();
   }, []);
 
+  // Serialize shortcuts and drawer undo, including the canvas snapshot round
+  // trip: the pen's just-completed stroke may still be waiting to publish.
+  const historyQueueRef = useRef(null);
+  if (!historyQueueRef.current) historyQueueRef.current = createHistoryReplayQueue();
+  const replaySessionAction = useCallback(
+    (redo = false) =>
+      historyQueueRef.current(async () => {
+        const targetId = sessionId;
+        try {
+          annotationSchedulerRef.current.clearPending();
+          if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+          await replayCanvasHistory({
+            sessionId: targetId,
+            snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
+            getSync: () => syncRef.current,
+            replay: redo ? api.redoSessionAction : api.undoSessionAction,
+            clientId: api.getClientId(),
+          });
+        } catch (err) {
+          showNotification(
+            'error',
+            t(redo ? 'history.session_redo_failed' : 'history.session_undo_failed')
+          );
+          throw err;
+        }
+      }),
+    [sessionId, requestSessionSnapshot, syncRef, showNotification, t]
+  );
+  const handleSessionUndo = useCallback(() => replaySessionAction(), [replaySessionAction]);
+  const handleSessionRedo = useCallback(() => replaySessionAction(true), [replaySessionAction]);
+  // Keyboard callbacks are fire-and-forget; the shared path reports failures.
+  const shortcutUndo = useCallback(() => {
+    handleSessionUndo().catch(() => {});
+  }, [handleSessionUndo]);
+  const shortcutRedo = useCallback(() => {
+    handleSessionRedo().catch(() => {});
+  }, [handleSessionRedo]);
+
   // Position-change callback GraphCanvas's onNodePositionChange fires for
   // both graph-node and annotation drags/moves alike. Graph node moves keep
   // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
@@ -3496,6 +3535,8 @@ function App() {
           annotationsToRestore={pendingAnnotations}
           onAnnotationsRestored={() => setPendingAnnotations(null)}
           onAnnotationChange={handleAnnotationChange}
+          onUndo={shortcutUndo}
+          onRedo={shortcutRedo}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
@@ -3773,6 +3814,7 @@ function App() {
         sessionId={sessionId}
         currentClientId={api.getClientId()}
         roster={roster}
+        onUndo={handleSessionUndo}
       />
       {clearConfirm && (
         <ConfirmDialog

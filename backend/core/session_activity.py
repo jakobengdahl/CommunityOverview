@@ -208,6 +208,20 @@ def undo_conflict_reason(
     """``None`` if ``record`` is still safe to undo, else a human-readable reason."""
     current = current_snapshot_for(session_state, record)
     expected = record.get("after")
+    if (record.get("affected") or {}).get("kind") == "annotation":
+        # Replay assigns fresh server metadata; content equality still lets a
+        # sequence of edits be undone/redone without conflicting with itself.
+        metadata = {"version", "field_versions", "updated_at"}
+        current = (
+            {k: v for k, v in current.items() if k not in metadata}
+            if current
+            else current
+        )
+        expected = (
+            {k: v for k, v in expected.items() if k not in metadata}
+            if expected
+            else expected
+        )
     if current != expected:
         return "affected state changed since this action"
     return None

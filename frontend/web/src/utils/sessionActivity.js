@@ -540,3 +540,25 @@ export function classifyUndoError(err) {
   }
   return 'failed';
 }
+
+/** Publish the current canvas before replaying history; await its stream echo. */
+export async function replayCanvasHistory({ sessionId, snapshot, getSync, replay, clientId }) {
+  await snapshot();
+  const sync = getSync();
+  if (!sync || sync.sessionId !== sessionId) return;
+  await sync.flushPending();
+  if (getSync() !== sync) return;
+  const result = await replay(sessionId, clientId);
+  await sync.waitForRevision(result.revision);
+}
+
+/** Serialize complete history replays while preserving each caller's result. */
+export function createHistoryReplayQueue() {
+  let tail = Promise.resolve();
+  return (replay) => {
+    const result = tail.then(replay);
+    // A failed operation must reject its caller without blocking later requests.
+    tail = result.catch(() => {});
+    return result;
+  };
+}

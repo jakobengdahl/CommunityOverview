@@ -1558,7 +1558,39 @@ export class SessionSyncClient {
     });
   }
 
-  async _flush({ bypassReady = false } = {}) {
+  _flush(options = {}) {
+    if (this._activeFlush) return this._activeFlush;
+    if (!this._queue.length) return Promise.resolve(true);
+    const pending = this._flushBatch(options);
+    this._activeFlush = pending;
+    pending.finally(() => {
+      if (this._activeFlush === pending) this._activeFlush = null;
+    });
+    return pending;
+  }
+
+  // History must follow acknowledged writes and stream delivery, otherwise an
+  // immediate undo can target an older action or a stale canvas can resend it.
+  async waitForRevision(revision) {
+    const deadline = Date.now() + 10000;
+    while (!this._ready || this._appliedSeq < revision) {
+      if (this._closed || Date.now() >= deadline) throw new Error('Session sync unavailable');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async flushPending() {
+    await this.waitForRevision(this._seq);
+    if (this._activeFlush && !(await this._activeFlush)) {
+      throw new Error('Session changes are not confirmed');
+    }
+    while (this._queue.length) {
+      if (!(await this._flush())) throw new Error('Session changes are not confirmed');
+    }
+    await this.waitForRevision(this._seq);
+  }
+
+  async _flushBatch({ bypassReady = false } = {}) {
     if (this._flushing || this._closed) return;
     if ((!this._ready && !bypassReady) || !this._queue.length || !this._fetch) return;
     this._flushing = true;
@@ -1627,6 +1659,7 @@ export class SessionSyncClient {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
+        return true;
       } else if (
         resp &&
         (resp.status === 400 ||

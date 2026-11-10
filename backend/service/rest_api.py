@@ -1864,14 +1864,20 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="session not found")
         return {"session_id": session_id, "activity": records}
 
+    @router.post("/sessions/{session_id}/redo")
     @router.post("/sessions/{session_id}/undo")
     async def undo_session_action(
-        session_id: str, request: UndoSessionActionRequest
+        session_id: str, request: UndoSessionActionRequest, http_request: Request
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
         try:
-            return session_manager.undo_last_action(
+            replay = (
+                session_manager.redo_last_action
+                if http_request.url.path.endswith("/redo")
+                else session_manager.undo_last_action
+            )
+            return replay(
                 session_id,
                 request.client_id,
                 expected_revision=request.expected_revision,
