@@ -54,7 +54,8 @@ function SessionRow({ children, onOpenMenu, ...props }) {
   return (
     <div
       {...props}
-      onClick={consumeClick}
+      // Consume the release before descendant buttons can toggle or select.
+      onClickCapture={consumeClick}
       onPointerDown={(e) => {
         cancel();
         if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;

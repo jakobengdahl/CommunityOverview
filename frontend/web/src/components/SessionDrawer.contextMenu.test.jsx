@@ -299,6 +299,38 @@ describe('SessionDrawer — long press on touch', () => {
     expect(onSelectSession).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['touch', 'pen'])('keeps a %s long-press menu open on kebab release and permits later activation', (pointerType) => {
+    const onClose = vi.fn();
+    const onSelectSession = vi.fn();
+    renderDrawer({ onClose, onSelectSession });
+    const trigger = screen.getByRole('button', { name: 'Session actions' });
+
+    dispatchPointer(trigger, 'pointerdown', { pointerType, clientX: 120, clientY: 160 });
+    act(() => vi.advanceTimersByTime(500));
+    dispatchPointer(trigger, 'pointerup', { pointerType });
+    expect(fireEvent.click(trigger.querySelector('svg'))).toBe(false);
+    expect(screen.getByRole('menu')).toBeVisible();
+    expect(screen.getByRole('menu')).toHaveClass('pointer-triggered');
+    expect(screen.getByRole('menu').style.left).toBe('120px');
+    expect(screen.getByRole('menu').style.top).toBe('160px');
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    dispatchPointer(trigger, 'pointerdown', { pointerType });
+    dispatchPointer(trigger, 'pointerup', { pointerType });
+    fireEvent.click(trigger);
+    expect(screen.queryByRole('menu')).toBeNull();
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: 'Enter' });
+    fireEvent.click(trigger, { detail: 0 });
+    expect(screen.getByRole('menu')).not.toHaveClass('pointer-triggered');
+
+    dispatchPointer(document.body, 'pointerdown', { pointerType: 'mouse' });
+    fireEvent.click(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('cancels a pending long press when the browser cancels the touch', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
