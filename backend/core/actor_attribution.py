@@ -68,15 +68,18 @@ def replace_attribution(
     if envelope == "annotation" and value.get("created_by") == actor_id:
         result["created_by"] = replacement_token
     if envelope == "activity":
-        if "inverse_op" in value:
-            result["inverse_op"] = replace_attribution(
-                value["inverse_op"],
-                actor_id,
-                replacement_token,
-                envelope="activity_operation",
-            )
-        # Process ordinary record attribution without revisiting inverse_op.
-        value = {k: v for k, v in value.items() if k != "inverse_op"}
+        for key in ("inverse_op", "forward_op"):
+            if key in value:
+                result[key] = replace_attribution(
+                    value[key],
+                    actor_id,
+                    replacement_token,
+                    envelope="activity_operation",
+                )
+        # Process ordinary record attribution without revisiting operations.
+        value = {
+            k: v for k, v in value.items() if k not in {"inverse_op", "forward_op"}
+        }
         envelope = "record"
     elif envelope == "activity_operation":
         envelope = "operation"

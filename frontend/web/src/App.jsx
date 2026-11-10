@@ -2055,26 +2055,27 @@ function App() {
   const historyQueueRef = useRef(null);
   if (!historyQueueRef.current) historyQueueRef.current = createHistoryReplayQueue();
   const replaySessionAction = useCallback(
-    (redo = false) => historyQueueRef.current(async () => {
-      const targetId = sessionId;
-      try {
-        annotationSchedulerRef.current.clearPending();
-        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-        await replayCanvasHistory({
-          sessionId: targetId,
-          snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
-          getSync: () => syncRef.current,
-          replay: redo ? api.redoSessionAction : api.undoSessionAction,
-          clientId: api.getClientId(),
-        });
-      } catch (err) {
-        showNotification(
-          'error',
-          t(redo ? 'history.session_redo_failed' : 'history.session_undo_failed')
-        );
-        throw err;
-      }
-    }),
+    (redo = false) =>
+      historyQueueRef.current(async () => {
+        const targetId = sessionId;
+        try {
+          annotationSchedulerRef.current.clearPending();
+          if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+          await replayCanvasHistory({
+            sessionId: targetId,
+            snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
+            getSync: () => syncRef.current,
+            replay: redo ? api.redoSessionAction : api.undoSessionAction,
+            clientId: api.getClientId(),
+          });
+        } catch (err) {
+          showNotification(
+            'error',
+            t(redo ? 'history.session_redo_failed' : 'history.session_undo_failed')
+          );
+          throw err;
+        }
+      }),
     [sessionId, requestSessionSnapshot, syncRef, showNotification, t]
   );
   const handleSessionUndo = useCallback(() => replaySessionAction(), [replaySessionAction]);

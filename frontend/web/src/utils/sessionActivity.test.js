@@ -1625,32 +1625,45 @@ describe('createHistoryReplayQueue', () => {
     const sync = {
       sessionId: '1234-5678',
       flushPending: async () => {},
-      waitForRevision: (revision) => new Promise((resolve) => {
-        calls.push(`stream:${revision}`);
-        releases.push(resolve);
-      }),
+      waitForRevision: (revision) =>
+        new Promise((resolve) => {
+          calls.push(`stream:${revision}`);
+          releases.push(resolve);
+        }),
     };
-    const run = (action, revision) => enqueue(() => replayCanvasHistory({
-      sessionId: sync.sessionId,
-      clientId: 'me',
-      getSync: () => sync,
-      snapshot: async () => calls.push(`snapshot:${action}`),
-      replay: async () => {
-        calls.push(action);
-        return { revision };
-      },
-    }));
+    const run = (action, revision) =>
+      enqueue(() =>
+        replayCanvasHistory({
+          sessionId: sync.sessionId,
+          clientId: 'me',
+          getSync: () => sync,
+          snapshot: async () => calls.push(`snapshot:${action}`),
+          replay: async () => {
+            calls.push(action);
+            return { revision };
+          },
+        })
+      );
     const undo = run('undo', 1);
     const redo = run('redo', 2);
     let drawerSettled = false;
-    const drawer = run('drawer', 3).then(() => { drawerSettled = true; });
+    const drawer = run('drawer', 3).then(() => {
+      drawerSettled = true;
+    });
     await vi.waitFor(() => expect(releases).toHaveLength(1));
     expect(calls).toEqual(['snapshot:undo', 'undo', 'stream:1']);
     expect(drawerSettled).toBe(false);
     releases[0]();
     await undo;
     await vi.waitFor(() => expect(releases).toHaveLength(2));
-    expect(calls).toEqual(['snapshot:undo', 'undo', 'stream:1', 'snapshot:redo', 'redo', 'stream:2']);
+    expect(calls).toEqual([
+      'snapshot:undo',
+      'undo',
+      'stream:1',
+      'snapshot:redo',
+      'redo',
+      'stream:2',
+    ]);
     expect(drawerSettled).toBe(false);
     releases[1]();
     await redo;
@@ -1665,7 +1678,9 @@ describe('createHistoryReplayQueue', () => {
   it('rejects the failing caller and continues processing queued requests', async () => {
     const enqueue = createHistoryReplayQueue();
     const error = new Error('replay failed');
-    const failed = enqueue(async () => { throw error; });
+    const failed = enqueue(async () => {
+      throw error;
+    });
     const next = vi.fn(async () => 'undone');
     const queued = enqueue(next);
     await expect(failed).rejects.toBe(error);
