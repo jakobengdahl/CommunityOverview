@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/LabelNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import LabelNode from '../src/components/LabelNode';

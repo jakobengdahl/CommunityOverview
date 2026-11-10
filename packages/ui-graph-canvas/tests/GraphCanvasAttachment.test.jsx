@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, cleanup, screen, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';

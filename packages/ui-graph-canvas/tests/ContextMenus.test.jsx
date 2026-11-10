@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/ContextMenus.jsx
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import {
