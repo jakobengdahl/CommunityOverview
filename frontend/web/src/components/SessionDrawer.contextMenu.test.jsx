@@ -230,6 +230,22 @@ describe('SessionDrawer — long press on touch', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('allows a mouse click on the original target after a fired long press is cancelled', () => {
+    const onSelectSession = vi.fn();
+    renderDrawer({ onSelectSession });
+    const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });
+
+    fireEvent.touchStart(sessionName);
+    act(() => vi.advanceTimersByTime(500));
+    fireEvent.touchCancel(sessionName);
+    expect(screen.getByRole('menu')).toBeVisible();
+
+    fireEvent.mouseDown(sessionName, { detail: 1 });
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.click(sessionName, { detail: 1 });
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+  });
+
   it('does not open when the touch is shorter than 500 ms', () => {
     renderDrawer();
     const sessionName = screen.getByRole('button', { name: 'Test session abc-123' });

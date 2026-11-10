@@ -48,7 +48,7 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel, poin
     const { x, y } = pointerPosition;
     const rect = menu.getBoundingClientRect();
 
-    menu.style.top = `${y}px`;
+    menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - rect.height))}px`;
 
     // Default: align left edge with pointer. If it would overflow the
     // right edge, align the right edge instead.

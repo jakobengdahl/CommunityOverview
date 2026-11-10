@@ -190,6 +190,11 @@ function SessionDrawer({
     if (longPressTargetRef.current) e.preventDefault();
   }, [cancelLongPress]);
 
+  const handleTouchCancel = useCallback(() => {
+    cancelLongPress();
+    longPressTargetRef.current = null;
+  }, [cancelLongPress]);
+
   // Some browsers still synthesize mouse events after a long press. Consume
   // release on the original target, including mousedown's outside-menu close.
   // Keyboard clicks (detail === 0) and subsequent touches remain available.
@@ -283,7 +288,7 @@ function SessionDrawer({
               onTouchStart={(e) => handleTouchStart(session.id, e)}
               onTouchEnd={handleTouchEnd}
               onTouchMove={cancelLongPress}
-              onTouchCancel={cancelLongPress}
+              onTouchCancel={handleTouchCancel}
               onMouseDownCapture={handleLongPressRelease}
               onClickCapture={handleLongPressRelease}
             >

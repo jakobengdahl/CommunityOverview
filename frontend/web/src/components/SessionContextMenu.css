@@ -51,6 +51,9 @@
    can appear at the pointer coordinates instead of below the kebab button. */
 .session-context-menu-dropdown.pointer-triggered {
   position: fixed;
+  box-sizing: border-box;
+  max-height: 100vh;
+  overflow-y: auto;
 }
 
 .session-context-menu-item {

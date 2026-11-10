@@ -14,6 +14,27 @@ function makeItems(overrides = {}) {
 }
 
 describe('SessionContextMenu', () => {
+  it.each([100, 200, 800])('keeps a %ipx-tall pointer menu within the viewport', (height) => {
+    const props = {
+      open: true,
+      onToggle: vi.fn(),
+      onClose: vi.fn(),
+      triggerLabel: 'Session actions',
+      items: makeItems(),
+    };
+    const { rerender } = render(<SessionContextMenu {...props} />);
+    const menu = screen.getByRole('menu');
+    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200, height });
+    try {
+      for (const y of [window.innerHeight - 10, 80]) {
+        rerender(<SessionContextMenu {...props} pointerPosition={{ x: 100, y }} />);
+        expect(menu.style.top).toBe(`${Math.max(0, Math.min(y, window.innerHeight - height))}px`);
+      }
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it.each([
     ['left to right', 100, -50],
     ['right to left', -50, 100],
@@ -27,7 +48,7 @@ describe('SessionContextMenu', () => {
     };
     const { rerender } = render(<SessionContextMenu {...props} />);
     const menu = screen.getByRole('menu');
-    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200 });
+    const rectSpy = vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({ width: 200, height: 100 });
     try {
       for (const offset of [firstOffset, nextOffset]) {
         const x = offset < 0 ? window.innerWidth + offset : offset;
