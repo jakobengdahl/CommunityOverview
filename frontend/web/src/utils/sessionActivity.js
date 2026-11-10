@@ -439,11 +439,11 @@ export function describeActivity(record, opts = {}) {
       return { key: 'history.desc.layout_applied', params: { count } };
     }
     case 'nodes_added': {
-      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      const count = (record.affected && record.affected.count) || 0;
       return { key: 'history.desc.nodes_added', params: { count } };
     }
     case 'nodes_removed': {
-      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      const count = (record.affected && record.affected.count) || 0;
       return { key: 'history.desc.nodes_removed', params: { count } };
     }
     case 'nodes_hidden': {

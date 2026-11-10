@@ -16,6 +16,7 @@ from backend.core.session_activity import (
 )
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
+    MAX_ACTIVITY_NODE_IDS,
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
@@ -332,12 +333,30 @@ class TestSessionStoreActivityIntegration:
         ):
             store.apply_state_op(session, op)
         assert [(r["op"], r["actor"], r["affected"]) for r in session.activity_log] == [
-            ("nodes_added", "a1", {"kind": "node_refs", "ids": ["n1", "n2"]}),
-            ("nodes_added", "a2", {"kind": "node_refs", "ids": ["n3"]}),
-            ("nodes_removed", "a2", {"kind": "node_refs", "ids": ["n1"]}),
+            (
+                "nodes_added",
+                "a1",
+                {"kind": "node_refs", "ids": ["n1", "n2"], "count": 2},
+            ),
+            ("nodes_added", "a2", {"kind": "node_refs", "ids": ["n3"], "count": 1}),
+            ("nodes_removed", "a2", {"kind": "node_refs", "ids": ["n1"], "count": 1}),
         ]
         assert store.find_latest_undoable(session, "a1") is None
         assert store.find_latest_undoable(session, "a2") is None
+
+    def test_bulk_node_add_and_remove_records_store_a_bounded_id_sample(self):
+        store = _store()
+        session = store.create()
+        ids = [f"n{i:04d}" for i in range(MAX_ACTIVITY_NODE_IDS * 3)]
+        for op_type in ("nodes_added", "nodes_removed"):
+            store.apply_state_op(
+                session, {"op": op_type, "node_ids": ids, "client_id": "a1"}
+            )
+        assert len(session.activity_log) == 2
+        for record in session.activity_log:
+            assert record["affected"]["count"] == len(ids)
+            assert record["affected"]["ids"] == ids[:MAX_ACTIVITY_NODE_IDS]
+            assert record["before"] is None and record["after"] is None
 
     def test_retention_trims_by_max_records(self):
         store = _store(max_activity_records=3, ring_size=50)
