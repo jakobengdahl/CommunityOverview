@@ -39,7 +39,7 @@ from backend.federation import FederationManager
 from backend.runtime import session_context
 
 from . import access, attachments, queries, mutations, views, import_service
-from . import staged_review
+from . import attachment_tools, staged_review
 from .attachment_tools import AttachmentReadTools, ATTACHMENT_READ_DEFAULT_CHARS
 from .attachments import AttachmentSettings
 from .composed import annotate_staged_state
@@ -621,6 +621,21 @@ class GraphService:
             query=query, node_ids=node_ids, top_k=top_k
         )
 
+    def attachment_tool_add(
+        self,
+        node_id: str,
+        filename: str,
+        content_text: Optional[str] = None,
+        content_base64: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ):
+        return attachment_tools.add_attachment(
+            self, node_id, filename, content_text, content_base64, content_type
+        )
+
+    def attachment_tool_delete(self, node_id: str, attachment_id: str):
+        return attachment_tools.delete_attachment(self, node_id, attachment_id)
+
     def list_node_attachments(self, node_id: str) -> Dict[str, Any]:
         return attachments.list_node_attachments(
             self._storage, self._authorization_hook, self._attachment_settings, node_id
@@ -664,6 +679,17 @@ class GraphService:
             declared_content_type=declared_content_type,
             content=content,
             content_length=content_length,
+        )
+
+    def attachment_upload_refusal(
+        self, node_id: str, content_length: int
+    ) -> Optional[Dict[str, Any]]:
+        return attachments.upload_refusal(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            content_length,
         )
 
     def delete_node_attachment(

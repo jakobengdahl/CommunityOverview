@@ -31,6 +31,17 @@ from .governance import (
     ProposalStore,
     SqliteProposalStore,
 )
+from .governance.gate import original_tool_name
+from backend.runtime.attachment_access import (
+    ATTACHMENT_WRITE_TOOLS,
+    agent_attachment_access,
+    attachment_tool_refusal,
+)
+from backend.service.attachment_tools import (
+    approved_write,
+    audit_attachment_refusal,
+    tool_caller,
+)
 from backend.skills.loader import SkillsConfig
 
 if TYPE_CHECKING:
@@ -572,13 +583,37 @@ class AgentRegistry:
         )
 
         def apply(tool, arguments):
+            original = original_tool_name(self._mcp_loader, tool)
             worker = self._workers.get(agent_id)
-            if worker is None or not worker.config.enabled:
-                raise ValueError("Agent is unavailable or disabled")
-            if worker.get_status()["paused"]:
+            unavailable = worker is None or not worker.config.enabled
+            if unavailable or worker.get_status()["paused"]:
+                if original in ATTACHMENT_WRITE_TOOLS:
+                    with tool_caller("agent", agent_id), approved_write():
+                        audit_attachment_refusal(original, "agent_unavailable")
+                if unavailable:
+                    raise ValueError("Agent is unavailable or disabled")
                 raise ValueError(
                     "Agent is paused; retry with a new proposal after recovery"
                 )
+            if original in ATTACHMENT_WRITE_TOOLS:
+                # Re-resolve the proposing Agent's grant from storage, so a
+                # grant revoked or an Agent deleted since also stops queued writes.
+                node = self._service.storage.get_node(agent_id)
+                refused = attachment_tool_refusal(
+                    original,
+                    agent_attachment_access(
+                        (node.metadata or {}).get("attachment_access", "none")
+                        if node is not None
+                        else "none",
+                        agent_id=agent_id,
+                    ),
+                    self._service.authorization_hook,
+                )
+                with tool_caller("agent", agent_id), approved_write():
+                    if refused is not None:
+                        audit_attachment_refusal(original, refused["error_code"])
+                        return refused
+                    return raw(tool, arguments)
             return raw(tool, arguments)
 
         return apply

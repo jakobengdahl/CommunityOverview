@@ -120,6 +120,8 @@ class ChatService:
                     "list_node_attachments": self._graph_service.attachment_tool_list,
                     "read_node_attachment": self._graph_service.attachment_tool_read,
                     "search_node_attachments": self._graph_service.attachment_tool_search,
+                    "add_node_attachment": self._graph_service.attachment_tool_add,
+                    "delete_node_attachment": self._graph_service.attachment_tool_delete,
                 }
                 if self._graph_service.attachment_settings is not None
                 else {}

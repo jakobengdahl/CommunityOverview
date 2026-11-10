@@ -1,12 +1,16 @@
-"""Synchronous, bounded attachment read tools (ADR 0010).
+"""Synchronous, bounded attachment tools (ADR 0010).
 
 The cache is process memory only. Authorization precedes every cache lookup.
 REST attachment methods deliberately retain their separate response shapes.
 """
 
+import asyncio
+import base64
+import binascii
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, fields, replace
 import functools
 import inspect
@@ -15,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 from backend.core import attachment_extract as extraction
 from backend.core.attachment_retrieval import Segment, rank_passages
@@ -40,6 +45,7 @@ audit_logger = logging.getLogger("attachments.audit")
 
 _graph_dispatch = ContextVar("attachment_graph_dispatch", default=None)
 _caller = ContextVar("attachment_tool_caller", default=("user", None))
+_approved = ContextVar("attachment_write_approved", default=False)
 _slot_lock = threading.Lock()
 _process_slots = None
 
@@ -52,6 +58,23 @@ def tool_caller(kind, caller_id=None):
         yield
     finally:
         _caller.reset(token)
+
+
+@contextmanager
+def approved_write():
+    """Mark a write applied from an approved proposal: the approver is audited."""
+    token = _approved.set(True)
+    try:
+        yield
+    finally:
+        _approved.reset(token)
+
+
+# The REST upload's ``filename`` query bound (a 422 there).
+MAX_TOOL_FILENAME_CHARS = 4096
+# 3,000,000 decoded bytes are 4,000,000 base64 characters, under the MCP
+# transport's 4 MiB request body; a larger cap would fail in transit.
+MCP_MAX_DECODED_BYTES_CEILING = 3_000_000
 
 
 @dataclass(frozen=True)
@@ -70,6 +93,8 @@ class ReadLimits:
     text_cache_max_chars: int = 20_000_000
     extract_concurrency: int = 2
     extract_timeout_seconds: int = 30
+    # Bytes add_node_attachment stores from one call.
+    mcp_max_decoded_bytes: int = MCP_MAX_DECODED_BYTES_CEILING
 
     @classmethod
     def from_env(cls):
@@ -86,6 +111,8 @@ class ReadLimits:
             raise ValueError("Attachment result budget must fit a chunk")
         if values["search_max_nodes"] > 20:
             raise ValueError("Attachment search permits at most 20 nodes")
+        if values["mcp_max_decoded_bytes"] > MCP_MAX_DECODED_BYTES_CEILING:
+            raise ValueError("ATTACHMENT_MCP_MAX_DECODED_BYTES is out of bounds")
         return cls(**values)
 
 
@@ -100,6 +127,16 @@ def error(code):
             "attachments_unavailable": "Attachments are not configured.",
             "attachment_index_corrupt": "Attachment index could not be read.",
             "busy": "Attachment extraction is busy; retry later.",
+            "federated_node": "Files cannot be attached to a federated node.",
+            "attachments_not_allowed": "This node type does not accept attachments.",
+            "node_archived": "Files cannot be attached to an archived node.",
+            "attachment_too_large": "The file exceeds the per-file limit.",
+            "node_attachment_limit": "The node's attachment limits are reached.",
+            "unsupported_attachment_type": "This file type cannot be attached.",
+            "attachment_too_large_for_tool": (
+                "The file exceeds what this tool accepts; upload it through "
+                "POST /api/nodes/{node_id}/attachments instead."
+            ),
         }.get(code, "Attachment operation failed."),
     }
 
@@ -218,7 +255,10 @@ class AttachmentReadTools:
 
     @staticmethod
     def audit(tool, node_id=None, record=None, chars=0, outcome="ok"):
-        context = build_graph_authorization_context(action="read", target=tool)
+        write = tool in ("add_node_attachment", "delete_node_attachment")
+        context = build_graph_authorization_context(
+            action="mutate" if write else "read", target=tool
+        )
         actor = context.actor
         kind, caller_id = _caller.get()
         request_actor = (
@@ -238,18 +278,23 @@ class AttachmentReadTools:
             None,
         )
         payload = {
-            "event": "attachment_content_read",
+            "event": {
+                "add_node_attachment": "attachment_added",
+                "delete_node_attachment": "attachment_deleted",
+            }.get(tool, "attachment_content_read"),
             "tool": {
                 "read": "read_node_attachment",
                 "search": "search_node_attachments",
-            }[tool],
+            }.get(tool, tool),
             "actor": {
                 "type": kind,
                 "id": caller_id
                 if kind in ("agent", "kiosk")
                 else actor.get("actor_id") or None,
             },
-            "on_behalf_of": request_actor if kind == "kiosk" else None,
+            "on_behalf_of": request_actor
+            if kind == "kiosk" or (write and _approved.get())
+            else None,
             "node_id": node_id,
             "attachment_id": record.id if record else None,
             "sha256": record.sha256 if record else None,
@@ -257,6 +302,8 @@ class AttachmentReadTools:
             "outcome": outcome,
             "correlation_id": correlation_id,
         }
+        if tool == "add_node_attachment":
+            payload["size"] = record.size if record else 0
         audit_logger.info(json.dumps(payload), extra=payload)
 
     def extracted(self, node_id, record, deadline, *, search=False, max_chars=None):
@@ -513,8 +560,162 @@ class AttachmentReadTools:
                 self.audit("search", key[0], record, counts.get(key, 0), status)
 
 
+def _write_result(result):
+    """Keep the service's code; replace its message, which can echo the node id."""
+    if result.get("success") is False and result.get("error_code") != "access_denied":
+        return error(result.get("error_code"))
+    return result
+
+
+def _write_refusal(service, name):
+    # Per-caller grants are enforced at dispatch; the instance ceiling also
+    # applies to direct in-process wrapper calls.
+    from backend.runtime.attachment_access import attachment_tool_refusal
+
+    if os.getenv("ATTACHMENT_CONTENT_ACCESS", "off") != "read_write":
+        return attachment_tool_refusal(name, "off", service.authorization_hook)
+    return None
+
+
+# Refusals the service returns only after the node resolved as visible.
+_NODE_RESOLVED_CODES = frozenset(
+    {
+        "federated_node",
+        "attachments_not_allowed",
+        "node_archived",
+        "node_attachment_limit",
+        "attachment_too_large",
+        "unsupported_attachment_type",
+        "attachment_index_corrupt",
+    }
+)
+
+
+def _audit_write(tool, node_id, result, resolved=False):
+    record = result.get("attachment") if result.get("success") else None
+    code = result.get("error_code") or result.get("error") or "failed"
+    AttachmentReadTools.audit(
+        tool,
+        node_id
+        if record or resolved or result.get("error_code") in _NODE_RESOLVED_CODES
+        else None,
+        SimpleNamespace(id=record["id"], sha256=record["sha256"], size=record["size"])
+        if record
+        else None,
+        outcome="ok" if record else code,
+    )
+
+
+def _content_length(content_text, content_base64):
+    """The bytes the content decodes to, or None when the arguments are malformed."""
+    if (content_text is None) == (content_base64 is None):
+        return None
+    if content_text is not None:
+        if not isinstance(content_text, str):
+            return None
+        try:
+            return len(content_text.encode("utf-8"))
+        except UnicodeEncodeError:
+            return None
+    if not isinstance(content_base64, str):
+        return None
+    padding = len(content_base64) - len(content_base64.rstrip("="))
+    return max(len(content_base64) * 3 // 4 - min(padding, 2), 0)
+
+
+def _decoded_content(content_text, content_base64):
+    if content_text is not None:
+        return content_text.encode("utf-8")
+    try:
+        return base64.b64decode(content_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def add_attachment(
+    service,
+    node_id,
+    filename,
+    content_text=None,
+    content_base64=None,
+    content_type=None,
+):
+    """Store one file through the same service path as the REST upload."""
+    result, resolved = error("failed"), False
+    try:
+        result = _write_refusal(service, "add_node_attachment")
+        if result is not None:
+            return result
+        size = _content_length(content_text, content_base64)
+        if (
+            not isinstance(node_id, str)
+            or not isinstance(filename, str)
+            or len(filename) > MAX_TOOL_FILENAME_CHARS
+            or not isinstance(content_type, (str, type(None)))
+            or size is None
+        ):
+            result = error("invalid_arguments")
+            return result
+        # The REST upload's node rules and caps decide first, as they would
+        # for a raw body of this size; only then the tool's own limits.
+        refused = graph_call(service.attachment_upload_refusal, node_id, size)
+        if refused is not None:
+            result = _write_result(refused)
+            return result
+        resolved = True
+        if size > service._attachment_read_tools.limits.mcp_max_decoded_bytes:
+            result = error("attachment_too_large_for_tool")
+            return result
+        data = _decoded_content(content_text, content_base64)
+        if data is None:
+            result = error("invalid_arguments")
+            return result
+        # Callers are synchronous and may sit on an event loop (proposal
+        # approval), so the upload runs on a private loop in a helper thread;
+        # the copied context carries the request's authorization inputs.
+        upload = service.add_node_attachment(
+            node_id,
+            filename=filename,
+            declared_content_type=content_type,
+            content=data,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = _write_result(
+                pool.submit(copy_context().run, asyncio.run, upload).result()
+            )
+        return result
+    except Exception:
+        result = error("failed")
+        return result
+    finally:
+        _audit_write("add_node_attachment", node_id, result, resolved)
+
+
+def delete_attachment(service, node_id, attachment_id):
+    result = error("failed")
+    try:
+        result = _write_refusal(service, "delete_node_attachment")
+        if result is not None:
+            return result
+        if not isinstance(node_id, str) or not isinstance(attachment_id, str):
+            result = error("invalid_arguments")
+            return result
+        result = _write_result(
+            graph_call(service.delete_node_attachment, node_id, attachment_id)
+        )
+        return result
+    except Exception:
+        result = error("failed")
+        return result
+    finally:
+        _audit_write("delete_node_attachment", node_id, result)
+        if result.get("success"):
+            result.pop("attachment", None)
+
+
 def tool_definitions():
     node = {"type": "string"}
+    max_bytes = ReadLimits.from_env().mcp_max_decoded_bytes
     return [
         {
             "name": name,
@@ -553,23 +754,48 @@ def tool_definitions():
                 },
                 ["query", "node_ids"],
             ),
+            (
+                "add_node_attachment",
+                "Attach a file to a node: exactly one of content_text (UTF-8) or "
+                f"content_base64, at most {max_bytes:,} bytes; the type is sniffed.",
+                {
+                    "node_id": node,
+                    "filename": node,
+                    "content_text": node,
+                    "content_base64": node,
+                    "content_type": node,
+                },
+                ["node_id", "filename"],
+            ),
+            (
+                "delete_node_attachment",
+                "Delete one attachment from a node.",
+                {"node_id": node, "attachment_id": node},
+                ["node_id", "attachment_id"],
+            ),
         ]
     ]
 
 
 def audit_attachment_refusal(name, outcome):
     """Audit a dispatcher refusal before any node or attachment is resolved."""
-    if name in ("read_node_attachment", "search_node_attachments"):
+    from backend.runtime.attachment_access import ATTACHMENT_TOOLS
+
+    # Gates call this for every tool; only attachment content tools are audited.
+    if name in ATTACHMENT_TOOLS and name != "list_node_attachments":
         AttachmentReadTools.audit(
-            "read" if name == "read_node_attachment" else "search", outcome=outcome
+            {"read_node_attachment": "read", "search_node_attachments": "search"}.get(
+                name, name
+            ),
+            outcome=outcome,
         )
 
 
 def attachment_argument_refusal(name, func, args=(), kwargs=None):
     """Reject malformed dispatcher calls without logging their arguments."""
-    from backend.runtime.attachment_access import ATTACHMENT_READ_TOOLS
+    from backend.runtime.attachment_access import ATTACHMENT_TOOLS
 
-    if name not in ATTACHMENT_READ_TOOLS:
+    if name not in ATTACHMENT_TOOLS:
         return None
     try:
         inspect.signature(func).bind(*args, **(kwargs or {}))
