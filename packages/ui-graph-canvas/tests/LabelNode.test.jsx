@@ -202,7 +202,7 @@ describe('LabelNode colour defaults', () => {
     const { container } = render(
       <LabelNode id="l1" data={{ text: 'Label text' }} selected={false} />
     );
-    expect(container.querySelector('.graph-label-node').style.color).toBe('rgb(30, 41, 59)');
+    expect(container.querySelector('.graph-label-node').style.color).toBe('rgb(17, 24, 39)');
   });
 
   it('keeps the near-white colour available as a selectable swatch', () => {

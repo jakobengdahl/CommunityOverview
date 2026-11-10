@@ -41,7 +41,7 @@ import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GenericAnnotationNode.css';
 
-const DEFAULT_COLOR = '#1e293b';
+const DEFAULT_COLOR = '#111827';
 
 // A right-click property editor exists for every rotatable generic kind:
 // each has at least its rotation and its layer to edit, plus — per kind —

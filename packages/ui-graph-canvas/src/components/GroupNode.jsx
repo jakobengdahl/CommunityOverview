@@ -12,7 +12,7 @@ import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GroupNode.css';
 
 const DEFAULT_GROUP_COLOR = '#646cff';
-const DARK_GROUP_TEXT = '#1e293b';
+const DARK_GROUP_TEXT = '#111827';
 const LIGHT_GROUP_TEXT = '#ffffff';
 export const GROUP_TEXT_COLORS = [DARK_GROUP_TEXT, LIGHT_GROUP_TEXT, '#FDE047', '#1E3A8A'];
 
