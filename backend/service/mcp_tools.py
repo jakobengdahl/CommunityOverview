@@ -3158,6 +3158,8 @@ def register_mcp_tools(
             session = session_manager.copy_session(session_id)
         except WriteModeRefused as exc:
             return exc.to_result()
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
         except (
             SessionNotFound,
             SessionLimitReached,

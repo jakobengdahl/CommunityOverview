@@ -47,7 +47,13 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_annotations import IMAGE_TYPE, annotation_type_of, is_embedded_image_url
+from .session_annotations import (
+    IMAGE_TYPE,
+    annotation_type_of,
+    image_annotation_error,
+    is_embedded_image_url,
+    reference_annotation_error,
+)
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
@@ -832,6 +838,16 @@ class SessionManager:
                 for child in value:
                     remap_attachment(child)
 
+        # Every copied annotation lands on a fresh id, so it is a new write as
+        # duplicate_annotation's is: a legacy non-embedded image URL or an
+        # unsafe reference target refuses the whole copy before anything
+        # is allocated.
+        for annotation in state["annotations"]:
+            error = image_annotation_error(annotation) or reference_annotation_error(
+                annotation, require_complete=True
+            )
+            if error:
+                raise OpError(error)
         for annotation in state["annotations"]:
             annotation["id"] = ids[annotation["id"]]
             for key in ("startAnchor", "endAnchor"):

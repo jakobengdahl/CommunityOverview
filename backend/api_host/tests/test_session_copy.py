@@ -73,11 +73,9 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         "target_type": "node",
         "target_id": "shape",
     }
-    source.state["annotations"][7]["content"]["image"] = {
-        "url": "data:image/webp;base64,AAAA"
-    }
+    source.state["annotations"][7]["image"] = {"url": "data:image/webp;base64,AAAA"}
     source.state["annotations"][8]["member_node_ids"] = ["node"]
-    source.state["annotations"][9]["content"]["target"] = source.id
+    source.state["annotations"][9].update(target_kind="session", target=source.id)
     source.seq = 19
     source.activity_log = [{"id": "history"}]
     manager.presence.join(source.id, "other", "Participant")
@@ -187,3 +185,25 @@ def test_copy_obeys_session_count_limit(test_app):
     manager._max_sessions = 1
     assert test_app.post(f"/api/sessions/{source.id}/copy").status_code == 503
     assert manager.store.session_count() == 1
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_copy_refuses_legacy_remote_image_url_before_creating(test_app, transport):
+    """A non-embedded image URL counts as a new reference; nothing is allocated."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state["annotations"] = [
+        {
+            "id": "legacy",
+            "type": "image",
+            "x": 0,
+            "y": 0,
+            "image": {"url": "https://example.com/picture.png"},
+        }
+    ]
+    before = copy.deepcopy(source.to_dict())
+    status, result = invoke(test_app, source, transport)
+    assert status == (400 if transport == "rest" else 403)
+    assert result.get("success") is not True
+    assert manager.store.session_count() == 1
+    assert source.to_dict() == before

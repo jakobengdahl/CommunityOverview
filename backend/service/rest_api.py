@@ -1428,6 +1428,8 @@ def _register_session_endpoints(
             raise HTTPException(status_code=503, detail="too many sessions")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="session too large")
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
