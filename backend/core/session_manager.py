@@ -785,6 +785,8 @@ class SessionManager:
 
         Synchronous callers refuse an in-flight state batch. REST holds the same
         source lock, then calls the internal method without yielding.
+        Like create_session, copying allocates through store.create without
+        consuming an MCP rate-limit bucket; the session limit still applies.
         """
         if self._lock(session_id).locked():
             raise LayoutBusy()
