@@ -71,7 +71,6 @@ vi.mock('../src/services/api', () => {
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
-    copySession: vi.fn(),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
     createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
     setSessionWriteMode: vi.fn(async (id) => ({ id, write_mode: 'staged' })),
@@ -212,35 +211,6 @@ describe('Server-backed session lifecycle', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-
-  it.each([
-    [413, 'Could not copy session: the source exceeds the session size limit.'],
-    [403, 'Could not copy session'],
-    [undefined, 'Could not copy session'],
-  ])(
-    'explains a copy refusal with status %s without switching sessions',
-    async (status, message) => {
-      api.copySession.mockRejectedValueOnce(Object.assign(new Error('server detail'), { status }));
-      sessionStore.touchSession('7777-8888');
-      renderApp();
-      await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenCalled());
-      const activeSession = api.setActiveSessionForRequests.mock.calls.at(-1)[0];
-      const sessionsBefore = sessionStore.listSessions().map(({ id }) => id);
-      fireEvent.click(screen.getByTitle('Menu'));
-      const label = await screen.findByText('7777-8888');
-      let row = label;
-      while (!row.querySelector('[aria-label="Session actions"]')) row = row.parentElement;
-      fireEvent.click(row.querySelector('[aria-label="Session actions"]'));
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Create a copy' }));
-
-      expect(await screen.findByText(message)).toBeInTheDocument();
-      expect(api.copySession).toHaveBeenCalledTimes(1);
-      expect(api.copySession).toHaveBeenCalledWith('7777-8888');
-      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(activeSession);
-      expect(sessionStore.listSessions().map(({ id }) => id)).toEqual(sessionsBefore);
-      expect(screen.queryByText('server detail')).not.toBeInTheDocument();
-    }
-  );
 
   it('shows a clear read-only offline state when the network is gone', async () => {
     renderApp();

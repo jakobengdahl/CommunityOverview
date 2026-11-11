@@ -1,4 +1,4 @@
-# covers: backend/core/session_manager.py, backend/core/session_store.py, backend/service/rest_api.py, backend/service/mcp_tools.py
+# covers: backend/service/rest_api.py, backend/service/mcp_tools.py
 """Copy guarantees across the REST and MCP boundaries."""
 
 import copy
