@@ -410,6 +410,7 @@
     "session_menu": "Session actions",
     "create_copy": "Create a copy",
     "copy_error": "Could not copy session",
+    "copy_size_error": "Could not copy session: the source exceeds the session size limit.",
     "copy_link": "Copy link",
     "link_copied": "Session link copied to clipboard",
     "copy_trigger_url": "Copy pulse-trigger URL",

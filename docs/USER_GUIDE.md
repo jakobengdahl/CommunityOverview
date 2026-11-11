@@ -830,7 +830,7 @@ settings. Graph nodes and connections remain shared. The copy keeps the source's
 write mode, but starts without staged graph changes, participants, presence,
 activity, undo history or edit leases. Copying requires permission to create a
 session and read the source; sessions exceeding the document size limit are
-refused.
+refused with a size-limit error message.
 
 Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
 a panel that slides out from the left and docks to the screen edge. While it is open,

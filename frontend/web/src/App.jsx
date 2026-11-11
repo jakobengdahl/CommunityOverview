@@ -2875,8 +2875,11 @@ function App() {
         sessionStore.touchSession(created.id);
         sessionStore.renameSession(created.id, created.name);
         switchToSession(created.id);
-      } catch {
-        showNotification('error', t('sessions.copy_error'));
+      } catch (error) {
+        showNotification(
+          'error',
+          t(error?.status === 413 ? 'sessions.copy_size_error' : 'sessions.copy_error')
+        );
       }
     },
     [sessionId, syncRef, requestSessionSnapshot, switchToSession, showNotification, t]
