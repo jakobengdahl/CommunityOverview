@@ -821,6 +821,39 @@ class SessionManager:
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
         state = copy.deepcopy(source.state)
+        # A fresh staged layer cannot resolve entities created only in the
+        # source layer. Drop their canvas state, while retaining shared graph
+        # entities even when the source stages updates or deletions for them.
+        layer_backend = self.write_modes.layer_store
+        if (
+            layer_backend is not None
+            and self.write_mode_of(source)["write_mode"] == WRITE_MODE_STAGED
+        ):
+            entries = layer_backend.load_layer(session_id)
+            staged_only = {
+                kind: {
+                    entry["entity_id"]
+                    for entry in entries
+                    if entry["kind"] == kind and entry["action"] == "create"
+                }
+                for kind in ("node", "edge")
+            }
+            for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
+                state[key] = [i for i in state[key] if i not in staged_only["node"]]
+            state["positions"] = {
+                i: position
+                for i, position in state["positions"].items()
+                if i not in staged_only["node"]
+            }
+            for key in ("hidden_edge_ids", "dimmed_edge_ids"):
+                state[key] = [i for i in state[key] if i not in staged_only["edge"]]
+            for annotation in state["annotations"]:
+                if isinstance(annotation.get("member_node_ids"), list):
+                    annotation["member_node_ids"] = [
+                        i
+                        for i in annotation["member_node_ids"]
+                        if i not in staged_only["node"]
+                    ]
         ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
 
         # Untyped attachments and the canvas's startAnchor/endAnchor snaps are

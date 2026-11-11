@@ -827,8 +827,11 @@ Use **Create a copy** in a session's context menu to open a separate copy of
 its stored canvas: name with a “(copy)” suffix, description, positions, groups,
 all annotation kinds (including images), hidden and dimmed objects, and visual
 settings. Graph nodes and connections remain shared. The copy keeps the source's
-write mode, but starts without staged graph changes, participants, presence,
-activity, undo history or edit leases. Copying requires permission to create a
+write mode, but starts without staged graph changes. Nodes and connections created
+only in the source’s staged layer are omitted, along with their positions, hidden
+or dimmed state and group memberships. Shared graph entities remain on the copied
+canvas even if the source stages updates or deletions for them. Participants, presence,
+activity, undo history and edit leases are not copied. Copying requires permission to create a
 session and read the source; sessions exceeding the document size limit are
 refused with a size-limit error message. A session holding an older image that
 links to a web address instead of carrying its own picture cannot be copied;
