@@ -399,7 +399,7 @@ device with no fine pointer:
 - **Multiple objects here** — if you tap or click a point where more than one annotation
   overlaps, a small list appears naming each one so you can pick which you meant, instead of
   only ever getting whichever one happens to be drawn on top. Only annotations on the same
-  layer count: a click on a node card, or on an annotation drawn above shapes sent to the
+  rendered layer count; node cards are never offered as alternatives. A click on a node card, or on an annotation drawn above shapes sent to the
   back, simply selects what you clicked.
 - **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
   toggles a mode where tapping adds each node to the selection instead of replacing it — the

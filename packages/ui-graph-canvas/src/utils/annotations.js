@@ -1019,7 +1019,10 @@ export function nodesAtPoint(nodes, point) {
 }
 
 function hitLayer(node) {
-  return Number.isFinite(node?.zIndex) ? node.zIndex : 0;
+  // CSS rejects fractional z-index declarations (falling back to auto/0)
+  // and clamps accepted integers to the signed 32-bit range.
+  const z = node?.zIndex;
+  return Number.isInteger(z) ? Math.max(-2147483648, Math.min(2147483647, z)) : 0;
 }
 
 // The objects the overlap picker offers for a click ReactFlow resolved to
@@ -1032,7 +1035,9 @@ function hitLayer(node) {
 export function overlapPickerCandidates(nodes, clickedNode, point) {
   if (!clickedNode || !ANNOTATION_TYPES.has(clickedNode.type)) return [];
   const layer = hitLayer(clickedNode);
-  const sameLayer = nodesAtPoint(nodes, point).filter((n) => hitLayer(n) === layer);
+  const sameLayer = nodesAtPoint(nodes, point).filter(
+    (n) => ANNOTATION_TYPES.has(n.type) && hitLayer(n) === layer
+  );
   return sameLayer.length > 1 ? sameLayer : [];
 }
 

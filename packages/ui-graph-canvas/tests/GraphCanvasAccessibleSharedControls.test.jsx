@@ -254,6 +254,40 @@ describe('GraphCanvas: the overlap-object picker', () => {
     expect(pickerOpen()).toBe(true);
   });
 
+  it('selects an annotation over a card without offering the card as an alternative', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    const top = noteNode('top', -10, -10, 40, 40, { text: 'Top' });
+    const card = { id: 'card', type: 'custom', position: { x: -10, y: -10 }, width: 40, height: 40 };
+    setNodesAndRerender([card, top]);
+    clickNode(top, 0, 0);
+    expect(pickerOpen()).toBe(false);
+
+    const peer = noteNode('peer', -10, -10, 40, 40, { text: 'Peer' });
+    setNodesAndRerender([card, top, peer]);
+    clickNode(top, 0, 0);
+    expect(screen.getByRole('button', { name: 'Sticky note, Top' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sticky note, Peer' })).toBeInTheDocument();
+    expect(document.querySelectorAll('.graph-overlap-picker button')).toHaveLength(2);
+  });
+
+  it.each([
+    [0, 0.5],
+    [0.5, -0.5],
+    [2147483647, 1730000000000],
+    [1730000000000, 1730000000001],
+    [-2147483648, -1730000000000],
+  ])('offers annotations sharing the rendered layer for z %s and %s only', (aZ, bZ) => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    const a = { ...noteNode('a', -10, -10, 40, 40, { text: 'First' }), zIndex: aZ };
+    const b = { ...noteNode('b', -10, -10, 40, 40, { text: 'Second' }), zIndex: bZ };
+    const otherLayer = { ...noteNode('other', -10, -10), zIndex: 7 };
+    setNodesAndRerender([a, b, otherLayer]);
+    clickNode(a, 0, 0);
+    expect(screen.getByRole('button', { name: 'Sticky note, First' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sticky note, Second' })).toBeInTheDocument();
+    expect(document.querySelectorAll('.graph-overlap-picker button')).toHaveLength(2);
+  });
+
   it('picking a candidate selects only that node and dismisses the picker', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     const a = noteNode('a', -10, -10, 40, 40, { text: 'First' });
