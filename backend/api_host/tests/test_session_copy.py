@@ -56,6 +56,8 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
             "content": {"text": kind},
             "version": 7,
             "field_versions": {"content": 7},
+            "created_by": "other",
+            "updated_by": "other",
         }
         for kind in kinds
     ]
@@ -94,6 +96,7 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         original["id"] = actual["id"]
         original["version"] = 1
         original["field_versions"] = {}
+        del original["created_by"], original["updated_by"]
     expected["annotations"][4]["content"]["start"]["attachment"]["target_id"] = (
         annotations[0]["id"]
     )
@@ -121,11 +124,12 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
     assert test_app.app.state.session_manager.store.session_count() == 1
 
 
-def test_copy_rejects_large_state_before_creating(test_app, monkeypatch):
-    """An over-budget copy leaves no empty destination behind."""
+@pytest.mark.parametrize("description", ["x" * 2000, "å" * 200])
+def test_copy_rejects_large_state_before_creating(test_app, monkeypatch, description):
+    """An over-budget copy, measured as op batches are, leaves no destination."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
-    source.description = "x" * 2000
+    source.description = description
     monkeypatch.setattr(manager_module, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 2048)
     response = test_app.post(f"/api/sessions/{source.id}/copy")
     assert response.status_code == 413

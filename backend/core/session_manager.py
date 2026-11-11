@@ -804,15 +804,15 @@ class SessionManager:
             raise SessionLimitReached()
         # Check before allocating an id or cloning embedded images. History is
         # deliberately excluded from both the copy and its document budget.
+        # Measured as apply_ops measures the document (ASCII-escaped), so a
+        # copy that fits here still accepts later op batches.
         name = f"{source.name or 'Untitled session'} (copy)"
         document = {
             "state": source.state,
             "name": name,
             "description": source.description,
         }
-        if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > (
-            DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024
-        ):
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
         state = copy.deepcopy(source.state)
         ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
@@ -833,11 +833,11 @@ class SessionManager:
             annotation["id"] = ids[annotation["id"]]
             annotation["version"] = 1
             annotation["field_versions"] = {}
+            annotation.pop("created_by", None)
+            annotation.pop("updated_by", None)
             remap_attachment(annotation)
         document["state"] = state
-        if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > (
-            DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024
-        ):
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
         mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
         return self.store.create(
