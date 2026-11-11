@@ -817,12 +817,15 @@ class SessionManager:
         state = copy.deepcopy(source.state)
         ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
 
+        # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
+        # resolved by id alone, so any reference naming a copied annotation
+        # follows it; a node-typed one keeps the shared node id.
         def remap_attachment(value):
             if isinstance(value, dict):
-                if value.get("target_type") == "annotation":
-                    value["target_id"] = ids.get(
-                        value.get("target_id"), value.get("target_id")
-                    )
+                if value.get("target_type") in (None, "annotation"):
+                    target = value.get("target_id")
+                    if isinstance(target, str) and target in ids:
+                        value["target_id"] = ids[target]
                 for child in value.values():
                     remap_attachment(child)
             elif isinstance(value, list):
@@ -831,6 +834,10 @@ class SessionManager:
 
         for annotation in state["annotations"]:
             annotation["id"] = ids[annotation["id"]]
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
             annotation["version"] = 1
             annotation["field_versions"] = {}
             annotation.pop("created_by", None)

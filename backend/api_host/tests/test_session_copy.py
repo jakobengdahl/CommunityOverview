@@ -20,7 +20,10 @@ def invoke(test_app, source, transport):
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
 def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, transport):
-    """Every stored canvas field survives, with new IDs and no shared mutable state."""
+    """Every stored canvas field survives, with new IDs and no shared mutable state.
+
+    Every reference resolved as an annotation id follows the copied annotation.
+    """
     manager = test_app.app.state.session_manager
     source = manager.create_session("Design")
     source.description = "Working canvas"
@@ -64,6 +67,12 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
     source.state["annotations"][4]["content"]["start"] = {
         "attachment": {"target_type": "annotation", "target_id": "shape"}
     }
+    source.state["annotations"][4].update(startAnchor="text", endAnchor="node")
+    source.state["annotations"][5]["attachment"] = {"target_id": "note"}
+    source.state["annotations"][6]["attachment"] = {
+        "target_type": "node",
+        "target_id": "shape",
+    }
     source.state["annotations"][7]["content"]["image"] = {
         "url": "data:image/webp;base64,AAAA"
     }
@@ -100,6 +109,8 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
     expected["annotations"][4]["content"]["start"]["attachment"]["target_id"] = (
         annotations[0]["id"]
     )
+    expected["annotations"][4]["startAnchor"] = annotations[1]["id"]
+    expected["annotations"][5]["attachment"]["target_id"] = annotations[2]["id"]
     assert copied.state == expected
     annotations[0]["content"]["text"] = "changed"
     assert source.to_dict() == before
