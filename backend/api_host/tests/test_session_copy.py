@@ -7,6 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from backend.core import session_manager as manager_module
+from backend.core.session_annotations import image_annotation_error
+from backend.core.write_modes import STAGED_UNSUPPORTED
 from backend.runtime.authorization import GraphAuthorizationDecision
 
 
@@ -129,7 +131,11 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
         )
     )
     test_app.app.state.graph_service._authorization_hook = hook
-    assert invoke(test_app, source, transport)[0] == 403
+    status, result = invoke(test_app, source, transport)
+    assert status == 403
+    if transport == "mcp":
+        assert result["error_code"] == "access_denied"
+        assert "session" not in result
     assert test_app.app.state.session_manager.store.session_count() == 1
 
 
@@ -178,6 +184,23 @@ def test_copy_preserves_staged_mode_without_staged_changes(
     assert client.get(f"/api/sessions/{source}/staged").json()["items"] == before
 
 
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_copy_of_staged_source_without_staged_support_is_refused(
+    test_app, monkeypatch, transport
+):
+    """A staged source on a deployment without staged sessions yields its refusal code."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    monkeypatch.setattr(manager, "write_mode_of", lambda s: {"write_mode": "staged"})
+    if transport == "rest":
+        response = test_app.post(f"/api/sessions/{source.id}/copy")
+        assert response.status_code == 422
+    else:
+        result = invoke(test_app, source, transport)[1]
+        assert result["error"] == STAGED_UNSUPPORTED
+    assert manager.store.session_count() == 1
+
+
 def test_copy_obeys_session_count_limit(test_app):
     """Copying cannot bypass the session allocation cap."""
     manager = test_app.app.state.session_manager
@@ -205,5 +228,7 @@ def test_copy_refuses_legacy_remote_image_url_before_creating(test_app, transpor
     status, result = invoke(test_app, source, transport)
     assert status == (400 if transport == "rest" else 403)
     assert result.get("success") is not True
+    if transport == "mcp":
+        assert result["error"] == image_annotation_error(source.state["annotations"][0])
     assert manager.store.session_count() == 1
     assert source.to_dict() == before
