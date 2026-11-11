@@ -257,7 +257,13 @@ describe('GraphCanvas: the overlap-object picker', () => {
   it('selects an annotation over a card without offering the card as an alternative', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
     const top = noteNode('top', -10, -10, 40, 40, { text: 'Top' });
-    const card = { id: 'card', type: 'custom', position: { x: -10, y: -10 }, width: 40, height: 40 };
+    const card = {
+      id: 'card',
+      type: 'custom',
+      position: { x: -10, y: -10 },
+      width: 40,
+      height: 40,
+    };
     setNodesAndRerender([card, top]);
     clickNode(top, 0, 0);
     expect(pickerOpen()).toBe(false);
