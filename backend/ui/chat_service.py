@@ -929,6 +929,11 @@ class ChatService:
                         collection_short_name, touched=touched_nodes
                     ),
                 }
+            if _confirmation:
+                # The audit names the tool only if this execution's tool set has it.
+                _confirmation["tool_names"].update(
+                    {**self._processor.tools_map, **(tools_override or {})}
+                )
 
             visualization_context = self._format_visualization_context(
                 visible_node_ids, selected_node_ids
@@ -1088,34 +1093,42 @@ class ChatService:
             return confirmation_outcome(refusal("access_denied"))
         # Sibling confirmations share the original turn's touched ids. Serialize
         # writes and response saves so the latter observes completed writes.
+        tool_names = set()
+        response = None
         with context["lock"]:
             if pending_actions.take(token) is None:
                 return confirmation_outcome(refusal("confirmation_unknown"))
-            result = self.process_message(
-                messages=[],
-                collection_short_name=context["collection"],
-                api_key="" if context["api_key_override"] else None,
-                _confirmation={
-                    **context,
-                    "call": {
-                        "type": "tool_use",
-                        "id": "confirmed",
-                        "name": name,
-                        "input": arguments,
+            # The token is spent: audit every outcome, including an exception.
+            try:
+                result = self.process_message(
+                    messages=[],
+                    collection_short_name=context["collection"],
+                    api_key="" if context["api_key_override"] else None,
+                    _confirmation={
+                        **context,
+                        "tool_names": tool_names,
+                        "call": {
+                            "type": "tool_use",
+                            "id": "confirmed",
+                            "name": name,
+                            "input": arguments,
+                        },
                     },
-                },
-            )
-        response = confirmation_outcome(result)
-        logger.info(
-            "Chat action confirmed",
-            extra={
-                "event": "chat_action_confirmed",
-                "tool": name if name in self._processor.tools_map else "unknown_tool",
-                "actor": context["actor"],
-                "conversation_id": conversation_id,
-                "outcome": response["outcome"],
-            },
-        )
+                )
+                response = confirmation_outcome(result)
+            finally:
+                logger.info(
+                    "Chat action confirmed",
+                    extra={
+                        "event": "chat_action_confirmed",
+                        "tool": name
+                        if name in tool_names or name in self._processor.tools_map
+                        else "unknown_tool",
+                        "actor": context["actor"],
+                        "conversation_id": conversation_id,
+                        "outcome": response["outcome"] if response else "failed",
+                    },
+                )
         return response
 
     def process_chat_request(

@@ -273,8 +273,11 @@ def test_confirmation_route_exposes_cards_and_runs_once(fastapi_test_client):
     )
 
 
-def test_confirmed_kiosk_writes_share_touched_nodes_with_response_save(chat_service):
+def test_confirmed_kiosk_writes_share_touched_nodes_with_response_save(
+    chat_service, caplog
+):
     service, llm = chat_service
+    caplog.set_level(logging.INFO)
     graph = service._graph_service
     add_collection(graph)
     cards = taint(
@@ -301,6 +304,12 @@ def test_confirmed_kiosk_writes_share_touched_nodes_with_response_save(chat_serv
         for edge in graph.storage.edges.values()
         if edge.source == saved["response_id"]
     }
+    # The override-installed save tool is audited by name, not as unknown_tool.
+    assert [
+        r.tool
+        for r in caplog.records
+        if getattr(r, "event", None) == "chat_action_confirmed"
+    ] == ["add_nodes", "save_collection_response"]
 
 
 @pytest.mark.parametrize("revocation", ["ceiling", "grant", "hook"])

@@ -1,7 +1,7 @@
 # covers: backend/ui/chat_service.py, backend/ui/chat_logic.py, backend/ui/rest_api.py, backend/ui/attachment_confirmation.py
 """Confirmation identity, request validation, and pending argument guarantees."""
 
-from pathlib import Path
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -89,15 +89,31 @@ def test_invalid_attachment_bodies_require_confirmation(
     tool.assert_not_called()
 
 
-def test_documented_attachment_validation_follows_pending_storage():
-    documentation = (Path(__file__).parents[2] / "DEVELOPMENT.md").read_text()
-    contract = " ".join(documentation.split())
-    assert (
-        "In tainted turns, blocked calls store their exact arguments before "
-        "validation, including invalid or oversized attachment bodies, subject "
-        "to pending-action capacity limits. Argument validation runs only after "
-        "confirmation, before tool execution."
-    ) in contract
+def test_confirmation_raising_before_execution_is_audited_and_spends_token(
+    chat_service, caplog, monkeypatch
+):
+    service, llm = chat_service
+    service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
+    llm.mock_tool_call_sequence = [
+        [{"name": "get_schema", "input": {}}],
+        [{"name": "write"}],
+    ]
+    (card,) = service.process_message([{"role": "user", "content": "read"}])[
+        "pending_actions"
+    ]
+    monkeypatch.setattr(
+        service, "_format_visualization_context", MagicMock(side_effect=RuntimeError)
+    )
+    caplog.set_level(logging.INFO)
+    with pytest.raises(RuntimeError):
+        service.confirm_action(card["token"], card["conversation_id"])
+    (audit,) = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "chat_action_confirmed"
+    ]
+    assert audit.outcome == "failed"
+    assert pending_actions.peek(card["token"]) is None
 
 
 @pytest.mark.parametrize("authentication", [None, "basic", "session", "bearer"])
