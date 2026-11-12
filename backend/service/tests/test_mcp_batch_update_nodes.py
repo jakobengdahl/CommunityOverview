@@ -493,19 +493,25 @@ class TestServiceLayer:
             "error",
             "ok",
         ]
-        assert result["results"][1:3] == [
-            {
-                "node_id": node_id,
-                "status": "error",
-                "error": "Invalid node_id: expected a string",
-            }
-        ] * 2
+        assert (
+            result["results"][1:3]
+            == [
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Invalid node_id: expected a string",
+                }
+            ]
+            * 2
+        )
         assert [call.args[0] for call in write.call_args_list] == ["a", "b"]
         assert storage.nodes["a"].name == "First updated"
         assert storage.nodes["b"].name == "Last updated"
 
     @pytest.mark.parametrize("missing_count", [1, 2])
-    def test_missing_node_id_preserves_partial_success(self, batch_tools, missing_count):
+    def test_missing_node_id_preserves_partial_success(
+        self, batch_tools, missing_count
+    ):
         tools, storage = batch_tools
         revisions = {node_id: storage.nodes[node_id].revision for node_id in ("a", "b")}
 
@@ -527,13 +533,17 @@ class TestServiceLayer:
         assert [item["status"] for item in result["results"]] == (
             ["ok"] + ["error"] * missing_count + ["ok"]
         )
-        assert result["results"][1:-1] == [
-            {
-                "node_id": None,
-                "status": "error",
-                "error": "Missing required field: node_id",
-            }
-        ] * missing_count
+        assert (
+            result["results"][1:-1]
+            == [
+                {
+                    "node_id": None,
+                    "status": "error",
+                    "error": "Missing required field: node_id",
+                }
+            ]
+            * missing_count
+        )
         assert [call.args[0] for call in write.call_args_list] == ["a", "b"]
         assert storage.nodes["a"].name == "First updated"
         assert storage.nodes["b"].name == "Last updated"
