@@ -7,31 +7,22 @@ partial success, size cap, duplicate rejection, compact result shape.
 """
 
 import json
-from typing import Any, Dict, List, Optional
 from unittest.mock import Mock
 
 import pytest
 
 from backend.core import (
-    EntityRevisionConflict,
     GraphStorage,
     Node,
     NodeType,
 )
-from backend.core.session_store import (
-    InMemorySessionPersistenceBackend,
-    SessionStore,
-)
-from backend.core.session_manager import SessionManager
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
-    GRAPH_OPERATION_STAGE,
     GraphAccessNarrowing,
     GraphAuthorizationContext,
     GraphAuthorizationDecision,
-    GraphAuthorizationHook,
 )
-from backend.service import GraphService, mutations, register_mcp_tools
+from backend.service import GraphService, register_mcp_tools
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +127,6 @@ def _make_scoped_service(tmp_path, include_graph_ids: tuple) -> GraphService:
 class TestHappyPath:
     def test_updates_multiple_nodes(self, batch_tools):
         tools, storage = batch_tools
-        a_rev = storage.nodes["a"].revision
         updates = [
             {"node_id": "a", "updates": {"name": "Alice Updated"}},
             {"node_id": "b", "updates": {"name": "Bob Updated"}},
@@ -152,33 +142,41 @@ class TestHappyPath:
     def test_metadata_merge_is_honoured(self, batch_tools):
         tools, storage = batch_tools
         # Set initial metadata
-        tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"metadata": {"k1": "v1", "k2": "v2"}}},
-        ])
+        tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"metadata": {"k1": "v1", "k2": "v2"}}},
+            ]
+        )
         # Merge: update k1, remove k2 with null; k3 is not present so nothing to preserve
-        tools["batch_update_nodes"]([
-            {
-                "node_id": "a",
-                "updates": {"metadata": {"k1": "new", "k2": None}},
-                "metadata_merge": True,
-            },
-        ])
+        tools["batch_update_nodes"](
+            [
+                {
+                    "node_id": "a",
+                    "updates": {"metadata": {"k1": "new", "k2": None}},
+                    "metadata_merge": True,
+                },
+            ]
+        )
         a_node = storage.nodes["a"]
         assert a_node.metadata == {"k1": "new"}
 
     def test_metadata_merge_is_skipped_when_false(self, batch_tools):
         tools, storage = batch_tools
-        tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"metadata": {"k1": "v1", "k2": "v2"}}},
-        ])
+        tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"metadata": {"k1": "v1", "k2": "v2"}}},
+            ]
+        )
         # Replace mode — k2 is gone, k3 is gone
-        tools["batch_update_nodes"]([
-            {
-                "node_id": "a",
-                "updates": {"metadata": {"only": "stay"}},
-                "metadata_merge": False,
-            },
-        ])
+        tools["batch_update_nodes"](
+            [
+                {
+                    "node_id": "a",
+                    "updates": {"metadata": {"only": "stay"}},
+                    "metadata_merge": False,
+                },
+            ]
+        )
         assert storage.nodes["a"].metadata == {"only": "stay"}
 
 
@@ -191,9 +189,11 @@ class TestTagsReplace:
     def test_tags_replace_not_append(self, batch_tools):
         tools, storage = batch_tools
         # a starts with tags=["old"]
-        tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"tags": ["new-tag"]}},
-        ])
+        tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"tags": ["new-tag"]}},
+            ]
+        )
         assert storage.nodes["a"].tags == ["new-tag"]
         assert "old" not in storage.nodes["a"].tags
 
@@ -209,18 +209,20 @@ class TestPartialSuccessRevisions:
         a_rev = storage.nodes["a"].revision
         b_rev = storage.nodes["b"].revision
 
-        result = tools["batch_update_nodes"]([
-            {
-                "node_id": "a",
-                "updates": {"name": "Alice"},
-                "expected_revision": a_rev + 99,  # stale
-            },
-            {
-                "node_id": "b",
-                "updates": {"name": "Bob"},
-                "expected_revision": b_rev,  # ok
-            },
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {
+                    "node_id": "a",
+                    "updates": {"name": "Alice"},
+                    "expected_revision": a_rev + 99,  # stale
+                },
+                {
+                    "node_id": "b",
+                    "updates": {"name": "Bob"},
+                    "expected_revision": b_rev,  # ok
+                },
+            ]
+        )
 
         assert result["success"] is True
         counts = result["counts"]
@@ -237,10 +239,20 @@ class TestPartialSuccessRevisions:
     def test_all_conflicts(self, batch_tools):
         tools, storage = batch_tools
         stale_rev = 999
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "X"}, "expected_revision": stale_rev},
-            {"node_id": "b", "updates": {"name": "Y"}, "expected_revision": stale_rev},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {
+                    "node_id": "a",
+                    "updates": {"name": "X"},
+                    "expected_revision": stale_rev,
+                },
+                {
+                    "node_id": "b",
+                    "updates": {"name": "Y"},
+                    "expected_revision": stale_rev,
+                },
+            ]
+        )
         assert result["success"] is True
         assert result["counts"]["conflict"] == 2
         assert result["counts"]["ok"] == 0
@@ -254,9 +266,11 @@ class TestPartialSuccessRevisions:
 class TestNotFound:
     def test_missing_node_id_returns_not_found(self, batch_tools):
         tools, _ = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "nonexistent", "updates": {"name": "X"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "nonexistent", "updates": {"name": "X"}},
+            ]
+        )
         assert result["success"] is True
         assert result["counts"]["not_found"] == 1
         nr = result["results"][0]
@@ -264,10 +278,12 @@ class TestNotFound:
 
     def test_not_found_coexists_with_success(self, batch_tools):
         tools, storage = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "Alice"}},
-            {"node_id": "nope", "updates": {"name": "X"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "Alice"}},
+                {"node_id": "nope", "updates": {"name": "X"}},
+            ]
+        )
         assert result["success"] is True
         assert result["counts"]["ok"] == 1
         assert result["counts"]["not_found"] == 1
@@ -284,10 +300,12 @@ class TestAuthorizationPartialSuccess:
         service = _make_scoped_service(tmp_path, ("graph-alpha",))
 
         # batch_update_nodes on the service level
-        result = service.batch_update_nodes([
-            {"node_id": "alpha-1", "updates": {"name": "Alpha Updated"}},
-            {"node_id": "beta-1", "updates": {"name": "Beta Updated"}},
-        ])
+        result = service.batch_update_nodes(
+            [
+                {"node_id": "alpha-1", "updates": {"name": "Alpha Updated"}},
+                {"node_id": "beta-1", "updates": {"name": "Beta Updated"}},
+            ]
+        )
 
         assert result["success"] is True
         counts = result["counts"]
@@ -302,10 +320,12 @@ class TestAuthorizationPartialSuccess:
     def test_all_out_of_scope(self, tmp_path):
         service = _make_scoped_service(tmp_path, ("graph-alpha",))
 
-        result = service.batch_update_nodes([
-            {"node_id": "beta-1", "updates": {"name": "X"}},
-            {"node_id": "alpha-1", "updates": {"name": "Y"}},
-        ])
+        result = service.batch_update_nodes(
+            [
+                {"node_id": "beta-1", "updates": {"name": "X"}},
+                {"node_id": "alpha-1", "updates": {"name": "Y"}},
+            ]
+        )
         assert result["success"] is True
         # alpha-1 is in scope so ok=1, beta-1 is out of scope → not_found=1
         counts = result["counts"]
@@ -316,9 +336,11 @@ class TestAuthorizationPartialSuccess:
         service = _make_scoped_service(tmp_path, ("graph-alpha",))
 
         # local-1 is always visible even when only graph-alpha is included
-        result = service.batch_update_nodes([
-            {"node_id": "local-1", "updates": {"name": "Local Updated"}},
-        ])
+        result = service.batch_update_nodes(
+            [
+                {"node_id": "local-1", "updates": {"name": "Local Updated"}},
+            ]
+        )
         assert result["success"] is True
         assert result["counts"]["ok"] == 1
         assert service.storage.nodes["local-1"].name == "Local Updated"
@@ -353,9 +375,7 @@ class TestSizeCap:
         for i in range(99):
             nid = f"cap-{i}"
             storage.add_nodes([Node(id=nid, type=NodeType.ACTOR, name=nid)], [])
-        batch = [
-            {"node_id": f"cap-{i}", "updates": {"name": "x"}} for i in range(99)
-        ]
+        batch = [{"node_id": f"cap-{i}", "updates": {"name": "x"}} for i in range(99)]
         batch.append({"node_id": "a", "updates": {"name": "X"}})
         assert len(batch) == 100
         # One more → 101
@@ -379,10 +399,12 @@ class TestSizeCap:
 class TestDuplicateIds:
     def test_duplicate_node_ids_refused(self, batch_tools):
         tools, storage = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "X"}},
-            {"node_id": "a", "updates": {"name": "Y"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "X"}},
+                {"node_id": "a", "updates": {"name": "Y"}},
+            ]
+        )
         assert result["success"] is False
         assert "Duplicate node_id" in result["error"]
         assert result["results"] == []
@@ -390,10 +412,12 @@ class TestDuplicateIds:
 
     def test_no_duplicates_allows_update(self, batch_tools):
         tools, storage = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "Alice Updated"}},
-            {"node_id": "b", "updates": {"name": "Bob Updated"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "Alice Updated"}},
+                {"node_id": "b", "updates": {"name": "Bob Updated"}},
+            ]
+        )
         assert result["success"] is True
         assert result["counts"]["ok"] == 2
 
@@ -406,9 +430,11 @@ class TestDuplicateIds:
 class TestCompactResult:
     def test_result_contains_no_full_node_bodies(self, batch_tools):
         tools, storage = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "Alice Updated"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "Alice Updated"}},
+            ]
+        )
         assert result["success"] is True
         for item in result["results"]:
             # Each result should NOT contain a full node dict
@@ -422,9 +448,11 @@ class TestCompactResult:
 
     def test_ok_result_has_revision_and_updated_at(self, batch_tools):
         tools, storage = batch_tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "Alice Updated"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "Alice Updated"}},
+            ]
+        )
         ok_items = [r for r in result["results"] if r["status"] == "ok"]
         assert len(ok_items) == 1
         assert "revision" in ok_items[0]
@@ -441,7 +469,13 @@ class TestServiceLayer:
         result = empty_service.batch_update_nodes([])
         assert result["success"] is True
         assert result["results"] == []
-        assert result["counts"] == {"ok": 0, "conflict": 0, "not_found": 0, "forbidden": 0, "error": 0}
+        assert result["counts"] == {
+            "ok": 0,
+            "conflict": 0,
+            "not_found": 0,
+            "forbidden": 0,
+            "error": 0,
+        }
 
     def test_over_cap_at_service_level(self, empty_service):
         batch = [
@@ -452,10 +486,12 @@ class TestServiceLayer:
         assert "exceeds the limit of 100" in result["error"]
 
     def test_duplicate_at_service_level(self, empty_service):
-        result = empty_service.batch_update_nodes([
-            {"node_id": "x", "updates": {"name": "X"}},
-            {"node_id": "x", "updates": {"name": "Y"}},
-        ])
+        result = empty_service.batch_update_nodes(
+            [
+                {"node_id": "x", "updates": {"name": "X"}},
+                {"node_id": "x", "updates": {"name": "Y"}},
+            ]
+        )
         assert result["success"] is False
         assert "Duplicate node_id" in result["error"]
 
@@ -468,7 +504,9 @@ class TestServiceLayer:
 class TestMutationDeny:
     def test_deny_mutations_blocks_batch(self, tmp_path):
         class DenyMutationsHook:
-            def evaluate(self, context: GraphAuthorizationContext) -> GraphAuthorizationDecision:
+            def evaluate(
+                self, context: GraphAuthorizationContext
+            ) -> GraphAuthorizationDecision:
                 if context.action == GRAPH_ACTION_MUTATE:
                     return GraphAuthorizationDecision(
                         allowed=False,
@@ -476,15 +514,19 @@ class TestMutationDeny:
                         mode="custom",
                         source="test",
                     )
-                return GraphAuthorizationDecision(allowed=True, mode="custom", source="test")
+                return GraphAuthorizationDecision(
+                    allowed=True, mode="custom", source="test"
+                )
 
         service = GraphService(
             GraphStorage(json_path=str(tmp_path / "deny.json")),
             authorization_hook=DenyMutationsHook(),
         )
-        result = service.batch_update_nodes([
-            {"node_id": "a", "updates": {"name": "X"}},
-        ])
+        result = service.batch_update_nodes(
+            [
+                {"node_id": "a", "updates": {"name": "X"}},
+            ]
+        )
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
         assert result.get("results") == []
@@ -499,9 +541,11 @@ class TestMcpToolRegistration:
     def test_tool_is_registered_and_callable(self, batch_tools):
         tools, _ = batch_tools
         assert "batch_update_nodes" in tools
-        result = tools["batch_update_nodes"]([
-            {"node_id": "a", "updates": {"name": "Test"}},
-        ])
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "Test"}},
+            ]
+        )
         assert "success" in result
         assert "results" in result
         assert "counts" in result
@@ -512,4 +556,10 @@ class TestMcpToolRegistration:
         assert result["success"] is True
         assert isinstance(result["results"], list)
         assert isinstance(result["counts"], dict)
-        assert set(result["counts"].keys()) == {"ok", "conflict", "not_found", "forbidden", "error"}
+        assert set(result["counts"].keys()) == {
+            "ok",
+            "conflict",
+            "not_found",
+            "forbidden",
+            "error",
+        }

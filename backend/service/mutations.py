@@ -426,13 +426,6 @@ def batch_update_nodes(
         denied.setdefault("counts", {})
         return denied
 
-    event_context = access.build_event_context(
-        target="batch_update_nodes",
-        event_origin=event_origin,
-        event_session_id=event_session_id,
-        event_correlation_id=event_correlation_id,
-    )
-
     # --- Pre-flight validations (reject everything if violated) ---
     if len(updates) > MAX_BATCH:
         return {
@@ -481,43 +474,53 @@ def batch_update_nodes(
         # Classify the per-node result
         if result.get("success") is True:
             counts["ok"] += 1
-            results.append({
-                "node_id": node_id,
-                "status": "ok",
-                "revision": result.get("node", {}).get("revision"),
-                "updated_at": result.get("node", {}).get("updated_at"),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "ok",
+                    "revision": result.get("node", {}).get("revision"),
+                    "updated_at": result.get("node", {}).get("updated_at"),
+                }
+            )
         elif result.get("error") == "entity_revision_conflict":
             counts["conflict"] += 1
-            results.append({
-                "node_id": node_id,
-                "status": "conflict",
-                "current_revision": result.get("current_revision"),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "conflict",
+                    "current_revision": result.get("current_revision"),
+                }
+            )
         elif (
             result.get("success") is False
             and "not found" in (result.get("error") or "").lower()
         ):
             counts["not_found"] += 1
-            results.append({
-                "node_id": node_id,
-                "status": "not_found",
-                "error": result.get("error"),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "not_found",
+                    "error": result.get("error"),
+                }
+            )
         elif result.get("error_code") == "access_denied":
             counts["forbidden"] += 1
-            results.append({
-                "node_id": node_id,
-                "status": "forbidden",
-                "error": result.get("error"),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "forbidden",
+                    "error": result.get("error"),
+                }
+            )
         else:
             counts["error"] += 1
-            results.append({
-                "node_id": node_id,
-                "status": "error",
-                "error": result.get("error"),
-            })
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": result.get("error"),
+                }
+            )
 
     return {
         "success": True,
