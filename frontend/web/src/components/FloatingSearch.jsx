@@ -14,6 +14,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
     nodes: vizNodes,
     hiddenNodeIds,
     addNodesToVisualization,
+    publishMembership,
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
@@ -285,6 +286,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
           if (selectionRef.current !== selectionId) return;
 
           clearVisualization();
+          let loadedIds = [];
           if (nodeIds.length > 0) {
             const loadedNodes = details
               .filter((d) => d?.success)
@@ -317,8 +319,10 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+              loadedIds = loadedNodes.map((n) => n.id);
             }
           }
+          publishMembership('nodes_replaced', loadedIds);
 
           if (savedViewAnnotations.groups.length > 0) {
             setPendingGroups({
@@ -353,6 +357,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       } else {
         // Add node and fetch edges connecting it to existing visualization nodes
         addNodesToVisualization([node], []);
+        publishMembership('nodes_added', [node.id]);
         try {
           const related = await api.getRelatedNodes(node.id, { depth: 1 });
           if (selectionRef.current !== selectionId) return;
@@ -383,6 +388,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       vizNodes,
       hiddenNodeIds,
       addNodesToVisualization,
+      publishMembership,
       clearVisualization,
       setFocusNodeId,
       setPendingGroups,

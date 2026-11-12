@@ -36,13 +36,14 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
 
   // Apply a tool result's nodes and edges to the canvas.
   const applyToCanvas = useCallback(
-    (toolResult) => {
+    (toolResult, { publish = false } = {}) => {
       const {
         nodes: currentNodes,
         edges: currentEdges,
         addNodesToVisualization: addNodes,
         updateVisualization: updateViz,
         clearVisualization: clearViz,
+        publishMembership,
       } = useGraphStore.getState();
 
       const filtered = (toolResult.nodes || []).filter(
@@ -95,6 +96,19 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         // the current view.
         addNodesToView();
       }
+      // A push the server already applied is only rendered; `publish` marks
+      // one it could not apply (see the legacy stream below).
+      if (publish) {
+        const replaces = [
+          'load_visualization',
+          'clear_visualization',
+          'replace_visualization',
+        ].includes(toolResult.action);
+        publishMembership(
+          replaces ? 'nodes_replaced' : 'nodes_added',
+          filtered.map((n) => n.id)
+        );
+      }
     },
     [latestViewport]
   );
@@ -111,7 +125,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // handover from the legacy stream to the op stream (or a brief overlap
   // window) the same MCP push can be broadcast on both.
   const applyToolResultCommand = useCallback(
-    (pushed, commandId) => {
+    (pushed, commandId, { publish = false } = {}) => {
       if (!pushed) return;
       if (commandId) {
         if (appliedCommandIdsRef.current.includes(commandId)) return;
@@ -126,7 +140,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       // Pushes apply in the order they arrived: one waiting on its composed
       // re-read holds back every later one.
       if (!api.isActiveSessionPossiblyStaged() && pendingRef.current === 0) {
-        applyToCanvas(pushed);
+        applyToCanvas(pushed, { publish });
         return;
       }
       const target = sessionIdRef.current;
@@ -142,7 +156,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
           // keep the canvas rather than clear it for nothing.
           const replaces = ['load_visualization', 'replace_visualization'].includes(pushed.action);
           if (replaces && (pushed.nodes || []).length && !toolResult.nodes.length) return;
-          applyToCanvas(toolResult);
+          applyToCanvas(toolResult, { publish });
         })
         .catch(() => {})
         .finally(() => {
@@ -191,7 +205,11 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
           return;
         }
         if (cmd.type !== 'tool_result' || !cmd.result) return;
-        applyToolResultCommand(cmd.result, cmd.command_id);
+        // The server marks a push whose membership it applied; only one it
+        // could not (no stored session yet) is sent on by this browser.
+        applyToolResultCommand(cmd.result, cmd.command_id, {
+          publish: cmd.membership_applied === false,
+        });
       } catch (err) {
         console.error('[Session SSE] parse error:', err);
       }

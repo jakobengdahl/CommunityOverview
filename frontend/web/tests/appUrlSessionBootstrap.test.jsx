@@ -1,3 +1,4 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import { StrictMode } from 'react';
@@ -324,6 +325,8 @@ describe('App URL session bootstrap', () => {
   });
 
   it('connects the stream of a link settled direct by a late 404, so a later switch to staged is learnt', async () => {
+    // No view or node to add: either is a membership write that connects first.
+    window.history.replaceState({}, '', '/?session=1111-2222');
     api.getUiCapabilities.mockResolvedValue({ llm_available: false, staged_sessions: true });
     await renderApp();
     await act(async () => {

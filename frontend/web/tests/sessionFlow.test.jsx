@@ -1,3 +1,4 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 
@@ -247,9 +248,9 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalled();
     });
+    // Layout only: membership is never part of a snapshot save.
     const ops = opsFrom(global.fetch);
-    expect(ops).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
-    expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
+    expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
   });
 
   // The canvas discards its position undo/redo history on this counter, so the
@@ -319,7 +320,7 @@ describe('Server-backed session lifecycle', () => {
       expect(connectSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
-      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+      expect(opsFrom(global.fetch).map((op) => op.op)).toContain('node_moved');
     });
 
     connectSpy.mockRestore();
@@ -338,23 +339,12 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalled();
     });
-    expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
-
-    // Clear the canvas — what a double-Escape, a last-node delete, or an MCP
-    // clear_visualization does. Now that the session is materialised (the
-    // save above connected its sync client), this empty state must still
-    // reach the server via the debounced auto-save (R4/D14) instead of
-    // scheduleAutoSave's own emptiness guard silently dropping it.
-    act(() => {
-      useGraphStore.getState().clearVisualization();
+    // The user clears the materialised session: the empty membership reaches
+    // the server as one explicit replace, not through the debounced autosave.
+    fireEvent.click(screen.getByLabelText('Clear canvas'));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_replaced', node_ids: [] });
     });
-
-    await waitFor(
-      () => {
-        expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_removed', node_ids: ['node-a'] });
-      },
-      { timeout: 3000 }
-    );
   });
 
   it('MCP command dedup: same command_id is skipped, a different command_id re-applies (R5)', async () => {

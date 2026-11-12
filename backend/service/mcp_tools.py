@@ -6409,8 +6409,9 @@ def _push_to_session(
 
     Every push to a stored shared session applies its node membership on the
     server before broadcasting (``SessionManager._apply_command_membership``),
-    so browsers only render it. Legacy-only sessions still rely on the browser
-    applying the command. An
+    so browsers only render it. The legacy copy says so in
+    ``membership_applied``; only when that is false (no stored session) does
+    the browser send the membership itself. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6432,16 +6433,6 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
-    legacy_enqueued = False
-    legacy_consumers = 0
-    if session_registry and session_registry.is_valid_session_id(session_id):
-        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
-        # A registry that cannot report its consumers cannot support a delivery
-        # claim, so the verdict falls back to the hub rather than assuming a
-        # reader that may not be there.
-        counter = getattr(session_registry, "consumer_count", None)
-        if callable(counter):
-            legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
     # The two hub calls fail independently and mean different things, so they are
@@ -6462,6 +6453,22 @@ def _push_to_session(
             # Best-effort mirror to the hub; never break the legacy push path.
             hub_published = False
             hub_publish_failed = True
+    legacy_enqueued = False
+    legacy_consumers = 0
+    if session_registry and session_registry.is_valid_session_id(session_id):
+        # The hub push above applied the membership server-side when it
+        # published; a legacy browser sends it only when nothing did, so the
+        # server stays its only writer for a stored session.
+        legacy_command = {**command, "membership_applied": hub_published}
+        legacy_enqueued = bool(
+            session_registry.push_command_sync(session_id, legacy_command)
+        )
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy_consumers = max(0, int(counter(session_id)))
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (

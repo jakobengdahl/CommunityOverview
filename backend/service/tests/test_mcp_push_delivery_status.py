@@ -358,6 +358,8 @@ async def test_legacy_consumer_reports_delivered_and_receives_the_command(wired)
         assert await _settle(lambda: len(received) == 1)
         assert received[0]["tool"] == "search_graph"
         assert received[0]["result"]["nodes"]
+        # The server applied this push's membership; the browser must not.
+        assert received[0]["membership_applied"] is True
 
         # A second push to the SAME still-attached consumer. Pushing once per
         # consumer would not notice a ref-count that delivery consumes, which
@@ -393,6 +395,8 @@ async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path)
         assert delivery["live_consumers"] == 1
         assert "warning" not in delivery
         assert await _settle(lambda: len(received) == 1)
+        # Nothing server-side holds this id: the browser sends the membership.
+        assert received[0]["membership_applied"] is False
 
 
 # ---------------------------------------------------------------------------

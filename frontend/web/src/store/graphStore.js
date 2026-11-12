@@ -151,6 +151,11 @@ function scheduleClearGroupsReset(set) {
   }, 100);
 }
 
+// Forwards this browser's own membership changes to the active session (set
+// by App). Rendering never sends membership: a change the server broadcast
+// must not be sent back, so only the user-action sites call publishMembership.
+let membershipPublisher = null;
+
 // One auto-clear timer per pulsing node. A repeated pulse on the same node
 // replaces its timer so the visual always lasts the full latest duration, and
 // the timer only clears the entry if it still carries the seq it was armed for
@@ -383,6 +388,12 @@ const useGraphStore = create((set, get) => ({
   // Actions
   setSessionWriteMode: (mode) =>
     set({ sessionWriteMode: mode === 'staged' || mode === 'unknown' ? mode : 'direct' }),
+  setMembershipPublisher: (publish) => {
+    membershipPublisher = publish;
+  },
+  /** Send a user's own `nodes_added`/`nodes_removed`/`nodes_replaced` to the session. */
+  publishMembership: (op, nodeIds) => membershipPublisher?.(op, nodeIds),
+
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 

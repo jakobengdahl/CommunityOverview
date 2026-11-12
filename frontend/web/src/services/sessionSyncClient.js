@@ -10,8 +10,13 @@
  *    to handlers that `App.jsx` binds to the Zustand store and canvas signals.
  *  - Derive the minimal op set from a full-state snapshot (`syncState`) by
  *    diffing against the last-synced baseline, batch ops and POST them to
- *    `/ops`. This keeps every mutation path (search, expand, drag, annotations)
- *    converging without wiring an explicit op emitter into each one.
+ *    `/ops`. This keeps every layout and annotation path (drag, hide, dim,
+ *    annotations) converging without wiring an explicit op emitter into each.
+ *  - Node membership is the exception: the server is its only writer. A
+ *    snapshot never carries it; this browser's own adds, removals and
+ *    replacements go out as explicit ops (`sendMembership`), and the baseline
+ *    takes membership only from the server's broadcasts, this client's own
+ *    included.
  *  - Stay echo-safe: the baseline mirrors what the server already has, so a
  *    remote op the host re-applies (updating the baseline) never bounces back
  *    out as a fresh local op — no store guard flag needed.
@@ -35,6 +40,11 @@ const SERVER_ONLY_OPS = new Set([
   'graph_changes_merged',
   'write_mode_changed',
 ]);
+
+// Ops that change which nodes are in the session. The server is their only
+// writer: they are sent explicitly, never derived from a snapshot, and their
+// broadcasts are applied even when this client sent them.
+const MEMBERSHIP_OPS = new Set(['nodes_added', 'nodes_removed', 'nodes_replaced']);
 
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
@@ -218,19 +228,16 @@ export function diffAnnotationFields(before, next, { ignoreMembers = false } = {
 
 /**
  * Compute the ordered op batch that turns `prev` (last synced) into `next`.
- * Pure — exported for unit testing. Order: additions and creates before the
- * changes that depend on them, deletions/removals last.
+ * Pure — exported for unit testing. Order: creates before the changes that
+ * depend on them, deletions last. Never a membership op: `next.node_refs`
+ * only scopes which positions are compared.
  */
 export function computeOps(prevState, nextState) {
   const prev = normalizeMirror(prevState);
   const next = normalizeMirror(nextState);
   const ops = [];
 
-  const addedNodes = diffAdded(prev.node_refs, next.node_refs);
-  const removedNodes = diffAdded(next.node_refs, prev.node_refs);
-  if (addedNodes.length) ops.push({ op: 'nodes_added', node_ids: addedNodes });
-
-  // Positions: only for nodes that survive in next. New-with-position and moved
+  // Positions: only for nodes on the canvas. New-with-position and moved
   // both count. Bulk changes collapse into one layout_applied op.
   const movedIds = next.node_refs.filter((id) => {
     const np = next.positions[id];
@@ -309,24 +316,21 @@ export function computeOps(prevState, nextState) {
     if (!nextAnn.has(id)) ops.push({ op: 'annotation_deleted', annotation_id: id });
   }
 
-  if (removedNodes.length) ops.push({ op: 'nodes_removed', node_ids: removedNodes });
   return ops;
 }
 
 /**
- * Read the nodes of a `nodes_added` op for the canvas, keeping only those
- * still in `client`'s session once the reads settle: a removal or clear that
- * landed meanwhile changes `membershipVersion`, and a late read must not put
- * its nodes back. Edges come only from the kept nodes' reads.
+ * Read nodes a membership broadcast added, for the canvas. A result read
+ * across a newer membership version is stale: it keeps only the nodes the
+ * server still holds, since a later removal or replace must not be undone by
+ * a late read, while a node still held has no other op left to render it.
+ * Edges come only from the kept nodes' reads.
  */
 export async function hydrateAddedNodes(client, nodeIds, getNodeDetails) {
   const version = client.membershipVersion;
   const reads = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
-  const stillMember = (id) => client.membershipVersion === version || client.keepsNode(id);
-  const kept = reads.filter((r) => r?.node && stillMember(r.node.id));
-  // The caller renders what is kept; an unreadable node stays held, so this
-  // browser never writes a removal for a node it could not show.
-  client.markNodesRendered(kept.map((r) => r.node.id));
+  const stale = client.membershipVersion !== version;
+  const kept = reads.filter((r) => r?.node && (!stale || client.isMember(r.node.id)));
   return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
 }
 
@@ -344,9 +348,13 @@ export function applyOpToMirror(mirrorState, op) {
     case 'nodes_added':
       m.node_refs = Array.from(new Set([...m.node_refs, ...(op.node_ids || [])]));
       break;
-    case 'nodes_removed': {
-      const drop = new Set(op.node_ids || []);
-      m.node_refs = m.node_refs.filter((id) => !drop.has(id));
+    case 'nodes_removed':
+    case 'nodes_replaced': {
+      // A replace names the nodes it keeps; everything else leaves.
+      const named = new Set(op.node_ids || []);
+      const replace = type === 'nodes_replaced';
+      const drop = replace ? new Set(m.node_refs.filter((id) => !named.has(id))) : named;
+      m.node_refs = replace ? [...named] : m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
@@ -772,16 +780,11 @@ export class SessionSyncClient {
     // (by-then possibly stale) creation-time content over it a second time —
     // see foldLocalOp and _handleEvent's 'op' case.
     this._locallyFoldedAnnotationIds = new Set();
-    // Bumped whenever nodes may have left the baseline (a removal, a clear, a
-    // reload), so an async hydration started before can drop what was removed.
+    // The session's membership version: the stream seq of the last
+    // membership op applied, or the seq a loaded baseline, snapshot or
+    // catch-up reflects. A hydration read across a change of it is stale
+    // (hydrateAddedNodes).
     this._membershipVersion = 0;
-    // Nodes another client added that this canvas has not rendered yet (its
-    // node reads are still in flight): an autosave in that window must not
-    // diff them back out as a removal under this client's identity.
-    this._unrenderedNodeIds = new Set();
-    // Members a local clear dropped: still in the baseline until the clear's
-    // autosave diffs them out, but a hydration must not restore them.
-    this._discardedNodeIds = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -853,35 +856,13 @@ export class SessionSyncClient {
     return p ? { x: p.x, y: p.y } : null;
   }
 
-  /** Whether `nodeId` is a session member this canvas should still show. */
-  keepsNode(nodeId) {
-    return this._baseline.node_refs.includes(nodeId) && !this._discardedNodeIds.has(nodeId);
+  /** Whether the server's membership, as last broadcast, holds `nodeId`. */
+  isMember(nodeId) {
+    return this._baseline.node_refs.includes(nodeId);
   }
 
-  /** Counter that changes whenever a node may have left the baseline. */
   get membershipVersion() {
     return this._membershipVersion;
-  }
-
-  /** The canvas now shows `nodeIds`, or never will: autosave diffs them again. */
-  markNodesRendered(nodeIds) {
-    (nodeIds || []).forEach((id) => this._unrenderedNodeIds.delete(id));
-  }
-
-  /**
-   * The user cleared the canvas: stop holding nodes whose hydration is still
-   * in flight, so the clear's autosave removes them, and drop every member a
-   * late read could return — a push may already have rendered one of them.
-   */
-  discardForClear() {
-    this._baseline.node_refs.forEach((id) => this._discardedNodeIds.add(id));
-    this._unrenderedNodeIds.clear();
-    this._membershipVersion += 1;
-  }
-
-  _foldIntoBaseline(op) {
-    if (op?.op === 'nodes_removed') this._membershipVersion += 1;
-    this._baseline = applyOpToMirror(this._baseline, op);
   }
 
   // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
@@ -1351,10 +1332,10 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
-    this._membershipVersion += 1;
-    this._unrenderedNodeIds.clear();
-    this._discardedNodeIds.clear();
-    if (typeof seq === 'number') this._loadedSeq = seq;
+    if (typeof seq === 'number') {
+      this._loadedSeq = seq;
+      this._membershipVersion = seq;
+    }
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
     // the fresh baseline already reflects server truth for every annotation,
@@ -1399,7 +1380,7 @@ export class SessionSyncClient {
   foldLocalOp(op) {
     const id = op?.annotation?.id;
     if (id) this._locallyFoldedAnnotationIds.add(id);
-    this._foldIntoBaseline(op);
+    this.foldOpIntoBaseline(op);
   }
 
   /**
@@ -1409,9 +1390,11 @@ export class SessionSyncClient {
    * check in `_handleEvent` before it could ever reach — let alone need —
    * `foldLocalOp`'s dedup marker (see that method's docstring for why
    * setting one in that case is actively harmful, not just unnecessary).
+   * A membership op is not folded: membership follows its broadcast.
    */
   foldOpIntoBaseline(op) {
-    this._foldIntoBaseline(op);
+    if (MEMBERSHIP_OPS.has(op?.op)) return;
+    this._baseline = applyOpToMirror(this._baseline, op);
   }
 
   /**
@@ -1425,34 +1408,31 @@ export class SessionSyncClient {
    * fields only catches up asynchronously after this op's ack round-trips
    * back (`onLocalAnnotationsApplied`), so a second rapid edit computed
    * before that would otherwise read the same stale, pre-send version.
+   *
+   * The snapshot's `node_refs` is not membership: the baseline keeps the
+   * server's, and the positions of members the canvas has not drawn yet, so
+   * a node still being read is placed where the server has it.
    */
   syncState(state) {
-    const next = this._withUnrenderedNodes(normalizeMirror(state));
+    const next = normalizeMirror(state);
     const ops = computeOps(this._baseline, next);
-    if (ops.some((op) => op.op === 'nodes_removed')) this._membershipVersion += 1;
-    this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
-    const shown = new Set(next.node_refs);
-    this._discardedNodeIds.forEach((id) => {
-      if (shown.has(id) || !this._baseline.node_refs.includes(id)) {
-        this._discardedNodeIds.delete(id);
-      }
-    });
+    const sent = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    sent.node_refs = this._baseline.node_refs;
+    sent.positions = { ...this._baseline.positions, ...sent.positions };
+    this._baseline = sent;
     if (ops.length) this._enqueue(ops);
   }
 
-  _withUnrenderedNodes(next) {
-    const shown = new Set(next.node_refs);
-    const baselineRefs = new Set(this._baseline.node_refs);
-    for (const id of this._unrenderedNodeIds) {
-      if (shown.has(id) || !baselineRefs.has(id)) {
-        this._unrenderedNodeIds.delete(id);
-        continue;
-      }
-      next.node_refs.push(id);
-      const pos = this._baseline.positions[id];
-      if (pos && !next.positions[id]) next.positions[id] = pos;
-    }
-    return next;
+  /**
+   * Send this browser's own membership change — `nodes_added`,
+   * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
+   * as one explicit op. The baseline does not move until the server
+   * broadcasts it back.
+   */
+  sendMembership(op, nodeIds) {
+    if (!MEMBERSHIP_OPS.has(op)) return;
+    const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
+    if (ids.length || op === 'nodes_replaced') this._enqueue([{ op, node_ids: ids }]);
   }
 
   /**
@@ -1864,6 +1844,9 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
+          // It may carry membership changes this client never saw as ops; a
+          // read marked stale still keeps every current member.
+          this._membershipVersion = data.seq;
         }
         this._ready = true;
         this._resolveReadyWaiters();
@@ -1893,6 +1876,7 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
+          this._membershipVersion = data.seq; // as for a snapshot
         }
         this._ready = true;
         this._resolveReadyWaiters();
@@ -1948,7 +1932,15 @@ export class SessionSyncClient {
         // only the server emits: one carrying this client id (a write-mode
         // switch made from this browser) may come from another tab sharing
         // the id, which must still learn of it.
-        if (data.client_id === this.clientId && !SERVER_ONLY_OPS.has(op.op)) return;
+        // Nor for a membership op: the server is its only writer, so its
+        // broadcast, not the local action, is what the baseline follows.
+        if (
+          data.client_id === this.clientId &&
+          !SERVER_ONLY_OPS.has(op.op) &&
+          !MEMBERSHIP_OPS.has(op.op)
+        ) {
+          return;
+        }
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an
         // echo — UNLESS foldLocalOp already folded this exact annotation
@@ -1996,13 +1988,9 @@ export class SessionSyncClient {
         let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
-          if (op.op === 'nodes_removed') this._membershipVersion += 1;
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
-          if (op.op === 'nodes_added') {
-            (op.node_ids || []).forEach((id) => {
-              this._unrenderedNodeIds.add(id);
-              this._discardedNodeIds.delete(id);
-            });
+          if (MEMBERSHIP_OPS.has(op.op) && typeof data.seq === 'number') {
+            this._membershipVersion = data.seq;
           }
         }
         if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {

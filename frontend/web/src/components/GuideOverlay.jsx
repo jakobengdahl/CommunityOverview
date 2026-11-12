@@ -171,6 +171,10 @@ function GuideOverlay() {
               positionNewNodes(result.nodes, s.nodes, allEdges),
               result.edges || []
             );
+            s.publishMembership(
+              'nodes_added',
+              result.nodes.map((n) => n.id)
+            );
           }
 
           // ── Node CRUD ────────────────────────────────────────────────────
@@ -182,6 +186,7 @@ function GuideOverlay() {
             const nodeWithId = { type: nodeType, ...nodeData, id: result.added_node_ids[0] };
             const s = useGraphStore.getState();
             s.addNodesToVisualization(positionNewNodes([nodeWithId], s.nodes, s.edges), []);
+            s.publishMembership('nodes_added', [nodeWithId.id]);
           }
         } else if (action === 'update_node') {
           const nodeId = currentStep.node_id;
@@ -198,7 +203,10 @@ function GuideOverlay() {
           const nodeId = currentStep.node_id;
           if (nodeId && !cancelled) {
             await api.deleteNodes([nodeId], true);
-            if (!cancelled) useGraphStore.getState().removeNode(nodeId);
+            if (!cancelled) {
+              useGraphStore.getState().removeNode(nodeId);
+              useGraphStore.getState().publishMembership('nodes_removed', [nodeId]);
+            }
           }
         } else if (action === 'show_node_detail') {
           const nodeId = currentStep.node_id;
@@ -243,6 +251,10 @@ function GuideOverlay() {
                   const s = useGraphStore.getState();
                   s.clearVisualization();
                   s.addNodesToVisualization(loadedNodes, savedEdges);
+                  s.publishMembership(
+                    'nodes_replaced',
+                    loadedNodes.map((n) => n.id)
+                  );
                 }
               }
             }
@@ -250,7 +262,10 @@ function GuideOverlay() {
 
           // ── Visualization control ─────────────────────────────────────────
         } else if (action === 'clear_visualization' || action === 'clear') {
-          if (!cancelled) useGraphStore.getState().clearVisualization();
+          if (!cancelled) {
+            useGraphStore.getState().clearVisualization();
+            useGraphStore.getState().publishMembership('nodes_replaced', []);
+          }
         } else if (action === 'focus_node') {
           const nodeId = currentStep.node_id;
           if (!cancelled && nodeId) useGraphStore.getState().setFocusNodeId(nodeId);

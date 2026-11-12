@@ -117,6 +117,8 @@ function App() {
     clearGroupsFlag,
     canvasBaselineEpoch,
     addNodesToVisualization,
+    publishMembership,
+    setMembershipPublisher,
     updateVisualization,
     toggleNodeVisibility,
     toggleEdgeVisibility,
@@ -516,17 +518,23 @@ function App() {
         return fresh.length > 0;
       }
       switch (op?.op) {
-        case 'nodes_added': {
+        case 'nodes_added':
+        case 'nodes_replaced': {
+          // A replace (a saved-view load or clear anywhere) keeps only the
+          // nodes it names; both then draw the named nodes this canvas lacks.
+          const keep = new Set(op.node_ids || []);
+          const dropped =
+            op.op === 'nodes_replaced' ? store.nodes.filter((n) => !keep.has(n.id)) : [];
+          dropped.forEach((n) => removeNode(n.id));
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          syncRef.current?.markNodesRendered((op.node_ids || []).filter((id) => have.has(id)));
-          if (!missing.length) return false;
+          if (!missing.length) return dropped.length > 0;
           // The only case here with an internal await, so the only one where
           // the session or its membership can change out from under it: a
-          // session switch mid-fetch (review round 5), or a removal or clear
-          // that lands before the reads settle, whose nodes must stay gone.
+          // session switch mid-fetch (review round 5), or a membership change
+          // that lands before the reads settle (hydrateAddedNodes).
           const client = syncRef.current;
-          if (!client) return false;
+          if (!client) return dropped.length > 0;
           const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
             client,
             missing,
@@ -547,7 +555,7 @@ function App() {
             addNodesToVisualization(positioned, addEdges);
             return true;
           }
-          return false;
+          return dropped.length > 0;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
@@ -912,7 +920,9 @@ function App() {
         recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds), {
+          seq: payload?.seq,
+        });
         // A full reload re-hydrates every annotation from server truth, so any
         // image-ingest race this browser was still waiting to resolve (see
         // createSelfEchoDedup) is moot — drop it rather than let it linger and
@@ -1140,12 +1150,11 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
-  // A user clear also drops nodes whose reads are still in flight, so the
-  // clear removes them rather than a late read restoring them.
+  // A user clear empties the session too, as one explicit replace.
   const clearBoard = useCallback(() => {
-    syncRef.current?.discardForClear();
     clearVisualization();
-  }, [clearVisualization]);
+    publishMembership('nodes_replaced', []);
+  }, [clearVisualization, publishMembership]);
 
   const requestClear = useCallback(
     (source) => {
@@ -1367,6 +1376,10 @@ function App() {
             );
             clearVisualization();
             addNodesToVisualization(positioned, result.edges || []);
+            publishMembership(
+              'nodes_replaced',
+              positioned.map((n) => n.id)
+            );
             if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
             if (result.groups?.length)
               setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
@@ -1437,6 +1450,7 @@ function App() {
           return;
         }
         addNodesToVisualization([result.node], result.edges || []);
+        publishMembership('nodes_added', [result.node.id]);
         setFocusNodeId(result.node.id);
         // Carry the sender's search text into the search box so the visitor
         // lands on the node without losing what they were looking for.
@@ -1815,6 +1829,18 @@ function App() {
     [sessionId]
   );
 
+  // This browser's own membership changes go to the session as explicit ops;
+  // the first add materialises it, as a first save would. Removing from a
+  // session that does not exist yet has nothing to change.
+  useEffect(() => {
+    setMembershipPublisher((op, nodeIds) => {
+      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds?.length);
+      if (removes && !isSessionMaterialized()) return;
+      ensureSyncConnected(sessionId)?.sendMembership(op, nodeIds);
+    });
+    return () => setMembershipPublisher(null);
+  }, [sessionId, ensureSyncConnected, isSessionMaterialized, setMembershipPublisher]);
+
   const persistSessionSnapshot = useCallback(
     (viewData) => {
       const state = useGraphStore.getState();
@@ -2108,13 +2134,6 @@ function App() {
     },
     [publishAnnotationChange, scheduleAutoSave]
   );
-
-  // A node any path renders (a push command included) stops being held as
-  // unrendered at once, not at the next debounced autosave: removing it before
-  // that autosave must still be written as a removal.
-  useEffect(() => {
-    syncRef.current?.markNodesRendered(nodes.map((n) => n.id));
-  }, [nodes, syncRef]);
 
   useEffect(() => {
     scheduleAutoSave();
@@ -3063,13 +3082,22 @@ function App() {
             return;
           }
           await addNodesToVisualization([details.node], []);
+          publishMembership('nodes_added', [details.node.id]);
           setFocusNodeId(target);
         } catch {
           showNotification('error', t('context_menu.reference_broken_target'));
         }
       }
     },
-    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
+    [
+      sessionId,
+      switchToSession,
+      showNotification,
+      t,
+      addNodesToVisualization,
+      publishMembership,
+      setFocusNodeId,
+    ]
   );
 
   const handleRenameSession = useCallback(
@@ -3305,9 +3333,20 @@ function App() {
           nodes,
           found.flatMap((r) => r?.edges || [])
         );
+        publishMembership(
+          'nodes_added',
+          nodes.map((n) => n.id)
+        );
       }
     },
-    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+    [
+      refreshStagedDiff,
+      refreshStagedEntities,
+      sessionId,
+      syncRef,
+      addNodesToVisualization,
+      publishMembership,
+    ]
   );
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);

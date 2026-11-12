@@ -24,6 +24,7 @@ vi.mock('../store/graphStore', () => {
     addNodesToVisualization: vi.fn(),
     updateVisualization: vi.fn(),
     clearVisualization: vi.fn(),
+    publishMembership: vi.fn(),
     pulseNode: vi.fn(),
   };
   return { default: { getState: vi.fn(() => state) } };
@@ -284,19 +285,25 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(es.closed).toBe(true);
   });
 
-  it('routes a tool_result message through applyToolResultCommand', () => {
+  it('sends a legacy push on as membership only when the server did not apply it', () => {
     render();
     const es = FakeEventSource.instances[0];
-    act(() =>
-      es.onmessage({
-        data: JSON.stringify({
-          type: 'tool_result',
-          command_id: 'cmd-1',
-          result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
-        }),
-      })
-    );
+    const push = (id, applied) =>
+      act(() =>
+        es.onmessage({
+          data: JSON.stringify({
+            type: 'tool_result',
+            command_id: id,
+            membership_applied: applied,
+            result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
+          }),
+        })
+      );
+    push('cmd-1', true);
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    expect(store().publishMembership).not.toHaveBeenCalled();
+    push('cmd-2', false);
+    expect(store().publishMembership).toHaveBeenCalledWith('nodes_replaced', ['n1']);
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

@@ -1,6 +1,10 @@
 import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
 import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
 
+// The user's own membership change, sent to the session as an explicit op.
+const publishMembership = (op, nodeIds) =>
+  useGraphStore.getState().publishMembership?.(op, nodeIds);
+
 /**
  * App's awaiting graph handlers, guarded against stale post-await canvas writes.
  *
@@ -133,7 +137,10 @@ export async function confirmNodeDelete({
     const ids = deleteDialog.isMultiple ? deleteDialog.nodeIds : [deleteDialog.nodeId];
     await deleteNodes(ids, true);
     const current = !isStaleSessionEpoch(requestEpoch);
-    if (current) ids.forEach((id) => removeNode(id));
+    if (current) {
+      ids.forEach((id) => removeNode(id));
+      publishMembership('nodes_removed', ids);
+    }
     showNotification(
       'success',
       deleteDialog.isMultiple ? `${ids.length} nodes deleted` : 'Node deleted'
@@ -242,6 +249,10 @@ export async function persistNewNodes({
   const drawn = toCanvas(result);
   if (!drawn) return false;
   addNodesToVisualization(drawn.nodes, drawn.edges || []);
+  publishMembership(
+    'nodes_added',
+    drawn.nodes.map((n) => n.id)
+  );
   return true;
 }
 
@@ -275,6 +286,10 @@ export async function expandNode({
       const existingIds = new Set(nodes.map((n) => n.id));
       const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
       addNodesToVisualization(result.nodes, result.edges || []);
+      publishMembership(
+        'nodes_added',
+        result.nodes.map((n) => n.id)
+      );
       if (newCount > 0) {
         showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
       } else {
@@ -481,6 +496,10 @@ export async function loadSavedViewNode({
           }
           return n;
         });
+      publishMembership(
+        'nodes_replaced',
+        loadedNodes.map((n) => n.id)
+      );
       if (loadedNodes.length > 0) {
         let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
         if (edgesToLoad.length === 0) {
@@ -586,6 +605,10 @@ export async function createDialogNode({
   showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   if (scope.sessionChanged()) return false;
   addNodesToVisualization(created.nodes, []);
+  publishMembership(
+    'nodes_added',
+    created.nodes.map((n) => n.id)
+  );
   onDrawn?.(createdNode);
   return true;
 }

@@ -47,7 +47,6 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_activity import MEMBERSHIP_OPS
 from .session_annotations import (
     IMAGE_TYPE,
     annotation_type_of,
@@ -1573,11 +1572,7 @@ class SessionManager:
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
-                            session,
-                            {**op, "client_id": client_id},
-                            # Browser membership ops report an already-applied
-                            # canvas diff; its originating action is unknown.
-                            record_activity=op_type not in MEMBERSHIP_OPS,
+                            session, {**op, "client_id": client_id}
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -2898,10 +2893,10 @@ class SessionManager:
     ) -> None:
         """Apply a push's node membership here, so browsers only render it.
 
-        The resulting ops reach every subscriber before the command and fold
-        into each browser's sync baseline, so no browser diffs the change back
-        out under its own identity. Each direction that changes something is
-        one activity record, attributed to the pusher.
+        The server is the only writer of membership: the resulting op reaches
+        every subscriber before the command, and browsers never send
+        membership back for what they render. A change is one activity record,
+        attributed to the pusher.
         """
         result = command.get("result")
         if not isinstance(result, dict):
@@ -2924,13 +2919,14 @@ class SessionManager:
             else "mcp-agent"
         )
         if action in _REPLACING_ACTIONS:
-            # Browsers swap the whole view for the result's nodes.
-            keep = set(node_ids)
-            stale = [n for n in session.state.get("node_refs", []) if n not in keep]
-            self._remove_node_refs(session, actor, stale)
-        elif action not in _ADDITIVE_ACTIONS:
-            return
-        if node_ids:
+            # Browsers swap the whole view for the result's nodes: one op.
+            self._apply_op_sync(
+                session,
+                session.id,
+                actor,
+                {"op": "nodes_replaced", "node_ids": node_ids, "client_id": actor},
+            )
+        elif action in _ADDITIVE_ACTIONS and node_ids:
             self._add_node_refs(session, actor, node_ids)
 
     # ---------------- summon to viewport ----------------
