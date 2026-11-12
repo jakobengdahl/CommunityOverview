@@ -19,6 +19,7 @@ import contextvars
 import logging
 import json
 import re
+import secrets
 import threading
 from datetime import datetime, timezone
 
@@ -819,6 +820,7 @@ class ChatService:
         selected_node_ids: Optional[List[str]] = None,
         llm_provider: Optional[Any] = None,
         conversation_state: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         _confirmation: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
@@ -853,6 +855,8 @@ class ChatService:
                 resolving one from env/model profiles. Passed through to
                 ChatProcessor.process_message for the evaluation harness
                 (backend/evaluation); see that parameter's docstring there.
+            conversation_id: Conversation identity to bind pending actions to;
+                omitted identities are minted by the server and returned on each card.
             conversation_state: The token the previous response returned. Without
                 a valid, clean one, a request continuing a conversation starts
                 tainted (ADR 0010 §5).
@@ -987,6 +991,7 @@ class ChatService:
                 if not tool_allowlist:
                     tool_allowlist = ["__no_tools__"]
             context = {
+                "conversation_id": conversation_id or secrets.token_urlsafe(32),
                 "actor": request_actor(),
                 "caller_kind": "kiosk"
                 if collection_short_name and effective_prefix is not None
@@ -1066,12 +1071,17 @@ class ChatService:
         finally:
             _request_federation_depth.reset(federation_depth_token)
 
-    def confirm_action(self, token: str) -> Dict[str, Any]:
+    def confirm_action(self, token: str, conversation_id: str) -> Dict[str, Any]:
         entry = pending_actions.peek(token)
         if entry is None:
             return confirmation_outcome(refusal("confirmation_unknown"))
         _, name, arguments, context = entry
-        if context is None or request_actor() != context["actor"]:
+        if (
+            context is None
+            or not context["actor"]["id"]
+            or request_actor() != context["actor"]
+            or conversation_id != context["conversation_id"]
+        ):
             return confirmation_outcome(refusal("access_denied"))
         # Sibling confirmations share the original turn's touched ids. Serialize
         # writes and response saves so the latter observes completed writes.
@@ -1092,7 +1102,18 @@ class ChatService:
                     },
                 },
             )
-        return confirmation_outcome(result)
+        response = confirmation_outcome(result)
+        logger.info(
+            "Chat action confirmed",
+            extra={
+                "event": "chat_action_confirmed",
+                "tool": name if name in self._processor.tools_map else "unknown_tool",
+                "actor": context["actor"],
+                "conversation_id": conversation_id,
+                "outcome": response["outcome"],
+            },
+        )
+        return response
 
     def process_chat_request(
         self,

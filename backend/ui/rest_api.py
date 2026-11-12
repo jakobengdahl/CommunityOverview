@@ -111,6 +111,7 @@ class ChatRequest(BaseModel):
         None,
         description="IDs of nodes the user has selected in the canvas",
     )
+    conversation_id: Optional[str] = Field(None, min_length=1, max_length=256)
     conversation_state: Optional[str] = Field(
         None,
         max_length=4096,
@@ -166,6 +167,9 @@ class ChatResponse(BaseModel):
 
 
 class ConfirmActionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    conversation_id: str = Field(..., min_length=1, max_length=256)
     token: str = Field(..., min_length=1, max_length=256)
 
 
@@ -260,6 +264,7 @@ def create_ui_router(
                     visible_node_ids=request.visible_node_ids,
                     selected_node_ids=request.selected_node_ids,
                     conversation_state=request.conversation_state,
+                    conversation_id=request.conversation_id,
                 )
 
             return ChatResponse(
@@ -280,7 +285,9 @@ def create_ui_router(
         try:
             with use_request_authorization(headers=http_request.headers):
                 return await run_chat_off_event_loop(
-                    chat_service.confirm_action, token=request.token
+                    chat_service.confirm_action,
+                    token=request.token,
+                    conversation_id=request.conversation_id,
                 )
         except Exception as exc:
             _log_chat_exception("Error in /chat/confirm endpoint", exc)

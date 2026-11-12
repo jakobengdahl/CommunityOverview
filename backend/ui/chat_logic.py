@@ -55,6 +55,7 @@ from backend.runtime.content_logging import (
 from backend.ui.attachment_confirmation import (
     ATTACHMENT_TAINT_PERMITTED_TOOLS,
     pending_actions,
+    pending_argument_refusal,
     refusal,
 )
 
@@ -1822,6 +1823,12 @@ class ChatProcessor:
                 and not execution_only
                 and tool_name not in ATTACHMENT_TAINT_PERMITTED_TOOLS
             ):
+                invalid = pending_argument_refusal(tool_name, tool_input)
+                if invalid is not None:
+                    audit_attachment_refusal(tool_name, invalid["error_code"])
+                    tool_results.append({"tool_use_id": tool_id, "result": invalid})
+                    tool_use["input"] = {}
+                    continue
                 if len(pending_actions_for_turn) < positive_int_setting(
                     "ATTACHMENT_PENDING_ACTIONS_PER_TURN", 5
                 ):
