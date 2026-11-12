@@ -2222,3 +2222,8 @@ calls and eight minutes overall; the deadline applies to each chat model call,
 including all network operations, not the whole chain. A current synchronous
 request may finish after the deadline, but SDK retries are disabled for chat.
 Agents, service helpers, and evaluation retain SDK timeout and retry defaults.
+
+The `/schema` response includes `node_shapes` (validated configuration definitions),
+optional `shape` references on node types, and structured `shape_diagnostics` for
+isolated malformed external definitions or missing references. Shape selections
+are opt-in; no renderer or appearance mutation endpoint is enabled yet.

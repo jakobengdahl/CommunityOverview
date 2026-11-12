@@ -506,6 +506,8 @@ const useGraphStore = create((set, get) => ({
       selectedGraphNodes: [],
       selectedNodeId: null,
       navHistory: [],
+      shapeOverrides: {},
+      typeShapes: {},
       canvasBaselineEpoch: state.canvasBaselineEpoch + 1,
     }));
     scheduleClearGroupsReset(set);
@@ -693,6 +695,9 @@ const useGraphStore = create((set, get) => ({
       availableExperts: presentation?.expert_agents || [],
     });
   },
+
+  shapeOverrides: {},
+  typeShapes: {},
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);

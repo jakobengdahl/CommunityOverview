@@ -36,6 +36,8 @@ from backend.runtime.request_context import (
 )
 from backend.config.model_profiles import ModelProfile, ModelProfilesConfig
 
+from backend.config.node_shapes import ShapeDefinition, ShapeName, sanitize_shapes
+
 logger = logging.getLogger(__name__)
 
 # Default config path relative to project root
@@ -147,6 +149,7 @@ class NodeTypeConfig(BaseModel):
     # available so turning it off never strands files already attached
     # (ADR 0008 section 7).
     allows_attachments: bool = False
+    shape: Optional[ShapeName] = None
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -402,6 +405,7 @@ class SystemConfig(BaseModel):
 class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
 
+    node_shapes: Dict[ShapeName, ShapeDefinition] = Field(default_factory=dict)
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     ui: UiConfig = Field(default_factory=UiConfig)
@@ -414,6 +418,13 @@ class SchemaFileConfig(BaseModel):
     # by default — that is the legacy single-provider mode (LLM_PROVIDER /
     # LLM_MODEL / OPENAI_API_KEY / ANTHROPIC_API_KEY environment variables).
     model_profiles: ModelProfilesConfig = Field(default_factory=ModelProfilesConfig)
+
+    @model_validator(mode="after")
+    def known_shape_references(self):
+        for config in self.schema_.node_types.values():
+            if config.shape is not None and config.shape not in self.node_shapes:
+                raise ValueError("node type references an unknown shape")
+        return self
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -453,11 +464,13 @@ class ConfigLoader:
         self._config_path = self._get_config_path()
         self._dropped_capability_ids = set()
         raw_config = None
+        self.shape_diagnostics = []
 
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self.shape_diagnostics = sanitize_shapes(raw_config)
             self._sanitize_node_types(raw_config)
             self._sanitize_relationship_types(raw_config)
             self._sanitize_rest_interfaces(raw_config)
@@ -751,8 +764,14 @@ def get_schema() -> Dict[str, Any]:
     schema = loader.config.schema_
 
     return {
+        "node_shapes": {
+            name: shape.model_dump()
+            for name, shape in loader.config.node_shapes.items()
+        },
+        "shape_diagnostics": loader.shape_diagnostics,
         "node_types": {
             name: {
+                **({"shape": cfg.shape} if cfg.shape is not None else {}),
                 "fields": cfg.fields,
                 "static": cfg.static,
                 "category": cfg.category,
