@@ -1412,13 +1412,16 @@ field is additive and does not bump the session contract version (§9):
 For a stored shared session the server is the single writer of a push's
 `node_refs`, even with no connected browser: additive and in-place-update results
 add their nodes, and saved-view loads, replacements and clears replace the
-membership with the result's nodes. The `nodes_removed`/`nodes_added` ops are
-broadcast before the command, so every browser folds them into its sync baseline
-and only renders the command — none writes the membership back. Each direction
-that changes something is one activity record, attributed to `mcp-agent`, or to
-`auto-add-agent:<agent_id>` for a session auto-add agent's push.
-Reading stored state confirms membership, not delivery to a live canvas;
-legacy-only channels still depend on a browser applying the command.
+membership with the result's nodes. The `nodes_added` or `nodes_replaced` op is
+broadcast before the command, so every browser renders membership from it and
+none writes it back. A change is one activity record, attributed to
+`mcp-agent`, or to `auto-add-agent:<agent_id>` for a session auto-add agent's
+push. The server writes membership for browsers too: their autosave never
+carries it, and a user's own add, removal or clear is sent as one explicit
+`nodes_added`, `nodes_removed` or `nodes_replaced` op.
+Reading stored state confirms membership, not delivery to a live canvas. The
+legacy-stream copy of a push carries `membership_applied`; only when it is
+`false` (no stored session yet) does the browser send the membership itself.
 Undelivered is not the same as discarded, though: when the session has a legacy
 registry entry with nothing draining it, the command still waits in that
 entry's bounded queue (oldest dropped first), and a browser that opens the
