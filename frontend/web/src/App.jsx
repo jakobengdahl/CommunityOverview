@@ -1140,6 +1140,13 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
+  // A user clear also drops nodes another client added whose reads are still
+  // in flight, so the clear removes them rather than a late read restoring them.
+  const clearBoard = useCallback(() => {
+    syncRef.current?.discardUnrenderedNodes();
+    clearVisualization();
+  }, [clearVisualization]);
+
   const requestClear = useCallback(
     (source) => {
       const action = decideClearAction({
@@ -1148,7 +1155,7 @@ function App() {
         source,
       });
       if (action === 'clear') {
-        clearVisualization();
+        clearBoard();
       } else if (action === 'confirm') {
         setClearConfirm({ locked: false });
       } else if (action === 'confirm-locked') {
@@ -1156,7 +1163,7 @@ function App() {
       }
       // 'noop' — locked board, esc-esc does nothing.
     },
-    [canvasLocked, currentSessionName, clearVisualization]
+    [canvasLocked, currentSessionName, clearBoard]
   );
 
   // The capture-phase keydown listener is registered once and reads the latest
@@ -3850,7 +3857,7 @@ function App() {
           cancelText={t('common.cancel')}
           confirmStyle="danger"
           onConfirm={() => {
-            clearVisualization();
+            clearBoard();
             setClearConfirm(null);
           }}
           onCancel={() => setClearConfirm(null)}

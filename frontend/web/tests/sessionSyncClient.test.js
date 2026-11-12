@@ -581,6 +581,26 @@ describe('SessionSyncClient', () => {
     expect(await hydration).toEqual({ nodes: [{ id: 'b' }], edges: [{ id: 'e-b' }] });
   });
 
+  it('a local clear during hydration removes the pending nodes and drops their late reads', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    es.emit({ type: 'op', client_id: 'other', op: { op: 'nodes_added', node_ids: ['a'] }, seq: 1 });
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    const hydration = hydrateAddedNodes(client, ['a'], async (id) => {
+      await gate;
+      return { node: { id }, edges: [] };
+    });
+    client.discardUnrenderedNodes();
+    release();
+    expect(await hydration).toEqual({ nodes: [], edges: [] }); // settles before the autosave
+    client.syncState({ node_refs: [] });
+    await flush();
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_removed', node_ids: ['a'] });
+  });
+
   it('forwards a summon from another client and skips its own echo', () => {
     const onViewportSummoned = vi.fn();
     const { client } = makeClient({ handlers: { onViewportSummoned } });

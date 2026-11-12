@@ -322,7 +322,7 @@ export function computeOps(prevState, nextState) {
 export async function hydrateAddedNodes(client, nodeIds, getNodeDetails) {
   const version = client.membershipVersion;
   const reads = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
-  const stillMember = (id) => client.membershipVersion === version || client.baselineHasNode(id);
+  const stillMember = (id) => client.membershipVersion === version || client.keepsNode(id);
   const kept = reads.filter((r) => r?.node && stillMember(r.node.id));
   // The caller renders what is kept; an unreadable node stays held, so this
   // browser never writes a removal for a node it could not show.
@@ -779,6 +779,9 @@ export class SessionSyncClient {
     // node reads are still in flight): an autosave in that window must not
     // diff them back out as a removal under this client's identity.
     this._unrenderedNodeIds = new Set();
+    // Unrendered nodes a local clear dropped: still in the baseline until the
+    // clear's autosave diffs them out, but a hydration must not restore them.
+    this._discardedNodeIds = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -850,9 +853,9 @@ export class SessionSyncClient {
     return p ? { x: p.x, y: p.y } : null;
   }
 
-  /** Whether the synced baseline currently holds `nodeId` as a session member. */
-  baselineHasNode(nodeId) {
-    return this._baseline.node_refs.includes(nodeId);
+  /** Whether `nodeId` is a session member this canvas should still show. */
+  keepsNode(nodeId) {
+    return this._baseline.node_refs.includes(nodeId) && !this._discardedNodeIds.has(nodeId);
   }
 
   /** Counter that changes whenever a node may have left the baseline. */
@@ -863,6 +866,16 @@ export class SessionSyncClient {
   /** The canvas now shows `nodeIds`, or never will: autosave diffs them again. */
   markNodesRendered(nodeIds) {
     (nodeIds || []).forEach((id) => this._unrenderedNodeIds.delete(id));
+  }
+
+  /**
+   * The user cleared the canvas: stop holding nodes whose hydration is still
+   * in flight, so the clear's autosave removes them and a late read drops them.
+   */
+  discardUnrenderedNodes() {
+    this._unrenderedNodeIds.forEach((id) => this._discardedNodeIds.add(id));
+    this._unrenderedNodeIds.clear();
+    this._membershipVersion += 1;
   }
 
   _foldIntoBaseline(op) {
@@ -1339,6 +1352,7 @@ export class SessionSyncClient {
     this._baseline = normalizeMirror(state);
     this._membershipVersion += 1;
     this._unrenderedNodeIds.clear();
+    this._discardedNodeIds.clear();
     if (typeof seq === 'number') this._loadedSeq = seq;
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
@@ -1416,6 +1430,9 @@ export class SessionSyncClient {
     const ops = computeOps(this._baseline, next);
     if (ops.some((op) => op.op === 'nodes_removed')) this._membershipVersion += 1;
     this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    this._discardedNodeIds.forEach((id) => {
+      if (!this._baseline.node_refs.includes(id)) this._discardedNodeIds.delete(id);
+    });
     if (ops.length) this._enqueue(ops);
   }
 
@@ -1978,7 +1995,10 @@ export class SessionSyncClient {
           if (op.op === 'nodes_removed') this._membershipVersion += 1;
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
           if (op.op === 'nodes_added') {
-            (op.node_ids || []).forEach((id) => this._unrenderedNodeIds.add(id));
+            (op.node_ids || []).forEach((id) => {
+              this._unrenderedNodeIds.add(id);
+              this._discardedNodeIds.delete(id);
+            });
           }
         }
         if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
