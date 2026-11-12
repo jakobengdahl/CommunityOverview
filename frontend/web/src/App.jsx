@@ -1140,10 +1140,10 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
-  // A user clear also drops nodes another client added whose reads are still
-  // in flight, so the clear removes them rather than a late read restoring them.
+  // A user clear also drops nodes whose reads are still in flight, so the
+  // clear removes them rather than a late read restoring them.
   const clearBoard = useCallback(() => {
-    syncRef.current?.discardUnrenderedNodes();
+    syncRef.current?.discardForClear();
     clearVisualization();
   }, [clearVisualization]);
 

@@ -779,8 +779,8 @@ export class SessionSyncClient {
     // node reads are still in flight): an autosave in that window must not
     // diff them back out as a removal under this client's identity.
     this._unrenderedNodeIds = new Set();
-    // Unrendered nodes a local clear dropped: still in the baseline until the
-    // clear's autosave diffs them out, but a hydration must not restore them.
+    // Members a local clear dropped: still in the baseline until the clear's
+    // autosave diffs them out, but a hydration must not restore them.
     this._discardedNodeIds = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
@@ -870,10 +870,11 @@ export class SessionSyncClient {
 
   /**
    * The user cleared the canvas: stop holding nodes whose hydration is still
-   * in flight, so the clear's autosave removes them and a late read drops them.
+   * in flight, so the clear's autosave removes them, and drop every member a
+   * late read could return — a push may already have rendered one of them.
    */
-  discardUnrenderedNodes() {
-    this._unrenderedNodeIds.forEach((id) => this._discardedNodeIds.add(id));
+  discardForClear() {
+    this._baseline.node_refs.forEach((id) => this._discardedNodeIds.add(id));
     this._unrenderedNodeIds.clear();
     this._membershipVersion += 1;
   }
@@ -1430,8 +1431,11 @@ export class SessionSyncClient {
     const ops = computeOps(this._baseline, next);
     if (ops.some((op) => op.op === 'nodes_removed')) this._membershipVersion += 1;
     this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    const shown = new Set(next.node_refs);
     this._discardedNodeIds.forEach((id) => {
-      if (!this._baseline.node_refs.includes(id)) this._discardedNodeIds.delete(id);
+      if (shown.has(id) || !this._baseline.node_refs.includes(id)) {
+        this._discardedNodeIds.delete(id);
+      }
     });
     if (ops.length) this._enqueue(ops);
   }

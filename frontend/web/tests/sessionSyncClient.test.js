@@ -606,19 +606,28 @@ describe('SessionSyncClient', () => {
     client.connect();
     const es = FakeEventSource.instances[0];
     es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    es.emit({ type: 'op', client_id: 'other', op: { op: 'nodes_added', node_ids: ['a'] }, seq: 1 });
+    es.emit({
+      type: 'op',
+      client_id: 'other',
+      op: { op: 'nodes_added', node_ids: ['a', 'b'] },
+      seq: 1,
+    });
     let release;
     const gate = new Promise((resolve) => (release = resolve));
-    const hydration = hydrateAddedNodes(client, ['a'], async (id) => {
+    const hydration = hydrateAddedNodes(client, ['a', 'b'], async (id) => {
       await gate;
       return { node: { id }, edges: [] };
     });
-    client.discardUnrenderedNodes();
+    client.markNodesRendered(['b']); // a push rendered 'b' before the clear
+    client.discardForClear();
     release();
     expect(await hydration).toEqual({ nodes: [], edges: [] }); // settles before the autosave
     client.syncState({ node_refs: [] });
     await flush();
-    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_removed', node_ids: ['a'] });
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({
+      op: 'nodes_removed',
+      node_ids: ['a', 'b'],
+    });
   });
 
   it('forwards a summon from another client and skips its own echo', () => {
