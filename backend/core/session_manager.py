@@ -2712,7 +2712,9 @@ class SessionManager:
                     if command.get("tool") == "session_auto_add_agent"
                     else "mcp-agent"
                 )
-                self.add_node_refs(session_id, actor, node_ids)
+                # Command delivery has no MCP write-budget charge. Reuse the
+                # membership/activity path without introducing one here.
+                self.add_node_refs(session_id, actor, node_ids, precharged=True)
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 

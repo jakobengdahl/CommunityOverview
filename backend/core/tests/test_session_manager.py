@@ -2577,6 +2577,49 @@ class TestLifecycle:
         events = await _drain(sub)
         assert events[0]["type"] == "command"
 
+    @pytest.mark.parametrize(
+        "tool,actor",
+        [
+            ("add_to_visualization", "mcp-agent"),
+            ("session_auto_add_agent", "session-auto-add-agent"),
+        ],
+    )
+    @pytest.mark.parametrize("node_count,exhausted", [(201, False), (1, True)])
+    async def test_additive_push_does_not_charge_mcp_budget(
+        self, tool, actor, node_count, exhausted
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        subs = [mgr.connect(s.id, client, client)[0] for client in ("c1", "c2")]
+        for sub in subs:
+            await _drain(sub)
+        if exhausted:
+            # Freeze refill so even the one-node push would fail if charged.
+            mgr._mcp_bucket = _TokenBucket(capacity=200, refill_per_sec=0)
+            assert mgr._mcp_bucket.consume(actor, 200)
+        node_ids = [f"n{i}" for i in range(node_count)]
+        command = {
+            "tool": tool,
+            "result": {
+                "action": "add_to_visualization",
+                "nodes": [{"id": node_id} for node_id in node_ids],
+            },
+        }
+
+        assert mgr.push_command(s.id, command) is True
+
+        assert s.state["node_refs"] == node_ids
+        assert len(s.activity_log) == 1
+        assert s.activity_log[0]["op"] == "nodes_added"
+        assert s.activity_log[0]["actor"] == actor
+        for sub in subs:
+            events = await _drain(sub)
+            assert [event["type"] for event in events] == ["op", "command"]
+            assert events[0]["op"]["node_ids"] == node_ids
+            assert events[1]["command"] == command
+        # Delivery neither spends a fresh budget nor replenishes an empty one.
+        assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
+
 
 class TestOpBatchByteCap:
     """A batch is bounded by *size* as well as op *count* (design §3.9)."""
