@@ -6407,10 +6407,10 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    A push writes nothing to the session's stored state when it is sent (of the
-    MCP tools, only ``add_nodes_to_session`` and ``remove_nodes_from_session``
-    write ``node_refs``), so a caller that ignores this
-    report cannot tell afterwards whether anything received the push. An
+    MCP additive pushes to a stored shared session apply node references on the
+    server before broadcasting, attributed to MCP. Saved-view and auto-add
+    agent pushes remain client-applied and produce no membership activity.
+    Legacy-only sessions still rely on the browser applying the command. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.

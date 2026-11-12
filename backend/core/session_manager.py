@@ -47,6 +47,7 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
+from .session_activity import MEMBERSHIP_OPS
 from .session_annotations import (
     IMAGE_TYPE,
     annotation_type_of,
@@ -663,6 +664,7 @@ class SessionManager:
         # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._pending_pushes: set[asyncio.Task] = set()
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -1561,7 +1563,11 @@ class SessionManager:
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
-                            session, {**op, "client_id": client_id}
+                            session,
+                            {**op, "client_id": client_id},
+                            # Browser membership ops report an already-applied
+                            # canvas diff; its originating action is unknown.
+                            record_activity=op_type not in MEMBERSHIP_OPS,
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -1852,6 +1858,17 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._add_node_refs(session, client_id, node_ids)
+
+    def _add_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Commit one membership change after the caller has serialized access.
+
+        Request caps belong to the public MCP method; trusted visualization
+        results may contain more ids and still represent a single activity.
+        """
+        session_id = session.id
         # Dedupe against the session *and* against the rest of this call, in
         # order: a repeated id would otherwise be reported as added twice and
         # ride the broadcast twice, while the stored state (a union) holds it
@@ -1930,6 +1947,13 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._remove_node_refs(session, client_id, node_ids)
+
+    def _remove_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Apply trusted removals without the public MCP request caps or charge."""
+        session_id = session.id
         present = set(session.state.get("node_refs", []))
         removed: List[str] = []
         for node_id in node_ids:
@@ -2817,13 +2841,63 @@ class SessionManager:
     # ---------------- MCP push ----------------
 
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Broadcast an MCP visualization command to all subscribers.
+        """Apply server-owned membership once, then broadcast the command.
 
-        Returns ``False`` when the session is unknown so callers can fall back to
-        the legacy single-consumer registry during the transition.
+        Additive results bypass MCP request caps and produce one membership op.
+        During an in-flight batch, acceptance queues delivery behind its lock;
+        otherwise delivery completes inline. Returns ``False`` when the session
+        is unknown so callers can fall back to the legacy registry.
         """
         if self.store.get(session_id) is None:
             return False
+        queue_name = f"session-push:{session_id}"
+        if self._lock(session_id).locked() or any(
+            task.get_name() == queue_name for task in self._pending_pushes
+        ):
+            # A synchronous producer cannot await the batch's persistence. Keep
+            # the command alive and deliver it only after that batch commits or
+            # rolls back, preserving op/command order for every subscriber.
+            command = copy.deepcopy(command)
+            task = asyncio.get_running_loop().create_task(
+                self._push_command_after_batch(session_id, command), name=queue_name
+            )
+            self._pending_pushes.add(task)
+            task.add_done_callback(self._pending_pushes.discard)
+            return True
+        return self._publish_command(session_id, command)
+
+    async def _push_command_after_batch(
+        self, session_id: str, command: Dict[str, Any]
+    ) -> None:
+        try:
+            async with self._lock(session_id):
+                self._publish_command(session_id, command)
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    def _publish_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        session = self.store.get(session_id)
+        if session is None:
+            return False
+        result = command.get("result", {})
+        if result.get("action") == "add_to_visualization" and command.get(
+            "tool"
+        ) not in {"session_auto_add_agent", "load_visualization", "get_saved_view"}:
+            node_ids = [
+                node["id"]
+                for node in result.get("nodes", [])
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            ]
+            if node_ids:
+                # Server-applied additive results are attributable to MCP.
+                self._add_node_refs(session, "mcp-agent", node_ids)
+        elif result.get("action") == "clear_visualization":
+            self._remove_node_refs(
+                session, "mcp-agent", list(session.state.get("node_refs", []))
+            )
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 

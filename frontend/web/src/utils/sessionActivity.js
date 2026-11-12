@@ -409,6 +409,9 @@ export function describeActivity(record, opts = {}) {
   const op = record && record.op;
 
   switch (op) {
+    case 'nodes_added':
+    case 'nodes_removed':
+      return { key: `history.desc.${op}`, params: { count: record.affected?.count || 0 } };
     case 'annotation_created':
       return {
         key: 'history.desc.annotation_created',

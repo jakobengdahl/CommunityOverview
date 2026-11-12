@@ -1,3 +1,4 @@
+// covers: frontend/web/src/utils/sessionActivity.js
 import { describe, it, expect, vi } from 'vitest';
 import { createAnnotation, ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import {

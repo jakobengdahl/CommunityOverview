@@ -204,7 +204,9 @@
       "edges_dimmed": "Dimmed {count} connection(s)",
       "edges_undimmed": "Restored {count} connection(s)",
       "edge_intensity_set": "Changed the edge intensity",
-      "unknown": "Changed something"
+      "unknown": "Changed something",
+      "nodes_added": "Added {count} nodes",
+      "nodes_removed": "Removed {count} nodes"
     },
     "event": {
       "node_create": "Node created",
@@ -221,7 +223,8 @@
       "hours_ago": "{count} h ago",
       "days_ago": "{count} d ago",
       "unknown": "unknown"
-    }
+    },
+    "via_mcp": "via MCP"
   },
   "nav_history": {
     "title": "Recent nodes",

@@ -204,7 +204,9 @@
       "edges_dimmed": "Tonade ned {count} koppling(ar)",
       "edges_undimmed": "Återställde {count} koppling(ar)",
       "edge_intensity_set": "Ändrade kopplingsintensiteten",
-      "unknown": "Ändrade något"
+      "unknown": "Ändrade något",
+      "nodes_added": "Lade till {count} noder",
+      "nodes_removed": "Tog bort {count} noder"
     },
     "event": {
       "node_create": "Nod skapad",
@@ -221,7 +223,8 @@
       "hours_ago": "{count} h sedan",
       "days_ago": "{count} d sedan",
       "unknown": "okänd"
-    }
+    },
+    "via_mcp": "via MCP"
   },
   "nav_history": {
     "title": "Senaste noder",

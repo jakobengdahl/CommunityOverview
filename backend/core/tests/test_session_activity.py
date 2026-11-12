@@ -1,3 +1,4 @@
+# covers: backend/core/session_activity.py, backend/core/session_store.py
 """
 Tests for the per-session activity log (``backend/core/session_activity.py``)
 and its integration into ``SessionStore.apply_state_op``: record shape,
@@ -295,12 +296,12 @@ class TestSessionStoreActivityIntegration:
         )
         assert session.activity_log == []
 
-    def test_non_undoable_op_does_not_log(self):
+    def test_untracked_op_does_not_log(self):
         store = _store()
         session = store.create()
         store.apply_state_op(
             session,
-            {"op": "nodes_added", "node_ids": ["n1"], "client_id": "actor-1"},
+            {"op": "session_renamed", "name": "Renamed", "client_id": "actor-1"},
         )
         assert session.activity_log == []
 
