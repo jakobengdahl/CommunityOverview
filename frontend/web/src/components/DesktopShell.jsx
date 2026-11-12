@@ -29,6 +29,7 @@ function DesktopShell({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopySession,
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
@@ -68,6 +69,7 @@ function DesktopShell({
         onRenameSession={onRenameSession}
         onDeleteSession={onDeleteSession}
         onCopySessionLink={onCopySessionLink}
+        onCopySession={onCopySession}
         onCopyTriggerUrl={onCopyTriggerUrl}
         onOpenSettings={onOpenSettings}
         onOpenActivity={onOpenActivity}

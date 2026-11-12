@@ -2876,6 +2876,27 @@ function App() {
     [sessionId, switchToSession]
   );
 
+  const handleCopySession = useCallback(
+    async (targetId) => {
+      try {
+        if (targetId === sessionId) {
+          await new Promise((resolve) => requestSessionSnapshot(resolve));
+          await syncRef.current?.flushPending();
+        }
+        const created = await api.copySession(targetId);
+        sessionStore.touchSession(created.id);
+        sessionStore.renameSession(created.id, created.name);
+        switchToSession(created.id);
+      } catch (error) {
+        showNotification(
+          'error',
+          t(error?.status === 413 ? 'sessions.copy_size_error' : 'sessions.copy_error')
+        );
+      }
+    },
+    [sessionId, syncRef, requestSessionSnapshot, switchToSession, showNotification, t]
+  );
+
   // Copy the canonical share link for a session (contract §5 form
   // `<base>/?session=<id>`), built from the current origin+path so it stays
   // correct across deployments without needing the server base URL client-side.
@@ -3475,6 +3496,7 @@ function App() {
     },
     onDeleteSession: handleRequestDeleteSession,
     onCopySessionLink: handleCopySessionLink,
+    onCopySession: handleCopySession,
     onCopyTriggerUrl: handleCopyTriggerUrl,
     onOpenSettings: () => setSettingsOpen(true),
     canvasLocked,

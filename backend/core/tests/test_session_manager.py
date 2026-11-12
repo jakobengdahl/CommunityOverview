@@ -4146,6 +4146,8 @@ def _delete_existing_session(mgr, sid, label):
 _MCP_UNMETERED_CALLS = {
     "claimed_elements",
     "connected_count",
+    # Like create_session, copying allocates a session without spending a bucket.
+    "copy_session",
     "create_session",
     "get_session",
     "list_activity",
@@ -4223,6 +4225,7 @@ class _RecordingBucket:
 _MCP_UNMETERED_RUNS = {
     "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
+    "copy_session": lambda mgr, sid: mgr.copy_session(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_activity": lambda mgr, sid: mgr.list_activity(sid),
@@ -5869,3 +5872,65 @@ class TestSessionActivityByteCache:
         assert cached == s
         assert "_activity_record_bytes" not in repr(cached)
         assert "record-bytes-marker" not in repr(cached)
+
+
+@pytest.mark.parametrize("async_copy", [False, True])
+@pytest.mark.parametrize("shared_action", ["update", "delete"])
+async def test_copy_session_omits_staged_only_canvas_references(
+    async_copy, shared_action
+):
+    from backend.core.tests.layer_store_contract import entry
+    from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+
+    backend = InMemoryGraphPersistenceBackend({}, staged=True)
+    mgr = _manager(write_modes=WriteModes(backend))
+    source = mgr.create_session("Staged canvas", write_mode="staged")
+    entries = [
+        entry(kind, entity_id, action, session_id=source.id)
+        for kind, entity_id, action in [
+            ("node", "new", "create"),
+            ("node", "shared", shared_action),
+            ("edge", "new-edge", "create"),
+            ("edge", "shared-edge", shared_action),
+        ]
+    ]
+    backend.stage(source.id, entries=entries)
+    source.state.update(
+        {
+            "node_refs": ["new", "shared"],
+            "positions": {"new": {"x": 1, "y": 2}, "shared": {"x": 3, "y": 4}},
+            "hidden_node_ids": ["new", "shared"],
+            "dimmed_node_ids": ["new", "shared"],
+            "hidden_edge_ids": ["new-edge", "shared-edge"],
+            "dimmed_edge_ids": ["new-edge", "shared-edge"],
+            "annotations": [
+                {"id": "group", "type": "group", "member_node_ids": ["new", "shared"]}
+            ],
+        }
+    )
+    mgr.store.persist(source)
+    before = copy.deepcopy(source.to_dict())
+    layer_before = backend.load_layer(source.id)
+
+    copied = (
+        await mgr.copy_session_async(source.id)
+        if async_copy
+        else mgr.copy_session(source.id)
+    )
+
+    expected = copy.deepcopy(before["state"])
+    for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
+        expected[key] = ["shared"]
+    expected["positions"].pop("new")
+    for key in ("hidden_edge_ids", "dimmed_edge_ids"):
+        expected[key] = ["shared-edge"]
+    group = copied.state["annotations"][0]
+    assert group["id"] != "group"
+    assert group["member_node_ids"] == ["shared"]
+    expected["annotations"] = [group]
+    assert copied.state == expected
+    assert mgr.write_mode_of(copied)["write_mode"] == "staged"
+    assert backend.load_layer(copied.id) == []
+    assert mgr.get_session(source.id).to_dict() == before
+    assert backend.load_layer(source.id) == layer_before
