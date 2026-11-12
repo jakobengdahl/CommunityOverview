@@ -2109,6 +2109,13 @@ function App() {
     [publishAnnotationChange, scheduleAutoSave]
   );
 
+  // A node any path renders (a push command included) stops being held as
+  // unrendered at once, not at the next debounced autosave: removing it before
+  // that autosave must still be written as a removal.
+  useEffect(() => {
+    syncRef.current?.markNodesRendered(nodes.map((n) => n.id));
+  }, [nodes, syncRef]);
+
   useEffect(() => {
     scheduleAutoSave();
     return () => {
