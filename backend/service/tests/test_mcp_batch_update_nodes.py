@@ -465,6 +465,44 @@ class TestCompactResult:
 
 
 class TestServiceLayer:
+    @pytest.mark.parametrize("missing_count", [1, 2])
+    def test_missing_node_id_preserves_partial_success(self, batch_tools, missing_count):
+        tools, storage = batch_tools
+        revisions = {node_id: storage.nodes[node_id].revision for node_id in ("a", "b")}
+
+        with patch.object(storage, "update_node", wraps=storage.update_node) as write:
+            result = tools["batch_update_nodes"](
+                [{"node_id": "a", "updates": {"name": "First updated"}}]
+                + [{"updates": {"name": "Missing ID"}} for _ in range(missing_count)]
+                + [{"node_id": "b", "updates": {"name": "Last updated"}}]
+            )
+
+        assert result["success"] is True
+        assert result["counts"] == {
+            "ok": 2,
+            "conflict": 0,
+            "not_found": 0,
+            "forbidden": 0,
+            "error": missing_count,
+        }
+        assert [item["status"] for item in result["results"]] == (
+            ["ok"] + ["error"] * missing_count + ["ok"]
+        )
+        assert result["results"][1:-1] == [
+            {
+                "node_id": None,
+                "status": "error",
+                "error": "Missing required field: node_id",
+            }
+        ] * missing_count
+        assert [call.args[0] for call in write.call_args_list] == ["a", "b"]
+        assert storage.nodes["a"].name == "First updated"
+        assert storage.nodes["b"].name == "Last updated"
+        for node_id, revision in revisions.items():
+            assert storage.nodes[node_id].revision > revision
+        for item in (result["results"][0], result["results"][-1]):
+            assert item["revision"] == storage.nodes[item["node_id"]].revision
+
     def test_missing_updates_preserves_partial_success(self, batch_tools):
         tools, storage = batch_tools
         original_revision = storage.nodes["b"].revision

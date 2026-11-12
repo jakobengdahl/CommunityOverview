@@ -437,6 +437,8 @@ def batch_update_nodes(
 
     seen_ids: set = set()
     for entry in updates:
+        if "node_id" not in entry:
+            continue
         node_id = entry.get("node_id")
         if node_id in seen_ids:
             return {
@@ -451,7 +453,17 @@ def batch_update_nodes(
     counts = {"ok": 0, "conflict": 0, "not_found": 0, "forbidden": 0, "error": 0}
 
     for entry in updates:
-        node_id = entry["node_id"]
+        node_id = entry.get("node_id")
+        if "node_id" not in entry:
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Missing required field: node_id",
+                }
+            )
+            continue
         if "updates" not in entry:
             counts["error"] += 1
             results.append(
