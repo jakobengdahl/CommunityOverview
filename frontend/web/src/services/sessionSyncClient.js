@@ -821,11 +821,6 @@ export class SessionSyncClient {
    * place a node that another client added-then-moved at its authoritative spot,
    * even though the two ops arrive as separate async-applied events.
    */
-  /** Whether current synced membership still includes a hydrated node. */
-  baselineHasNode(nodeId) {
-    return this._baseline.node_refs.includes(nodeId);
-  }
-
   baselinePosition(nodeId) {
     const p = this._baseline.positions[nodeId];
     return p ? { x: p.x, y: p.y } : null;

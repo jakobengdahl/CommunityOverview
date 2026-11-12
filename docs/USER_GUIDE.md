@@ -938,21 +938,25 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
-Node additions and removals are recorded, without undo. Each server-side
-membership change produces one record, regardless of the number of browsers;
-repeated additions or removals that change nothing produce no record. Additive
-MCP visualization pushes apply membership on the server for stored sessions.
-Saved-view loads and replacement pushes record their membership removals and
-additions as **via MCP** before broadcasting the new view.
-Legacy-only visualization channels still depend on a browser applying the push.
+Node additions and removals applied directly by the server are recorded, without
+undo: server-handled UI actions, MCP add/remove tools, additive MCP visualization
+pushes to stored shared sessions, and server-applied clears. Each actual change
+produces one record; repeated additions or removals that change nothing produce
+no record.
+
+**Known gap:** additions arriving by saved-view load or client-side sync are not
+yet recorded. Saved-view/replacement pushes (`load_visualization` /
+`get_saved_view`), browser membership sync, and session auto-add agent pushes
+remain client-applied and record no membership activity in this release. Their
+origin cannot be reliably attributed from a browser's canvas diff. Legacy-only
+visualization channels also depend on a browser applying the push.
 
 Membership records retain a total count and at most 100 IDs
 (`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.
 They have their own 500-record cap (`DEFAULT_MAX_MEMBERSHIP_RECORDS`) and the
 same seven-day age limit, so they never evict undoable activity from its separate
 500-record budget. User actions use the user's presence identity; automated
-writes display **via MCP** or **Auto-add agent**, rather than claiming the user
-performed them. The shared MCP client ID does not identify individual agents or
+writes display **via MCP**. The shared MCP client ID does not identify individual agents or
 users; records are per change, not per viewer or per actor.
 
 A session can also carry a **description** — what it

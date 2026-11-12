@@ -224,8 +224,7 @@
       "days_ago": "{count} d ago",
       "unknown": "unknown"
     },
-    "via_mcp": "via MCP",
-    "auto_add_agent": "Auto-add agent"
+    "via_mcp": "via MCP"
   },
   "nav_history": {
     "title": "Recent nodes",

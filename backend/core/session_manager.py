@@ -47,6 +47,7 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
+from .session_activity import MEMBERSHIP_OPS
 from .session_annotations import (
     IMAGE_TYPE,
     annotation_type_of,
@@ -1562,7 +1563,11 @@ class SessionManager:
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
-                            session, {**op, "client_id": client_id}
+                            session,
+                            {**op, "client_id": client_id},
+                            # Browser membership ops report an already-applied
+                            # canvas diff; its originating action is unknown.
+                            record_activity=op_type not in MEMBERSHIP_OPS,
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -2836,7 +2841,7 @@ class SessionManager:
     # ---------------- MCP push ----------------
 
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Apply membership once, then broadcast the visualization command.
+        """Apply server-owned membership once, then broadcast the command.
 
         Additive results bypass MCP request caps and produce one membership op.
         During an in-flight batch, acceptance queues delivery behind its lock;
@@ -2875,11 +2880,9 @@ class SessionManager:
         if session is None:
             return False
         result = command.get("result", {})
-        if result.get("action") in {
-            "add_to_visualization",
-            "load_visualization",
-            "replace_visualization",
-        }:
+        if result.get("action") == "add_to_visualization" and command.get(
+            "tool"
+        ) not in {"session_auto_add_agent", "load_visualization", "get_saved_view"}:
             node_ids = [
                 node["id"]
                 for node in result.get("nodes", [])
@@ -2888,26 +2891,9 @@ class SessionManager:
                 and node.get("type") != "Community"
                 and (node.get("data") or {}).get("type") != "Community"
             ]
-            if result.get("action") in {"load_visualization", "replace_visualization"}:
-                wanted = set(node_ids)
-                self._remove_node_refs(
-                    session,
-                    "mcp-agent",
-                    [
-                        node_id
-                        for node_id in session.state.get("node_refs", [])
-                        if node_id not in wanted
-                    ],
-                )
             if node_ids:
-                actor = (
-                    "session-auto-add-agent"
-                    if command.get("tool") == "session_auto_add_agent"
-                    else "mcp-agent"
-                )
-                # Command delivery has no MCP write-budget charge. Reuse the
-                # membership/activity path without introducing one here.
-                self._add_node_refs(session, actor, node_ids)
+                # Server-applied additive results are attributable to MCP.
+                self._add_node_refs(session, "mcp-agent", node_ids)
         elif result.get("action") == "clear_visualization":
             self._remove_node_refs(
                 session, "mcp-agent", list(session.state.get("node_refs", []))

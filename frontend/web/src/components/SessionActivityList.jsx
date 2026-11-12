@@ -43,12 +43,7 @@ function SessionActivityEntry({
   // a raw client id just because the roster hasn't caught up yet. A
   // collaborator who has since left the roster still falls back to their raw
   // client id, which is the best identity left to show.
-  const automatedLabel =
-    record.actor === 'mcp-agent'
-      ? t('history.via_mcp')
-      : record.actor === 'session-auto-add-agent'
-        ? t('history.auto_add_agent')
-        : null;
+  const automatedLabel = record.actor === 'mcp-agent' ? t('history.via_mcp') : null;
   const actorLabel =
     automatedLabel ||
     (isSelf

@@ -546,19 +546,11 @@ function App() {
           // op, which is dropped when the node isn't mounted yet) prevents the node
           // from settling at an auto-layout spot and re-emitting a wrong position.
           if (addNodes.length) {
-            // Live ops are applied concurrently. A later removal may have
-            // reached the baseline while these node reads were in flight.
-            const currentNodes = addNodes.filter((n) => syncRef.current?.baselineHasNode(n.id));
-            const positioned = currentNodes.map((n) => {
+            const positioned = addNodes.map((n) => {
               const pos = syncRef.current?.baselinePosition(n.id);
               return pos ? { ...n, _savedPosition: pos } : n;
             });
-            const members = new Set(currentNodes.map((n) => n.id));
-            useGraphStore.getState().nodes.forEach((n) => members.add(n.id));
-            addNodesToVisualization(
-              positioned,
-              addEdges.filter((e) => members.has(e.source) && members.has(e.target))
-            );
+            addNodesToVisualization(positioned, addEdges);
             return true;
           }
           return false;

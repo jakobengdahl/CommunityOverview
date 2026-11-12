@@ -224,8 +224,7 @@
       "days_ago": "{count} d sedan",
       "unknown": "okänd"
     },
-    "via_mcp": "via MCP",
-    "auto_add_agent": "Agent för automatiskt tillägg"
+    "via_mcp": "via MCP"
   },
   "nav_history": {
     "title": "Senaste noder",

@@ -70,12 +70,7 @@ class TestSustainedMovesPersistence:
         await _drain(sub_a)
         await _drain(sub_b)
 
-        await mgr.apply_ops(
-            sid,
-            "A",
-            0,
-            [{"op": "nodes_added", "node_ids": [f"n{i}" for i in range(5)]}],
-        )
+        mgr.add_node_refs(sid, "A", [f"n{i}" for i in range(5)])
 
         last: dict[str, dict[str, float]] = {}
         moves = 3 * bound  # forces the ring and activity log to trim mid-session
@@ -131,9 +126,7 @@ class TestSustainedMovesPersistence:
             bucket_refill_per_sec=100_000,
         )
         sid = mgr.create_session(name="Shared").id
-        await mgr.apply_ops(
-            sid, "A", 0, [{"op": "nodes_added", "node_ids": ["n0", "n1"]}]
-        )
+        mgr.add_node_refs(sid, "A", ["n0", "n1"])
 
         moves = max(_DEFAULT_RING_SIZE, DEFAULT_MAX_ACTIVITY_RECORDS) + 20
         batch = 50

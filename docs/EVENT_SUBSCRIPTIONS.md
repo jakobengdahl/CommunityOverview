@@ -444,11 +444,7 @@ A **session-scoped auto-add agent** is a lightweight, deterministic reactor buil
 directly on the `node.create` event. It watches for newly created nodes that
 match a pattern and **adds each match to one visualization session's live view**
 — additively (reusing the `add_to_visualization` push path), so it never clears
-what the session already shows. For stored shared sessions, membership is
-applied once on the server even without a browser. The session activity record
-names the **Auto-add agent**; it is not attributed to a viewing user. Node
-membership activity retains a count and at most 100 IDs, with a separate
-500-record/seven-day budget that cannot evict undoable activity.
+what the session already shows.
 
 It is deliberately *not* an `Agent` node:
 

@@ -1,4 +1,4 @@
-# covers: backend/core/session_activity.py, backend/core/session_store.py, backend/core/session_manager.py
+# covers: backend/core/session_activity.py, backend/core/session_store.py
 """
 Tests for the per-session activity log (``backend/core/session_activity.py``)
 and its integration into ``SessionStore.apply_state_op``: record shape,
@@ -6,8 +6,6 @@ actor scoping, retention (max records / max age) and persistence.
 """
 
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from backend.core import session_activity
 from backend.core.session_activity import (
@@ -382,77 +380,3 @@ class TestSessionStoreActivityIntegration:
             },
         )
         assert session.activity_log == []
-
-
-@pytest.mark.parametrize(
-    "tool,actor",
-    [
-        ("search_graph", "mcp-agent"),
-        ("session_auto_add_agent", "session-auto-add-agent"),
-    ],
-)
-@pytest.mark.parametrize("browsers", [0, 3])
-def test_pushed_membership_is_applied_once_with_automation_attribution(
-    tool, actor, browsers, monkeypatch
-):
-    """A push persists once; browser echoes cannot steal its attribution."""
-    from backend.core.session_manager import SessionManager
-    from backend.service.mcp_tools import _push_to_session
-
-    store = _store()
-    session = store.create()
-    manager = SessionManager(store)
-    monkeypatch.setattr(manager, "connected_count", lambda sid: browsers)
-    _push_to_session(
-        None, session.id, tool, {"nodes": [{"id": "n1", "type": "Actor"}]}, manager
-    )
-    for i in range(browsers):
-        store.apply_state_op(
-            session,
-            {"op": "nodes_added", "node_ids": ["n1"], "client_id": f"browser-{i}"},
-        )
-    assert session.state["node_refs"] == ["n1"]
-    assert [(r["op"], r["actor"], r["affected"]) for r in session.activity_log] == [
-        ("nodes_added", actor, {"kind": "nodes", "count": 1, "ids": ["n1"]})
-    ]
-
-
-def test_membership_caps_preserve_undo_and_user_attribution(monkeypatch):
-    """Membership has a separate cap, bounded ids, no inverse or duplicate ids."""
-    monkeypatch.setattr(session_activity, "DEFAULT_MAX_MEMBERSHIP_RECORDS", 3)
-    store = _store(max_activity_records=1)
-    session = store.create()
-    store.apply_state_op(
-        session,
-        {
-            "op": "node_moved",
-            "node_id": "old",
-            "position": {"x": 1, "y": 2},
-            "client_id": "user",
-        },
-    )
-    undoable = session.activity_log[0]
-    ids = [f"n{i}" for i in range(session_activity.MAX_ACTIVITY_NODE_IDS + 5)]
-    for op in ["nodes_added", "nodes_removed", "nodes_added", "nodes_removed"]:
-        store.apply_state_op(
-            session, {"op": op, "node_ids": ids + ids, "client_id": "user"}
-        )
-    store.apply_state_op(
-        session, {"op": "nodes_removed", "node_ids": ids, "client_id": "other"}
-    )
-    assert len(session.activity_log) == 4
-    assert store.find_latest_undoable(session, "user") == undoable
-    for record in session.activity_log[1:]:
-        assert record["actor"] == "user"
-        assert record["affected"] == {
-            "kind": "nodes",
-            "count": len(ids),
-            "ids": ids[: session_activity.MAX_ACTIVITY_NODE_IDS],
-        }
-        assert record["before"] is None and record["after"] is None
-        assert record["inverse_op"] is None and "forward_op" not in record
-    store.persist(session)
-    assert (
-        SessionStore(store._backend).get(session.id).activity_log
-        == session.activity_log
-    )
