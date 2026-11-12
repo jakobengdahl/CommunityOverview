@@ -1,3 +1,4 @@
+# covers: backend/core/storage.py
 """
 Regression tests for update_node metadata_merge correctness.
 
@@ -113,9 +114,7 @@ class TestMetadataMergePreservesKeys:
         self, storage_with_metadata: GraphStorage
     ):
         """Updating one tag doesn't drop others."""
-        storage_with_metadata.update_node(
-            "meta-1", {"tags": ["initial", "added-tag"]}
-        )
+        storage_with_metadata.update_node("meta-1", {"tags": ["initial", "added-tag"]})
         store_node = storage_with_metadata.get_node("meta-1")
         assert "initial" in store_node.tags
         assert "added-tag" in store_node.tags
@@ -162,9 +161,7 @@ class TestConcurrentMetadataMerge:
                     )
                     if result is None:
                         with lock:
-                            errors.append(
-                                f"Thread {thread_id}: update returned None"
-                            )
+                            errors.append(f"Thread {thread_id}: update returned None")
                 except Exception as exc:
                     with lock:
                         errors.append(f"Thread {thread_id} exception: {exc}")
@@ -188,9 +185,7 @@ class TestConcurrentMetadataMerge:
             expected_keys = {"owner"} | {f"key_{i}" for i in range(num_threads)}
             actual_keys = set(final.metadata.keys())
             missing = expected_keys - actual_keys
-            assert not missing, (
-                f"concurrent merge lost keys: {missing}"
-            )
+            assert not missing, f"concurrent merge lost keys: {missing}"
 
     def test_concurrent_tag_merge_preserves_all(self):
         """10 threads each add a unique tag. After all threads finish, every
@@ -223,9 +218,7 @@ class TestConcurrentMetadataMerge:
                     )
                     if result is None:
                         with lock:
-                            errors.append(
-                                f"Thread {thread_id}: update returned None"
-                            )
+                            errors.append(f"Thread {thread_id}: update returned None")
                 except Exception as exc:
                     with lock:
                         errors.append(f"Thread {thread_id} exception: {exc}")
@@ -250,9 +243,7 @@ class TestConcurrentMetadataMerge:
             # without crashing or corrupting state.
             assert "base-tag" in final.tags
 
-    def test_concurrent_merge_mixed_metadata_and_tags(
-        self, temp_storage: GraphStorage
-    ):
+    def test_concurrent_merge_mixed_metadata_and_tags(self, temp_storage: GraphStorage):
         """Threads that update both metadata and tags concurrently must not
         produce a node where the response disagreed with the store for any call."""
         node = Node(
@@ -284,10 +275,7 @@ class TestConcurrentMetadataMerge:
                 with lock:
                     errors.append(f"Thread {thread_id}: {exc}")
 
-        threads = [
-            threading.Thread(target=worker, args=(t_id,))
-            for t_id in range(10)
-        ]
+        threads = [threading.Thread(target=worker, args=(t_id,)) for t_id in range(10)]
         for t in threads:
             t.start()
         for t in threads:
@@ -304,9 +292,7 @@ class TestConcurrentMetadataMerge:
             assert r.metadata == final.metadata, (
                 f"result metadata {r.metadata} != store {final.metadata}"
             )
-            assert r.tags == final.tags, (
-                f"result tags {r.tags} != store {final.tags}"
-            )
+            assert r.tags == final.tags, f"result tags {r.tags} != store {final.tags}"
 
 
 # -- G4: persistence survives flush + reload -----------------------------------
@@ -324,9 +310,7 @@ class TestMetadataMergePersistence:
             json_path = os.path.join(tmpdir, "test_graph.json")
             embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
 
-            storage = GraphStorage(
-                json_path=json_path, embeddings_path=embeddings_path
-            )
+            storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
 
             node = Node(
                 id="persist-1",
@@ -346,7 +330,9 @@ class TestMetadataMergePersistence:
             storage.flush()
 
             # Reload from disk
-            reloaded = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
+            reloaded = GraphStorage(
+                json_path=json_path, embeddings_path=embeddings_path
+            )
             reloaded_node = reloaded.get_node("persist-1")
 
             assert reloaded_node is not None
@@ -362,9 +348,7 @@ class TestMetadataMergePersistence:
             json_path = os.path.join(tmpdir, "test_graph.json")
             embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
 
-            storage = GraphStorage(
-                json_path=json_path, embeddings_path=embeddings_path
-            )
+            storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
 
             node = Node(
                 id="persist-tags-1",
@@ -374,12 +358,12 @@ class TestMetadataMergePersistence:
             )
             storage.add_nodes([node], [])
 
-            storage.update_node(
-                "persist-tags-1", {"tags": ["original", "added"]}
-            )
+            storage.update_node("persist-tags-1", {"tags": ["original", "added"]})
             storage.flush()
 
-            reloaded = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
+            reloaded = GraphStorage(
+                json_path=json_path, embeddings_path=embeddings_path
+            )
             reloaded_node = reloaded.get_node("persist-tags-1")
 
             assert reloaded_node is not None
@@ -391,9 +375,7 @@ class TestMetadataMergePersistence:
             json_path = os.path.join(tmpdir, "test_graph.json")
             embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
 
-            storage = GraphStorage(
-                json_path=json_path, embeddings_path=embeddings_path
-            )
+            storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
 
             node = Node(
                 id="deep-meta-1",
@@ -410,7 +392,9 @@ class TestMetadataMergePersistence:
             )
             storage.flush()
 
-            reloaded = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
+            reloaded = GraphStorage(
+                json_path=json_path, embeddings_path=embeddings_path
+            )
             reloaded_node = reloaded.get_node("deep-meta-1")
 
             assert reloaded_node is not None
@@ -426,9 +410,7 @@ class TestMetadataMergePersistence:
             json_path = os.path.join(tmpdir, "test_graph.json")
             embeddings_path = os.path.join(tmpdir, "test_embeddings.pkl")
 
-            storage = GraphStorage(
-                json_path=json_path, embeddings_path=embeddings_path
-            )
+            storage = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
 
             node = Node(
                 id="chain-1",
@@ -447,7 +429,9 @@ class TestMetadataMergePersistence:
 
             storage.flush()
 
-            reloaded = GraphStorage(json_path=json_path, embeddings_path=embeddings_path)
+            reloaded = GraphStorage(
+                json_path=json_path, embeddings_path=embeddings_path
+            )
             reloaded_node = reloaded.get_node("chain-1")
 
             assert reloaded_node is not None
