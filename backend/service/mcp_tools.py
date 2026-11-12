@@ -1132,6 +1132,87 @@ def register_mcp_tools(
         )
 
     @register_tool
+    def batch_update_nodes(
+        updates: List[Dict[str, Any]],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update multiple nodes in a single call (max 100)
+
+        Each node in the batch is processed through the same authorization,
+        validation and staging path as ``update_node``.  One node failing
+        (not found, conflict, forbidden, invalid) does **not** stop the others
+        from being applied — partial success is the default.
+
+        The call is rejected (writes nothing) when the batch exceeds 100 nodes
+        or contains duplicate node_ids.
+
+        Args:
+            updates: List of per-node update dicts, each with:
+
+                * ``node_id`` (str, required): the node to update
+                * ``updates`` (dict, required): same dict as ``update_node`` —
+                  fields to update (name, description, summary, tags, aliases,
+                  metadata). ``tags`` **replace** existing tags, not append.
+                * ``metadata_merge`` (bool, default True): see ``update_node``.
+                * ``expected_updated_at`` (str, optional): optimistic concurrency
+                  guard, same semantics as ``update_node``.
+                * ``expected_revision`` (int, optional): the node's ``revision``
+                  must still equal this value; otherwise the per-node result has
+                  status ``conflict``.
+
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer and
+                the graph is not changed; in a direct session it lands in the
+                graph. A session that does not exist is refused with
+                session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
+
+        Returns:
+            Dict with compact result (no full node bodies):
+
+            .. code-block:: json
+
+                {
+                  "success": true,
+                  "results": [
+                    { "node_id": "a", "status": "ok", "revision": 3,
+                      "updated_at": "2025-..." },
+                    { "node_id": "b", "status": "conflict",
+                      "current_revision": 3 },
+                    { "node_id": "c", "status": "not_found",
+                      "error": "Node with ID c not found" },
+                    { "node_id": "d", "status": "forbidden" },
+                    { "node_id": "e", "status": "error",
+                      "error": "..." }
+                  ],
+                  "counts": { "ok": 1, "conflict": 1, "not_found": 1,
+                              "forbidden": 1, "error": 1 }
+                }
+
+            Status values are ``ok``, ``conflict``, ``not_found``, ``forbidden``,
+            or ``error``. A top-level ``success: true`` means the batch
+            *executed* (not that every node was updated — ``counts`` show the
+            breakdown). An over-cap or duplicate-id batch returns
+            ``success: false`` with no writes.
+        """
+        return service.batch_update_nodes(
+            updates,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+            expected_session_seq=expected_session_seq,
+        )
+
+    @register_tool
     def delete_nodes(
         node_ids: List[str],
         confirmed: bool = False,
