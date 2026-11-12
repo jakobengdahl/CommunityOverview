@@ -496,51 +496,112 @@ class TestMetadataMergePersistence:
             assert reloaded_node.metadata == expected
 
 
-# -- Cross-layer: service layer guarantees -------------------------------------
+# -- Cross-layer: MCP tool guarantees ------------------------------------------
 
 
 class TestServiceLayerUpdateNode:
-    """Regression for the full service path: response must match store."""
+    """Exercise the registered MCP tool and verify writes independently."""
 
     @pytest.fixture
-    def service_with_data(self, temp_storage):
-        """Storage with a node that has initial metadata."""
-        node = Node(
-            id="svc-1",
-            type=NodeType.ACTOR,
-            name="Service Test Node",
-            metadata={"owner": "svc-team", "status": "planned"},
+    def mcp_with_data(self, temp_storage):
+        from mcp.server.fastmcp import FastMCP
+
+        from backend.service import GraphService, register_mcp_tools
+
+        temp_storage.add_nodes(
+            [
+                Node(
+                    id="svc-1",
+                    type=NodeType.ACTOR,
+                    name="Service Test Node",
+                    tags=["original"],
+                    metadata={"owner": "svc-team", "status": "planned"},
+                )
+            ],
+            [],
         )
-        temp_storage.add_nodes([node], [])
-        return temp_storage
+        mcp = FastMCP("update-node-regression")
+        register_mcp_tools(mcp, GraphService(temp_storage))
+        return mcp, temp_storage
 
-    def test_service_update_node_metadata_merge_response_matches_store(
-        self, service_with_data: GraphStorage
-    ):
-        """When calling storage.update_node with metadata_merge=True, the
-        response must match the in-memory state — no stale data leakage."""
-        result = service_with_data.update_node(
-            "svc-1",
-            {"metadata": {"status": "in_progress"}},
-            metadata_merge=True,
+    @pytest.mark.asyncio
+    async def test_mcp_metadata_merge_and_tags_persist(self, mcp_with_data):
+        """A successful combined tool update must reach memory and disk."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        mcp, storage = mcp_with_data
+        async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+            result = await client.call_tool(
+                "update_node",
+                {
+                    "node_id": "svc-1",
+                    "updates": {
+                        "metadata": {"status": "in_progress", "added": "value"},
+                        "tags": ["svc-tag-1", "svc-tag-2"],
+                    },
+                    "metadata_merge": True,
+                },
+            )
+
+        assert not result.isError
+        assert result.structuredContent["result"]["success"] is True
+        # Assert requested values, never values copied from the tool response.
+        expected_metadata = {
+            "owner": "svc-team",
+            "status": "in_progress",
+            "added": "value",
+        }
+        stored = storage.get_node("svc-1")
+        assert stored.metadata == expected_metadata
+        assert stored.tags == ["svc-tag-1", "svc-tag-2"]
+
+        storage.flush()
+        reloaded = GraphStorage(
+            json_path=storage.json_path, embeddings_path=storage.embeddings_path
         )
-        assert result is not None
-        assert result.metadata["status"] == "in_progress"
-        assert result.metadata["owner"] == "svc-team"  # preserved
+        persisted = reloaded.get_node("svc-1")
+        assert persisted.metadata == expected_metadata
+        assert persisted.tags == ["svc-tag-1", "svc-tag-2"]
 
-        store_node = service_with_data.get_node("svc-1")
-        assert store_node.metadata == result.metadata
+    @pytest.mark.asyncio
+    async def test_mcp_merge_null_tags_and_revision_conflict(self, mcp_with_data):
+        """Null deletes a key, tags replace, and stale revisions change nothing."""
+        from mcp.shared.memory import create_connected_server_and_client_session
 
-    def test_service_update_node_tags_response_matches_store(
-        self, service_with_data: GraphStorage
-    ):
-        """Tag updates via storage must also be consistent between response
-        and store."""
-        result = service_with_data.update_node(
-            "svc-1", {"tags": ["svc-tag-1", "svc-tag-2"]}
-        )
-        assert result is not None
-        assert result.tags == ["svc-tag-1", "svc-tag-2"]
+        mcp, storage = mcp_with_data
+        initial_revision = storage.get_node("svc-1").revision
+        async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+            result = await client.call_tool(
+                "update_node",
+                {
+                    "node_id": "svc-1",
+                    "updates": {"metadata": {"status": None}, "tags": ["replacement"]},
+                    "metadata_merge": True,
+                    "expected_revision": initial_revision,
+                },
+            )
+            assert not result.isError
+            assert result.structuredContent["result"]["success"] is True
+            stored = storage.get_node("svc-1")
+            assert stored.metadata == {"owner": "svc-team"}
+            assert stored.tags == ["replacement"]
+            committed_revision = stored.revision
 
-        store_node = service_with_data.get_node("svc-1")
-        assert store_node.tags == result.tags
+            rejected = await client.call_tool(
+                "update_node",
+                {
+                    "node_id": "svc-1",
+                    "updates": {"metadata": {"rejected": True}, "tags": ["rejected"]},
+                    "metadata_merge": True,
+                    "expected_revision": initial_revision,
+                },
+            )
+
+        assert not rejected.isError
+        payload = rejected.structuredContent["result"]
+        assert payload["success"] is False
+        assert payload["error"] == "entity_revision_conflict"
+        stored = storage.get_node("svc-1")
+        assert stored.metadata == {"owner": "svc-team"}
+        assert stored.tags == ["replacement"]
+        assert stored.revision == committed_revision
