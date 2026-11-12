@@ -825,6 +825,20 @@ Use the subtle return button or Escape to leave it. The shortcut is
 Ctrl+Shift+F on Windows/Linux and Cmd+Shift+F on macOS. If browser fullscreen is
 unavailable or denied, the same action automatically uses an in-app focus mode.
 
+Use **Create a copy** in a session's context menu to open a separate copy of
+its stored canvas: name with a “(copy)” suffix, description, positions, groups,
+all annotation kinds (including images), hidden and dimmed objects, and visual
+settings. Graph nodes and connections remain shared. The copy keeps the source's
+write mode, but starts without staged graph changes. Nodes and connections created
+only in the source’s staged layer are omitted, along with their positions, hidden
+or dimmed state and group memberships. Shared graph entities remain on the copied
+canvas even if the source stages updates or deletions for them. Participants, presence,
+activity, undo history and edit leases are not copied. Copying requires permission to create a
+session and read the source; sessions exceeding the document size limit are
+refused with a size-limit error message. A session holding an older image that
+links to a web address instead of carrying its own picture cannot be copied;
+re-add that image first.
+
 Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
 a panel that slides out from the left and docks to the screen edge. While it is open,
 the toolbar shifts right so it keeps floating next to the panel.
@@ -842,7 +856,7 @@ AI apps:
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Create a copy** (opens a separate copy of the stored canvas), **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — this session's annotation/canvas activity with undo, plus a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
@@ -924,7 +938,26 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
-Adding or removing nodes is not recorded in this activity log.
+Node additions and removals applied directly by the server are recorded, without
+undo: server-handled UI actions, MCP add/remove tools, additive MCP visualization
+pushes to stored shared sessions, and server-applied clears. Each actual change
+produces one record; repeated additions or removals that change nothing produce
+no record.
+
+**Known gap:** additions arriving by saved-view load or client-side sync are not
+yet recorded. Saved-view/replacement pushes (`load_visualization` /
+`get_saved_view`), browser membership sync, and session auto-add agent pushes
+remain client-applied and record no membership activity in this release. Their
+origin cannot be reliably attributed from a browser's canvas diff. Legacy-only
+visualization channels also depend on a browser applying the push.
+
+Membership records retain a total count and at most 100 IDs
+(`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.
+They have their own 500-record cap (`DEFAULT_MAX_MEMBERSHIP_RECORDS`) and the
+same seven-day age limit, so they never evict undoable activity from its separate
+500-record budget. User actions use the user's presence identity; automated
+writes display **via MCP**. The shared MCP client ID does not identify individual agents or
+users; records are per change, not per viewer or per actor.
 
 A session can also carry a **description** — what it
 is for and what the next participant should pick up — set with the MCP
@@ -1009,7 +1042,7 @@ a layer change, distinct from locking or unlocking it.
   reaching through them: you are told to try again in a moment, and it works
   once they click away. This one is temporary — unlike the conflict above, the
   action stays undoable.
-- Session activity is kept for 7 days or the last 500 actions per session,
+- Session activity is kept for 7 days with separate 500-record budgets for node membership and other actions per session,
   whichever comes first — it is not a permanent record.
 
 #### Graph tab

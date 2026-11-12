@@ -39,6 +39,8 @@ from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
     RECORDED_ONLY_OPS,
+    MEMBERSHIP_OPS,
+    MAX_ACTIVITY_NODE_IDS,
     UNDOABLE_OPS,
     build_activity_record,
     find_latest_undoable as _find_latest_undoable,
@@ -255,8 +257,8 @@ class Session:
     # nor layout; a document written before the field existed is direct.
     write_mode: str = "direct"
     write_mode_source: str = "inherited"
-    # Persistent per-session activity log (annotation/canvas ops with an
-    # inverse), see session_activity.py. Newest entries last; bounded by
+    # Persistent per-session activity log, including membership without an
+    # inverse; see session_activity.py. Newest entries last; bounded by
     # retention applied on every append.
     activity_log: List[Dict[str, Any]] = field(default_factory=list)
     # Ephemeral (not persisted, not part of to_dict/from_dict): recently
@@ -683,6 +685,8 @@ class SessionStore:
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
     ) -> Session:
         """Create a session under a fresh id.
 
@@ -695,6 +699,8 @@ class SessionStore:
             session = Session(
                 id=self._new_id(),
                 name=name,
+                description=description,
+                state=state if state is not None else _empty_state(),
                 write_mode=write_mode,
                 write_mode_source=write_mode_source,
             )
@@ -873,6 +879,9 @@ class SessionStore:
         applied: Optional[Dict[str, Any]] = dict(op)
         activity_kwargs: Optional[Dict[str, Any]] = None
 
+        membership_before = (
+            set(state["node_refs"]) if op_type in MEMBERSHIP_OPS else set()
+        )
         if op_type == "nodes_added":
             state["node_refs"] = _union(
                 state["node_refs"], _require_id_list(op, "node_ids")
@@ -1350,10 +1359,35 @@ class SessionStore:
             applied
         )
 
+        if op_type in MEMBERSHIP_OPS:
+            membership_after = set(state["node_refs"])
+            changed = (
+                membership_after - membership_before
+                if op_type == "nodes_added"
+                else membership_before - membership_after
+            )
+            ids = list(dict.fromkeys(op["node_ids"]))
+            ids = [node_id for node_id in ids if node_id in changed]
+            if ids:
+                activity_kwargs = {
+                    "affected": {
+                        "kind": "nodes",
+                        "count": len(ids),
+                        "ids": ids[:MAX_ACTIVITY_NODE_IDS],
+                    },
+                    "before": None,
+                    "after": None,
+                    "inverse_op": None,
+                }
+
         if (
             record_activity
             and activity_kwargs is not None
-            and (op_type in UNDOABLE_OPS or op_type in RECORDED_ONLY_OPS)
+            and (
+                op_type in UNDOABLE_OPS
+                or op_type in RECORDED_ONLY_OPS
+                or op_type in MEMBERSHIP_OPS
+            )
             and isinstance(actor, str)
             and actor
         ):
@@ -1365,12 +1399,15 @@ class SessionStore:
                 correlation_id=op.get("correlation_id"),
                 **activity_kwargs,
             )
-            record["forward_op"] = copy.deepcopy(applied)
+            if op_type not in MEMBERSHIP_OPS:
+                record["forward_op"] = copy.deepcopy(applied)
             # A fresh action invalidates only this actor's redo future. Replace
             # records so the manager's shallow rollback snapshot stays intact.
             session.activity_log[:] = [
                 {**r, "redo_seq": None}
-                if r.get("actor") == actor and r.get("redo_seq")
+                if op_type not in MEMBERSHIP_OPS
+                and r.get("actor") == actor
+                and r.get("redo_seq")
                 else r
                 for r in session.activity_log
             ]

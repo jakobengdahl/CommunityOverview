@@ -1,30 +1,7 @@
 # covers: backend/service/mcp_tools.py
-"""A push carrying ``visualization_session_id`` must report whether it landed.
+"""Delivery reports require a live consumer, independently of stored membership.
 
-The motivating scenario: an unattended routine refreshes a canvas every night by
-calling ``search_graph`` with a ``visualization_session_id``. Nobody has that
-session open, so the command reaches no consumer — and because a push writes no
-session state (only the stored-state session tools write ``node_refs``), reading
-the session back afterwards shows nothing either. The routine reported a refreshed
-view every night while publishing nothing.
-
-So the invariant under test is not "a push succeeds" but "the result says which
-of the two delivery paths took it". Getting that wrong in the other direction is
-worse than the silence it replaces, and the legacy path makes it easy to: a
-registry *entry* is not a consumer. An entry is created by ``get_or_create``
-(also by ``mint_trigger_token`` and the session auto-add tools, with no browser
-anywhere), nothing removes it when the SSE connection closes, and every push
-refreshes its TTL — so it outlives its browser indefinitely. The tests here
-therefore drive ``SessionRegistry.stream()`` for real rather than standing a bare
-queue in for a connected browser, and the nightly scenario above is pinned end to
-end: consumer attached, consumer gone, and the push after that.
-
-Both paths run against the real ``SessionRegistry`` / ``SessionManager``, and
-each delivered case drains the consumer it claims to have reached.
-
-``clear_visualization`` also pushes, but it already refuses unless a live client
-is reachable, so it is self-reporting already and its result shape is pinned
-here as unchanged.
+Both paths use real registries and each delivered case drains its consumer.
 """
 
 import asyncio
@@ -163,12 +140,7 @@ def _drain_hub(subscription):
 
 
 def test_stored_session_with_no_consumer_reports_undelivered(wired):
-    """The motivating case: a session exists, nobody is watching it.
-
-    The hub accepts the publish because the session is in the store, which is
-    exactly why "the hub took it" cannot stand in for delivery: there is no
-    subscriber behind it.
-    """
+    """Persisting membership does not imply delivery to a live consumer."""
     tools, _registry, manager = wired
     session_id = _new_session(tools)
 
@@ -193,9 +165,11 @@ def test_stored_session_with_no_consumer_reports_undelivered(wired):
     # And it must name this report, not a pre-push check, as the verdict.
     assert "Trust this report" in delivery["warning"]
     assert delivery["warning"].endswith(EXPECTED_REMEDY)
-    # The push left no trace to read back — the half of the defect that makes
-    # the report the only way to notice.
-    assert manager.get_session(session_id).state.get("node_refs", []) == []
+    session = manager.get_session(session_id)
+    assert session.state["node_refs"] == ["alpha"]
+    assert [(r["op"], r["actor"]) for r in session.activity_log] == [
+        ("nodes_added", "mcp-agent")
+    ]
     # The search itself still succeeded; only the delivery is reported as failed.
     assert result["nodes"]
 

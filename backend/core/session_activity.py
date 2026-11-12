@@ -8,7 +8,8 @@ ops in ``UNDOABLE_OPS``: a snapshot of what changed (``before``/``after``),
 who did it (``actor``, the op's ``client_id``), when, and a ready-to-apply
 ``inverse_op`` that would revert just that change.
 
-The log is bounded (``DEFAULT_MAX_ACTIVITY_RECORDS`` records,
+The log is bounded (``DEFAULT_MAX_ACTIVITY_RECORDS`` other records plus
+``DEFAULT_MAX_MEMBERSHIP_RECORDS`` node membership records,
 ``DEFAULT_ACTIVITY_MAX_AGE_DAYS`` days) and persisted as part of the session
 document via the existing ``SessionPersistenceBackend`` seam — no new storage
 backend is introduced.
@@ -31,6 +32,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 DEFAULT_MAX_ACTIVITY_RECORDS = 500
+DEFAULT_MAX_MEMBERSHIP_RECORDS = 500
+MAX_ACTIVITY_NODE_IDS = 100
+MEMBERSHIP_OPS = frozenset({"nodes_added", "nodes_removed"})
 DEFAULT_ACTIVITY_MAX_AGE_DAYS = 7.0
 
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -40,11 +44,8 @@ _PADDED_TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
 )
 
-# Ops the activity log tracks and can build an inverse for. Every other state
-# op (session_renamed, group_membership_changed, nodes_added/removed,
-# edges_*) is out of scope for this slice — the sessions design already keeps
-# edges out of session state entirely (R14), and node add/remove has group
-# membership side effects that a single inverse op cannot cleanly undo.
+# Ops with an inverse. Node membership is recorded separately without undo:
+# removal has group-membership side effects a single inverse cannot restore.
 UNDOABLE_OPS = frozenset(
     {
         "annotation_created",
@@ -120,7 +121,9 @@ def prune_activity_log(
 ) -> List[Dict[str, Any]]:
     """Return ``records`` (chronological order) trimmed to the retention policy.
 
-    Age filtering runs first, then the max-records cap keeps the newest N —
+    Age filtering runs first, then independent membership and other caps keep
+    the newest records in each budget. Membership never evicts undoable records.
+    The other max-records cap keeps the newest N —
     mirroring the retention pass in ``GraphHistoryStore._compact_locked``. A record whose timestamp
     cannot be parsed is kept rather than dropped on a parse failure.
     """
@@ -129,8 +132,13 @@ def prune_activity_log(
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         cutoff_text = cutoff.strftime(_TIMESTAMP_FORMAT)
         kept = [r for r in kept if _within_age(r, cutoff, cutoff_text)]
-    if max_records is not None and max_records > 0 and len(kept) > max_records:
-        kept = kept[-max_records:]
+    membership = [r for r in kept if r.get("op") in MEMBERSHIP_OPS]
+    other = [r for r in kept if r.get("op") not in MEMBERSHIP_OPS]
+    retained = {id(r) for r in membership[-DEFAULT_MAX_MEMBERSHIP_RECORDS:]}
+    if max_records is not None and max_records > 0:
+        other = other[-max_records:]
+    retained.update(id(r) for r in other)
+    kept = [r for r in kept if id(r) in retained]
     return kept
 
 

@@ -38,6 +38,7 @@ import copy
 import json
 import logging
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
@@ -46,7 +47,14 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_annotations import IMAGE_TYPE, annotation_type_of, is_embedded_image_url
+from .session_activity import MEMBERSHIP_OPS
+from .session_annotations import (
+    IMAGE_TYPE,
+    annotation_type_of,
+    image_annotation_error,
+    is_embedded_image_url,
+    reference_annotation_error,
+)
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
@@ -656,6 +664,7 @@ class SessionManager:
         # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._pending_pushes: set[asyncio.Task] = set()
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -777,6 +786,127 @@ class SessionManager:
             on_allocate=(
                 self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
             ),
+        )
+
+    def copy_session(self, session_id: str) -> Session:
+        """Copy canvas state only; graph entities and staged layers stay shared/absent.
+
+        Synchronous callers refuse an in-flight state batch. REST holds the same
+        source lock, then calls the internal method without yielding.
+        Like create_session, copying allocates through store.create without
+        consuming an MCP rate-limit bucket; the session limit still applies.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        return self._copy_session(session_id)
+
+    async def copy_session_async(self, session_id: str) -> Session:
+        async with self._lock(session_id):
+            return self._copy_session(session_id)
+
+    def _copy_session(self, session_id: str) -> Session:
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if self.store.session_count() >= self._max_sessions:
+            raise SessionLimitReached()
+        # Check before allocating an id or cloning embedded images. History is
+        # deliberately excluded from both the copy and its document budget.
+        # Measured as apply_ops measures the document (ASCII-escaped), so a
+        # copy that fits here still accepts later op batches.
+        name = f"{source.name or 'Untitled session'} (copy)"
+        document = {
+            "state": source.state,
+            "name": name,
+            "description": source.description,
+        }
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        state = copy.deepcopy(source.state)
+        # A fresh staged layer cannot resolve entities created only in the
+        # source layer. Drop their canvas state, while retaining shared graph
+        # entities even when the source stages updates or deletions for them.
+        layer_backend = self.write_modes.layer_store
+        if (
+            layer_backend is not None
+            and self.write_mode_of(source)["write_mode"] == WRITE_MODE_STAGED
+        ):
+            entries = layer_backend.load_layer(session_id)
+            staged_only = {
+                kind: {
+                    entry["entity_id"]
+                    for entry in entries
+                    if entry["kind"] == kind and entry["action"] == "create"
+                }
+                for kind in ("node", "edge")
+            }
+            for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
+                state[key] = [i for i in state[key] if i not in staged_only["node"]]
+            state["positions"] = {
+                i: position
+                for i, position in state["positions"].items()
+                if i not in staged_only["node"]
+            }
+            for key in ("hidden_edge_ids", "dimmed_edge_ids"):
+                state[key] = [i for i in state[key] if i not in staged_only["edge"]]
+            for annotation in state["annotations"]:
+                if isinstance(annotation.get("member_node_ids"), list):
+                    annotation["member_node_ids"] = [
+                        i
+                        for i in annotation["member_node_ids"]
+                        if i not in staged_only["node"]
+                    ]
+        ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
+
+        # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
+        # resolved by id alone, so any reference naming a copied annotation
+        # follows it; a node-typed one keeps the shared node id.
+        def remap_attachment(value):
+            if isinstance(value, dict):
+                if value.get("target_type") in (None, "annotation"):
+                    target = value.get("target_id")
+                    if isinstance(target, str) and target in ids:
+                        value["target_id"] = ids[target]
+                for child in value.values():
+                    remap_attachment(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remap_attachment(child)
+
+        # Every copied annotation lands on a fresh id, so it is a new write as
+        # duplicate_annotation's is: a legacy non-embedded image URL or an
+        # unsafe reference target refuses the whole copy before anything
+        # is allocated.
+        for annotation in state["annotations"]:
+            error = image_annotation_error(annotation) or reference_annotation_error(
+                annotation, require_complete=True
+            )
+            if error:
+                raise OpError(error)
+        for annotation in state["annotations"]:
+            annotation["id"] = ids[annotation["id"]]
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
+            annotation["version"] = 1
+            annotation["field_versions"] = {}
+            annotation.pop("created_by", None)
+            annotation.pop("updated_by", None)
+            remap_attachment(annotation)
+        document["state"] = state
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        return self.store.create(
+            name,
+            description=source.description,
+            state=state,
+            write_mode=mode,
+            write_mode_source="explicit",
+            on_allocate=self.write_modes.record_staged
+            if mode == WRITE_MODE_STAGED
+            else None,
         )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
@@ -1433,7 +1563,11 @@ class SessionManager:
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
-                            session, {**op, "client_id": client_id}
+                            session,
+                            {**op, "client_id": client_id},
+                            # Browser membership ops report an already-applied
+                            # canvas diff; its originating action is unknown.
+                            record_activity=op_type not in MEMBERSHIP_OPS,
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -1724,6 +1858,17 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._add_node_refs(session, client_id, node_ids)
+
+    def _add_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Commit one membership change after the caller has serialized access.
+
+        Request caps belong to the public MCP method; trusted visualization
+        results may contain more ids and still represent a single activity.
+        """
+        session_id = session.id
         # Dedupe against the session *and* against the rest of this call, in
         # order: a repeated id would otherwise be reported as added twice and
         # ride the broadcast twice, while the stored state (a union) holds it
@@ -1802,6 +1947,13 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._remove_node_refs(session, client_id, node_ids)
+
+    def _remove_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Apply trusted removals without the public MCP request caps or charge."""
+        session_id = session.id
         present = set(session.state.get("node_refs", []))
         removed: List[str] = []
         for node_id in node_ids:
@@ -2689,13 +2841,63 @@ class SessionManager:
     # ---------------- MCP push ----------------
 
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Broadcast an MCP visualization command to all subscribers.
+        """Apply server-owned membership once, then broadcast the command.
 
-        Returns ``False`` when the session is unknown so callers can fall back to
-        the legacy single-consumer registry during the transition.
+        Additive results bypass MCP request caps and produce one membership op.
+        During an in-flight batch, acceptance queues delivery behind its lock;
+        otherwise delivery completes inline. Returns ``False`` when the session
+        is unknown so callers can fall back to the legacy registry.
         """
         if self.store.get(session_id) is None:
             return False
+        queue_name = f"session-push:{session_id}"
+        if self._lock(session_id).locked() or any(
+            task.get_name() == queue_name for task in self._pending_pushes
+        ):
+            # A synchronous producer cannot await the batch's persistence. Keep
+            # the command alive and deliver it only after that batch commits or
+            # rolls back, preserving op/command order for every subscriber.
+            command = copy.deepcopy(command)
+            task = asyncio.get_running_loop().create_task(
+                self._push_command_after_batch(session_id, command), name=queue_name
+            )
+            self._pending_pushes.add(task)
+            task.add_done_callback(self._pending_pushes.discard)
+            return True
+        return self._publish_command(session_id, command)
+
+    async def _push_command_after_batch(
+        self, session_id: str, command: Dict[str, Any]
+    ) -> None:
+        try:
+            async with self._lock(session_id):
+                self._publish_command(session_id, command)
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    def _publish_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        session = self.store.get(session_id)
+        if session is None:
+            return False
+        result = command.get("result", {})
+        if result.get("action") == "add_to_visualization" and command.get(
+            "tool"
+        ) not in {"session_auto_add_agent", "load_visualization", "get_saved_view"}:
+            node_ids = [
+                node["id"]
+                for node in result.get("nodes", [])
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            ]
+            if node_ids:
+                # Server-applied additive results are attributable to MCP.
+                self._add_node_refs(session, "mcp-agent", node_ids)
+        elif result.get("action") == "clear_visualization":
+            self._remove_node_refs(
+                session, "mcp-agent", list(session.state.get("node_refs", []))
+            )
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 
