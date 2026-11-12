@@ -530,7 +530,9 @@ class TestServiceLayerUpdateNode:
         from mcp.shared.memory import create_connected_server_and_client_session
 
         mcp, storage = mcp_with_data
-        async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
             result = await client.call_tool(
                 "update_node",
                 {
@@ -570,7 +572,9 @@ class TestServiceLayerUpdateNode:
 
         mcp, storage = mcp_with_data
         initial_revision = storage.get_node("svc-1").revision
-        async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
             result = await client.call_tool(
                 "update_node",
                 {
