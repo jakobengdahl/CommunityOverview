@@ -846,9 +846,19 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   (`RLIMIT_AS`) where the platform supports it; exceeding it ends in
   `failed`.
 - **ZIP-based formats are checked before decompression.** The declared
-  uncompressed total, the member count and the compression ratio (whole
-  archive and per member) are checked from the central directory, and an
-  archive over any cap is `too_large` without inflating anything.
+  uncompressed total, the member count, the whole-archive compression ratio
+  and (conditionally) the per-member ratio are checked from the central
+  directory, and an archive over any cap is `too_large` without inflating
+  anything. The constants are `max_zip_ratio` (100.0),
+  `max_zip_uncompressed_bytes` (100 MiB), `max_zip_members` (2 000) and
+  `zip_ratio_floor_bytes` (1 MiB). The whole-archive ratio is always
+  checked (`total_uncompressed / len(archive_data) > max_zip_ratio`). The
+  per-member ratio (`member_uncompressed / member_compressed`) is checked
+  only for members whose declared size exceeds `zip_ratio_floor_bytes`. The
+  floor exists because small XML parts inside OOXML/ODF archives often
+  compress far beyond any reasonable bomb threshold, yet they cannot inflate
+  dangerously on their own; the whole-archive ratio and the total uncompressed
+  cap still bound the inflation.
 - **No XXE.** XML parts are parsed with entity resolution, network access
   and DTD loading off. A part that carries a DTD is refused (OOXML and ODF
   never need one), and the file is `failed`.
