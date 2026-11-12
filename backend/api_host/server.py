@@ -512,12 +512,13 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     auto_add_registry = SessionAutoAddRegistry()
     app.state.auto_add_registry = auto_add_registry
 
-    def _auto_add_push(session_id: str, node_payload: dict) -> None:
+    def _auto_add_push(session_id: str, node_payload: dict, agent_id: str) -> None:
         _push_to_session(
             session_registry,
             session_id,
             "session_auto_add_agent",
-            {"nodes": [node_payload], "edges": []},
+            # agent_id attributes the server-applied addition to this agent.
+            {"nodes": [node_payload], "edges": [], "agent_id": agent_id},
             session_manager,
         )
 

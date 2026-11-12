@@ -8,6 +8,7 @@ import {
   foldAckedAnnotationOp,
   foldRemoteAnnotationOp,
   isAnnotationOpStale,
+  hydrateAddedNodes,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import {
@@ -522,6 +523,58 @@ describe('SessionSyncClient', () => {
     };
     es.emit({ type: 'command', command });
     expect(onCommand).toHaveBeenCalledWith(command);
+  });
+
+  it('renders a server-applied view load without writing membership back', async () => {
+    const { client, fetchImpl } = makeClient({ handlers: { onCommand: vi.fn() } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.setBaseline({ node_refs: ['old'] });
+    es.emit({
+      type: 'op',
+      client_id: 'mcp-agent',
+      op: { op: 'nodes_removed', node_ids: ['old'] },
+      seq: 1,
+    });
+    es.emit({
+      type: 'op',
+      client_id: 'mcp-agent',
+      op: { op: 'nodes_added', node_ids: ['new'] },
+      seq: 2,
+    });
+    es.emit({ type: 'command', command: { result: { action: 'load_visualization' } } });
+    client.syncState({ node_refs: ['new'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('drops a node whose hydration settles after a removal of it', async () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    es.emit({
+      type: 'op',
+      client_id: 'other',
+      op: { op: 'nodes_added', node_ids: ['a', 'b'] },
+      seq: 1,
+    });
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    const read = async (id) => {
+      await gate;
+      return { node: { id }, edges: [{ id: `e-${id}` }] };
+    };
+    const hydration = hydrateAddedNodes(client, ['a', 'b'], read);
+    es.emit({
+      type: 'op',
+      client_id: 'other',
+      op: { op: 'nodes_removed', node_ids: ['a'] },
+      seq: 2,
+    });
+    release();
+    expect(await hydration).toEqual({ nodes: [{ id: 'b' }], edges: [{ id: 'e-b' }] });
   });
 
   it('forwards a summon from another client and skips its own echo', () => {

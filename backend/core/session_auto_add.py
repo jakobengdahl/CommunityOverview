@@ -23,8 +23,9 @@ At least one constraint is required — a rule matching every created node is
 rejected at the boundary as a footgun that would flood the canvas, mirroring the
 kiosk assistant's guard against an empty allowlist.
 
-The push itself is injected as a callback (``push(session_id, node_dict)``) so
-this core module has no dependency on the service/transport layer.
+The push itself is injected as a callback (``push(session_id, node_dict,
+agent_id)``) so this core module has no dependency on the service/transport
+layer.
 """
 
 import logging
@@ -235,12 +236,20 @@ class SessionAutoAddRegistry:
         Each session appears at most once even if several of its rules match, so
         a session receives a newly created node exactly once.
         """
+        return list(self.matching_agents(node_type, node_data))
+
+    def matching_agents(
+        self, node_type: str, node_data: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Map each matching session id to the first of its agents that matches."""
         with self._lock:
-            return [
-                session_id
-                for session_id, rules in self._by_session.items()
-                if any(rule.matches(node_type, node_data) for rule in rules.values())
-            ]
+            matches: Dict[str, str] = {}
+            for session_id, rules in self._by_session.items():
+                for rule in rules.values():
+                    if rule.matches(node_type, node_data):
+                        matches[session_id] = rule.agent_id
+                        break
+            return matches
 
     def prune_to_sessions(self, live_session_ids) -> int:
         """Drop rules for sessions no longer live. Returns sessions removed.
@@ -268,12 +277,13 @@ class SessionAutoAddRegistry:
 
 def build_node_create_listener(
     registry: SessionAutoAddRegistry,
-    push: Callable[[str, Dict[str, Any]], None],
+    push: Callable[[str, Dict[str, Any], str], None],
 ) -> Callable[[Any], None]:
     """Build a graph system-listener that feeds matching new nodes to sessions.
 
     On each ``node.create`` event the listener finds every session whose
-    auto-add agent matches the node and calls ``push(session_id, node_dict)`` —
+    auto-add agent matches the node and calls ``push(session_id, node_dict,
+    agent_id)`` naming the matching agent —
     which the caller wires to the additive ``add_to_visualization`` push path.
     The node's ``embedding`` is stripped so the pushed payload matches the shape
     the frontend already receives from search results.
@@ -290,13 +300,13 @@ def build_node_create_listener(
         if entity is None or entity.kind != EntityKind.NODE:
             return
         node_data = entity.after or {}
-        sessions = registry.matching_sessions(entity.type, node_data)
+        sessions = registry.matching_agents(entity.type, node_data)
         if not sessions:
             return
         payload = {key: value for key, value in node_data.items() if key != "embedding"}
-        for session_id in sessions:
+        for session_id, agent_id in sessions.items():
             try:
-                push(session_id, payload)
+                push(session_id, payload, agent_id)
             except Exception:  # pragma: no cover - defensive isolation
                 logger.exception(
                     "auto-add push failed for session %s (node %s)",

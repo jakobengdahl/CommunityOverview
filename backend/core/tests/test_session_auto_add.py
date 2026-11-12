@@ -191,7 +191,7 @@ class TestListener:
         reg.add_rule(SESSION_A, node_types=["Actor"])
         pushed = []
         listener = build_node_create_listener(
-            reg, lambda sid, node: pushed.append((sid, node))
+            reg, lambda sid, node, _agent: pushed.append((sid, node))
         )
 
         listener(_create_event("Actor", {"id": "n1", "name": "SCB"}))
@@ -203,7 +203,7 @@ class TestListener:
         reg.add_rule(SESSION_A, node_types=["Actor"])
         pushed = []
         listener = build_node_create_listener(
-            reg, lambda sid, node: pushed.append((sid, node))
+            reg, lambda sid, node, _agent: pushed.append((sid, node))
         )
 
         listener(_create_event("Goal", {"id": "n1", "name": "SCB"}))
@@ -216,7 +216,9 @@ class TestListener:
         reg.add_rule(SESSION_A, node_types=["Actor"])
         reg.add_rule(SESSION_B, node_types=["Goal"])
         pushed = []
-        listener = build_node_create_listener(reg, lambda sid, node: pushed.append(sid))
+        listener = build_node_create_listener(
+            reg, lambda sid, node, _agent: pushed.append(sid)
+        )
 
         listener(_create_event("Actor", {"id": "n1", "name": "SCB"}))
 
@@ -227,7 +229,7 @@ class TestListener:
         reg.add_rule(SESSION_A, node_types=["Actor"])
         pushed = []
         listener = build_node_create_listener(
-            reg, lambda sid, node: pushed.append(node)
+            reg, lambda sid, node, _agent: pushed.append(node)
         )
 
         listener(
@@ -241,7 +243,9 @@ class TestListener:
         reg = SessionAutoAddRegistry()
         reg.add_rule(SESSION_A, node_types=["Actor"])
         pushed = []
-        listener = build_node_create_listener(reg, lambda sid, node: pushed.append(sid))
+        listener = build_node_create_listener(
+            reg, lambda sid, node, _agent: pushed.append(sid)
+        )
 
         update = Event(
             event_type=EventType.NODE_UPDATE,
@@ -268,7 +272,7 @@ class TestListener:
         reg.add_rule(SESSION_B, node_types=["Actor"])
         reached = []
 
-        def flaky_push(sid, node):
+        def flaky_push(sid, node, _agent):
             if sid == SESSION_A:
                 raise RuntimeError("boom")
             reached.append(sid)
@@ -301,7 +305,7 @@ class TestAdditivePush:
     def test_push_command_is_additive(self):
         registry = _CapturingRegistry()
 
-        def push(session_id, node_payload):
+        def push(session_id, node_payload, _agent):
             _push_to_session(
                 registry,
                 session_id,
@@ -339,7 +343,7 @@ class TestGraphIntegration:
         pushed = []
         storage.add_system_listener(
             build_node_create_listener(
-                reg, lambda sid, node: pushed.append((sid, node["name"]))
+                reg, lambda sid, node, _agent: pushed.append((sid, node["name"]))
             )
         )
 
@@ -354,7 +358,9 @@ class TestGraphIntegration:
         reg = SessionAutoAddRegistry()
         pushed = []
         storage.add_system_listener(
-            build_node_create_listener(reg, lambda sid, node: pushed.append(sid))
+            build_node_create_listener(
+                reg, lambda sid, node, _agent: pushed.append(sid)
+            )
         )
 
         service.add_nodes(nodes=[{"type": "Actor", "name": "Skatteverket"}], edges=[])

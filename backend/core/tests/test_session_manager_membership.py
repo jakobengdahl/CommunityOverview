@@ -1,5 +1,5 @@
 # covers: backend/core/session_manager.py
-"""Server-owned membership recording and browser-sync exclusions."""
+"""Server-owned membership recording for pushes and direct writes."""
 
 import asyncio
 import threading
@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
-from backend.core.session_manager import _TokenBucket
+from backend.core.session_manager import AUTO_ADD_ACTOR_PREFIX, _TokenBucket
 from backend.core.tests.test_session_manager import _manager, _drain
 
 pytestmark = pytest.mark.asyncio
@@ -162,43 +162,66 @@ class TestServerMembership:
         assert len(s.activity_log) == 2
 
     @pytest.mark.parametrize(
-        "tool,action",
+        "tool,action,expected,actor",
         [
-            ("load_visualization", "load_visualization"),
-            ("get_saved_view", "replace_visualization"),
-            ("get_saved_view", "load_visualization"),
-            ("get_saved_view", "add_to_visualization"),
-            ("session_auto_add_agent", "add_to_visualization"),
+            ("get_saved_view", "load_visualization", ["new"], "mcp-agent"),
+            ("get_saved_view", "replace_visualization", ["new"], "mcp-agent"),
+            ("search_graph", "update_in_visualization", ["old", "new"], "mcp-agent"),
+            (
+                "session_auto_add_agent",
+                "add_to_visualization",
+                ["old", "new"],
+                f"{AUTO_ADD_ACTOR_PREFIX}agent-1",
+            ),
         ],
     )
-    async def test_client_applied_push_and_sync_do_not_record(self, tool, action):
+    async def test_pushed_membership_is_server_applied_once(
+        self, tool, action, expected, actor
+    ):
+        """One record per changed direction, by the pusher, whatever the viewers."""
         mgr = _manager()
         s = mgr.create_session()
         mgr.add_node_refs(s.id, "owner", ["old"])
-        sub, _ = mgr.connect(s.id, "browser", "Viewer")
-        await _drain(sub)
+        browsers = [f"browser{i}" for i in range(3)]
+        subs = [mgr.connect(s.id, b, b)[0] for b in browsers]
+        for sub in subs:
+            await _drain(sub)
         command = {
             "tool": tool,
-            "result": {"action": action, "nodes": [{"id": "new"}]},
+            "result": {
+                "action": action,
+                "nodes": [{"id": "new"}, {"id": "c", "type": "Community"}],
+                "agent_id": "agent-1",
+            },
         }
         assert mgr.push_command(s.id, command)
-        assert s.state["node_refs"] == ["old"]
-        assert [e["type"] for e in await _drain(sub)] == ["command"]
-        await mgr.apply_ops(
-            s.id,
-            "browser",
-            None,
-            [
-                {"op": "nodes_removed", "node_ids": ["old"]},
-                {"op": "nodes_added", "node_ids": ["new"]},
-                {"op": "node_moved", "node_id": "new", "position": {"x": 1, "y": 2}},
-            ],
+        assert s.state["node_refs"] == expected
+        server_records = [(r["op"], r["actor"]) for r in s.activity_log[1:]]
+        assert server_records == (
+            [("nodes_removed", actor), ("nodes_added", actor)]
+            if expected == ["new"]
+            else [("nodes_added", actor)]
         )
-        assert s.state["node_refs"] == ["new"]
-        assert [(r["op"], r["actor"]) for r in s.activity_log] == [
-            ("nodes_added", "owner"),
-            ("node_moved", "browser"),
-        ]
+        for sub in subs:
+            events = await _drain(sub)
+            # Membership ops precede the command, so each browser folds them
+            # into its baseline before it renders and has nothing to sync back.
+            assert [e["type"] for e in events][-1] == "command"
+            assert all(e["type"] == "op" for e in events[:-1])
+        for browser in browsers:
+            await mgr.apply_ops(
+                s.id,
+                browser,
+                None,
+                [
+                    {"op": "nodes_removed", "node_ids": ["old"]}
+                    if expected == ["new"]
+                    else {"op": "nodes_added", "node_ids": ["old"]},
+                    {"op": "nodes_added", "node_ids": ["new"]},
+                ],
+            )
+        assert s.state["node_refs"] == expected
+        assert [(r["op"], r["actor"]) for r in s.activity_log[1:]] == server_records
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()

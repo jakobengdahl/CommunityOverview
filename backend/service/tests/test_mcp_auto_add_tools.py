@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """Tests for the session-scoped auto-add-agent MCP tools.
 
 ``create_session_auto_add_agent`` / ``list_session_auto_add_agents`` /
@@ -146,7 +147,8 @@ class TestReacts:
         pushed = []
         storage.add_system_listener(
             build_node_create_listener(
-                auto_add_registry, lambda sid, node: pushed.append((sid, node["name"]))
+                auto_add_registry,
+                lambda sid, node, _agent: pushed.append((sid, node["name"])),
             )
         )
         service.add_nodes(nodes=[{"type": "Actor", "name": "SCB"}], edges=[])

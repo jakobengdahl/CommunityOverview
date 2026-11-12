@@ -27,7 +27,10 @@ import {
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
-import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
+  hydrateAddedNodes,
+} from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useStagedSession } from './hooks/useStagedSession';
 import WriteModeBar from './components/WriteModeBar';
@@ -518,27 +521,17 @@ function App() {
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length) return false;
           // The only case here with an internal await, so the only one where
-          // the active session can change out from under it (a session
-          // switch mid-fetch, review round 5): capture which session this op
-          // is for and re-check before writing to the store below, which is
-          // not itself session-scoped.
-          const sessionAtStart = syncRef.current?.sessionId;
-          const addNodes = [];
-          const addEdges = [];
-          await Promise.all(
-            missing.map(async (id) => {
-              try {
-                const r = await api.getNodeDetails(id);
-                if (r?.node) {
-                  addNodes.push(r.node);
-                  (r.edges || []).forEach((e) => addEdges.push(e));
-                }
-              } catch {
-                /* node may have been deleted from the graph — skip */
-              }
-            })
+          // the session or its membership can change out from under it: a
+          // session switch mid-fetch (review round 5), or a removal or clear
+          // that lands before the reads settle, whose nodes must stay gone.
+          const client = syncRef.current;
+          if (!client) return false;
+          const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
+            client,
+            missing,
+            api.getNodeDetails
           );
-          if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+          if (syncRef.current !== client) return false; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.

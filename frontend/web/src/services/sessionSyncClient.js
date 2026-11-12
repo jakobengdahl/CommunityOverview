@@ -314,6 +314,20 @@ export function computeOps(prevState, nextState) {
 }
 
 /**
+ * Read the nodes of a `nodes_added` op for the canvas, keeping only those
+ * still in `client`'s session once the reads settle: a removal or clear that
+ * landed meanwhile changes `membershipVersion`, and a late read must not put
+ * its nodes back. Edges come only from the kept nodes' reads.
+ */
+export async function hydrateAddedNodes(client, nodeIds, getNodeDetails) {
+  const version = client.membershipVersion;
+  const reads = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
+  const stillMember = (id) => client.membershipVersion === version || client.baselineHasNode(id);
+  const kept = reads.filter((r) => r?.node && stillMember(r.node.id));
+  return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
+}
+
+/**
  * Apply a single applied op to the baseline mirror (client-side mirror of the
  * server's state transforms). Keeping the baseline current for *remote* ops is
  * what makes the outgoing diff echo-safe: once a remote change is folded into
@@ -755,6 +769,9 @@ export class SessionSyncClient {
     // (by-then possibly stale) creation-time content over it a second time —
     // see foldLocalOp and _handleEvent's 'op' case.
     this._locallyFoldedAnnotationIds = new Set();
+    // Bumped whenever nodes may have left the baseline (a removal, a clear, a
+    // reload), so an async hydration started before can drop what was removed.
+    this._membershipVersion = 0;
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -824,6 +841,21 @@ export class SessionSyncClient {
   baselinePosition(nodeId) {
     const p = this._baseline.positions[nodeId];
     return p ? { x: p.x, y: p.y } : null;
+  }
+
+  /** Whether the synced baseline currently holds `nodeId` as a session member. */
+  baselineHasNode(nodeId) {
+    return this._baseline.node_refs.includes(nodeId);
+  }
+
+  /** Counter that changes whenever a node may have left the baseline. */
+  get membershipVersion() {
+    return this._membershipVersion;
+  }
+
+  _foldIntoBaseline(op) {
+    if (op?.op === 'nodes_removed') this._membershipVersion += 1;
+    this._baseline = applyOpToMirror(this._baseline, op);
   }
 
   // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
@@ -1293,6 +1325,7 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
+    this._membershipVersion += 1;
     if (typeof seq === 'number') this._loadedSeq = seq;
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
@@ -1338,7 +1371,7 @@ export class SessionSyncClient {
   foldLocalOp(op) {
     const id = op?.annotation?.id;
     if (id) this._locallyFoldedAnnotationIds.add(id);
-    this._baseline = applyOpToMirror(this._baseline, op);
+    this._foldIntoBaseline(op);
   }
 
   /**
@@ -1350,7 +1383,7 @@ export class SessionSyncClient {
    * setting one in that case is actively harmful, not just unnecessary).
    */
   foldOpIntoBaseline(op) {
-    this._baseline = applyOpToMirror(this._baseline, op);
+    this._foldIntoBaseline(op);
   }
 
   /**
@@ -1368,6 +1401,7 @@ export class SessionSyncClient {
   syncState(state) {
     const next = normalizeMirror(state);
     const ops = computeOps(this._baseline, next);
+    if (ops.some((op) => op.op === 'nodes_removed')) this._membershipVersion += 1;
     this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
     if (ops.length) this._enqueue(ops);
   }
@@ -1913,6 +1947,7 @@ export class SessionSyncClient {
         let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
+          if (op.op === 'nodes_removed') this._membershipVersion += 1;
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
         if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
