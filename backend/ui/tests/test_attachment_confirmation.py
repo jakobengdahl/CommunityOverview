@@ -4,6 +4,7 @@
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -571,3 +572,14 @@ def test_invalid_attachment_bodies_require_confirmation(
     assert entry[1:3] == ("add_node_attachment", arguments)
     assert result["toolResult"]["error_code"] == "confirmation_required"
     tool.assert_not_called()
+
+
+def test_documented_attachment_validation_follows_pending_storage():
+    documentation = (Path(__file__).parents[2] / "DEVELOPMENT.md").read_text()
+    contract = " ".join(documentation.split())
+    assert (
+        "In tainted turns, blocked calls store their exact arguments before "
+        "validation, including invalid or oversized attachment bodies, subject "
+        "to pending-action capacity limits. Argument validation runs only after "
+        "confirmation, before tool execution."
+    ) in contract
