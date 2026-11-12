@@ -452,6 +452,16 @@ def batch_update_nodes(
 
     for entry in updates:
         node_id = entry["node_id"]
+        if "updates" not in entry:
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Missing required field: updates",
+                }
+            )
+            continue
         node_updates = entry["updates"]
         metadata_merge = entry.get("metadata_merge", True)
         expected_updated_at = entry.get("expected_updated_at")
@@ -462,9 +472,9 @@ def batch_update_nodes(
             hook,
             node_id,
             node_updates,
-            event_origin=None,  # already attributed above
-            event_session_id=None,
-            event_correlation_id=None,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,

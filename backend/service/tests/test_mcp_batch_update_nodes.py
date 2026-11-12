@@ -7,7 +7,7 @@ partial success, size cap, duplicate rejection, compact result shape.
 """
 
 import json
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -465,6 +465,54 @@ class TestCompactResult:
 
 
 class TestServiceLayer:
+    def test_missing_updates_preserves_partial_success(self, batch_tools):
+        tools, storage = batch_tools
+        original_revision = storage.nodes["b"].revision
+
+        result = tools["batch_update_nodes"](
+            [
+                {"node_id": "a", "updates": {"name": "First updated"}},
+                {"node_id": "b"},
+                {"node_id": "c", "updates": {"name": "Last updated"}},
+            ]
+        )
+
+        assert result["success"] is True
+        assert result["counts"]["ok"] == 2
+        assert result["counts"]["error"] == 1
+        assert [item["status"] for item in result["results"]] == ["ok", "error", "ok"]
+        assert result["results"][1] == {
+            "node_id": "b",
+            "status": "error",
+            "error": "Missing required field: updates",
+        }
+        assert storage.nodes["a"].name == "First updated"
+        assert storage.nodes["c"].name == "Last updated"
+        assert storage.nodes["b"].name == "Bob"
+        assert storage.nodes["b"].revision == original_revision
+
+    def test_event_attribution_reaches_each_storage_write(self, batch_tools):
+        _, storage = batch_tools
+        service = GraphService(storage)
+        with patch.object(storage, "update_node", wraps=storage.update_node) as write:
+            result = service.batch_update_nodes(
+                [
+                    {"node_id": "a", "updates": {"name": "Updated A"}},
+                    {"node_id": "b", "updates": {"name": "Updated B"}},
+                ],
+                event_origin="webhook",
+                event_session_id="session-123",
+                event_correlation_id="correlation-123",
+            )
+
+        assert result["counts"]["ok"] == 2
+        assert write.call_count == 2
+        for call in write.call_args_list:
+            context = call.kwargs["event_context"]
+            assert context.event_origin == "webhook"
+            assert context.event_session_id == "session-123"
+            assert context.event_correlation_id == "correlation-123"
+
     def test_empty_batch_succeeds(self, empty_service):
         result = empty_service.batch_update_nodes([])
         assert result["success"] is True
