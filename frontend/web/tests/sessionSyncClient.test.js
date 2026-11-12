@@ -544,9 +544,13 @@ describe('SessionSyncClient', () => {
       seq: 2,
     });
     es.emit({ type: 'command', command: { result: { action: 'load_visualization' } } });
+    client.syncState({ node_refs: [] }); // autosave while 'new' is still being read
     client.syncState({ node_refs: ['new'] });
     await flush();
     expect(fetchImpl.calls).toHaveLength(0);
+    client.syncState({ node_refs: [] }); // once shown, a removal is the user's own
+    await flush();
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_removed', node_ids: ['new'] });
   });
 
   it('drops a node whose hydration settles after a removal of it', async () => {

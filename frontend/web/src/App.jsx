@@ -519,6 +519,7 @@ function App() {
         case 'nodes_added': {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
+          syncRef.current?.markNodesRendered((op.node_ids || []).filter((id) => have.has(id)));
           if (!missing.length) return false;
           // The only case here with an internal await, so the only one where
           // the session or its membership can change out from under it: a
