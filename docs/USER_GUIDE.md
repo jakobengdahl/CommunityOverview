@@ -924,7 +924,20 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
-Adding or removing nodes is not recorded in this activity log.
+Node additions and removals are recorded, without undo. Each server-side
+membership change produces one record, regardless of the number of browsers;
+repeated additions or removals that change nothing produce no record. Additive
+MCP visualization pushes apply membership on the server for stored sessions.
+Legacy-only visualization channels still depend on a browser applying the push.
+
+Membership records retain a total count and at most 100 IDs
+(`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.
+They have their own 500-record cap (`DEFAULT_MAX_MEMBERSHIP_RECORDS`) and the
+same seven-day age limit, so they never evict undoable activity from its separate
+500-record budget. User actions use the user's presence identity; automated
+writes display **via MCP** or **Auto-add agent**, rather than claiming the user
+performed them. The shared MCP client ID does not identify individual agents or
+users; records are per change, not per viewer or per actor.
 
 A session can also carry a **description** — what it
 is for and what the next participant should pick up — set with the MCP
@@ -1009,7 +1022,7 @@ a layer change, distinct from locking or unlocking it.
   reaching through them: you are told to try again in a moment, and it works
   once they click away. This one is temporary — unlike the conflict above, the
   action stays undoable.
-- Session activity is kept for 7 days or the last 500 actions per session,
+- Session activity is kept for 7 days with separate 500-record budgets for node membership and other actions per session,
   whichever comes first — it is not a permanent record.
 
 #### Graph tab

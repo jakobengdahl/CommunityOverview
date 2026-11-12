@@ -1,3 +1,4 @@
+// covers: frontend/web/src/utils/sessionActivity.js
 import { describe, it, expect, vi } from 'vitest';
 import { createAnnotation, ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import {
@@ -1572,4 +1573,10 @@ describe('classifyUndoError × i18n', () => {
       expect(sv.history[`session_undo_${reason}`], `sv: ${reason}`).toBeTruthy();
     }
   });
+});
+
+it.each(['nodes_added', 'nodes_removed'])('describes %s with its total count and no undo', (op) => {
+  const record = { op, affected: { count: 105, ids: ['sample'] }, inverse_op: null };
+  expect(describeActivity(record)).toEqual({ key: `history.desc.${op}`, params: { count: 105 } });
+  expect(isUndoableRecord(record)).toBe(false);
 });

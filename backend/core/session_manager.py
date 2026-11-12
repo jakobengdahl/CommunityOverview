@@ -2689,13 +2689,30 @@ class SessionManager:
     # ---------------- MCP push ----------------
 
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Broadcast an MCP visualization command to all subscribers.
+        """Apply additive membership once, then broadcast the visualization command.
 
         Returns ``False`` when the session is unknown so callers can fall back to
         the legacy single-consumer registry during the transition.
         """
         if self.store.get(session_id) is None:
             return False
+        result = command.get("result", {})
+        if result.get("action") == "add_to_visualization":
+            node_ids = [
+                node["id"]
+                for node in result.get("nodes", [])
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            ]
+            if node_ids:
+                actor = (
+                    "session-auto-add-agent"
+                    if command.get("tool") == "session_auto_add_agent"
+                    else "mcp-agent"
+                )
+                self.add_node_refs(session_id, actor, node_ids)
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 
