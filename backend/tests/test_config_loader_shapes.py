@@ -1,5 +1,4 @@
-# covers: backend/config/config_loader.py
-"""Shape transport isolation guarantees for config_loader."""
+# covers: backend/config/config_loader.py, backend/config/node_shapes.py
 
 import json
 
