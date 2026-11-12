@@ -1468,8 +1468,11 @@ months ago would report `delivered: true` forever, and would inflate
 `clear_visualization`) use the same consumer count for the same reason.
 
 `delivered` means a consumer was attached when the command was sent, not
-that the canvas has finished applying it. `clear_visualization` has nothing to
-report — it refuses up front instead.
+that the canvas has finished applying it. `clear_visualization` refuses up front without a consumer. For shared sessions,
+command pushes preserve request order behind an in-flight batch. Clear removes
+server node references before broadcasting the canvas command and records the
+removal once as `mcp-agent`, independently of browser count; browser echoes do
+not create user-attributed removal records.
 
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent

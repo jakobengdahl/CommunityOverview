@@ -2628,7 +2628,10 @@ class TestLifecycle:
         # Delivery neither spends a fresh budget nor replenishes an empty one.
         assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
 
-    async def test_additive_push_waits_for_inflight_batch(self, monkeypatch):
+    @pytest.mark.parametrize("clear_after_add", [False, True])
+    async def test_additive_push_waits_for_inflight_batch(
+        self, monkeypatch, clear_after_add
+    ):
         mgr = _manager()
         s = mgr.create_session()
         subs = [mgr.connect(s.id, client, client)[0] for client in ("c1", "c2")]
@@ -2659,8 +2662,14 @@ class TestLifecycle:
         try:
             assert await asyncio.to_thread(entered.wait, 2)
             assert mgr.push_command(s.id, command) is True
+            clear = {
+                "tool": "clear_visualization",
+                "result": {"action": "clear_visualization"},
+            }
+            if clear_after_add:
+                assert mgr.push_command(s.id, clear) is True
             pending = list(mgr._pending_pushes)
-            assert len(pending) == 1
+            assert len(pending) == (2 if clear_after_add else 1)
             for sub in subs:
                 assert await _drain(sub) == []
         finally:
@@ -2668,16 +2677,59 @@ class TestLifecycle:
             await batch
         await asyncio.gather(*pending)
 
-        assert s.state["node_refs"] == ["existing", "new"]
-        assert len(s.activity_log) == 2
+        assert s.state["node_refs"] == ([] if clear_after_add else ["existing", "new"])
+        assert len(s.activity_log) == (3 if clear_after_add else 2)
         assert s.activity_log[-1]["actor"] == "mcp-agent"
         for sub in subs:
             events = await _drain(sub)
-            assert [event["type"] for event in events] == ["op", "op", "command"]
+            assert [event["type"] for event in events] == (
+                ["op", "op", "command", "op", "command"]
+                if clear_after_add
+                else ["op", "op", "command"]
+            )
+            if clear_after_add:
+                assert events[3]["op"]["op"] == "nodes_removed"
+                assert events[3]["seq"] == 3
+                assert events[4]["command"] == clear
             assert [event["seq"] for event in events[:2]] == [1, 2]
             assert events[1]["op"]["node_ids"] == ["new"]
             assert events[2]["command"] == command
-        assert mgr.catch_up(s.id, 0)["seq"] == 2
+        assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
+
+    @pytest.mark.parametrize("viewers", [0, 2])
+    async def test_clear_push_records_server_removal_once(self, viewers):
+        mgr = _manager()
+        s = mgr.create_session()
+        ids = [f"n{i}" for i in range(501)]
+        mgr._add_node_refs(s, "mcp-agent", ids)
+        subs = [mgr.connect(s.id, f"c{i}", "Alice")[0] for i in range(viewers)]
+        for sub in subs:
+            await _drain(sub)
+        command = {
+            "tool": "clear_visualization",
+            "result": {"action": "clear_visualization"},
+        }
+        assert mgr.push_command(s.id, command)
+        assert s.state["node_refs"] == []
+        record = s.activity_log[-1]
+        assert record["actor"] == "mcp-agent"
+        assert record["op"] == "nodes_removed"
+        assert record["affected"] == {
+            "kind": "nodes",
+            "count": len(ids),
+            "ids": ids[:MAX_ACTIVITY_NODE_IDS],
+        }
+        for sub in subs:
+            events = await _drain(sub)
+            assert [event["type"] for event in events] == ["op", "command"]
+            assert events[0]["op"]["node_ids"] == ids
+        # Browser echoes and repeated clears cannot create another activity.
+        for i in range(viewers):
+            await mgr.apply_ops(
+                s.id, f"c{i}", None, [{"op": "nodes_removed", "node_ids": ids}]
+            )
+        assert mgr.push_command(s.id, command)
+        assert len(s.activity_log) == 2
 
 
 class TestOpBatchByteCap:

@@ -1814,6 +1814,13 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._remove_node_refs(session, client_id, node_ids)
+
+    def _remove_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Apply trusted removals without the public MCP request caps or charge."""
+        session_id = session.id
         present = set(session.state.get("node_refs", []))
         removed: List[str] = []
         for node_id in node_ids:
@@ -2701,7 +2708,7 @@ class SessionManager:
     # ---------------- MCP push ----------------
 
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Apply additive membership once, then broadcast the visualization command.
+        """Apply membership once, then broadcast the visualization command.
 
         Additive results bypass MCP request caps and produce one membership op.
         During an in-flight batch, acceptance queues delivery behind its lock;
@@ -2710,16 +2717,16 @@ class SessionManager:
         """
         if self.store.get(session_id) is None:
             return False
-        if (
-            command.get("result", {}).get("action") == "add_to_visualization"
-            and self._lock(session_id).locked()
+        queue_name = f"session-push:{session_id}"
+        if self._lock(session_id).locked() or any(
+            task.get_name() == queue_name for task in self._pending_pushes
         ):
             # A synchronous producer cannot await the batch's persistence. Keep
             # the command alive and deliver it only after that batch commits or
             # rolls back, preserving op/command order for every subscriber.
             command = copy.deepcopy(command)
             task = asyncio.get_running_loop().create_task(
-                self._push_command_after_batch(session_id, command)
+                self._push_command_after_batch(session_id, command), name=queue_name
             )
             self._pending_pushes.add(task)
             task.add_done_callback(self._pending_pushes.discard)
@@ -2758,6 +2765,10 @@ class SessionManager:
                 # Command delivery has no MCP write-budget charge. Reuse the
                 # membership/activity path without introducing one here.
                 self._add_node_refs(session, actor, node_ids)
+        elif result.get("action") == "clear_visualization":
+            self._remove_node_refs(
+                session, "mcp-agent", list(session.state.get("node_refs", []))
+            )
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 
