@@ -465,6 +465,45 @@ class TestCompactResult:
 
 
 class TestServiceLayer:
+    @pytest.mark.parametrize("node_id", [["a"], {"id": "a"}])
+    def test_invalid_node_id_preserves_partial_success(self, batch_tools, node_id):
+        tools, storage = batch_tools
+
+        with patch.object(storage, "update_node", wraps=storage.update_node) as write:
+            result = tools["batch_update_nodes"](
+                [
+                    {"node_id": "a", "updates": {"name": "First updated"}},
+                    {"node_id": node_id, "updates": {"name": "Invalid"}},
+                    {"node_id": node_id, "updates": {"name": "Invalid again"}},
+                    {"node_id": "b", "updates": {"name": "Last updated"}},
+                ]
+            )
+
+        assert result["success"] is True
+        assert result["counts"] == {
+            "ok": 2,
+            "conflict": 0,
+            "not_found": 0,
+            "forbidden": 0,
+            "error": 2,
+        }
+        assert [item["status"] for item in result["results"]] == [
+            "ok",
+            "error",
+            "error",
+            "ok",
+        ]
+        assert result["results"][1:3] == [
+            {
+                "node_id": node_id,
+                "status": "error",
+                "error": "Invalid node_id: expected a string",
+            }
+        ] * 2
+        assert [call.args[0] for call in write.call_args_list] == ["a", "b"]
+        assert storage.nodes["a"].name == "First updated"
+        assert storage.nodes["b"].name == "Last updated"
+
     @pytest.mark.parametrize("missing_count", [1, 2])
     def test_missing_node_id_preserves_partial_success(self, batch_tools, missing_count):
         tools, storage = batch_tools

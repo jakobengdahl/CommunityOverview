@@ -437,7 +437,7 @@ def batch_update_nodes(
 
     seen_ids: set = set()
     for entry in updates:
-        if "node_id" not in entry:
+        if not isinstance(entry.get("node_id"), str):
             continue
         node_id = entry.get("node_id")
         if node_id in seen_ids:
@@ -461,6 +461,16 @@ def batch_update_nodes(
                     "node_id": node_id,
                     "status": "error",
                     "error": "Missing required field: node_id",
+                }
+            )
+            continue
+        if not isinstance(node_id, str):
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Invalid node_id: expected a string",
                 }
             )
             continue
