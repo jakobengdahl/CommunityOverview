@@ -2697,6 +2697,54 @@ class TestLifecycle:
         assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
 
     @pytest.mark.parametrize("viewers", [0, 2])
+    @pytest.mark.parametrize("action", ["load_visualization", "replace_visualization"])
+    async def test_saved_view_push_attributes_membership_before_delivery(
+        self, viewers, action
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr._add_node_refs(s, "c1", ["old", "kept"])
+        subs = [mgr.connect(s.id, f"c{i}", "Alice")[0] for i in range(viewers)]
+        for sub in subs:
+            await _drain(sub)
+        command = {
+            "tool": "get_saved_view",
+            "result": {
+                "action": action,
+                "nodes": [
+                    {"id": "kept"},
+                    {"id": "new"},
+                    {"id": "new"},
+                    {"id": "community", "type": "Community"},
+                ],
+            },
+        }
+        assert mgr.push_command(s.id, command)
+        assert s.state["node_refs"] == ["kept", "new"]
+        assert [
+            (r["op"], r["actor"], r["affected"]["ids"]) for r in s.activity_log[1:]
+        ] == [
+            ("nodes_removed", "mcp-agent", ["old"]),
+            ("nodes_added", "mcp-agent", ["new"]),
+        ]
+        for sub in subs:
+            events = await _drain(sub)
+            assert [e["type"] for e in events] == ["op", "op", "command"]
+            assert events[-1]["command"] == command
+        for i in range(viewers):
+            await mgr.apply_ops(
+                s.id,
+                f"c{i}",
+                None,
+                [
+                    {"op": "nodes_removed", "node_ids": ["old"]},
+                    {"op": "nodes_added", "node_ids": ["new"]},
+                ],
+            )
+        assert mgr.push_command(s.id, command)
+        assert len(s.activity_log) == 3
+
+    @pytest.mark.parametrize("viewers", [0, 2])
     async def test_clear_push_records_server_removal_once(self, viewers):
         mgr = _manager()
         s = mgr.create_session()

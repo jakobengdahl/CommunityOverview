@@ -2747,7 +2747,11 @@ class SessionManager:
         if session is None:
             return False
         result = command.get("result", {})
-        if result.get("action") == "add_to_visualization":
+        if result.get("action") in {
+            "add_to_visualization",
+            "load_visualization",
+            "replace_visualization",
+        }:
             node_ids = [
                 node["id"]
                 for node in result.get("nodes", [])
@@ -2756,6 +2760,17 @@ class SessionManager:
                 and node.get("type") != "Community"
                 and (node.get("data") or {}).get("type") != "Community"
             ]
+            if result.get("action") in {"load_visualization", "replace_visualization"}:
+                wanted = set(node_ids)
+                self._remove_node_refs(
+                    session,
+                    "mcp-agent",
+                    [
+                        node_id
+                        for node_id in session.state.get("node_refs", [])
+                        if node_id not in wanted
+                    ],
+                )
             if node_ids:
                 actor = (
                     "session-auto-add-agent"

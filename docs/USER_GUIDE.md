@@ -928,6 +928,8 @@ Node additions and removals are recorded, without undo. Each server-side
 membership change produces one record, regardless of the number of browsers;
 repeated additions or removals that change nothing produce no record. Additive
 MCP visualization pushes apply membership on the server for stored sessions.
+Saved-view loads and replacement pushes record their membership removals and
+additions as **via MCP** before broadcasting the new view.
 Legacy-only visualization channels still depend on a browser applying the push.
 
 Membership records retain a total count and at most 100 IDs

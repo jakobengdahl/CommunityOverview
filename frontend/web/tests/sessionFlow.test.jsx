@@ -212,6 +212,59 @@ describe('Server-backed session lifecycle', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not resurrect a remotely added node whose hydration finishes after clear', async () => {
+    let release;
+    api.getNodeDetails.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        })
+    );
+    const { container } = renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_B], []));
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await screen.findByText('Save View');
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    const source = await waitFor(() => {
+      const found = FakeEventSource.instances.find((es) => es.url.includes('/api/sessions/'));
+      expect(found).toBeTruthy();
+      return found;
+    });
+    await waitFor(() => expect(canvasProps.baselineEpoch).not.toBeNull());
+    const emit = (message) => source.onmessage({ data: JSON.stringify(message) });
+    act(() =>
+      emit({
+        type: 'op',
+        seq: 2,
+        client_id: 'mcp-agent',
+        op: { op: 'nodes_added', node_ids: ['node-a'] },
+      })
+    );
+    await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+    act(() => {
+      emit({
+        type: 'op',
+        seq: 3,
+        client_id: 'mcp-agent',
+        op: { op: 'nodes_removed', node_ids: ['node-a'] },
+      });
+      emit({
+        type: 'command',
+        command: {
+          type: 'tool_result',
+          command_id: 'clear',
+          result: { action: 'clear_visualization' },
+        },
+      });
+    });
+    await act(async () => {
+      release({ node: NODE_A, edges: [] });
+    });
+    expect(useGraphStore.getState().nodes).toEqual([]);
+    expect(opsFrom(global.fetch)).not.toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+  });
+
   it('shows a clear read-only offline state when the network is gone', async () => {
     renderApp();
 
