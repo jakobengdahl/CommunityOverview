@@ -12,6 +12,7 @@ from backend.runtime.authorization import use_request_authorization
 from backend.ui.attachment_confirmation import (
     ATTACHMENT_TAINT_PERMITTED_TOOLS,
     PendingActions,
+    pending_actions,
 )
 
 
@@ -545,21 +546,28 @@ def test_confirmation_requires_an_identified_actor(chat_service):
 
 
 @pytest.mark.parametrize(
-    "arguments,code",
+    "arguments",
     [
-        ({"content_text": "x", "content_base64": "eA=="}, "invalid_arguments"),
-        ({"content_base64": "????"}, "invalid_arguments"),
-        ({"content_text": "oversized"}, "attachment_too_large_for_tool"),
+        {"content_text": "x", "content_base64": "eA=="},
+        {"content_base64": "????"},
+        {"content_text": "oversized"},
+        ["malformed"],
+        None,
     ],
 )
-def test_invalid_attachment_bodies_are_not_retained(
-    chat_service, monkeypatch, arguments, code
+def test_invalid_attachment_bodies_require_confirmation(
+    chat_service, monkeypatch, arguments
 ):
     service, llm = chat_service
     monkeypatch.setenv("ATTACHMENT_MCP_MAX_DECODED_BYTES", "4")
     tool = MagicMock()
     service._processor.tools_map["add_node_attachment"] = tool
-    result = taint(service, llm, [call("add_node_attachment", **arguments)])
-    assert result["pending_actions"] == []
-    assert result["toolResult"]["error_code"] == code
+    result = taint(service, llm, [{"name": "add_node_attachment", "input": arguments}])
+    (action,) = result["pending_actions"]
+    assert action["tool"] == "add_node_attachment"
+    assert action["arguments"] == arguments
+    entry = pending_actions.peek(action["token"])
+    assert entry is not None
+    assert entry[1:3] == ("add_node_attachment", arguments)
+    assert result["toolResult"]["error_code"] == "confirmation_required"
     tool.assert_not_called()

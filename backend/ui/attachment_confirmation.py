@@ -48,30 +48,6 @@ def confirmation_outcome(result):
     return response
 
 
-def pending_argument_refusal(name, arguments):
-    """Bound stored file bodies before retaining an attachment write for approval."""
-    if name != "add_node_attachment":
-        return None
-    from backend.service.attachment_tools import (
-        ReadLimits,
-        _content_length,
-        _decoded_content,
-        error,
-    )
-
-    if not isinstance(arguments, dict):
-        return error("invalid_arguments")
-    text, encoded = arguments.get("content_text"), arguments.get("content_base64")
-    size = _content_length(text, encoded)
-    if size is None:
-        return error("invalid_arguments")
-    if size > ReadLimits.from_env().mcp_max_decoded_bytes:
-        return error("attachment_too_large_for_tool")
-    if _decoded_content(text, encoded) is None:
-        return error("invalid_arguments")
-    return None
-
-
 class PendingActions:
     def __init__(self):
         self._entries = OrderedDict()
