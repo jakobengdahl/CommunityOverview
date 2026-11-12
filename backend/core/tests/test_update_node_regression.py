@@ -21,6 +21,7 @@ import threading
 import pytest
 
 from backend.core import (
+    EntityRevisionConflict,
     GraphStorage,
     Node,
     NodeType,
@@ -186,6 +187,7 @@ class TestConcurrentMetadataMerge:
             actual_keys = set(final.metadata.keys())
             missing = expected_keys - actual_keys
             assert not missing, f"concurrent merge lost keys: {missing}"
+            storage.flush()
 
     def test_concurrent_tag_merge_preserves_all(self):
         """10 threads each add a unique tag. After all threads finish, every
@@ -242,10 +244,10 @@ class TestConcurrentMetadataMerge:
             # includes it. This verifies the storage layer handles concurrency
             # without crashing or corrupting state.
             assert "base-tag" in final.tags
+            storage.flush()
 
     def test_concurrent_merge_mixed_metadata_and_tags(self, temp_storage: GraphStorage):
-        """Threads that update both metadata and tags concurrently must not
-        produce a node where the response disagreed with the store for any call."""
+        """All metadata merges persist; tags use one caller's replacement."""
         node = Node(
             id="mixed-1",
             type=NodeType.ACTOR,
@@ -258,9 +260,11 @@ class TestConcurrentMetadataMerge:
         results = []
         errors: list[str] = []
         lock = threading.Lock()
+        start = threading.Barrier(10)
 
         def worker(thread_id: int) -> None:
             try:
+                start.wait(timeout=10)
                 r = temp_storage.update_node(
                     "mixed-1",
                     {
@@ -283,16 +287,67 @@ class TestConcurrentMetadataMerge:
 
         assert not errors, f"errors during mixed concurrent updates: {errors}"
 
-        # Every successful result's metadata and tags must match the store.
+        assert len(results) == 10
+        assert all(result is not None for result in results)
+
+        # Later successful writes may extend metadata and replace tags, so
+        # earlier committed responses need not equal this final store read.
         final = temp_storage.get_node("mixed-1")
         assert final is not None
-        for r in results:
-            if r is None:
-                continue
-            assert r.metadata == final.metadata, (
-                f"result metadata {r.metadata} != store {final.metadata}"
+        assert final.metadata == {"base": True, **{f"meta_{i}": i for i in range(10)}}
+        assert final.tags in [[f"tag-{i}"] for i in range(10)]
+
+    def test_successive_merge_snapshots_and_revision_conflict(
+        self, storage_with_metadata: GraphStorage
+    ):
+        """Distinct committed snapshots are valid; stale writes change nothing."""
+        storage = storage_with_metadata
+        initial_revision = storage.get_node("meta-1").revision
+        first = storage.update_node(
+            "meta-1",
+            {"metadata": {"first": 1, "status": None}, "tags": ["first"]},
+            metadata_merge=True,
+            expected_revision=initial_revision,
+        )
+        assert first is not None
+        # Save values now: storage may return a live node that later writes mutate.
+        first_metadata = dict(first.metadata)
+        first_tags = list(first.tags)
+        stored = storage.get_node("meta-1")
+        assert stored.metadata == {"owner": "team-a", "priority": "high", "first": 1}
+        assert stored.tags == ["first"]
+
+        second = storage.update_node(
+            "meta-1",
+            {"metadata": {"second": 2}, "tags": ["second"]},
+            metadata_merge=True,
+            expected_revision=stored.revision,
+        )
+        assert second is not None
+        stored = storage.get_node("meta-1")
+        expected_metadata = {
+            "owner": "team-a",
+            "priority": "high",
+            "first": 1,
+            "second": 2,
+        }
+        assert stored.metadata == expected_metadata
+        assert stored.tags == ["second"]
+        assert first_metadata != stored.metadata
+        assert first_tags != stored.tags
+        committed_revision = stored.revision
+
+        with pytest.raises(EntityRevisionConflict):
+            storage.update_node(
+                "meta-1",
+                {"metadata": {"rejected": True}, "tags": ["rejected"]},
+                metadata_merge=True,
+                expected_revision=initial_revision,
             )
-            assert r.tags == final.tags, f"result tags {r.tags} != store {final.tags}"
+        stored = storage.get_node("meta-1")
+        assert stored.metadata == expected_metadata
+        assert stored.tags == ["second"]
+        assert stored.revision == committed_revision
 
 
 # -- G4: persistence survives flush + reload -----------------------------------
