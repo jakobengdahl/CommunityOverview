@@ -333,7 +333,13 @@ class TestTwoClientsOneSession:
         # Both bounded structures really wrapped, so (a)-(c) hold past a trim.
         ring = mgr.store.ring(sid)
         assert len(ring) == bound and ring[0]["seq"] > 1
-        assert len(mgr.get_session(sid).activity_log) == bound
+        log = mgr.get_session(sid).activity_log
+        # Membership has its own retention budget; the initial add survives
+        # while the move history keeps exactly its newest window.
+        assert len(log) == bound + 1
+        assert log[0]["op"] == "nodes_added" and log[0]["seq"] == 1
+        assert [r["op"] for r in log[1:]] == ["node_moved"] * bound
+        assert [r["seq"] for r in log[1:]] == list(range(moves - bound + 2, moves + 2))
 
         # (a) Server state converged to each node's final move.
         state = mgr.get_session(sid).state
@@ -394,9 +400,15 @@ class TestTwoClientsOneSession:
         assert ring[-1]["seq"] == session.seq == moves + 1
         assert ring[0]["seq"] == session.seq - _DEFAULT_RING_SIZE + 1
         log = session.activity_log
-        assert len(log) == DEFAULT_MAX_ACTIVITY_RECORDS
+        assert len(log) == DEFAULT_MAX_ACTIVITY_RECORDS + 1
+        assert log[0]["op"] == "nodes_added" and log[0]["seq"] == 1
+        assert [r["op"] for r in log[1:]] == [
+            "node_moved"
+        ] * DEFAULT_MAX_ACTIVITY_RECORDS
+        assert [r["seq"] for r in log[1:]] == list(
+            range(session.seq - DEFAULT_MAX_ACTIVITY_RECORDS + 1, session.seq + 1)
+        )
         assert log[-1]["seq"] == session.seq
-        assert log[0]["seq"] == session.seq - DEFAULT_MAX_ACTIVITY_RECORDS + 1
         reloaded = SessionStore(FileSessionPersistenceBackend(tmp_path)).get(sid)
         assert [r["id"] for r in reloaded.activity_log] == [r["id"] for r in log]
         assert reloaded.state["positions"]["n1"] == {"x": moves - 1.0, "y": 0.0}
