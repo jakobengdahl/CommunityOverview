@@ -13,6 +13,7 @@ import threading
 
 import pytest
 
+from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
 from backend.core import image_ingest
 from backend.core.session_annotations import build_annotation, build_annotation_patch
 from backend.core.session_hub import InProcessEventBus, LeaseMap
@@ -2584,7 +2585,9 @@ class TestLifecycle:
             ("session_auto_add_agent", "session-auto-add-agent"),
         ],
     )
-    @pytest.mark.parametrize("node_count,exhausted", [(201, False), (1, True)])
+    @pytest.mark.parametrize(
+        "node_count,exhausted", [(201, False), (501, False), (1, True)]
+    )
     async def test_additive_push_does_not_charge_mcp_budget(
         self, tool, actor, node_count, exhausted
     ):
@@ -2612,6 +2615,11 @@ class TestLifecycle:
         assert len(s.activity_log) == 1
         assert s.activity_log[0]["op"] == "nodes_added"
         assert s.activity_log[0]["actor"] == actor
+        assert s.activity_log[0]["affected"] == {
+            "kind": "nodes",
+            "count": node_count,
+            "ids": node_ids[:MAX_ACTIVITY_NODE_IDS],
+        }
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == ["op", "command"]
@@ -2619,6 +2627,57 @@ class TestLifecycle:
             assert events[1]["command"] == command
         # Delivery neither spends a fresh budget nor replenishes an empty one.
         assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
+
+    async def test_additive_push_waits_for_inflight_batch(self, monkeypatch):
+        mgr = _manager()
+        s = mgr.create_session()
+        subs = [mgr.connect(s.id, client, client)[0] for client in ("c1", "c2")]
+        for sub in subs:
+            await _drain(sub)
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = mgr.store.persist_snapshot
+
+        def blocked_persist(snapshot):
+            entered.set()
+            assert proceed.wait(5)
+            return original(snapshot)
+
+        monkeypatch.setattr(mgr.store, "persist_snapshot", blocked_persist)
+        batch = asyncio.create_task(
+            mgr.apply_ops(
+                s.id, "c1", None, [{"op": "nodes_added", "node_ids": ["existing"]}]
+            )
+        )
+        command = {
+            "tool": "add_to_visualization",
+            "result": {
+                "action": "add_to_visualization",
+                "nodes": [{"id": "existing"}, {"id": "new"}, {"id": "new"}],
+            },
+        }
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert mgr.push_command(s.id, command) is True
+            pending = list(mgr._pending_pushes)
+            assert len(pending) == 1
+            for sub in subs:
+                assert await _drain(sub) == []
+        finally:
+            proceed.set()
+            await batch
+        await asyncio.gather(*pending)
+
+        assert s.state["node_refs"] == ["existing", "new"]
+        assert len(s.activity_log) == 2
+        assert s.activity_log[-1]["actor"] == "mcp-agent"
+        for sub in subs:
+            events = await _drain(sub)
+            assert [event["type"] for event in events] == ["op", "op", "command"]
+            assert [event["seq"] for event in events[:2]] == [1, 2]
+            assert events[1]["op"]["node_ids"] == ["new"]
+            assert events[2]["command"] == command
+        assert mgr.catch_up(s.id, 0)["seq"] == 2
 
 
 class TestOpBatchByteCap:

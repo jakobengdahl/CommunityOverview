@@ -656,6 +656,7 @@ class SessionManager:
         # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._pending_pushes: set[asyncio.Task] = set()
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -1724,6 +1725,17 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._add_node_refs(session, client_id, node_ids)
+
+    def _add_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Commit one membership change after the caller has serialized access.
+
+        Request caps belong to the public MCP method; trusted visualization
+        results may contain more ids and still represent a single activity.
+        """
+        session_id = session.id
         # Dedupe against the session *and* against the rest of this call, in
         # order: a repeated id would otherwise be reported as added twice and
         # ride the broadcast twice, while the stored state (a union) holds it
@@ -2691,10 +2703,41 @@ class SessionManager:
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Apply additive membership once, then broadcast the visualization command.
 
-        Returns ``False`` when the session is unknown so callers can fall back to
-        the legacy single-consumer registry during the transition.
+        Additive results bypass MCP request caps and produce one membership op.
+        During an in-flight batch, acceptance queues delivery behind its lock;
+        otherwise delivery completes inline. Returns ``False`` when the session
+        is unknown so callers can fall back to the legacy registry.
         """
         if self.store.get(session_id) is None:
+            return False
+        if (
+            command.get("result", {}).get("action") == "add_to_visualization"
+            and self._lock(session_id).locked()
+        ):
+            # A synchronous producer cannot await the batch's persistence. Keep
+            # the command alive and deliver it only after that batch commits or
+            # rolls back, preserving op/command order for every subscriber.
+            command = copy.deepcopy(command)
+            task = asyncio.get_running_loop().create_task(
+                self._push_command_after_batch(session_id, command)
+            )
+            self._pending_pushes.add(task)
+            task.add_done_callback(self._pending_pushes.discard)
+            return True
+        return self._publish_command(session_id, command)
+
+    async def _push_command_after_batch(
+        self, session_id: str, command: Dict[str, Any]
+    ) -> None:
+        try:
+            async with self._lock(session_id):
+                self._publish_command(session_id, command)
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    def _publish_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        session = self.store.get(session_id)
+        if session is None:
             return False
         result = command.get("result", {})
         if result.get("action") == "add_to_visualization":
@@ -2714,7 +2757,7 @@ class SessionManager:
                 )
                 # Command delivery has no MCP write-budget charge. Reuse the
                 # membership/activity path without introducing one here.
-                self.add_node_refs(session_id, actor, node_ids, precharged=True)
+                self._add_node_refs(session, actor, node_ids)
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
 
