@@ -852,8 +852,8 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   anything. The constants are `max_zip_ratio` (100.0),
   `max_zip_uncompressed_bytes` (100 MiB), `max_zip_members` (2 000) and
   `zip_ratio_floor_bytes` (1 MiB). The whole-archive ratio is always
-  checked (`total_uncompressed / len(archive_data) > max_zip_ratio`). The
-  per-member ratio (`member_uncompressed / member_compressed`) is checked
+  checked (`total_uncompressed / max(len(archive_data), 1) > max_zip_ratio`). The
+  per-member ratio (`member_uncompressed / max(member_compressed, 1) > max_zip_ratio`) is checked
   only for members whose declared size exceeds `zip_ratio_floor_bytes`. The
   floor exists because small XML parts inside OOXML/ODF archives often
   compress far beyond any reasonable bomb threshold, yet they cannot inflate
