@@ -683,6 +683,8 @@ class SessionStore:
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
     ) -> Session:
         """Create a session under a fresh id.
 
@@ -695,6 +697,8 @@ class SessionStore:
             session = Session(
                 id=self._new_id(),
                 name=name,
+                description=description,
+                state=state if state is not None else _empty_state(),
                 write_mode=write_mode,
                 write_mode_source=write_mode_source,
             )

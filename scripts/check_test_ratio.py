@@ -364,14 +364,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         root = Path(_git("rev-parse", "--show-toplevel").strip())
+        base_ref = _git("merge-base", args.base, "HEAD").strip()
         changed = _git(
-            "diff", "--name-only", "--diff-filter=d", "-z", f"{args.base}...HEAD"
+            "-C", str(root), "diff", "--name-only", "--diff-filter=d", "-z", base_ref
         )
-        tracked = _git("-C", str(root), "ls-files", "-z")
+        untracked = _git(
+            "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"
+        )
+        tracked = _git("-C", str(root), "ls-files", "-z") + untracked
         report = check(
             root,
             tracked.split("\0"),
-            set(changed.split("\0")),
+            set(changed.split("\0")) | set(untracked.split("\0")),
             _read_base(root, args.base),
         )
     except subprocess.CalledProcessError as exc:
