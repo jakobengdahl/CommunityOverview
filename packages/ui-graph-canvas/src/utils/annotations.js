@@ -1018,6 +1018,29 @@ export function nodesAtPoint(nodes, point) {
   });
 }
 
+function hitLayer(node) {
+  // CSS rejects fractional z-index declarations (falling back to auto/0)
+  // and clamps accepted integers to the signed 32-bit range.
+  const z = node?.zIndex;
+  return Number.isInteger(z) ? Math.max(-2147483648, Math.min(2147483647, z)) : 0;
+}
+
+// The objects the overlap picker offers for a click ReactFlow resolved to
+// `clickedNode`, or [] when the click is unambiguous. ReactFlow already picked
+// the topmost element by DOM stacking order, so only objects on that same layer
+// are genuine alternatives: a shape sent behind the graph (z -1, the default for
+// shape/heatmap) must not turn a click on the node card above it into a choice.
+// A graph node card is opaque content, so a click that landed on one is never
+// ambiguous.
+export function overlapPickerCandidates(nodes, clickedNode, point) {
+  if (!clickedNode || !ANNOTATION_TYPES.has(clickedNode.type)) return [];
+  const layer = hitLayer(clickedNode);
+  const sameLayer = nodesAtPoint(nodes, point).filter(
+    (n) => ANNOTATION_TYPES.has(n.type) && hitLayer(n) === layer
+  );
+  return sameLayer.length > 1 ? sameLayer : [];
+}
+
 export function resolveAttachedPosition(node, centers) {
   const targetId = node.data?.attachment?.target_id;
   if (!targetId) return null;

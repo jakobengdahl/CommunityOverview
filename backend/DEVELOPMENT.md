@@ -73,7 +73,7 @@ may see. Both halves are enforced consistently:
   scope (`search_graph`, `get_node_details`, saved views, stats, the custom REST
   interfaces).
 - **Mutations** apply the same narrowing to their *target*: `update_node` /
-  `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
+  `batch_update_nodes` / `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
   an existing entity the caller could not read (returning the same not-found the
   read paths return; batch deletes fail closed by dropping out-of-scope ids), and
   `add_edge` refuses an endpoint outside scope. So a caller can never mutate or
@@ -965,6 +965,7 @@ A `revision` a caller sends is dropped — never stored, never folded into
 | Request | Field | Holds when |
 |---|---|---|
 | `PATCH /api/nodes/{id}`, MCP `update_node` | `expected_revision` | the node's revision still equals it |
+| MCP `batch_update_nodes` (per node) | `expected_revision` | the node's revision still equals it; the per-node result has status ``conflict`` |
 | `PATCH /api/edges/{id}`, `DELETE /api/edges/{id}` | `expected_revision` | the edge's revision still equals it |
 | `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
 | `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
@@ -1341,6 +1342,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
 | `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
+| `batch_update_nodes` | Update many nodes in one call (max 100); partial success — one node failing (not found, conflict, forbidden) does not stop the others; rejects the whole call on over-cap or duplicate ids; result is compact with per-node status but no full node bodies |
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |

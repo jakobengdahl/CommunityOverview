@@ -73,7 +73,7 @@ import {
   computeAttachmentToTarget,
   isEligibleAttachTarget,
   computeAnnotationAriaLabel,
-  nodesAtPoint,
+  overlapPickerCandidates,
   resolveAttachedPosition,
   ICON_INTRINSIC_SIZE,
   VOTE_DOT_INTRINSIC_SIZE,
@@ -2920,7 +2920,7 @@ function GraphCanvasInner({
         }
       }
       const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const candidates = nodesAtPoint(nodes, flowPoint);
+      const candidates = overlapPickerCandidates(nodes, clickedNode, flowPoint);
       if (candidates.length > 1) {
         setOverlapPicker({
           x: event.clientX,
@@ -5660,8 +5660,9 @@ function GraphCanvasInner({
         </div>
 
         {/* The overlap-object picker (task-annotation-accessible-shared-
-            controls) — offered whenever a click's flow position lands
-            inside more than one annotation's box (see `onNodeClick` above).
+            controls) — offered whenever a click on an annotation lands
+            inside more than one box on that annotation's layer (see
+            `onNodeClick` above).
             A plain, keyboard/touch-reachable button list, the same shape as
             every other menu here; picking one selects exactly that node and
             moves focus to it, the same "land on the thing you picked"

@@ -1004,6 +1004,28 @@ class GraphService:
             ),
         )
 
+    def batch_update_nodes(
+        self,
+        updates: List[Dict[str, Any]],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return self._write(
+            "batch_update_nodes",
+            expected_session_seq,
+            lambda staging: mutations.batch_update_nodes(
+                self._storage,
+                self._authorization_hook,
+                updates,
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+                staging=staging,
+            ),
+        )
+
     def delete_nodes(
         self,
         node_ids: List[str],

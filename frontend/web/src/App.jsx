@@ -1387,9 +1387,13 @@ function App() {
     setPendingAnnotations,
   ]);
 
+  const notificationTimeoutRef = useRef(null);
+  useEffect(() => () => clearTimeout(notificationTimeoutRef.current), []);
+
   const showNotification = useCallback((type, message) => {
+    clearTimeout(notificationTimeoutRef.current);
     setNotification({ type, message });
-    setTimeout(() => setNotification(null), 3000);
+    notificationTimeoutRef.current = setTimeout(() => setNotification(null), 3000);
   }, []);
 
   // "Bring everyone here": the canvas camera request, the summoned-viewer

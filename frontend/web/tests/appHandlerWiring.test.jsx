@@ -1,6 +1,6 @@
 // covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, waitFor, act, screen, fireEvent } from '@testing-library/react';
+import { render, waitFor, act, screen, fireEvent, cleanup } from '@testing-library/react';
 
 // The session-scoped helpers App delegates to are tested on their own in
 // appAwaitingHandlerEpochGuards.test.js. What those tests cannot see is App's
@@ -674,6 +674,31 @@ describe('App handler wiring', () => {
   // user's silence unless the toast is a live region. The urgency has to
   // follow the kind: a failure interrupts, a notice waits.
   describe('notification toast', () => {
+    it('gives a replacement toast its full lifetime and cancels the timeout on unmount', async () => {
+      await renderApp();
+      vi.useFakeTimers();
+      const notify = () =>
+        act(async () => {
+          await canvas().onReferenceOpen({ targetKind: 'url', target: 'javascript:alert(1)' });
+        });
+      try {
+        await notify();
+        act(() => vi.advanceTimersByTime(2000));
+        await notify();
+        act(() => vi.advanceTimersByTime(1000));
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        act(() => vi.advanceTimersByTime(2000));
+        expect(screen.queryByRole('alert')).toBeNull();
+
+        await notify();
+        expect(vi.getTimerCount()).toBe(1);
+        cleanup();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('announces a notice politely and names its dismiss button', async () => {
       await renderApp();
       api.getSession.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }));
