@@ -19,8 +19,11 @@ from backend.ui.attachment_confirmation import (
 def identified_caller(request):
     if "fastapi_test_client" in request.fixturenames:
         client, _, _ = request.getfixturevalue("fastapi_test_client")
+        request.getfixturevalue("confirmation_auth")
         client.headers["x-communityoverview-actor-id"] = "owner"
-    with use_request_authorization(actor_id="owner"):
+    with use_request_authorization(
+        actor_id="owner", authenticated_principal={"kind": "user", "id": "owner"}
+    ):
         yield
 
 
@@ -116,10 +119,24 @@ def test_confirmation_is_actor_bound_exact_once_and_model_free(chat_service, cap
     service._processor.tools_map["write"] = lambda value: (
         called.append(value) or {"success": True}
     )
-    with use_request_authorization(actor_id="one", actor_type="user"):
+    with use_request_authorization(
+        actor_id="one",
+        actor_type="user",
+        authenticated_principal={"kind": "user", "id": "one"},
+    ):
         cards = taint(service, llm, [call("write", value=[1])])["pending_actions"]
         card = cards[0]
         count = llm.call_count
+        for principal in (None, {"kind": "bearer", "id": "one"}):
+            with use_request_authorization(
+                actor_id="one", actor_type="user", authenticated_principal=principal
+            ):
+                assert (
+                    service.confirm_action(card["token"], card["conversation_id"])[
+                        "error_code"
+                    ]
+                    == "access_denied"
+                )
         assert (
             service.confirm_action(card["token"], "another-conversation")["error_code"]
             == "access_denied"
@@ -147,9 +164,15 @@ def test_confirmation_is_actor_bound_exact_once_and_model_free(chat_service, cap
     assert audit[0].outcome == "ok"
     assert llm.call_count == count
     llm.reset()
-    with use_request_authorization(actor_id="one", actor_type="user"):
+    with use_request_authorization(
+        actor_id="one",
+        actor_type="user",
+        authenticated_principal={"kind": "user", "id": "one"},
+    ):
         card = taint(service, llm, [{"name": "write"}])["pending_actions"][0]
-    with use_request_authorization(actor_id="two"):
+    with use_request_authorization(
+        actor_id="two", authenticated_principal={"kind": "user", "id": "two"}
+    ):
         assert (
             service.confirm_action(card["token"], card["conversation_id"])["error_code"]
             == "access_denied"

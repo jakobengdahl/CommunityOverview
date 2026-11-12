@@ -33,6 +33,7 @@ from backend.runtime.attachment_access import (
     validate_attachment_setting,
 )
 
+from backend.runtime.authorization import request_authenticated_principal
 from backend.ui.attachment_confirmation import (
     confirmation_outcome,
     pending_actions,
@@ -993,6 +994,7 @@ class ChatService:
             context = {
                 "conversation_id": conversation_id or secrets.token_urlsafe(32),
                 "actor": request_actor(),
+                "principal": request_authenticated_principal(),
                 "caller_kind": "kiosk"
                 if collection_short_name and effective_prefix is not None
                 else "user",
@@ -1078,7 +1080,8 @@ class ChatService:
         _, name, arguments, context = entry
         if (
             context is None
-            or not context["actor"]["id"]
+            or not context.get("principal")
+            or request_authenticated_principal() != context["principal"]
             or request_actor() != context["actor"]
             or conversation_id != context["conversation_id"]
         ):
