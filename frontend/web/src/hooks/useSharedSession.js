@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 import {
   annotationsToGroups,
@@ -85,6 +86,10 @@ export function useSharedSession({
       const loadedNodes = assertArrayField(resolved.nodes, 'nodes');
       const resolvedEdges = assertArrayField(resolved.edges, 'edges');
       clearVisualization();
+      useGraphStore.setState({
+        shapeOverrides: state.shape_overrides || {},
+        typeShapes: state.type_shapes || {},
+      });
       if (loadedNodes.length) {
         const positioned = loadedNodes.map((n) =>
           state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n

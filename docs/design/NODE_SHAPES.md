@@ -1,8 +1,9 @@
 # Configurable node shapes
 
-Design proposal only. No product behaviour changes in this change. Decisions below
-are proposed defaults pending the final owner questions; implementation requiring
-those decisions is deferred.
+The models, strict validation, resolution contract, schema transport and empty
+session maps are implemented. Rendering, editing, shared appearance operations
+and library persistence remain future work. Unconfigured nodes continue to use
+the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
 [Clickable editor](node-shapes/editor.html). Open either file directly; no server,
@@ -161,7 +162,7 @@ Unknown bases, properties, versions, invalid scale or placement are rejected on
 writes. Loading malformed external data isolates that definition, reports a
 structured diagnostic, and renders the built-in card without losing the graph.
 
-Session additions (proposed, not accepted by today's API):
+Session selections (models defined; mutation operations are not yet accepted by the API):
 
 ```json
 {
@@ -203,11 +204,11 @@ Saved references follow the current revision; inline copies remain independent.
 
 Session participants with existing session-write permission may change session
 looks; locked/read-only access cannot. Library creation requires authenticated
-identity; creators may edit/delete their own entries and administrators may
-manage all. Others can read/pick or save a copy. Never trust client owner fields.
+identity; everyone may edit/delete every saved entry for now. Keep this permission
+check in one replaceable function. Never trust client owner fields.
 Until a trustworthy identity/permission boundary is available, disable library
 writes rather than treating a client ID as an owner. Config changes remain an
-operator file workflow. These rights require the owner decision below.
+operator file workflow. The ownership decision is recorded below.
 
 On edit/delete, show the count of referencing sessions, including inactive
 persisted ones, without exposing their names to unauthorized users. Recheck
@@ -317,8 +318,7 @@ Before release, measure a fixed synthetic 1,000- and 5,000-node graph, mixed
 shapes at 0.1/1/10 scale, in both themes: initial render, pan frame time, memory,
 shape apply and edge update. Proposed budget: under 10% regression against the
 same legacy-card scene and no additional per-node network requests. Record
-hardware/browser and p50/p95; settle the budget with the owner before making it
-a gate. These benchmarks are future implementation work, not results claimed here.
+hardware/browser and p50/p95; use the confirmed relative 10% budget. These benchmarks are future implementation work, not results claimed here.
 
 ## Migration and small implementation phases
 
@@ -345,7 +345,7 @@ Each phase is a proposed PR boundary, not a separate project status tracker:
    verify a type change remains one operation.
 5. Add the editor draft/Apply flow and i18n. Target Cancel isolation, validation,
    scope application and keyboard/focus behaviour in existing component suites.
-6. After ownership approval, add library persistence, permission checks, reference
+6. Add library persistence, permission checks, reference
    index and invalidations. Test unauthorized mutation, stale edit, deletion in
    active/closed sessions, restart and tombstone non-resurrection. Run the focused
    performance scenes and accessibility review before enabling library writes.
@@ -356,18 +356,15 @@ live-service test is required for these documentation-only artifacts.
 
 ## Open questions for the owner
 
-- **Library ownership:** personal editable entries with shared read access, or
-  administrator-only curation? Recommend creator/admin writes and shared reads,
-  conditional on verified identity; otherwise start with read-only config shapes.
-- **Edit propagation:** live references or immutable pinned revisions? Recommend
-  live references with usage warning, revision conflict checks and Save copy;
-  deletion always returns reference users to the built-in card.
-- **Catalogue:** the four proposed bases, or add ellipse/diamond now? Recommend
-  four only; validate real text readability before expanding the fixed catalogue.
-- **Attribute types:** scalar fields only, or formatted arrays/objects too?
-  Recommend scalar fields only, with missing values empty and visible editor warnings.
-- **Scale meaning:** scale all metrics, or keep text fixed while resizing the body?
-  Recommend uniform scaling with zoom-to-read and minimum interaction targets.
-- **Performance budget:** proposed 10% relative regression on 1k/5k scenes, or an
-  absolute frame-time target on specified hardware? Recommend the relative budget
-  initially, recording frame times before agreeing an absolute release gate.
+The following decisions were confirmed on 2026-11-12:
+
+- **Library ownership:** everyone can edit every saved shape for now. Keep the
+  permission check in one replaceable function so restrictions can be added later.
+- **Edit propagation:** live references with usage warnings, revision conflict
+  checks and Save copy. Deletion returns reference users to the built-in card.
+- **Catalogue:** the four bases documented above only.
+- **Attribute types:** scalar fields only; missing values render empty with a
+  visible editor warning.
+- **Scale meaning:** uniform scaling with zoom-to-read and minimum interaction targets.
+- **Performance budget:** relative 10% budget on the 1,000- and 5,000-node scenes;
+  record frame times.

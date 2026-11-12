@@ -1,8 +1,5 @@
-"""
-Tests for config_loader module.
-
-Tests loading and validation of schema configuration from JSON files.
-"""
+# covers: backend/config/config_loader.py
+"""Loading and validation of schema configuration from JSON files."""
 
 import os
 import json
@@ -1439,7 +1436,9 @@ class TestAllowsAttachmentsSchemaField:
         assert "Rich" in schema["node_types"], "fixture must not be vacuous"
         rich = schema["node_types"]["Rich"]
         assert rich == self.RICH
-        assert set(schema["node_types"]["Plain"]) == set(NodeTypeConfig.model_fields)
+        assert set(schema["node_types"]["Plain"]) == set(
+            NodeTypeConfig.model_fields
+        ) - {"shape"}
         assert schema["node_types"]["Plain"]["allows_attachments"] is False
 
     def test_system_node_types_do_not_allow_attachments(self):

@@ -148,6 +148,8 @@ def _now_iso() -> str:
 
 def _empty_state() -> Dict[str, Any]:
     return {
+        "shape_overrides": {},
+        "type_shapes": {},
         "node_refs": [],
         "positions": {},
         "hidden_node_ids": [],
