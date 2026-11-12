@@ -1403,6 +1403,37 @@ def _register_session_endpoints(
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
 
+    @router.post("/sessions/{session_id}/copy")
+    async def copy_session(session_id: str, http_request: Request) -> Dict[str, Any]:
+        from backend.runtime.authorization import GRAPH_ACTION_READ
+
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        _authorize_session_change(http_request, "create_visualization_session", None)
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+        _rate_limit_lookup(http_request)
+        try:
+            session = await session_manager.copy_session_async(session_id)
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except SessionLimitReached:
+            raise HTTPException(status_code=503, detail="too many sessions")
+        except OpBatchTooLarge:
+            raise HTTPException(status_code=413, detail="session too large")
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
+        return _session_payload(session, resolve=False, manager=session_manager)
+
     @router.get("/sessions")
     async def list_sessions() -> Dict[str, Any]:
         return {"sessions": session_manager.list_sessions()}

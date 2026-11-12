@@ -156,6 +156,7 @@ function SessionDrawer({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopySession,
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
@@ -394,6 +395,12 @@ function SessionDrawer({
                         label: t('sessions.rename_session'),
                         icon: <PencilSquare size={14} />,
                         onClick: () => onRenameSession(session.id),
+                      },
+                      {
+                        key: 'copy-session',
+                        label: t('sessions.create_copy'),
+                        icon: <PlusCircle size={14} />,
+                        onClick: () => onCopySession?.(session.id),
                       },
                       {
                         key: 'copy-link',

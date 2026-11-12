@@ -94,6 +94,7 @@ function MobileShell({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopySession,
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
@@ -356,6 +357,7 @@ function MobileShell({
         onRenameSession={onRenameSession}
         onDeleteSession={onDeleteSession}
         onCopySessionLink={onCopySessionLink}
+        onCopySession={onCopySession}
         onCopyTriggerUrl={onCopyTriggerUrl}
         onOpenSettings={onOpenSettings}
         onOpenActivity={() => {

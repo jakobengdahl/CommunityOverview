@@ -73,7 +73,7 @@ may see. Both halves are enforced consistently:
   scope (`search_graph`, `get_node_details`, saved views, stats, the custom REST
   interfaces).
 - **Mutations** apply the same narrowing to their *target*: `update_node` /
-  `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
+  `batch_update_nodes` / `delete_nodes` / `update_edge` / `delete_edge` / `delete_edges` refuse to touch
   an existing entity the caller could not read (returning the same not-found the
   read paths return; batch deletes fail closed by dropping out-of-scope ids), and
   `add_edge` refuses an endpoint outside scope. So a caller can never mutate or
@@ -965,6 +965,7 @@ A `revision` a caller sends is dropped — never stored, never folded into
 | Request | Field | Holds when |
 |---|---|---|
 | `PATCH /api/nodes/{id}`, MCP `update_node` | `expected_revision` | the node's revision still equals it |
+| MCP `batch_update_nodes` (per node) | `expected_revision` | the node's revision still equals it; the per-node result has status ``conflict`` |
 | `PATCH /api/edges/{id}`, `DELETE /api/edges/{id}` | `expected_revision` | the edge's revision still equals it |
 | `DELETE /api/nodes`, MCP `delete_nodes` | `expected_revisions` (id → revision) | every listed node still has it |
 | `POST /api/nodes`, MCP `add_nodes` | `expect_absent` | no node or edge in the request exists yet |
@@ -1204,6 +1205,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/sessions` | Create a new shared session (server-assigned `DDDD-DDDD-DDDD-DDDD` id). Optional `write_mode` (`direct`/`staged`; omitted, the graph default). Creating a staged one asks the authorization hook (`mutate`, `create_visualization_session`); `422 staged_unsupported` where staged sessions are not enabled. Every session response carries `write_mode` and `write_mode_source` |
+| POST | `/api/sessions/{id}/copy` | Copy stored canvas state to a fresh session; MCP: `copy_visualization_session`. Requires create permission plus read permission on the source. Preserves write mode, description, node references, positions, visibility, dimming, visual settings and all annotations (fresh IDs, creator attribution cleared). Excludes staged graph changes, presence, leases, activity and undo history. Entities with staged `create` entries are omitted from node references, positions, visibility, dimming and group memberships; shared entities with staged updates/deletions retain their canvas state. Bounded by the 25 MiB session document budget (`413`, shown as a localized size-limit error in the session menu) and session count (`503`); an annotation that `duplicate_annotation` or a create op would refuse (a legacy non-embedded image URL, an incomplete or unsafe reference) refuses the whole copy (`400`; MCP: the ingest/reference error) with nothing created; source missing: `404` |
 | GET | `/api/sessions` | List session metadata |
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side; a session materialised this way (or by joining its stream) is always `direct`, whatever `SESSION_WRITE_MODE_DEFAULT` says. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8. With `write_mode`: switch an existing session `direct` → `staged` (asks the hook as `set_session_write_mode`; fans out as a `write_mode_changed` op); `staged` → `direct` is `409 write_mode_irreversible` |
@@ -1340,6 +1342,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
 | `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
+| `batch_update_nodes` | Update many nodes in one call (max 100); partial success — one node failing (not found, conflict, forbidden) does not stop the others; rejects the whole call on over-cap or duplicate ids; result is compact with per-node status but no full node bodies |
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
@@ -1355,6 +1358,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
 | `remove_nodes_from_session` | Take a known set of nodes off a session's canvas by id (stored state, no browser needed; skips ids not in the session) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted; optional `write_mode`, see Staged sessions) |
+| `copy_visualization_session` | Copy a session's stored canvas to a new session named with a ` (copy)` suffix, keeping its write mode. Graph nodes and edges stay shared; annotations get fresh ids and no creator attribution; staged changes, presence, leases, activity and undo history are not copied. Canvas references, positions, visibility, dimming and group memberships for staged-only created entities are omitted; shared entities with staged updates/deletions are retained. Requires create permission plus read permission on the source; a refusal of either is the access-denied result (`error_code: access_denied`) and says nothing about the source. Errors: the invalid-id message for a malformed `session_id`, `session_not_found`, `too_many_sessions`, `session_too_large`, `session_busy`; a write-mode refusal such as `staged_unsupported` (staged source where staged sessions are not enabled) as its code with a `message`; an annotation the ingest rules refuse (a legacy non-embedded image URL, an unsafe reference target) as the annotation-validation message in `error`. Every refusal leaves no new session |
 | `set_session_write_mode` | Switch a session `direct` → `staged` (`write_mode_irreversible` the other way) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
