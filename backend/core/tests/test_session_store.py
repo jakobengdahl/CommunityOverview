@@ -1,3 +1,4 @@
+# covers: backend/core/session_store.py
 """
 Tests for the server-side session store (step 1) and op state transforms
 (step 3) in ``backend/core/session_store.py``.
@@ -75,8 +76,18 @@ class TestPersistence:
         backend = FileSessionPersistenceBackend(tmp_path)
         session = Session(id="1111-2222", name="x", seq=5)
         session.state["node_refs"] = ["a", "b"]
-        backend.save(session.to_dict())
+        # A pre-appearance session fixture has no shape keys.
+        legacy = session.to_dict()
+        legacy["state"].pop("shape_overrides")
+        legacy["state"].pop("type_shapes")
+        backend.save(legacy)
         restored = Session.from_dict(backend.load("1111-2222"))
+        assert restored.state["shape_overrides"] == {}
+        assert restored.state["type_shapes"] == {}
+        roundtrip = restored.to_dict()
+        for key in ("shape_overrides", "type_shapes"):
+            roundtrip["state"].pop(key)
+        assert roundtrip == legacy
         assert restored.seq == 5
         assert restored.state["node_refs"] == ["a", "b"]
 
