@@ -608,6 +608,40 @@ describe('SessionSyncClient', () => {
     expect(await hydration).toEqual({ nodes: [], edges: [] });
   });
 
+  it('a membership op sequenced before an own add never takes the added node off the canvas', async () => {
+    const ack = (op, nodeIds, seq) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ applied: [{ op, node_ids: nodeIds, seq }], seq }),
+    });
+    const fetchImpl = makeFetch([
+      ack('nodes_replaced', ['a'], 1),
+      ack('nodes_added', ['x'], 3),
+      ack('nodes_added', ['y'], 4),
+    ]);
+    const held = [];
+    const onRemoteOps = ([op]) => held.push([op.op, client.holdsLocalAdd('x')]);
+    const { client } = makeClient({ fetchImpl, handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.sendMembership('nodes_replaced', ['a']);
+    await flush();
+    client.sendMembership('nodes_added', ['x']); // before the replace's echo
+    expect(client.holdsLocalAdd('x')).toBe(true); // not acked yet
+    await flush();
+    membershipOp(es, 'client-me', 'nodes_replaced', ['a'], 1);
+    membershipOp(es, 'other', 'nodes_removed', ['x'], 2);
+    membershipOp(es, 'client-me', 'nodes_added', ['x'], 3);
+    membershipOp(es, 'other', 'nodes_removed', ['x'], 5); // after the add: honoured
+    expect(held).toEqual([
+      ['nodes_replaced', true],
+      ['nodes_removed', true],
+      ['nodes_added', false],
+      ['nodes_removed', false],
+    ]);
+  });
+
   it('forwards a summon from another client and skips its own echo', () => {
     const onViewportSummoned = vi.fn();
     const { client } = makeClient({ handlers: { onViewportSummoned } });

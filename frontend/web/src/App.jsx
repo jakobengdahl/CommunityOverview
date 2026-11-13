@@ -522,9 +522,12 @@ function App() {
         case 'nodes_replaced': {
           // A replace (a saved-view load or clear anywhere) keeps only the
           // nodes it names; both then draw the named nodes this canvas lacks.
+          // Never a node this browser added after the op was sequenced.
           const keep = new Set(op.node_ids || []);
           const dropped =
-            op.op === 'nodes_replaced' ? store.nodes.filter((n) => !keep.has(n.id)) : [];
+            op.op === 'nodes_replaced'
+              ? store.nodes.filter((n) => !keep.has(n.id) && !syncRef.current?.holdsLocalAdd(n.id))
+              : [];
           dropped.forEach((n) => removeNode(n.id));
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
@@ -558,9 +561,9 @@ function App() {
           return dropped.length > 0;
         }
         case 'nodes_removed': {
-          const removeIds = op.node_ids || [];
+          const removeIds = (op.node_ids || []).filter((id) => !syncRef.current?.holdsLocalAdd(id));
           const existing = new Set(store.nodes.map((n) => n.id));
-          (op.node_ids || []).forEach((id) => removeNode(id));
+          removeIds.forEach((id) => removeNode(id));
           return removeIds.some((id) => existing.has(id));
         }
         case 'nodes_hidden': {
@@ -1031,7 +1034,12 @@ function App() {
         )
       );
       if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
-      if (removeMissing) missing.forEach((id) => removeNode(id));
+      if (removeMissing && missing.length) {
+        // A discarded staged create is gone from the graph: take it out of the
+        // session too. Every viewer may send this; the repeats change nothing.
+        missing.forEach((id) => removeNode(id));
+        publishMembership('nodes_removed', missing);
+      }
       const current = useGraphStore.getState();
       const present = new Set(current.nodes.map((n) => n.id));
       const nodeUpdates = new Map();
@@ -1063,7 +1071,7 @@ function App() {
       setNodes(nodes);
       setEdges(edges);
     },
-    [syncRef, setNodes, setEdges, removeNode]
+    [syncRef, setNodes, setEdges, removeNode, publishMembership]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -2032,7 +2040,8 @@ function App() {
   // would overwrite them, a drag made here meanwhile included.
   useEffect(() => {
     setMembershipPublisher((op, nodeIds) => {
-      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds?.length);
+      if (!nodeIds?.length && op !== 'nodes_replaced') return;
+      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds.length);
       if (removes && !isSessionMaterialized()) return;
       ensureSyncConnected(sessionId)?.sendMembership(op, nodeIds);
       // Next tick, once the canvas has drawn the change; the debounced

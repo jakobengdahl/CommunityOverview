@@ -268,6 +268,13 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
+  it('an add naming no nodes does not create the session', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().publishMembership('nodes_added', []));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/'))).toEqual([]);
+  });
+
   // The canvas discards its position undo/redo history on this counter, so the
   // whole fix hangs on App passing it down. Asserted here — against the real App
   // and the real store — because the canvas-side and store-side tests both pass

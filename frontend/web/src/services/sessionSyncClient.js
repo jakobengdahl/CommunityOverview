@@ -785,6 +785,11 @@ export class SessionSyncClient {
     // catch-up reflects. A hydration read across a change of it is stale
     // (hydrateAddedNodes).
     this._membershipVersion = 0;
+    // Nodes this client added (an add or a replace naming them) whose op has
+    // not been applied from the stream yet: node id -> its stream seq, null
+    // until the POST is acked. A membership op sequenced before the add must
+    // not take the node off this canvas (holdsLocalAdd).
+    this._localAdds = new Map();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -859,6 +864,13 @@ export class SessionSyncClient {
   /** Whether the server's membership, as last broadcast, holds `nodeId`. */
   isMember(nodeId) {
     return this._baseline.node_refs.includes(nodeId);
+  }
+
+  /** Whether this client's own add of `nodeId` is sequenced after the stream so far. */
+  holdsLocalAdd(nodeId) {
+    if (!this._localAdds.has(nodeId)) return false;
+    const seq = this._localAdds.get(nodeId);
+    return seq === null || seq > this._appliedSeq;
   }
 
   get membershipVersion() {
@@ -1424,6 +1436,28 @@ export class SessionSyncClient {
   }
 
   /**
+   * Record the stream seq at which each acked add was applied; an add the
+   * server applied as a no-op, or rejected, is no longer held.
+   */
+  _ackLocalAdds(batch, applied) {
+    const seqOf = new Map();
+    for (const entry of applied || []) {
+      if (entry?.op !== 'nodes_added' && entry?.op !== 'nodes_replaced') continue;
+      if (typeof entry.seq !== 'number') continue;
+      (entry.node_ids || []).forEach((id) => seqOf.set(id, entry.seq));
+    }
+    for (const op of batch) {
+      if (op.op !== 'nodes_added' && op.op !== 'nodes_replaced') continue;
+      for (const id of op.node_ids || []) {
+        if (this._localAdds.get(id) !== null) continue;
+        const seq = seqOf.get(id);
+        if (seq === undefined || seq <= this._appliedSeq) this._localAdds.delete(id);
+        else this._localAdds.set(id, seq);
+      }
+    }
+  }
+
+  /**
    * Send this browser's own membership change — `nodes_added`,
    * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
    * as one explicit op. The baseline does not move until the server
@@ -1432,7 +1466,17 @@ export class SessionSyncClient {
   sendMembership(op, nodeIds) {
     if (!MEMBERSHIP_OPS.has(op)) return;
     const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
-    if (ids.length || op === 'nodes_replaced') this._enqueue([{ op, node_ids: ids }]);
+    if (!ids.length && op !== 'nodes_replaced') return;
+    if (op === 'nodes_removed') {
+      ids.forEach((id) => this._localAdds.delete(id));
+    } else {
+      if (op === 'nodes_replaced') {
+        const named = new Set(ids);
+        [...this._localAdds.keys()].forEach((id) => named.has(id) || this._localAdds.delete(id));
+      }
+      ids.forEach((id) => this._localAdds.set(id, null));
+    }
+    this._enqueue([{ op, node_ids: ids }]);
   }
 
   /**
@@ -1718,6 +1762,7 @@ export class SessionSyncClient {
         // (App.jsx's applyRemoteOp) — this reuses that exact path rather
         // than adding a second one, the same way handleImageIngest already
         // reuses it for its own direct-apply case.
+        this._ackLocalAdds(batch, body.applied);
         if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
@@ -1762,6 +1807,7 @@ export class SessionSyncClient {
           // `finally`'s own filter is then a harmless no-op for a batch
           // already removed.
           this._removeInFlight(batch);
+          this._ackLocalAdds(batch, []);
           // Parsed only to let onDropped tell apart the two distinct 409
           // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
           // different-field-edit): a live edit lease (LeaseConflict) vs. a
@@ -1998,6 +2044,9 @@ export class SessionSyncClient {
             clientId: data.client_id,
             sessionId: this.sessionId,
           });
+        }
+        for (const [id, seq] of this._localAdds) {
+          if (seq !== null && seq <= this._appliedSeq) this._localAdds.delete(id);
         }
         break;
       }
