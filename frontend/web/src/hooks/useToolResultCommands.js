@@ -26,7 +26,7 @@ async function composedToolResult(pushed) {
   return { action: pushed.action, nodes, edges: [...edges.values()] };
 }
 
-export function useToolResultCommands({ sessionId, opStreamReady, latestViewport }) {
+export function useToolResultCommands({ sessionId, opStreamReady, latestViewport, syncRef }) {
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
   // rather than a single last-applied slot, and keyed by the server-assigned
   // command_id rather than payload content, so a later *legitimately* repeated
@@ -74,10 +74,23 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         toolResult.action === 'clear_visualization' ||
         toolResult.action === 'replace_visualization'
       ) {
-        // Explicit replace/clear/load: swap the whole view for the results.
+        // Explicit replace/clear/load: swap the whole view for the results,
+        // keeping nodes this browser added after the push was sequenced.
+        const sync = syncRef?.current;
+        const named = new Set(filtered.map((n) => n.id));
+        const held = currentNodes
+          .filter((n) => !named.has(n.id) && sync?.holdsLocalAdd(n.id))
+          .map((n) => {
+            const pos = sync.baselinePosition(n.id);
+            return pos ? { ...n, _savedPosition: pos } : n;
+          });
+        const kept = new Set([...named, ...held.map((n) => n.id)]);
+        const heldEdges = held.length
+          ? currentEdges.filter((e) => kept.has(e.source) && kept.has(e.target))
+          : [];
         clearViz();
-        if (filtered.length > 0) {
-          updateViz(filtered, toolResult.edges || []);
+        if (kept.size > 0) {
+          updateViz([...filtered, ...held], [...(toolResult.edges || []), ...heldEdges]);
         }
       } else if (toolResult.action === 'update_in_visualization') {
         // In-place update: replace matching nodes, keep the rest, append any
@@ -110,7 +123,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         );
       }
     },
-    [latestViewport]
+    [latestViewport, syncRef]
   );
 
   const sessionIdRef = useRef(sessionId);

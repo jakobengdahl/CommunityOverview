@@ -424,6 +424,7 @@ function App() {
     sessionId,
     opStreamReady,
     latestViewport,
+    syncRef,
   });
 
   // Apply a single remote op incrementally onto the local store + canvas. This

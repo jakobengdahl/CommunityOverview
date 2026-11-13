@@ -614,11 +614,7 @@ describe('SessionSyncClient', () => {
       status: 200,
       json: async () => ({ applied: [{ op, node_ids: nodeIds, seq }], seq }),
     });
-    const fetchImpl = makeFetch([
-      ack('nodes_replaced', ['a'], 1),
-      ack('nodes_added', ['x'], 3),
-      ack('nodes_added', ['y'], 4),
-    ]);
+    const fetchImpl = makeFetch([ack('nodes_replaced', ['a'], 1), ack('nodes_added', ['x'], 3)]);
     const held = [];
     const onRemoteOps = ([op]) => held.push([op.op, client.holdsLocalAdd('x')]);
     const { client } = makeClient({ fetchImpl, handlers: { onRemoteOps } });
@@ -629,15 +625,23 @@ describe('SessionSyncClient', () => {
     await flush();
     client.sendMembership('nodes_added', ['x']); // before the replace's echo
     expect(client.holdsLocalAdd('x')).toBe(true); // not acked yet
+    client.syncState({ node_refs: ['x'], positions: { x: { x: 5, y: 6 } } });
     await flush();
     membershipOp(es, 'client-me', 'nodes_replaced', ['a'], 1);
     membershipOp(es, 'other', 'nodes_removed', ['x'], 2);
+    expect(client.baselinePosition('x')).toEqual({ x: 5, y: 6 }); // kept for the add's render
     membershipOp(es, 'client-me', 'nodes_added', ['x'], 3);
     membershipOp(es, 'other', 'nodes_removed', ['x'], 5); // after the add: honoured
+    // An own echo that beats its POST's ack releases the hold all the same.
+    client.sendMembership('nodes_added', ['x']);
+    membershipOp(es, 'client-me', 'nodes_added', ['x'], 6);
+    membershipOp(es, 'other', 'nodes_removed', ['x'], 7);
     expect(held).toEqual([
       ['nodes_replaced', true],
       ['nodes_removed', true],
       ['nodes_added', false],
+      ['nodes_removed', false],
+      ['nodes_added', true], // released once delivered
       ['nodes_removed', false],
     ]);
   });

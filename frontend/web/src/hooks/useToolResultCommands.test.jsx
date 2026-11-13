@@ -165,16 +165,23 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().addNodesToVisualization).not.toHaveBeenCalled();
   });
 
-  it('an empty replace_visualization clears the view and renders nothing', () => {
-    const { result } = render();
-    act(() =>
-      result.current.applyToolResultCommand(
-        { action: 'replace_visualization', nodes: [], edges: [] },
-        'cmd-1'
-      )
-    );
+  it('an empty replace_visualization clears all but a node this browser added after it', () => {
+    const sync = {
+      holdsLocalAdd: (id) => id === 'existing',
+      baselinePosition: () => ({ x: 1, y: 2 }),
+    };
+    const syncRef = { current: null };
+    const { result } = render({ syncRef });
+    const clear = { action: 'replace_visualization', nodes: [], edges: [] };
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-1'));
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
     expect(store().updateVisualization).not.toHaveBeenCalled();
+    syncRef.current = sync;
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-2'));
+    expect(store().updateVisualization).toHaveBeenCalledWith(
+      [{ id: 'existing', _savedPosition: { x: 1, y: 2 } }],
+      [{ id: 'e-existing', source: 'existing', target: 'existing' }]
+    );
   });
 
   it('no explicit action with nodes defaults to additive, not a full replace', () => {

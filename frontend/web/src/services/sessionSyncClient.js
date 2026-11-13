@@ -873,6 +873,15 @@ export class SessionSyncClient {
     return seq === null || seq > this._appliedSeq;
   }
 
+  _heldPositions() {
+    const held = {};
+    for (const id of this._localAdds.keys()) {
+      const pos = this._baseline.positions[id];
+      if (pos && this.holdsLocalAdd(id)) held[id] = pos;
+    }
+    return held;
+  }
+
   get membershipVersion() {
     return this._membershipVersion;
   }
@@ -2034,7 +2043,10 @@ export class SessionSyncClient {
         let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
+          const heldPositions = this._heldPositions();
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
+          // A held node stays where this client put it: its add comes later.
+          Object.assign(this._baseline.positions, heldPositions);
           if (MEMBERSHIP_OPS.has(op.op) && typeof data.seq === 'number') {
             this._membershipVersion = data.seq;
           }
@@ -2045,8 +2057,16 @@ export class SessionSyncClient {
             sessionId: this.sessionId,
           });
         }
+        // The add's own echo releases it even when it beats the POST's ack.
+        const echoed =
+          data.client_id === this.clientId &&
+          (op.op === 'nodes_added' || op.op === 'nodes_replaced')
+            ? new Set(op.node_ids || [])
+            : new Set();
         for (const [id, seq] of this._localAdds) {
-          if (seq !== null && seq <= this._appliedSeq) this._localAdds.delete(id);
+          if ((seq !== null && seq <= this._appliedSeq) || echoed.has(id)) {
+            this._localAdds.delete(id);
+          }
         }
         break;
       }
