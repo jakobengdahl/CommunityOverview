@@ -2747,6 +2747,8 @@ function App() {
       onLocalAnnotationsApplied: (ops) => {
         (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
       },
+      // Own adds a membership op sequenced after them has since removed.
+      onLocalAddsReleased: (ids) => ids.forEach((id) => removeNode(id)),
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
       onLeases: (l) => setRemoteLeases(l),

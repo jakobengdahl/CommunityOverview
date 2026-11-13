@@ -608,42 +608,52 @@ describe('SessionSyncClient', () => {
     expect(await hydration).toEqual({ nodes: [], edges: [] });
   });
 
-  it('a membership op sequenced before an own add never takes the added node off the canvas', async () => {
-    const ack = (op, nodeIds, seq) => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ applied: [{ op, node_ids: nodeIds, seq }], seq }),
+  it('an own add is held against membership ops sequenced before it, and only those', async () => {
+    const acks = [];
+    const fetchImpl = makeFetch();
+    fetchImpl.mockImplementation(async (url, opts) => {
+      fetchImpl.calls.push({ url, body: JSON.parse(opts.body) });
+      return new Promise((resolve) => acks.push(resolve));
     });
-    const fetchImpl = makeFetch([ack('nodes_replaced', ['a'], 1), ack('nodes_added', ['x'], 3)]);
-    const held = [];
-    const onRemoteOps = ([op]) => held.push([op.op, client.holdsLocalAdd('x')]);
-    const { client } = makeClient({ fetchImpl, handlers: { onRemoteOps } });
+    const ack = (i, entries) =>
+      acks[i]({
+        ok: true,
+        status: 200,
+        json: async () => ({ applied: entries.map(([op, seq]) => ({ op, node_ids: ['x'], seq })) }),
+      });
+    const onLocalAddsReleased = vi.fn();
+    const { client } = makeClient({ fetchImpl, handlers: { onLocalAddsReleased } });
     client.connect();
     const es = FakeEventSource.instances[0];
     es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.sendMembership('nodes_replaced', ['a']);
-    await flush();
-    client.sendMembership('nodes_added', ['x']); // before the replace's echo
-    expect(client.holdsLocalAdd('x')).toBe(true); // not acked yet
+    client.sendMembership('nodes_added', ['x']);
     client.syncState({ node_refs: ['x'], positions: { x: { x: 5, y: 6 } } });
     await flush();
-    membershipOp(es, 'client-me', 'nodes_replaced', ['a'], 1);
-    membershipOp(es, 'other', 'nodes_removed', ['x'], 2);
-    expect(client.baselinePosition('x')).toEqual({ x: 5, y: 6 }); // kept for the add's render
-    membershipOp(es, 'client-me', 'nodes_added', ['x'], 3);
-    membershipOp(es, 'other', 'nodes_removed', ['x'], 5); // after the add: honoured
-    // An own echo that beats its POST's ack releases the hold all the same.
-    client.sendMembership('nodes_added', ['x']);
-    membershipOp(es, 'client-me', 'nodes_added', ['x'], 6);
-    membershipOp(es, 'other', 'nodes_removed', ['x'], 7);
-    expect(held).toEqual([
-      ['nodes_replaced', true],
-      ['nodes_removed', true],
-      ['nodes_added', false],
-      ['nodes_removed', false],
-      ['nodes_added', true], // released once delivered
-      ['nodes_removed', false],
+    membershipOp(es, 'other', 'nodes_replaced', [], 1); // sequenced before the add
+    expect([client.holdsLocalAdd('x'), client.baselinePosition('x')]).toEqual([
+      true,
+      { x: 5, y: 6 },
     ]);
+    membershipOp(es, 'client-me', 'nodes_added', ['x'], 2); // the echo beats the ack
+    membershipOp(es, 'other', 'nodes_removed', ['x'], 3); // sequenced after the add
+    expect(client.holdsLocalAdd('x')).toBe(true);
+    ack(0, [
+      ['nodes_added', 2],
+      ['node_moved', 2],
+    ]);
+    await flush();
+    expect(client.holdsLocalAdd('x')).toBe(false);
+    expect(onLocalAddsReleased).toHaveBeenCalledWith(['x']); // the host drops it now
+    // Add, remove, re-add: the first add's ack does not end the re-add's hold.
+    client.sendMembership('nodes_added', ['x']);
+    await flush();
+    client.sendMembership('nodes_removed', ['x']);
+    client.sendMembership('nodes_added', ['x']);
+    ack(1, [['nodes_added', 4]]);
+    await flush();
+    membershipOp(es, 'client-me', 'nodes_added', ['x'], 4);
+    membershipOp(es, 'client-me', 'nodes_removed', ['x'], 5);
+    expect(client.holdsLocalAdd('x')).toBe(true);
   });
 
   it('forwards a summon from another client and skips its own echo', () => {

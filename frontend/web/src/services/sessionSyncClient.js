@@ -786,9 +786,11 @@ export class SessionSyncClient {
     // (hydrateAddedNodes).
     this._membershipVersion = 0;
     // Nodes this client added (an add or a replace naming them) whose op has
-    // not been applied from the stream yet: node id -> its stream seq, null
-    // until the POST is acked. A membership op sequenced before the add must
-    // not take the node off this canvas (holdsLocalAdd).
+    // not been applied from the stream yet: node id -> {op, seq}, the latest
+    // op that added it and its stream seq (null until that op's POST is
+    // acked). A membership op sequenced before the add must not take the node
+    // off this canvas (holdsLocalAdd); a released hold is reconciled against
+    // the server's membership (onLocalAddsReleased).
     this._localAdds = new Map();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
@@ -868,9 +870,15 @@ export class SessionSyncClient {
 
   /** Whether this client's own add of `nodeId` is sequenced after the stream so far. */
   holdsLocalAdd(nodeId) {
-    if (!this._localAdds.has(nodeId)) return false;
-    const seq = this._localAdds.get(nodeId);
-    return seq === null || seq > this._appliedSeq;
+    const hold = this._localAdds.get(nodeId);
+    return Boolean(hold) && (hold.seq === null || hold.seq > this._appliedSeq);
+  }
+
+  /** End these holds; hand the host the ones the server no longer holds. */
+  _releaseLocalAdds(ids) {
+    ids.forEach((id) => this._localAdds.delete(id));
+    const gone = ids.filter((id) => !this.isMember(id));
+    if (gone.length) this.handlers.onLocalAddsReleased?.(gone);
   }
 
   _heldPositions() {
@@ -1446,7 +1454,8 @@ export class SessionSyncClient {
 
   /**
    * Record the stream seq at which each acked add was applied; an add the
-   * server applied as a no-op, or rejected, is no longer held.
+   * server applied as a no-op, or rejected, or whose seq the stream has
+   * already passed, is no longer held. Only the op that set a hold ends it.
    */
   _ackLocalAdds(batch, applied) {
     const seqOf = new Map();
@@ -1455,15 +1464,17 @@ export class SessionSyncClient {
       if (typeof entry.seq !== 'number') continue;
       (entry.node_ids || []).forEach((id) => seqOf.set(id, entry.seq));
     }
+    const released = [];
     for (const op of batch) {
-      if (op.op !== 'nodes_added' && op.op !== 'nodes_replaced') continue;
       for (const id of op.node_ids || []) {
-        if (this._localAdds.get(id) !== null) continue;
+        const hold = this._localAdds.get(id);
+        if (hold?.op !== op) continue;
         const seq = seqOf.get(id);
-        if (seq === undefined || seq <= this._appliedSeq) this._localAdds.delete(id);
-        else this._localAdds.set(id, seq);
+        if (seq === undefined || seq <= this._appliedSeq) released.push(id);
+        else hold.seq = seq;
       }
     }
+    if (released.length) this._releaseLocalAdds(released);
   }
 
   /**
@@ -1476,6 +1487,7 @@ export class SessionSyncClient {
     if (!MEMBERSHIP_OPS.has(op)) return;
     const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
     if (!ids.length && op !== 'nodes_replaced') return;
+    const sent = { op, node_ids: ids };
     if (op === 'nodes_removed') {
       ids.forEach((id) => this._localAdds.delete(id));
     } else {
@@ -1483,9 +1495,9 @@ export class SessionSyncClient {
         const named = new Set(ids);
         [...this._localAdds.keys()].forEach((id) => named.has(id) || this._localAdds.delete(id));
       }
-      ids.forEach((id) => this._localAdds.set(id, null));
+      ids.forEach((id) => this._localAdds.set(id, { op: sent, seq: null }));
     }
-    this._enqueue([{ op, node_ids: ids }]);
+    this._enqueue([sent]);
   }
 
   /**
@@ -2057,17 +2069,10 @@ export class SessionSyncClient {
             sessionId: this.sessionId,
           });
         }
-        // The add's own echo releases it even when it beats the POST's ack.
-        const echoed =
-          data.client_id === this.clientId &&
-          (op.op === 'nodes_added' || op.op === 'nodes_replaced')
-            ? new Set(op.node_ids || [])
-            : new Set();
-        for (const [id, seq] of this._localAdds) {
-          if ((seq !== null && seq <= this._appliedSeq) || echoed.has(id)) {
-            this._localAdds.delete(id);
-          }
-        }
+        const passed = [...this._localAdds]
+          .filter(([, hold]) => hold.seq !== null && hold.seq <= this._appliedSeq)
+          .map(([id]) => id);
+        if (passed.length) this._releaseLocalAdds(passed);
         break;
       }
       case 'presence_joined':

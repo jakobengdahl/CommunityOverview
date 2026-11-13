@@ -75,11 +75,12 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         toolResult.action === 'replace_visualization'
       ) {
         // Explicit replace/clear/load: swap the whole view for the results,
-        // keeping nodes this browser added after the push was sequenced.
+        // keeping nodes added after the push was sequenced: this browser's
+        // still held, and any the server holds by now (a deferred render).
         const sync = syncRef?.current;
         const named = new Set(filtered.map((n) => n.id));
         const held = currentNodes
-          .filter((n) => !named.has(n.id) && sync?.holdsLocalAdd(n.id))
+          .filter((n) => !named.has(n.id) && (sync?.holdsLocalAdd(n.id) || sync?.isMember(n.id)))
           .map((n) => {
             const pos = sync.baselinePosition(n.id);
             return pos ? { ...n, _savedPosition: pos } : n;
