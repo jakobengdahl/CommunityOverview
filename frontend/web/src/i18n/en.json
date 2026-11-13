@@ -206,7 +206,8 @@
       "edge_intensity_set": "Changed the edge intensity",
       "unknown": "Changed something",
       "nodes_added": "Added {count} nodes",
-      "nodes_removed": "Removed {count} nodes"
+      "nodes_removed": "Removed {count} nodes",
+      "nodes_replaced": "Replaced the view with {count} nodes"
     },
     "event": {
       "node_create": "Node created",

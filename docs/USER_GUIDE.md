@@ -944,10 +944,10 @@ shared session — additive results, saved-view loads and replacements
 (`get_saved_view`), clears, and session auto-add agent additions. The server
 applies the push's membership change itself and every browser only renders it,
 so each actual change produces one record however many browsers are open; a
-load that replaces existing nodes records one removal and one addition.
-Repeated additions or removals that change nothing produce no record. Nodes a
-browser adds or removes on its own canvas are synced to the session but not
-recorded, since a canvas difference does not say which action caused it.
+load that replaces existing nodes, or a clear, is one record. Repeated
+additions or removals that change nothing produce no record. Nodes you add,
+remove or clear on your own canvas are sent to the server as the same kind of
+change and recorded as yours.
 
 Membership records retain a total count and at most 100 IDs
 (`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.

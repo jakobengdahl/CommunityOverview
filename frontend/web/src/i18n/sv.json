@@ -206,7 +206,8 @@
       "edge_intensity_set": "Ändrade kopplingsintensiteten",
       "unknown": "Ändrade något",
       "nodes_added": "Lade till {count} noder",
-      "nodes_removed": "Tog bort {count} noder"
+      "nodes_removed": "Tog bort {count} noder",
+      "nodes_replaced": "Ersatte vyn med {count} noder"
     },
     "event": {
       "node_create": "Nod skapad",
