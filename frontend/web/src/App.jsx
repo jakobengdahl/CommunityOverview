@@ -1829,18 +1829,6 @@ function App() {
     [sessionId]
   );
 
-  // This browser's own membership changes go to the session as explicit ops;
-  // the first add materialises it, as a first save would. Removing from a
-  // session that does not exist yet has nothing to change.
-  useEffect(() => {
-    setMembershipPublisher((op, nodeIds) => {
-      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds?.length);
-      if (removes && !isSessionMaterialized()) return;
-      ensureSyncConnected(sessionId)?.sendMembership(op, nodeIds);
-    });
-    return () => setMembershipPublisher(null);
-  }, [sessionId, ensureSyncConnected, isSessionMaterialized, setMembershipPublisher]);
-
   const persistSessionSnapshot = useCallback(
     (viewData) => {
       const state = useGraphStore.getState();
@@ -2035,6 +2023,30 @@ function App() {
       requestSessionSnapshot(null);
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
+
+  // This browser's own membership changes go to the session as explicit ops;
+  // the first add materialises it, as a first save would. Removing from a
+  // session that does not exist yet has nothing to change. The layout save
+  // follows at once rather than after the debounce: until the added nodes'
+  // positions arrive, another browser places them itself and its own save
+  // would overwrite them, a drag made here meanwhile included.
+  useEffect(() => {
+    setMembershipPublisher((op, nodeIds) => {
+      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds?.length);
+      if (removes && !isSessionMaterialized()) return;
+      ensureSyncConnected(sessionId)?.sendMembership(op, nodeIds);
+      // Next tick, once the canvas has drawn the change; the debounced
+      // autosave would reset this timer on that very render.
+      setTimeout(() => requestSessionSnapshot(null), 0);
+    });
+    return () => setMembershipPublisher(null);
+  }, [
+    sessionId,
+    ensureSyncConnected,
+    isSessionMaterialized,
+    setMembershipPublisher,
+    requestSessionSnapshot,
+  ]);
 
   // Realtime publish timing for annotation changes — the "accepted operation
   // timing" from task-annotation-shared-session-realtime's slice_scope, split

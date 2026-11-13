@@ -253,6 +253,21 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
   });
 
+  it("a user's add sends the node's position without waiting for the autosave debounce", async () => {
+    renderApp();
+    act(() => {
+      useGraphStore.getState().addNodesToVisualization([NODE_A], []);
+      useGraphStore.getState().publishMembership('nodes_added', ['node-a']);
+    });
+    // waitFor gives up after 1000ms, before the 1500ms debounce would save.
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toEqual([
+        { op: 'nodes_added', node_ids: ['node-a'] },
+        { op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } },
+      ]);
+    });
+  });
+
   // The canvas discards its position undo/redo history on this counter, so the
   // whole fix hangs on App passing it down. Asserted here — against the real App
   // and the real store — because the canvas-side and store-side tests both pass
