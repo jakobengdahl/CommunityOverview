@@ -283,6 +283,10 @@ class VectorStore:
         matrix /= np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12
         self.unit_matrix = matrix
 
+    def embedding_text(self, node: Node) -> str:
+        """The text ``node``'s vector is computed from."""
+        return self._get_text_representation(node)
+
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
         # Combine name, aliases, description, summary, and tags

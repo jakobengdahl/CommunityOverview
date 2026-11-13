@@ -16,12 +16,12 @@ from .models import Edge, Node
 
 
 class ImportMergeUnsupported(RuntimeError):
-    """The persistence backend cannot take a merge yet (ADR 0013 §6).
+    """The persistence backend cannot take a merge (ADR 0013 §3).
 
-    A store that assigns revisions is shared by several instances, and the
-    embedding commit a merge needs there is slice 3's; until it exists a
-    merge is refused rather than let the embedding job's whole-graph save
-    overwrite other instances' writes.
+    A store that assigns revisions may be shared by several instances, so the
+    instance's lock does not hold their writes back. A backend that does not
+    declare `batch_conditions` cannot verify inside the unit what the plan
+    read, and is refused rather than merged on a model that may be behind it.
     """
 
     code = "import_merge_not_supported"
@@ -51,12 +51,16 @@ class MergeWrites:
 
     A create expects its id absent and an overwrite expects the revision the
     plan read; every node an edge here names exists live or is created here.
+    ``reads`` is each live read the plan's decisions rest on: (kind, id) to the
+    revision read, None for absent. A store others write to verifies those
+    these writes do not cover (§3).
     """
 
     node_creates: List[Node] = field(default_factory=list)
     node_overwrites: List[NodeOverwrite] = field(default_factory=list)
     edge_creates: List[Edge] = field(default_factory=list)
     edge_overwrites: List[EdgeOverwrite] = field(default_factory=list)
+    reads: Dict[Tuple[str, str], Any] = field(default_factory=dict)
 
 
 @dataclass

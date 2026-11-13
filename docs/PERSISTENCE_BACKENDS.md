@@ -86,6 +86,7 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
+| `batch_conditions` | `apply_batch` verifies `read_revisions` and `expected_generation` (carried on a batch's first operation) inside its unit; needs `revision_enforcement` | a merge import may run on a store that assigns revisions; without it one is refused (`import_merge_not_supported`) |
 | `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
 | `staged_sessions` | the layer store is implemented: session layers, staged-session records and merge records live next to the graph | nothing yet — the slices that stage and merge build on it; see *The layer store* |
 
@@ -1319,7 +1320,9 @@ Two boundaries and one cost, none of them accidents:
   `GraphStorage` would otherwise do, and loads an empty graph carrying another
   scope's metadata — `graph_name` included. A schema per scope has none of
   this; one set of tables for several scopes is the shape this bullet exists to
-  rule out.
+  rule out. `graph_generation` sits in that row too, so a replace in one scope
+  supersedes another scope's replace job. A merge's job carries on instead (the
+  backend's `generation_shared_across_scopes`).
 - **`id` remains the primary key of each entity table**, so two scopes sharing
   one table cannot both hold `n0`. An upsert therefore conflicts with *the* row
   of that id whatever scope it carries, and the backend **refuses** such a

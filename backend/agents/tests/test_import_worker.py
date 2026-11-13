@@ -1,3 +1,4 @@
+# covers: backend/agents/execution/import_worker.py
 """
 Tests for backend.agents.execution.import_worker — the background half of
 graph.json import that (re)generates embeddings after a REPLACE (see
@@ -12,6 +13,7 @@ under), so these tests exercise the real "ML extras absent" degrade path
 end-to-end rather than mocking it.
 """
 
+import threading
 import time
 
 import pytest
@@ -21,8 +23,10 @@ from backend.agents.execution import (
     ExecutionKind,
     ExecutionState,
     InMemoryExecutionStore,
+    RetryPolicy,
 )
 from backend.agents.execution.import_worker import (
+    MERGE_EMBEDDING_PASSES,
     _run_one_import_job,
     drain_import_jobs,
     recover_import_jobs,
@@ -474,3 +478,164 @@ class TestGenerationStalenessGuard:
         assert stored.state == ExecutionState.CANCELLED
         assert stored.result["embeddings_status"] == "superseded"
         assert not storage.vector_store.has_embedding("shared-1")
+
+
+class TestMergeJobPerNodeGuard:
+    """A merge's job commits a vector only for the text it was encoded from
+    (docs/adr/0013-graph-import-merge-mode.md §6)."""
+
+    def _merge_job(self, store, storage):
+        return store.enqueue(
+            _import_job(
+                payload={"graph_generation": storage.generation, "mode": "merge"}
+            )
+        )
+
+    def test_a_node_edited_during_encoding_is_encoded_again_from_its_new_text(
+        self, store, storage, monkeypatch
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+        encoded = []
+
+        def encode(nodes):
+            encoded.append(nodes[0].name)
+            if len(encoded) == 1:
+                storage.update_node("n", {"name": "New"})
+            return {node.id: [float(len(encoded)), 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+
+        drain_import_jobs(store, storage)
+
+        assert encoded == ["Old", "New"]
+        assert storage.vector_store.get_vector_list("n") == [2.0, 0.0]
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.SUCCEEDED
+        assert stored.result["embedded_count"] == 1
+
+    def test_a_node_that_keeps_moving_fails_the_job_for_a_retry(
+        self, store, storage, monkeypatch
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+        passes = []
+
+        def encode(nodes):
+            passes.append(True)
+            storage.update_node("n", {"name": f"Edit {len(passes)}"})
+            return {node.id: [1.0, 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+
+        _run_one_import_job(store, storage, store.claim_next("w", lease_seconds=60))
+
+        assert len(passes) == MERGE_EMBEDDING_PASSES
+        assert not storage.vector_store.has_embedding("n")
+        assert store.get(job.id).state != ExecutionState.SUCCEEDED
+
+    def test_a_drain_retries_a_merge_job_that_kept_moving_until_its_node_has_a_vector(
+        self, storage, monkeypatch
+    ):
+        store = InMemoryExecutionStore(RetryPolicy(base_seconds=0.01))
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+        passes = []
+
+        def encode(nodes):
+            passes.append(True)
+            if len(passes) <= MERGE_EMBEDDING_PASSES:
+                storage.update_node("n", {"name": f"Edit {len(passes)}"})
+            return {node.id: [1.0, 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+
+        drain_import_jobs(store, storage)
+
+        assert storage.vector_store.has_embedding("n")
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.SUCCEEDED
+        assert stored.attempts == 2
+
+    def test_a_merge_job_during_a_reload_still_sees_the_nodes_being_refilled(
+        self, store, storage, monkeypatch
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = store.enqueue(_import_job(payload={"mode": "merge"}))
+        monkeypatch.setattr(
+            storage.vector_store,
+            "compute_node_embeddings",
+            lambda nodes: {node.id: [1.0, 0.0] for node in nodes},
+        )
+        drain = threading.Thread(target=drain_import_jobs, args=(store, storage))
+
+        # The window load() holds its lock over: nodes cleared, not yet refilled.
+        with storage._lock:
+            refill = dict(storage.nodes)
+            storage.nodes.clear()
+            drain.start()
+            drain.join(0.2)
+            storage.nodes.update(refill)
+        drain.join()
+
+        assert storage.vector_store.has_embedding("n")
+        assert store.get(job.id).result["embedded_count"] == 1
+
+    def test_a_replace_during_a_merge_job_supersedes_it(
+        self, store, storage, monkeypatch
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+
+        def encode(nodes):
+            storage.replace_all_nodes_and_edges(
+                [Node(id="n", type=NodeType.ACTOR, name="Replaced")], []
+            )
+            return {node.id: [1.0, 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+
+        drain_import_jobs(store, storage)
+
+        assert store.get(job.id).result["embeddings_status"] == "superseded"
+        assert not storage.vector_store.has_embedding("n")
+
+    @pytest.mark.parametrize("moved_during_encoding", [False, True])
+    def test_another_scopes_replace_leaves_a_merge_job_embedding_its_nodes(
+        self, store, storage, monkeypatch, moved_during_encoding
+    ):
+        storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="Old")], [])
+        job = self._merge_job(store, storage)
+        storage._persistence_backend.generation_shared_across_scopes = True
+        encoded = []
+
+        def encode(nodes):
+            encoded.append(True)
+            if moved_during_encoding and len(encoded) == 1:
+                storage._generation += 7
+            return {node.id: [1.0, 0.0] for node in nodes}
+
+        monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", encode)
+        if not moved_during_encoding:
+            storage._generation += 7
+
+        drain_import_jobs(store, storage)
+
+        assert storage.vector_store.has_embedding("n")
+        assert len(encoded) == (2 if moved_during_encoding else 1)
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.SUCCEEDED
+        assert stored.result["embedded_count"] == 1
+
+    def test_a_replace_job_is_still_superseded_by_a_generation_shared_across_scopes(
+        self, store, storage
+    ):
+        job = store.enqueue(
+            _import_job(payload={"graph_generation": storage.generation})
+        )
+        storage._persistence_backend.generation_shared_across_scopes = True
+        storage._generation += 7
+
+        drain_import_jobs(store, storage)
+
+        assert store.get(job.id).result["embeddings_status"] == "superseded"

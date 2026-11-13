@@ -339,6 +339,8 @@ class PlannedWrites:
     edge_renames: List[Edge] = field(default_factory=list)
     # (document edge, live revision read)
     edge_overwrites: List[Tuple[Edge, int]] = field(default_factory=list)
+    # Every live read the plan's decisions rest on, as the digest records it.
+    reads: Dict[Tuple[str, str], Optional[int]] = field(default_factory=dict)
 
     @property
     def nodes_to_embed(self) -> int:
@@ -398,6 +400,7 @@ def mint_writes(planned: PlannedWrites) -> MintedWrites:
             )
             for edge, revision in planned.edge_overwrites
         ],
+        reads=planned.reads,
     )
     return MintedWrites(writes, renamed_nodes, renamed_edges)
 
@@ -1061,7 +1064,7 @@ class _Planner:
         return MergePlan(report=report, digest=digest, committable=committable)
 
     def _writes(self) -> PlannedWrites:
-        writes = PlannedWrites()
+        writes = PlannedWrites(reads=dict(self.reads))
         for d in sorted(self.nodes.values(), key=lambda d: d.node.id):
             if d.outcome == "create":
                 writes.node_creates.append(d.node)

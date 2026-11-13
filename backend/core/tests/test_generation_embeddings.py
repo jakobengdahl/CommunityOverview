@@ -1,15 +1,33 @@
 """Import embedding commits must not replace a shared store's graph."""
 
+# covers: backend/core/storage.py
+
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    InMemoryExecutionStore,
+)
+from backend.agents.execution.import_worker import drain_import_jobs
 from backend.core import (
     BackendCapabilities,
     Edge,
     EntityRevisionConflict,
     GraphStorage,
+    GraphWriteOutcomeUnknown,
     Node,
+)
+from backend.core.storage_backends import (
+    EntityOperation,
+    ExternalChange,
+    GraphGenerationMoved,
+    GraphWriteFailed,
+    WriteRefusedByStore,
 )
 from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
 
@@ -40,7 +58,10 @@ class _RevisionBackend(InMemoryGraphPersistenceBackend):
     def apply_batch(self, operations, write_token=None):
         stamped = []
         revisions = []
+        stored_generation = self._store["metadata"].get("graph_generation", 0)
         for op in operations:
+            if op.expected_generation not in (None, stored_generation):
+                raise GraphGenerationMoved(op.expected_generation, stored_generation)
             assert (op.kind, op.action) == ("node", "upsert")
             current = self._store["nodes"].get(op.entity_id)
             revision = None if current is None else current.get("revision", 0)
@@ -190,3 +211,251 @@ def test_a_stale_embedded_node_refuses_the_batch_and_restores_vectors(storage, d
     for node_id in ("a", "b"):
         assert storage.vector_store.get_vector_list(node_id) == [0.0, 1.0]
         assert storage.nodes[node_id].revision == before[node_id]
+
+
+def _texts(storage):
+    return {
+        node_id: storage.vector_store.embedding_text(node)
+        for node_id, node in storage.nodes.items()
+    }
+
+
+def test_a_merge_vector_lands_only_on_a_vectorless_node_with_the_text_it_was_read_at(
+    storage,
+):
+    storage.add_nodes(
+        [
+            Node(id="moved", type="Actor", name="Moved"),
+            Node(id="embedded", type="Actor", name="Embedded"),
+            Node(id="metadata", type="Actor", name="Metadata"),
+        ],
+        [],
+    )
+    storage.vector_store.absorb_embeddings({"embedded": [0.0, 1.0]})
+    texts = _texts(storage)
+    storage.update_node("moved", {"name": "Moved again"})
+    storage.update_node("metadata", {"metadata": {"k": "v"}})
+
+    committed = storage.commit_merge_embeddings(
+        storage.generation,
+        {key: [1.0, 0.0] for key in ("moved", "gone", "embedded", "metadata")},
+        texts,
+    )
+
+    assert committed == 1
+    assert storage.vector_store.get_vector_list("metadata") == [1.0, 0.0]
+    assert not storage.vector_store.has_embedding("moved")
+    assert not storage.vector_store.has_embedding("gone")
+    assert storage.vector_store.get_vector_list("embedded") == [0.0, 1.0]
+
+
+def test_a_merge_vector_the_store_refuses_is_dropped_and_the_rest_land(storage):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    backend._store["nodes"]["b"].update(name="Remote edit", revision=100)
+    remote = dict(backend._store["nodes"]["b"])
+
+    committed = storage.commit_merge_embeddings(
+        storage.generation, {"a": [1.0, 0.0], "b": [1.0, 0.0]}, _texts(storage)
+    )
+
+    assert committed == 1
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert backend._store["nodes"]["b"] == remote
+    assert not storage.vector_store.has_embedding("b")
+    assert not storage._resync_pending
+
+
+def test_a_replace_only_the_store_has_seen_supersedes_a_merge_embedding_commit(storage):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    backend._store["metadata"]["graph_generation"] = storage.generation + 1
+
+    committed = storage.commit_merge_embeddings(
+        storage.generation, {"a": [1.0, 0.0]}, _texts(storage)
+    )
+
+    assert committed is None
+    assert storage.generation != backend._store["metadata"]["graph_generation"]
+    assert not storage.vector_store.has_embedding("a")
+    assert not backend._store["nodes"]["a"].get("embedding")
+
+
+def test_a_merge_job_survives_a_shared_generation_only_the_store_has_seen(
+    storage, monkeypatch
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    backend.generation_shared_across_scopes = True
+    jobs = InMemoryExecutionStore()
+    job = jobs.enqueue(
+        ExecutionJob(
+            kind=ExecutionKind.IMPORT,
+            agent_id="import",
+            idempotency_key="merge",
+            payload={"mode": "merge", "graph_generation": storage.generation},
+        )
+    )
+    backend._store["metadata"]["graph_generation"] = storage.generation + 5
+    monkeypatch.setattr(
+        storage.vector_store,
+        "compute_node_embeddings",
+        lambda nodes: {node.id: [1.0, 0.0] for node in nodes},
+    )
+
+    drain_import_jobs(jobs, storage)
+
+    assert jobs.get(job.id).state == ExecutionState.SUCCEEDED
+    assert storage.generation == backend._store["metadata"]["graph_generation"]
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert _listed(storage) == set()
+
+
+def test_two_replaces_from_one_generation_store_different_generations(storage):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires a store that assigns revisions")
+    reserved = iter([70, 80])
+    storage._persistence_backend.reserve_generation = lambda: next(reserved)
+    backend = storage._persistence_backend
+
+    storage.replace_all_nodes_and_edges([], [])
+    assert storage.generation == 70
+    assert backend._store["metadata"]["graph_generation"] == 70
+    storage._generation = 1
+    storage.replace_all_nodes_and_edges([], [])
+    assert storage.generation == 80
+    assert backend._store["metadata"]["graph_generation"] == 80
+
+
+@pytest.mark.parametrize("failure", ["refused", "conflict"])
+def test_a_failed_merge_vector_commit_leaves_no_regenerated_vector(
+    storage, monkeypatch, failure
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    undo_vector = [9.0, 9.0]
+    monkeypatch.setattr(
+        storage.vector_store,
+        "update_nodes_embeddings",
+        lambda nodes: storage.vector_store.absorb_embeddings(
+            {node.id: undo_vector for node in nodes}
+        ),
+    )
+    texts = _texts(storage)
+    vectors = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
+
+    if failure == "refused":
+        monkeypatch.setattr(
+            backend,
+            "apply_batch",
+            Mock(side_effect=WriteRefusedByStore("refused")),
+        )
+        with pytest.raises(GraphWriteFailed):
+            storage.commit_merge_embeddings(storage.generation, vectors, texts)
+        assert {node.id for node in storage.nodes_without_embedding()} == {"a", "b"}
+        return
+
+    backend._store["nodes"]["b"].update(name="Remote edit", revision=100)
+    assert storage.commit_merge_embeddings(storage.generation, vectors, texts) == 1
+    assert [node.id for node in storage.nodes_without_embedding()] == ["b"]
+    assert storage.vector_store.get_vector_list("a") == [1.0, 0.0]
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+
+
+def _listed(storage):
+    return {node.id for node in storage.nodes_without_embedding()}
+
+
+def test_a_vector_generated_for_an_external_update_stays_owed_to_the_store(
+    storage, monkeypatch
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    monkeypatch.setattr(
+        storage.vector_store,
+        "update_nodes_embeddings",
+        lambda nodes: storage.vector_store.absorb_embeddings(
+            {node.id: [9.0, 9.0] for node in nodes}
+        ),
+    )
+    texts = _texts(storage)
+
+    def reported(node_id, **fields):
+        storage.apply_external_change(
+            ExternalChange.entities(
+                [
+                    EntityOperation.upsert_node(
+                        {**backend._store["nodes"][node_id], **fields}
+                    )
+                ]
+            )
+        )
+
+    reported("a", metadata={"k": "v"})
+    reported("b", metadata={"k": "v"})
+    assert _listed(storage) == {"a", "b"}
+    reported("b", metadata={"k": "w"}, embedding=[0.0, 1.0])
+    assert _listed(storage) == {"a"}
+
+    committed = storage.commit_merge_embeddings(
+        storage.generation, {"a": [1.0, 0.0], "b": [1.0, 0.0]}, texts
+    )
+
+    assert committed == 1
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert storage.vector_store.get_vector_list("b") == [0.0, 1.0]
+    assert _listed(storage) == set()
+
+
+def test_merge_vectors_of_unknown_outcome_are_committed_again_after_a_failed_reread(
+    storage, monkeypatch
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    apply_batch = backend.apply_batch
+    texts = _texts(storage)
+    vectors = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
+    monkeypatch.setattr(backend, "apply_batch", Mock(side_effect=RuntimeError("lost")))
+    monkeypatch.setattr(storage, "load", Mock(side_effect=RuntimeError("down")))
+
+    with pytest.raises(GraphWriteOutcomeUnknown):
+        storage.commit_merge_embeddings(storage.generation, vectors, texts)
+
+    assert _listed(storage) == {"a", "b"}
+    monkeypatch.setattr(backend, "apply_batch", apply_batch)
+    assert storage.commit_merge_embeddings(storage.generation, vectors, texts) == 2
+    assert backend._store["nodes"]["a"]["embedding"] == [1.0, 0.0]
+    assert _listed(storage) == set()
+
+
+@pytest.mark.parametrize("landed", [True, False])
+def test_a_reread_settles_merge_vectors_of_unknown_outcome(
+    storage, monkeypatch, landed
+):
+    if not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    backend = storage._persistence_backend
+    apply_batch = backend.apply_batch
+
+    def lost_acknowledgement(*args, **kwargs):
+        if landed:
+            apply_batch(*args, **kwargs)
+        raise RuntimeError("lost")
+
+    monkeypatch.setattr(backend, "apply_batch", lost_acknowledgement)
+
+    with pytest.raises(GraphWriteOutcomeUnknown):
+        storage.commit_merge_embeddings(
+            storage.generation,
+            {"a": [1.0, 0.0], "b": [1.0, 0.0]},
+            _texts(storage),
+        )
+
+    assert _listed(storage) == (set() if landed else {"a", "b"})
+    assert storage.vector_store.has_embedding("a") is landed

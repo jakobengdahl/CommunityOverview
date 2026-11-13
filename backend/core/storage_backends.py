@@ -113,6 +113,10 @@ class BackendCapabilities:
         unit. Needs `incremental_writes` and `transactions`, and a backend
         that also declares `change_notification` - a shared store - must
         declare `revision_enforcement` too (§4.4).
+    batch_conditions: `apply_batch` verifies `read_revisions` and
+        `expected_generation` inside its unit (EntityOperation), so a merge
+        import can run against a store others write to (ADR 0013 §3). Needs
+        `revision_enforcement`.
     """
 
     incremental_writes: bool = False
@@ -121,6 +125,7 @@ class BackendCapabilities:
     store_traversal: bool = False
     revision_enforcement: bool = False
     staged_sessions: bool = False
+    batch_conditions: bool = False
 
 
 SNAPSHOT_ONLY = BackendCapabilities()
@@ -185,6 +190,13 @@ class EntityOperation:
     edge judged before a merge retyped its endpoint on another instance
     cannot land after it.
     Not journaled either, for the same reason.
+
+    `read_revisions` and `expected_generation` are conditions of the whole
+    batch, carried on its first operation, for a backend declaring
+    `batch_conditions`. `read_revisions` is `(kind, id, revision)` for each
+    entity the batch's decision read but does not write, None meaning absent:
+    each present row is held against updates until commit and compared.
+    `expected_generation` is compared with the generation the store holds.
     """
 
     kind: EntityKindName
@@ -198,6 +210,8 @@ class EntityOperation:
     # an empty incident tuple requires no incident edges.
     endpoint_subtypes: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
     incident_edge_revisions: Optional[Tuple[Tuple[str, int], ...]] = None
+    read_revisions: Tuple[Tuple[str, str, Optional[int]], ...] = ()
+    expected_generation: Optional[int] = None
 
     @classmethod
     def upsert_node(cls, payload: Dict[str, Any]) -> "EntityOperation":
@@ -454,6 +468,14 @@ class NodeTypeChanged(EntityRevisionConflict):
         self.args = (f"node {node_id!r}: no longer of type {judged!r}",)
 
 
+class GraphGenerationMoved(EntityRevisionConflict):
+    """The store holds another `graph_generation` than the batch was decided
+    on: another instance replaced the whole graph. Nothing was applied."""
+
+    def __init__(self, expected: Optional[int], current: Optional[int]):
+        super().__init__("graph", "generation", expected, current)
+
+
 class WriteRefusedByStore(RuntimeError):
     """The store refused a write outright and applied none of it.
 
@@ -681,6 +703,11 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
                 f"{type(backend).__name__} declares revision_enforcement but "
                 f"does not implement: {', '.join(missing)}"
             )
+    if caps.batch_conditions and not caps.revision_enforcement:
+        raise TypeError(
+            f"{type(backend).__name__} declares batch_conditions without "
+            f"revision_enforcement"
+        )
     if caps.staged_sessions:
         # A merge is graph writes plus a layer removal as one unit, which a
         # backend that cannot apply an atomic batch has no way to offer.
