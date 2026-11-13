@@ -168,7 +168,6 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
   it('an empty replace_visualization clears all but a node added after it', () => {
     // Added after the push, and applied by the time the deferred render runs.
     const sync = {
-      holdsLocalAdd: () => false,
       isMember: (id) => id === 'existing',
       baselinePosition: () => ({ x: 1, y: 2 }),
     };

@@ -520,8 +520,10 @@ steps 6–8.
 >   `layout_applied` op (keeping big layouts under the server's per-batch cap).
 >   Node membership is the exception: the server is its only writer. The diff
 >   never emits a membership op; a user's own add, removal or clear is sent
->   explicitly (`sendMembership`), the baseline takes membership only from the
->   server's broadcasts, and a node read that settles after a newer membership
+>   explicitly (`sendMembership`), the baseline and the canvas take
+>   membership only from the server's broadcasts (an own add is drawn from
+>   its broadcast, with the nodes it was sent with), and a node read that
+>   settles after a newer membership
 >   version (the stream seq of the last membership op, snapshot or catch-up)
 >   keeps only the nodes the server still holds.
 >   Ops batch on a short debounce; transient POST failures requeue with backoff,
