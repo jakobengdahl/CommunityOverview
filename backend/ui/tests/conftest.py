@@ -265,3 +265,18 @@ def fastapi_test_client(graph_service, mock_llm_provider):
             app.include_router(router, prefix="/ui")
 
             yield TestClient(app), mock_llm_provider, graph_service
+
+
+@pytest.fixture
+def confirmation_auth(fastapi_test_client):
+    """Exercise real authentication for confirmation route tests."""
+    from backend.api_host.config import AppConfig
+    from backend.api_host.middleware import add_auth_middleware
+
+    client, _, _ = fastapi_test_client
+    add_auth_middleware(
+        client.app,
+        AppConfig(auth_enabled=True, auth_username="owner", auth_password="password"),
+    )
+    client.auth = ("owner", "password")
+    client.headers["X-Requested-With"] = "fetch"

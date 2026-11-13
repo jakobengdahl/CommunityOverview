@@ -153,10 +153,14 @@ def use_request_authorization(
     workspace_id: Optional[str] = None,
     workspace_kind: Optional[str] = None,
     graph_id: Optional[str] = None,
+    authenticated_principal: Optional[Mapping[str, str]] = None,
 ) -> Iterator[None]:
     """Temporarily bind request-level authorization inputs for service calls."""
     token = _request_authorization_inputs.set(
         {
+            "authenticated_principal": dict(authenticated_principal)
+            if authenticated_principal
+            else None,
             "headers": headers,
             "actor_id": actor_id,
             "actor_type": actor_type,
@@ -170,6 +174,12 @@ def use_request_authorization(
         yield
     finally:
         _request_authorization_inputs.reset(token)
+
+
+def request_authenticated_principal():
+    """Return only identity supplied by the authentication boundary, never actor defaults."""
+    principal = _request_authorization_inputs.get().get("authenticated_principal")
+    return dict(principal) if principal else None
 
 
 def build_graph_authorization_context(

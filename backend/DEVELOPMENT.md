@@ -1991,7 +1991,7 @@ own.
 |--------|----------|-------------|
 | POST | `/ui/chat` | Process chat with conversation history |
 | POST | `/ui/chat/stream` | POST SSE: LLM rounds, optional capped reasoning, tool start/finish, final chat response; 15-second keep-alive comments |
-| POST | `/ui/chat/confirm` | Execute one bound pending action with `{ "token": "…" }` under the confirming request's authorization; returns `{ "outcome": "ok" \| "failed", "message", "result" }` (`result` is the raw tool result; refusals also carry `error_code`) |
+| POST | `/ui/chat/confirm` | Execute one bound pending action with `{ "token": "…", "conversation_id": "…" }` under the confirming request's authorization; returns `{ "outcome": "ok" \| "failed", "message", "result" }` (`result` is the raw tool result; refusals also carry `error_code`) |
 | POST | `/ui/chat/simple` | Simple chat with single message |
 | POST | `/ui/propose-nodes` | Extract entities from text (returns proposals) |
 | POST | `/ui/upload` | Upload and analyze document |
@@ -2003,10 +2003,23 @@ own.
 Chat replies include ordered `pending_actions` cards when a tool result marks the
 turn as containing untrusted file content. Only the fixed read/view tool set runs
 subsequently; other calls return `confirmation_required` to the model. Tokens and
-bound arguments appear only in the API cards. Confirmations recheck the actor,
+bound arguments appear only in the API cards. Each card also carries its
+`conversation_id`: pass the current conversation ID on `/ui/chat` or
+`/ui/chat/stream`, or use the server-minted ID returned on the card. Confirm with
+both the token and that conversation ID. The route rejects extra fields,
+including replacement tool arguments, and requires a principal established by
+HTTP authentication (Basic, signed session or bearer token). Pending actions bind
+that principal at creation; actor headers and configured default actors never
+prove ownership. When HTTP authentication is disabled, confirmation is refused.
+Confirmations recheck the authenticated principal, actor and conversation,
 collection identity, current permissions and allowlist and execute the recorded
-call once, without another model call. Expired, evicted, used or unknown tokens
-return `confirmation_unknown`; actor or collection mismatches return
+call once, without another model call. Successful and failed executions emit a
+structured `chat_action_confirmed` audit event with tool, actor, conversation ID
+and outcome, without tool arguments. In tainted turns, blocked calls store their
+exact arguments before validation, including invalid or oversized attachment
+bodies, subject to pending-action capacity limits. Argument validation runs only
+after confirmation, before tool execution. Expired, evicted, used or unknown tokens
+return `confirmation_unknown`; principal, actor, conversation or collection mismatches return
 `access_denied`. The response's `outcome` is `failed` for a refusal and for a
 tool result with `success: false` or an `error` (its reason, from `error` or
 `message`, is the response's `message`), otherwise `ok`. Pending actions live only in the process that minted them and

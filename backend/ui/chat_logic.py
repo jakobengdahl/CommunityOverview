@@ -1822,6 +1822,8 @@ class ChatProcessor:
                 and not execution_only
                 and tool_name not in ATTACHMENT_TAINT_PERMITTED_TOOLS
             ):
+                # Defer argument validation until confirmation: every blocked
+                # call must produce the same refusal and retain its exact input.
                 if len(pending_actions_for_turn) < positive_int_setting(
                     "ATTACHMENT_PENDING_ACTIONS_PER_TURN", 5
                 ):

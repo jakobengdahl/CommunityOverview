@@ -44,6 +44,7 @@ _ACTOR_HEADERS = tuple(
 )
 # Scope key the auth middleware fills with the identity it authenticated.
 AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
+AUTHENTICATED_PRINCIPAL_SCOPE_KEY = "communityoverview.authenticated_principal"
 
 
 class ActorHeaderMiddleware:
@@ -355,6 +356,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 # Non-ASCII credentials are invalid; retain session fallback.
                 pass
         if bearer_authenticated:
+            request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                "kind": "bearer",
+                "id": "instance-token",
+            }
             return await call_next(request)
 
         # A valid signed session cookie (issued by POST /auth/login after a
@@ -386,6 +391,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                         "detail": "Session-auth writes require a same-origin request or X-Requested-With"
                     },
                 )
+            request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                "kind": "user",
+                "id": config.auth_username,
+            }
             # The cookie is only minted for the configured Basic user.
             request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
                 "actor_id": config.auth_username,
@@ -418,6 +427,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 )
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                    "kind": "user",
+                    "id": username,
+                }
                 request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
                     "actor_id": username,
                     "auth_source": "basic",
