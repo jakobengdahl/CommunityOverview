@@ -98,7 +98,6 @@ export function useSyncConnection(sessionId) {
           onCommand: (...a) => callIfCurrent('onCommand', ...a),
           onViewportSummoned: (...a) => callIfCurrent('onViewportSummoned', ...a),
           onDropped: (...a) => callIfCurrent('onDropped', ...a),
-          onLocalAddsReleased: (...a) => callIfCurrent('onLocalAddsReleased', ...a),
           onStreamRefused: (...a) => callIfCurrent('onStreamRefused', ...a),
         },
       });

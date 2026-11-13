@@ -29,6 +29,7 @@ import {
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
+  MEMBERSHIP_OPS,
   hydrateAddedNodes,
 } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
@@ -523,26 +524,29 @@ function App() {
         case 'nodes_replaced': {
           // A replace (a saved-view load or clear anywhere) keeps only the
           // nodes it names; both then draw the named nodes this canvas lacks.
-          // Never a node this browser added after the op was sequenced.
+          // This is the only place a node joins the canvas, this browser's
+          // own adds included: they are drawn from what they were sent with.
           const keep = new Set(op.node_ids || []);
           const dropped =
-            op.op === 'nodes_replaced'
-              ? store.nodes.filter((n) => !keep.has(n.id) && !syncRef.current?.holdsLocalAdd(n.id))
-              : [];
+            op.op === 'nodes_replaced' ? store.nodes.filter((n) => !keep.has(n.id)) : [];
           dropped.forEach((n) => removeNode(n.id));
+          const client = syncRef.current;
+          const sent = client?.takeSentNodes(op.node_ids);
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          if (!missing.length) return dropped.length > 0;
+          if (!missing.length || !client) {
+            sent?.onDrawn();
+            return dropped.length > 0;
+          }
           // The only case here with an internal await, so the only one where
           // the session or its membership can change out from under it: a
           // session switch mid-fetch (review round 5), or a membership change
           // that lands before the reads settle (hydrateAddedNodes).
-          const client = syncRef.current;
-          if (!client) return dropped.length > 0;
           const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
             client,
             missing,
-            api.getNodeDetails
+            api.getNodeDetails,
+            sent
           );
           if (syncRef.current !== client) return false; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
@@ -557,12 +561,13 @@ function App() {
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            sent.onDrawn();
             return true;
           }
           return dropped.length > 0;
         }
         case 'nodes_removed': {
-          const removeIds = (op.node_ids || []).filter((id) => !syncRef.current?.holdsLocalAdd(id));
+          const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
           removeIds.forEach((id) => removeNode(id));
           return removeIds.some((id) => existing.has(id));
@@ -977,10 +982,12 @@ function App() {
         // over, stop here rather than keep applying this call's now-stale
         // ops on top of what the newer one already established — that newer
         // resync's own return value is the one the caller should act on.
+        // A pending membership op is not drawn here: its broadcast draws it.
         let appliedCount = 0;
         for (const op of pendingOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (syncRef.current !== client) break;
+          if (MEMBERSHIP_OPS.has(op?.op)) continue;
           if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
@@ -1384,15 +1391,20 @@ function App() {
               result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
             );
             clearVisualization();
-            addNodesToVisualization(positioned, result.edges || []);
             publishMembership(
               'nodes_replaced',
-              positioned.map((n) => n.id)
+              positioned.map((n) => n.id),
+              {
+                nodes: positioned,
+                edges: result.edges || [],
+                onDrawn: () => {
+                  if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+                  if (result.groups?.length)
+                    setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+                  if (result.annotations?.length) setPendingAnnotations(result.annotations);
+                },
+              }
             );
-            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-            if (result.groups?.length)
-              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-            if (result.annotations?.length) setPendingAnnotations(result.annotations);
           },
         });
       } catch (err) {
@@ -1404,7 +1416,7 @@ function App() {
   }, [
     stats,
     clearVisualization,
-    addNodesToVisualization,
+    publishMembership,
     setHiddenNodeIds,
     setPendingGroups,
     setPendingAnnotations,
@@ -1458,9 +1470,11 @@ function App() {
           showNotification('info', t('federation.teleport_focus_not_found'));
           return;
         }
-        addNodesToVisualization([result.node], result.edges || []);
-        publishMembership('nodes_added', [result.node.id]);
-        setFocusNodeId(result.node.id);
+        publishMembership('nodes_added', [result.node.id], {
+          nodes: [result.node],
+          edges: result.edges || [],
+          onDrawn: () => setFocusNodeId(result.node.id),
+        });
         // Carry the sender's search text into the search box so the visitor
         // lands on the node without losing what they were looking for.
         if (searchContext) {
@@ -1477,7 +1491,7 @@ function App() {
   }, [
     stats,
     urlViewSettled,
-    addNodesToVisualization,
+    publishMembership,
     setFocusNodeId,
     setGuideSearchInput,
     showNotification,
@@ -2035,19 +2049,32 @@ function App() {
 
   // This browser's own membership changes go to the session as explicit ops;
   // the first add materialises it, as a first save would. Removing from a
-  // session that does not exist yet has nothing to change. The layout save
-  // follows at once rather than after the debounce: until the added nodes'
-  // positions arrive, another browser places them itself and its own save
-  // would overwrite them, a drag made here meanwhile included.
+  // session that does not exist yet has nothing to change. Added nodes are
+  // drawn when the server broadcasts the op, and the layout save follows at
+  // once rather than after the debounce: until their positions arrive,
+  // another browser places them itself and its own save would overwrite
+  // them, a drag made here meanwhile included.
   useEffect(() => {
-    setMembershipPublisher((op, nodeIds) => {
-      if (!nodeIds?.length && op !== 'nodes_replaced') return;
+    setMembershipPublisher((op, nodeIds, payload) => {
       const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds.length);
-      if (removes && !isSessionMaterialized()) return;
-      ensureSyncConnected(sessionId)?.sendMembership(op, nodeIds);
-      // Next tick, once the canvas has drawn the change; the debounced
-      // autosave would reset this timer on that very render.
-      setTimeout(() => requestSessionSnapshot(null), 0);
+      const nothingToSend = !nodeIds?.length && op !== 'nodes_replaced';
+      const client =
+        nothingToSend || (removes && !isSessionMaterialized())
+          ? null
+          : ensureSyncConnected(sessionId);
+      if (!client) {
+        payload.onDrawn?.();
+        return;
+      }
+      client.sendMembership(op, nodeIds, {
+        ...payload,
+        onDrawn: () => {
+          payload.onDrawn?.();
+          // Next tick, once the canvas has the nodes; the debounced autosave
+          // would reset this timer on that very render.
+          setTimeout(() => requestSessionSnapshot(null), 0);
+        },
+      });
     });
     return () => setMembershipPublisher(null);
   }, [
@@ -2747,8 +2774,6 @@ function App() {
       onLocalAnnotationsApplied: (ops) => {
         (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
       },
-      // Own adds a membership op sequenced after them has since removed.
-      onLocalAddsReleased: (ids) => ids.forEach((id) => removeNode(id)),
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
       onLeases: (l) => setRemoteLeases(l),
@@ -3105,23 +3130,16 @@ function App() {
             showNotification('error', t('context_menu.reference_broken_target'));
             return;
           }
-          await addNodesToVisualization([details.node], []);
-          publishMembership('nodes_added', [details.node.id]);
-          setFocusNodeId(target);
+          publishMembership('nodes_added', [details.node.id], {
+            nodes: [details.node],
+            onDrawn: () => setFocusNodeId(target),
+          });
         } catch {
           showNotification('error', t('context_menu.reference_broken_target'));
         }
       }
     },
-    [
-      sessionId,
-      switchToSession,
-      showNotification,
-      t,
-      addNodesToVisualization,
-      publishMembership,
-      setFocusNodeId,
-    ]
+    [sessionId, switchToSession, showNotification, t, publishMembership, setFocusNodeId]
   );
 
   const handleRenameSession = useCallback(
@@ -3353,24 +3371,14 @@ function App() {
       if (syncRef.current?.sessionId !== sessionAtStart) return;
       const nodes = found.map((r) => r?.node).filter(Boolean);
       if (nodes.length) {
-        addNodesToVisualization(
-          nodes,
-          found.flatMap((r) => r?.edges || [])
-        );
         publishMembership(
           'nodes_added',
-          nodes.map((n) => n.id)
+          nodes.map((n) => n.id),
+          { nodes, edges: found.flatMap((r) => r?.edges || []) }
         );
       }
     },
-    [
-      refreshStagedDiff,
-      refreshStagedEntities,
-      sessionId,
-      syncRef,
-      addNodesToVisualization,
-      publishMembership,
-    ]
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, publishMembership]
   );
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);

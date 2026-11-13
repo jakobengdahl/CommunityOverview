@@ -63,7 +63,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     updateChatMessage,
     nodes,
     edges,
-    addNodesToVisualization,
     publishMembership,
     updateVisualization,
     clearVisualization,
@@ -165,10 +164,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       const currentNodes = useGraphStore.getState().nodes;
       const allEdges = [...edges, ...(result.edges || [])];
       const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-      addNodesToVisualization(positionedNodes, result.edges || []);
       publishMembership(
         'nodes_added',
-        positionedNodes.map((n) => n.id)
+        positionedNodes.map((n) => n.id),
+        { nodes: positionedNodes, edges: result.edges || [] }
       );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
@@ -198,12 +197,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       // useToolResultCommands path so both delivery channels behave the same.
       clearVisualization();
       const filteredNodes = filterCommunityNodes(toolResult.nodes || []);
-      if (filteredNodes.length > 0) {
-        updateVisualization(filteredNodes, toolResult.edges || []);
-      }
       publishMembership(
         'nodes_replaced',
-        filteredNodes.map((n) => n.id)
+        filteredNodes.map((n) => n.id),
+        { nodes: filteredNodes, edges: toolResult.edges || [] }
       );
     } else if (toolResult.action === 'add_to_visualization') {
       addNodesToView(toolResult);
@@ -223,10 +220,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           updatedNodeIds.has(n.id) ? updatedNodes.find((un) => un.id === n.id) : n
         );
         const newNodes = updatedNodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-        update([...mergedNodes, ...newNodes], currentEdges);
+        update(mergedNodes, currentEdges);
         publishMembership(
           'nodes_added',
-          newNodes.map((n) => n.id)
+          newNodes.map((n) => n.id),
+          { nodes: newNodes }
         );
       }
     } else if (toolResult.action === 'mark_nodes') {
@@ -465,10 +463,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         const currentNodes = useGraphStore.getState().nodes;
         const allEdges = [...edges, ...(response.toolResult.edges || [])];
         const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
         publishMembership(
           'nodes_added',
-          positionedNodes.map((n) => n.id)
+          positionedNodes.map((n) => n.id),
+          { nodes: positionedNodes, edges: response.toolResult.edges || [] }
         );
       }
     } catch (err) {

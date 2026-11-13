@@ -167,13 +167,13 @@ function GuideOverlay() {
           if (!cancelled && result.nodes?.length > 0) {
             const s = useGraphStore.getState();
             const allEdges = [...s.edges, ...(result.edges || [])];
-            s.addNodesToVisualization(
-              positionNewNodes(result.nodes, s.nodes, allEdges),
-              result.edges || []
-            );
             s.publishMembership(
               'nodes_added',
-              result.nodes.map((n) => n.id)
+              result.nodes.map((n) => n.id),
+              {
+                nodes: positionNewNodes(result.nodes, s.nodes, allEdges),
+                edges: result.edges || [],
+              }
             );
           }
 
@@ -185,8 +185,9 @@ function GuideOverlay() {
           if (!cancelled && result.added_node_ids?.length > 0) {
             const nodeWithId = { type: nodeType, ...nodeData, id: result.added_node_ids[0] };
             const s = useGraphStore.getState();
-            s.addNodesToVisualization(positionNewNodes([nodeWithId], s.nodes, s.edges), []);
-            s.publishMembership('nodes_added', [nodeWithId.id]);
+            s.publishMembership('nodes_added', [nodeWithId.id], {
+              nodes: positionNewNodes([nodeWithId], s.nodes, s.edges),
+            });
           }
         } else if (action === 'update_node') {
           const nodeId = currentStep.node_id;
@@ -250,10 +251,10 @@ function GuideOverlay() {
                 if (!cancelled) {
                   const s = useGraphStore.getState();
                   s.clearVisualization();
-                  s.addNodesToVisualization(loadedNodes, savedEdges);
                   s.publishMembership(
                     'nodes_replaced',
-                    loadedNodes.map((n) => n.id)
+                    loadedNodes.map((n) => n.id),
+                    { nodes: loadedNodes, edges: savedEdges }
                   );
                 }
               }

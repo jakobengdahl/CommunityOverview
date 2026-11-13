@@ -15,8 +15,8 @@
  *  - Node membership is the exception: the server is its only writer. A
  *    snapshot never carries it; this browser's own adds, removals and
  *    replacements go out as explicit ops (`sendMembership`), and the baseline
- *    takes membership only from the server's broadcasts, this client's own
- *    included.
+ *    and the canvas take added nodes only from the server's broadcasts, this
+ *    client's own included.
  *  - Stay echo-safe: the baseline mirrors what the server already has, so a
  *    remote op the host re-applies (updating the baseline) never bounces back
  *    out as a fresh local op — no store guard flag needed.
@@ -44,7 +44,7 @@ const SERVER_ONLY_OPS = new Set([
 // Ops that change which nodes are in the session. The server is their only
 // writer: they are sent explicitly, never derived from a snapshot, and their
 // broadcasts are applied even when this client sent them.
-const MEMBERSHIP_OPS = new Set(['nodes_added', 'nodes_removed', 'nodes_replaced']);
+export const MEMBERSHIP_OPS = new Set(['nodes_added', 'nodes_removed', 'nodes_replaced']);
 
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
@@ -320,15 +320,21 @@ export function computeOps(prevState, nextState) {
 }
 
 /**
- * Read nodes a membership broadcast added, for the canvas. A result read
- * across a newer membership version is stale: it keeps only the nodes the
- * server still holds, since a later removal or replace must not be undone by
- * a late read, while a node still held has no other op left to render it.
- * Edges come only from the kept nodes' reads.
+ * Read nodes a membership broadcast added, for the canvas. A node this client
+ * sent with its add (`sent`, from takeSentNodes) is taken from there, not
+ * read. A result read across a newer membership version is stale: it keeps
+ * only the nodes the server still holds, since a later removal or replace
+ * must not be undone by a late read, while a node still held has no other op
+ * left to render it. Edges come only from the kept nodes.
  */
-export async function hydrateAddedNodes(client, nodeIds, getNodeDetails) {
+export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = null) {
   const version = client.membershipVersion;
-  const reads = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
+  const read = (id) => {
+    const node = sent?.nodes.get(id);
+    if (node) return { node, edges: sent.edges.filter((e) => e.source === id || e.target === id) };
+    return getNodeDetails(id).catch(() => null);
+  };
+  const reads = await Promise.all(nodeIds.map(read));
   const stale = client.membershipVersion !== version;
   const kept = reads.filter((r) => r?.node && (!stale || client.isMember(r.node.id)));
   return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
@@ -785,13 +791,11 @@ export class SessionSyncClient {
     // catch-up reflects. A hydration read across a change of it is stale
     // (hydrateAddedNodes).
     this._membershipVersion = 0;
-    // Nodes this client added (an add or a replace naming them) whose op has
-    // not been applied from the stream yet: node id -> {op, seq}, the latest
-    // op that added it and its stream seq (null until that op's POST is
-    // acked). A membership op sequenced before the add must not take the node
-    // off this canvas (holdsLocalAdd); a released hold is reconciled against
-    // the server's membership (onLocalAddsReleased).
-    this._localAdds = new Map();
+    // What this client's own adds and replaces were sent with, so drawing
+    // their broadcast needs no read: node id -> {node, sent}, where `sent` is
+    // the op's {edges, onDrawn}. Data only: the canvas still takes the node
+    // from the broadcast (takeSentNodes).
+    this._sentNodes = new Map();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -868,26 +872,28 @@ export class SessionSyncClient {
     return this._baseline.node_refs.includes(nodeId);
   }
 
-  /** Whether this client's own add of `nodeId` is sequenced after the stream so far. */
-  holdsLocalAdd(nodeId) {
-    const hold = this._localAdds.get(nodeId);
-    return Boolean(hold) && (hold.seq === null || hold.seq > this._appliedSeq);
-  }
-
-  /** End these holds; hand the host the ones the server no longer holds. */
-  _releaseLocalAdds(ids) {
-    ids.forEach((id) => this._localAdds.delete(id));
-    const gone = ids.filter((id) => !this.isMember(id));
-    if (gone.length) this.handlers.onLocalAddsReleased?.(gone);
-  }
-
-  _heldPositions() {
-    const held = {};
-    for (const id of this._localAdds.keys()) {
-      const pos = this._baseline.positions[id];
-      if (pos && this.holdsLocalAdd(id)) held[id] = pos;
+  /**
+   * Take what this client sent with its own adds of `nodeIds`: the nodes by
+   * id, the edges of their ops, and an `onDrawn` that runs those ops' own
+   * follow-ups (once the host has drawn them). Taken once, by whichever
+   * broadcast names a node first.
+   */
+  takeSentNodes(nodeIds) {
+    const nodes = new Map();
+    const ops = new Set();
+    for (const id of nodeIds || []) {
+      const entry = this._sentNodes.get(id);
+      if (!entry) continue;
+      this._sentNodes.delete(id);
+      nodes.set(id, entry.node);
+      ops.add(entry.sent);
     }
-    return held;
+    const sent = [...ops];
+    return {
+      nodes,
+      edges: sent.flatMap((s) => s.edges),
+      onDrawn: () => sent.forEach((s) => s.onDrawn?.()),
+    };
   }
 
   get membershipVersion() {
@@ -1453,51 +1459,52 @@ export class SessionSyncClient {
   }
 
   /**
-   * Record the stream seq at which each acked add was applied; an add the
-   * server applied as a no-op, or rejected, or whose seq the stream has
-   * already passed, is no longer held. Only the op that set a hold ends it.
+   * A replace the server found unchanged is not broadcast; its ack says the
+   * session already holds those nodes, so the host draws them as their
+   * broadcast would have (the ones still held), and a dropped op's sent
+   * nodes are let go.
    */
-  _ackLocalAdds(batch, applied) {
-    const seqOf = new Map();
-    for (const entry of applied || []) {
-      if (entry?.op !== 'nodes_added' && entry?.op !== 'nodes_replaced') continue;
-      if (typeof entry.seq !== 'number') continue;
-      (entry.node_ids || []).forEach((id) => seqOf.set(id, entry.seq));
-    }
-    const released = [];
+  _settleSentMembership(batch, applied) {
+    const replaced = (applied || [])
+      .filter((entry) => entry?.op === 'nodes_replaced')
+      .map((entry) => [...new Set(entry.node_ids || [])].sort().join('\n'));
     for (const op of batch) {
-      for (const id of op.node_ids || []) {
-        const hold = this._localAdds.get(id);
-        if (hold?.op !== op) continue;
-        const seq = seqOf.get(id);
-        if (seq === undefined || seq <= this._appliedSeq) released.push(id);
-        else hold.seq = seq;
+      if (op.op !== 'nodes_replaced' || !op.node_ids.length) continue;
+      const at = replaced.indexOf([...op.node_ids].sort().join('\n'));
+      if (at >= 0) {
+        replaced.splice(at, 1);
+      } else if (applied) {
+        const held = op.node_ids.filter((id) => this.isMember(id));
+        this.takeSentNodes(op.node_ids.filter((id) => !this.isMember(id)));
+        this.handlers.onRemoteOps?.([{ op: 'nodes_added', node_ids: held }], {
+          sessionId: this.sessionId,
+        });
       }
     }
-    if (released.length) this._releaseLocalAdds(released);
+    if (!applied) {
+      for (const op of batch) {
+        if (MEMBERSHIP_OPS.has(op.op)) this.takeSentNodes(op.node_ids);
+      }
+    }
   }
 
   /**
    * Send this browser's own membership change — `nodes_added`,
    * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
-   * as one explicit op. The baseline does not move until the server
-   * broadcasts it back.
+   * as one explicit op. Neither the baseline nor the canvas gains a node
+   * until the server broadcasts it back; `nodes` (with `edges`) is what that
+   * broadcast then draws instead of reading, and `onDrawn` runs once it has.
    */
-  sendMembership(op, nodeIds) {
+  sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null } = {}) {
     if (!MEMBERSHIP_OPS.has(op)) return;
     const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
     if (!ids.length && op !== 'nodes_replaced') return;
-    const sent = { op, node_ids: ids };
-    if (op === 'nodes_removed') {
-      ids.forEach((id) => this._localAdds.delete(id));
-    } else {
-      if (op === 'nodes_replaced') {
-        const named = new Set(ids);
-        [...this._localAdds.keys()].forEach((id) => named.has(id) || this._localAdds.delete(id));
-      }
-      ids.forEach((id) => this._localAdds.set(id, { op: sent, seq: null }));
-    }
-    this._enqueue([sent]);
+    const sent = { edges, onDrawn };
+    const named = new Set(op === 'nodes_removed' ? [] : ids);
+    const carried = nodes.filter((node) => named.has(node?.id));
+    carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
+    this._enqueue([{ op, node_ids: ids }]);
+    if (!carried.length) onDrawn?.(); // nothing for a broadcast to draw
   }
 
   /**
@@ -1783,7 +1790,7 @@ export class SessionSyncClient {
         // (App.jsx's applyRemoteOp) — this reuses that exact path rather
         // than adding a second one, the same way handleImageIngest already
         // reuses it for its own direct-apply case.
-        this._ackLocalAdds(batch, body.applied);
+        this._settleSentMembership(batch, body.applied || []);
         if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
@@ -1828,7 +1835,7 @@ export class SessionSyncClient {
           // `finally`'s own filter is then a harmless no-op for a batch
           // already removed.
           this._removeInFlight(batch);
-          this._ackLocalAdds(batch, []);
+          this._settleSentMembership(batch, null);
           // Parsed only to let onDropped tell apart the two distinct 409
           // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
           // different-field-edit): a live edit lease (LeaseConflict) vs. a
@@ -2055,10 +2062,7 @@ export class SessionSyncClient {
         let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
-          const heldPositions = this._heldPositions();
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
-          // A held node stays where this client put it: its add comes later.
-          Object.assign(this._baseline.positions, heldPositions);
           if (MEMBERSHIP_OPS.has(op.op) && typeof data.seq === 'number') {
             this._membershipVersion = data.seq;
           }
@@ -2069,10 +2073,6 @@ export class SessionSyncClient {
             sessionId: this.sessionId,
           });
         }
-        const passed = [...this._localAdds]
-          .filter(([, hold]) => hold.seq !== null && hold.seq <= this._appliedSeq)
-          .map(([id]) => id);
-        if (passed.length) this._releaseLocalAdds(passed);
         break;
       }
       case 'presence_joined':

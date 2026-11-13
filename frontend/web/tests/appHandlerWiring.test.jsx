@@ -1,5 +1,6 @@
 // covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, waitFor, act, screen, fireEvent, cleanup } from '@testing-library/react';
 
 // The session-scoped helpers App delegates to are tested on their own in
@@ -108,6 +109,7 @@ class FakeEventSource {
     this.url = url;
     this.onmessage = null;
     this.onerror = null;
+    FakeEventSource.instances.push(this);
     setTimeout(
       () =>
         this.onmessage?.({
@@ -118,12 +120,9 @@ class FakeEventSource {
   }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -332,7 +331,10 @@ describe('App handler wiring', () => {
     });
 
     expect(api.addNodes).toHaveBeenCalledWith([data], []);
-    expect(findNode('created-1')).toMatchObject({ type: data.type, name: data.name });
+    // Drawn from the session's broadcast of the add.
+    await waitFor(() =>
+      expect(findNode('created-1')).toMatchObject({ type: data.type, name: data.name })
+    );
   });
 
   it('handleEdgeUpdate persists the edge edit and applies it to the canvas edge', async () => {
@@ -364,7 +366,7 @@ describe('App handler wiring', () => {
     });
 
     expect(api.getRelatedNodes).toHaveBeenCalledWith('b', { depth: 1 });
-    expect(nodeIds()).toContain('n1');
+    await waitFor(() => expect(nodeIds()).toContain('n1'));
     expect(findEdge('en')).toBeTruthy();
   });
 
@@ -423,7 +425,7 @@ describe('App handler wiring', () => {
 
     expect(api.getNodeDetails).toHaveBeenCalledWith('v1');
     expect(api.getNodeDetails).toHaveBeenCalledWith('v2');
-    expect(nodeIds()).toEqual(['v1', 'v2']);
+    await waitFor(() => expect(nodeIds()).toEqual(['v1', 'v2']));
   });
   it.each(['drawer', 'connect dialog', 'new session'])(
     '%s still opens an empty session on 404 without a missing-link notice',
@@ -559,8 +561,8 @@ describe('App handler wiring', () => {
         await canvas().onReferenceOpen({ targetKind: 'resource', target: 'res-1' });
       });
       expect(api.getNodeDetails).toHaveBeenCalledWith('res-1');
+      await waitFor(() => expect(store().focusNodeId).toBe('res-1'));
       expect(nodeIds()).toContain('res-1');
-      expect(store().focusNodeId).toBe('res-1');
     });
 
     it('does not add anything when a resource target cannot be fetched', async () => {

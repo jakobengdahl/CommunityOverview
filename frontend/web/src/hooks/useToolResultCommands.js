@@ -34,7 +34,11 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // mistaken for the same broadcast delivered twice.
   const appliedCommandIdsRef = useRef([]);
 
-  // Apply a tool result's nodes and edges to the canvas.
+  // Apply a tool result's nodes and edges to the canvas. A push the server
+  // already applied draws only the nodes the session holds (the rest are
+  // drawn, or were dropped, by membership broadcasts); `publish` marks one it
+  // could not apply (see the legacy stream below), whose nodes this browser
+  // sends and then draws from the op's broadcast.
   const applyToCanvas = useCallback(
     (toolResult, { publish = false } = {}) => {
       const {
@@ -45,10 +49,18 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         clearVisualization: clearViz,
         publishMembership,
       } = useGraphStore.getState();
+      const sync = syncRef?.current;
+      const held = (n) => !sync || sync.isMember(n.id);
 
       const filtered = (toolResult.nodes || []).filter(
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
       );
+      const send = (op, nodes, edges = []) =>
+        publishMembership(
+          op,
+          nodes.map((n) => n.id),
+          { nodes, edges }
+        );
 
       // Merge returned nodes into the current view (additive placement). Shared
       // by the explicit add_to_visualization action and the no-explicit-action
@@ -64,7 +76,8 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             }
           : null;
         const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-        addNodes(positioned, toolResult.edges || []);
+        if (publish) send('nodes_added', positioned, toolResult.edges || []);
+        else addNodes(positioned.filter(held), toolResult.edges || []);
       };
 
       if (toolResult.action === 'add_to_visualization') {
@@ -74,24 +87,28 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         toolResult.action === 'clear_visualization' ||
         toolResult.action === 'replace_visualization'
       ) {
-        // Explicit replace/clear/load: swap the whole view for the results,
-        // keeping nodes added after the push was sequenced: this browser's
-        // still held, and any the server holds by now (a deferred render).
-        const sync = syncRef?.current;
+        // Explicit replace/clear/load: swap the whole view for the results.
+        clearViz();
+        if (publish) {
+          send('nodes_replaced', filtered, toolResult.edges || []);
+          return;
+        }
+        // Nodes added since the push was sequenced (a deferred render) stay
+        // where the server has them; named ones removed since do not return.
         const named = new Set(filtered.map((n) => n.id));
-        const held = currentNodes
-          .filter((n) => !named.has(n.id) && (sync?.holdsLocalAdd(n.id) || sync?.isMember(n.id)))
+        const kept = currentNodes
+          .filter((n) => !named.has(n.id) && sync?.isMember(n.id))
           .map((n) => {
             const pos = sync.baselinePosition(n.id);
             return pos ? { ...n, _savedPosition: pos } : n;
           });
-        const kept = new Set([...named, ...held.map((n) => n.id)]);
-        const heldEdges = held.length
-          ? currentEdges.filter((e) => kept.has(e.source) && kept.has(e.target))
+        const shown = [...filtered.filter(held), ...kept];
+        const shownIds = new Set(shown.map((n) => n.id));
+        const keptEdges = kept.length
+          ? currentEdges.filter((e) => shownIds.has(e.source) && shownIds.has(e.target))
           : [];
-        clearViz();
-        if (kept.size > 0) {
-          updateViz([...filtered, ...held], [...(toolResult.edges || []), ...heldEdges]);
+        if (shown.length > 0) {
+          updateViz(shown, [...(toolResult.edges || []), ...keptEdges]);
         }
       } else if (toolResult.action === 'update_in_visualization') {
         // In-place update: replace matching nodes, keep the rest, append any
@@ -102,26 +119,18 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             updatedIds.has(n.id) ? filtered.find((u) => u.id === n.id) : n
           );
           const newNodes = filtered.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-          updateViz([...merged, ...newNodes], currentEdges);
+          if (publish) {
+            updateViz(merged, currentEdges);
+            send('nodes_added', newNodes);
+          } else {
+            updateViz([...merged, ...newNodes.filter(held)], currentEdges);
+          }
         }
       } else if (filtered.length > 0) {
         // No explicit view-content action: default to additive so a plain
         // additive request (or any node-returning tool) never silently clears
         // the current view.
         addNodesToView();
-      }
-      // A push the server already applied is only rendered; `publish` marks
-      // one it could not apply (see the legacy stream below).
-      if (publish) {
-        const replaces = [
-          'load_visualization',
-          'clear_visualization',
-          'replace_visualization',
-        ].includes(toolResult.action);
-        publishMembership(
-          replaces ? 'nodes_replaced' : 'nodes_added',
-          filtered.map((n) => n.id)
-        );
       }
     },
     [latestViewport, syncRef]

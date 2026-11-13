@@ -154,6 +154,7 @@ function scheduleClearGroupsReset(set) {
 // Forwards this browser's own membership changes to the active session (set
 // by App). Rendering never sends membership: a change the server broadcast
 // must not be sent back, so only the user-action sites call publishMembership.
+// Added nodes reach the canvas from the server's broadcast of the op.
 let membershipPublisher = null;
 
 // One auto-clear timer per pulsing node. A repeated pulse on the same node
@@ -391,8 +392,24 @@ const useGraphStore = create((set, get) => ({
   setMembershipPublisher: (publish) => {
     membershipPublisher = publish;
   },
-  /** Send a user's own `nodes_added`/`nodes_removed`/`nodes_replaced` to the session. */
-  publishMembership: (op, nodeIds) => membershipPublisher?.(op, nodeIds),
+  /**
+   * Send a user's own `nodes_added`/`nodes_removed`/`nodes_replaced` to the
+   * session. `nodes`/`edges` are what its broadcast draws, and `onDrawn` runs
+   * after it has; the caller draws nothing itself. With no session to send to,
+   * they are drawn here at once, with `draw` when given.
+   */
+  publishMembership: (
+    op,
+    nodeIds,
+    { nodes = [], edges = [], onDrawn = null, draw = null } = {}
+  ) => {
+    if (membershipPublisher) {
+      membershipPublisher(op, nodeIds, { nodes, edges, onDrawn });
+      return;
+    }
+    if (nodes.length) (draw || get().addNodesToVisualization)(nodes, edges);
+    onDrawn?.();
+  },
 
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),

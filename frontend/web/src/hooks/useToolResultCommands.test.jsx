@@ -312,7 +312,10 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
     expect(store().publishMembership).not.toHaveBeenCalled();
     push('cmd-2', false);
-    expect(store().publishMembership).toHaveBeenCalledWith('nodes_replaced', ['n1']);
+    expect(store().publishMembership).toHaveBeenCalledWith('nodes_replaced', ['n1'], {
+      nodes: [{ id: 'n1', type: 'Goal' }],
+      edges: [],
+    });
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

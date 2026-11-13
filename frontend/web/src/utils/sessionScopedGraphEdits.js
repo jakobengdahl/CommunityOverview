@@ -2,8 +2,10 @@ import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
 import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
 
 // The user's own membership change, sent to the session as an explicit op.
-const publishMembership = (op, nodeIds) =>
-  useGraphStore.getState().publishMembership?.(op, nodeIds);
+// Added nodes are drawn by the server's broadcast of it, from `nodes`/`edges`;
+// `draw` draws them at once only when there is no session to send to.
+const publishMembership = (op, nodeIds, payload) =>
+  useGraphStore.getState().publishMembership?.(op, nodeIds, payload);
 
 /**
  * App's awaiting graph handlers, guarded against stale post-await canvas writes.
@@ -248,10 +250,10 @@ export async function persistNewNodes({
   if (scope.sessionChanged()) return false;
   const drawn = toCanvas(result);
   if (!drawn) return false;
-  addNodesToVisualization(drawn.nodes, drawn.edges || []);
   publishMembership(
     'nodes_added',
-    drawn.nodes.map((n) => n.id)
+    drawn.nodes.map((n) => n.id),
+    { nodes: drawn.nodes, edges: drawn.edges || [], draw: addNodesToVisualization }
   );
   return true;
 }
@@ -285,10 +287,10 @@ export async function expandNode({
     if (result.nodes && result.nodes.length > 0) {
       const existingIds = new Set(nodes.map((n) => n.id));
       const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
-      addNodesToVisualization(result.nodes, result.edges || []);
       publishMembership(
         'nodes_added',
-        result.nodes.map((n) => n.id)
+        result.nodes.map((n) => n.id),
+        { nodes: result.nodes, edges: result.edges || [], draw: addNodesToVisualization }
       );
       if (newCount > 0) {
         showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
@@ -496,29 +498,25 @@ export async function loadSavedViewNode({
           }
           return n;
         });
-      publishMembership(
-        'nodes_replaced',
-        loadedNodes.map((n) => n.id)
-      );
-      if (loadedNodes.length > 0) {
-        let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
-        if (edgesToLoad.length === 0) {
-          const loadedIds = new Set(loadedNodes.map((n) => n.id));
-          const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
-          for (const d of details) {
-            if (d?.edges) {
-              const relevant = d.edges.filter(
-                (e) =>
-                  loadedIds.has(e.source) &&
-                  loadedIds.has(e.target) &&
-                  (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-              );
-              edgesToLoad.push(...relevant);
-            }
+      let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
+      if (edgesToLoad.length === 0) {
+        const loadedIds = new Set(loadedNodes.map((n) => n.id));
+        const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
+        for (const d of details) {
+          if (d?.edges) {
+            const relevant = d.edges.filter(
+              (e) =>
+                loadedIds.has(e.source) &&
+                loadedIds.has(e.target) &&
+                (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+            );
+            edgesToLoad.push(...relevant);
           }
         }
-        const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-        addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+      }
+      const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
+      // Groups and annotations wait for the nodes they frame.
+      const restoreAnnotations = () => {
         if (savedViewAnnotations.groups.length > 0) {
           setPendingGroups({
             groups: savedViewAnnotations.groups,
@@ -528,7 +526,17 @@ export async function loadSavedViewNode({
         if (savedViewAnnotations.annotations.length > 0) {
           setPendingAnnotations(savedViewAnnotations.annotations);
         }
-      }
+      };
+      publishMembership(
+        'nodes_replaced',
+        loadedNodes.map((n) => n.id),
+        {
+          nodes: loadedNodes,
+          edges: Array.from(edgeMap.values()),
+          draw: addNodesToVisualization,
+          onDrawn: loadedNodes.length > 0 ? restoreAnnotations : null,
+        }
+      );
     }
     showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
     return true;
@@ -604,12 +612,15 @@ export async function createDialogNode({
   const [createdNode] = created.nodes;
   showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   if (scope.sessionChanged()) return false;
-  addNodesToVisualization(created.nodes, []);
   publishMembership(
     'nodes_added',
-    created.nodes.map((n) => n.id)
+    created.nodes.map((n) => n.id),
+    {
+      nodes: created.nodes,
+      draw: addNodesToVisualization,
+      onDrawn: () => onDrawn?.(createdNode),
+    }
   );
-  onDrawn?.(createdNode);
   return true;
 }
 
