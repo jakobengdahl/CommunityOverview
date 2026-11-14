@@ -95,6 +95,7 @@ _ANNOTATION_META_FIELDS = frozenset(
 STATE_OPS = {
     "nodes_added",
     "nodes_removed",
+    "nodes_replaced",
     "node_moved",
     "nodes_hidden",
     "nodes_shown",
@@ -616,6 +617,19 @@ def _remove_all(existing: List[str], removals: List[str]) -> List[str]:
     return [item for item in existing if item not in drop]
 
 
+def _drop_node_refs(state: Dict[str, Any], removals: List[str]) -> None:
+    """Remove nodes from ``state`` with their position, flags and group slots."""
+    drop = set(removals)
+    state["node_refs"] = _remove_all(state["node_refs"], removals)
+    state["positions"] = {k: v for k, v in state["positions"].items() if k not in drop}
+    state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
+    state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], removals)
+    for ann in state["annotations"]:
+        members = ann.get("member_node_ids")
+        if isinstance(members, list):
+            ann["member_node_ids"] = [m for m in members if m not in drop]
+
+
 class SessionStore:
     """In-memory registry of sessions backed by a persistence seam.
 
@@ -889,18 +903,18 @@ class SessionStore:
                 state["node_refs"], _require_id_list(op, "node_ids")
             )
         elif op_type == "nodes_removed":
-            removals = _require_id_list(op, "node_ids")
-            drop = set(removals)
-            state["node_refs"] = _remove_all(state["node_refs"], removals)
-            state["positions"] = {
-                k: v for k, v in state["positions"].items() if k not in drop
-            }
-            state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
-            state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], removals)
-            for ann in state["annotations"]:
-                members = ann.get("member_node_ids")
-                if isinstance(members, list):
-                    ann["member_node_ids"] = [m for m in members if m not in drop]
+            _drop_node_refs(state, _require_id_list(op, "node_ids"))
+        elif op_type == "nodes_replaced":
+            # One op for a whole-view swap (a saved-view load, a clear), so it
+            # is one sequenced change and one activity record.
+            kept = _union([], _require_id_list(op, "node_ids"))
+            if set(kept) == membership_before:
+                return None
+            _drop_node_refs(
+                state, [n for n in state["node_refs"] if n not in set(kept)]
+            )
+            state["node_refs"] = kept
+            applied["node_ids"] = kept
         elif op_type == "node_moved":
             node_id = op.get("node_id")
             if not isinstance(node_id, str):
@@ -1363,14 +1377,18 @@ class SessionStore:
 
         if op_type in MEMBERSHIP_OPS:
             membership_after = set(state["node_refs"])
-            changed = (
-                membership_after - membership_before
-                if op_type == "nodes_added"
-                else membership_before - membership_after
-            )
-            ids = list(dict.fromkeys(op["node_ids"]))
-            ids = [node_id for node_id in ids if node_id in changed]
-            if ids:
+            if op_type == "nodes_replaced":
+                # A replace is described by the view it leaves behind.
+                ids = list(state["node_refs"])
+            else:
+                changed = (
+                    membership_after - membership_before
+                    if op_type == "nodes_added"
+                    else membership_before - membership_after
+                )
+                ids = list(dict.fromkeys(op["node_ids"]))
+                ids = [node_id for node_id in ids if node_id in changed]
+            if ids or op_type == "nodes_replaced":
                 activity_kwargs = {
                     "affected": {
                         "kind": "nodes",

@@ -27,7 +27,11 @@ import {
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
-import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
+  MEMBERSHIP_OPS,
+  hydrateAddedNodes,
+} from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useStagedSession } from './hooks/useStagedSession';
 import WriteModeBar from './components/WriteModeBar';
@@ -114,6 +118,8 @@ function App() {
     clearGroupsFlag,
     canvasBaselineEpoch,
     addNodesToVisualization,
+    publishMembership,
+    setMembershipPublisher,
     updateVisualization,
     toggleNodeVisibility,
     toggleEdgeVisibility,
@@ -419,6 +425,7 @@ function App() {
     sessionId,
     opStreamReady,
     latestViewport,
+    syncRef,
   });
 
   // Apply a single remote op incrementally onto the local store + canvas. This
@@ -513,32 +520,39 @@ function App() {
         return fresh.length > 0;
       }
       switch (op?.op) {
-        case 'nodes_added': {
-          const have = new Set(store.nodes.map((n) => n.id));
+        case 'nodes_added':
+        case 'nodes_replaced': {
+          // A replace (a saved-view load or clear anywhere) keeps only the
+          // nodes it names; both then draw the named nodes this canvas lacks.
+          // This is the only place a node joins the canvas, this browser's
+          // own adds included: they are drawn from what they were sent with,
+          // and a node an own replace carries is redrawn from it, so a view
+          // load places a node already shown where the view has it.
+          const keep = new Set(op.node_ids || []);
+          const client = syncRef.current;
+          const sent = client?.takeSentNodes(op.node_ids);
+          const dropped =
+            op.op === 'nodes_replaced'
+              ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
+              : [];
+          dropped.forEach((n) => removeNode(n.id));
+          const have = new Set(useGraphStore.getState().nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          if (!missing.length) return false;
+          if (!missing.length || !client) {
+            sent?.onDrawn();
+            return dropped.length > 0;
+          }
           // The only case here with an internal await, so the only one where
-          // the active session can change out from under it (a session
-          // switch mid-fetch, review round 5): capture which session this op
-          // is for and re-check before writing to the store below, which is
-          // not itself session-scoped.
-          const sessionAtStart = syncRef.current?.sessionId;
-          const addNodes = [];
-          const addEdges = [];
-          await Promise.all(
-            missing.map(async (id) => {
-              try {
-                const r = await api.getNodeDetails(id);
-                if (r?.node) {
-                  addNodes.push(r.node);
-                  (r.edges || []).forEach((e) => addEdges.push(e));
-                }
-              } catch {
-                /* node may have been deleted from the graph — skip */
-              }
-            })
+          // the session or its membership can change out from under it: a
+          // session switch mid-fetch (review round 5), or a membership change
+          // that lands before the reads settle (hydrateAddedNodes).
+          const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
+            client,
+            missing,
+            api.getNodeDetails,
+            sent
           );
-          if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+          if (syncRef.current !== client) return false; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -551,14 +565,15 @@ function App() {
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            sent.onDrawn();
             return true;
           }
-          return false;
+          return dropped.length > 0;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
-          (op.node_ids || []).forEach((id) => removeNode(id));
+          removeIds.forEach((id) => removeNode(id));
           return removeIds.some((id) => existing.has(id));
         }
         case 'nodes_hidden': {
@@ -918,7 +933,9 @@ function App() {
         recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds), {
+          seq: payload?.seq,
+        });
         // A full reload re-hydrates every annotation from server truth, so any
         // image-ingest race this browser was still waiting to resolve (see
         // createSelfEchoDedup) is moot — drop it rather than let it linger and
@@ -969,10 +986,12 @@ function App() {
         // over, stop here rather than keep applying this call's now-stale
         // ops on top of what the newer one already established — that newer
         // resync's own return value is the one the caller should act on.
+        // A pending membership op is not drawn here: its broadcast draws it.
         let appliedCount = 0;
         for (const op of pendingOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (syncRef.current !== client) break;
+          if (MEMBERSHIP_OPS.has(op?.op)) continue;
           if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
@@ -1027,7 +1046,11 @@ function App() {
         )
       );
       if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
-      if (removeMissing) missing.forEach((id) => removeNode(id));
+      if (removeMissing && missing.length) {
+        // A discarded staged create is gone from the graph: take it out of the
+        // session too. Every viewer may send this; the repeats change nothing.
+        publishMembership('nodes_removed', missing);
+      }
       const current = useGraphStore.getState();
       const present = new Set(current.nodes.map((n) => n.id));
       const nodeUpdates = new Map();
@@ -1059,7 +1082,7 @@ function App() {
       setNodes(nodes);
       setEdges(edges);
     },
-    [syncRef, setNodes, setEdges, removeNode]
+    [syncRef, setNodes, setEdges, publishMembership]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -1146,6 +1169,13 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
+  // A user clear empties the session too, as one explicit replace; its nodes
+  // leave on the replace's broadcast.
+  const clearBoard = useCallback(() => {
+    clearVisualization({ keepNodes: true });
+    publishMembership('nodes_replaced', []);
+  }, [clearVisualization, publishMembership]);
+
   const requestClear = useCallback(
     (source) => {
       const action = decideClearAction({
@@ -1154,7 +1184,7 @@ function App() {
         source,
       });
       if (action === 'clear') {
-        clearVisualization();
+        clearBoard();
       } else if (action === 'confirm') {
         setClearConfirm({ locked: false });
       } else if (action === 'confirm-locked') {
@@ -1162,7 +1192,7 @@ function App() {
       }
       // 'noop' — locked board, esc-esc does nothing.
     },
-    [canvasLocked, currentSessionName, clearVisualization]
+    [canvasLocked, currentSessionName, clearBoard]
   );
 
   // The capture-phase keydown listener is registered once and reads the latest
@@ -1364,12 +1394,21 @@ function App() {
             const positioned = result.nodes.map((n) =>
               result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
             );
-            clearVisualization();
-            addNodesToVisualization(positioned, result.edges || []);
-            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-            if (result.groups?.length)
-              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-            if (result.annotations?.length) setPendingAnnotations(result.annotations);
+            clearVisualization({ keepNodes: true });
+            publishMembership(
+              'nodes_replaced',
+              positioned.map((n) => n.id),
+              {
+                nodes: positioned,
+                edges: result.edges || [],
+                onDrawn: () => {
+                  if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+                  if (result.groups?.length)
+                    setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+                  if (result.annotations?.length) setPendingAnnotations(result.annotations);
+                },
+              }
+            );
           },
         });
       } catch (err) {
@@ -1381,7 +1420,7 @@ function App() {
   }, [
     stats,
     clearVisualization,
-    addNodesToVisualization,
+    publishMembership,
     setHiddenNodeIds,
     setPendingGroups,
     setPendingAnnotations,
@@ -1435,8 +1474,11 @@ function App() {
           showNotification('info', t('federation.teleport_focus_not_found'));
           return;
         }
-        addNodesToVisualization([result.node], result.edges || []);
-        setFocusNodeId(result.node.id);
+        publishMembership('nodes_added', [result.node.id], {
+          nodes: [result.node],
+          edges: result.edges || [],
+          onDrawn: () => setFocusNodeId(result.node.id),
+        });
         // Carry the sender's search text into the search box so the visitor
         // lands on the node without losing what they were looking for.
         if (searchContext) {
@@ -1453,7 +1495,7 @@ function App() {
   }, [
     stats,
     urlViewSettled,
-    addNodesToVisualization,
+    publishMembership,
     setFocusNodeId,
     setGuideSearchInput,
     showNotification,
@@ -1788,11 +1830,10 @@ function App() {
     await confirmNodeDelete({
       deleteDialog,
       deleteNodes: api.deleteNodes,
-      removeNode,
       setDeleteDialog,
       showNotification,
     });
-  }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
+  }, [deleteDialog, setDeleteDialog, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -2008,6 +2049,43 @@ function App() {
       requestSessionSnapshot(null);
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
+
+  // This browser's own membership changes go to the session as explicit ops;
+  // the first add materialises it, as a first save would. Removing from a
+  // session that does not exist yet has nothing to change; the store applies
+  // what is not sent at once. A sent change is rendered when the server
+  // broadcasts the op, and after an add the layout save follows at
+  // once rather than after the debounce: until their positions arrive,
+  // another browser places them itself and its own save would overwrite
+  // them, a drag made here meanwhile included.
+  useEffect(() => {
+    setMembershipPublisher((op, nodeIds, payload) => {
+      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds.length);
+      const nothingToSend = !nodeIds?.length && op !== 'nodes_replaced';
+      const client =
+        nothingToSend || (removes && !isSessionMaterialized())
+          ? null
+          : ensureSyncConnected(sessionId);
+      if (!client) return false;
+      client.sendMembership(op, nodeIds, {
+        ...payload,
+        onDrawn: () => {
+          payload.onDrawn?.();
+          // Next tick, once the canvas has the nodes; the debounced autosave
+          // would reset this timer on that very render.
+          setTimeout(() => requestSessionSnapshot(null), 0);
+        },
+      });
+      return true;
+    });
+    return () => setMembershipPublisher(null);
+  }, [
+    sessionId,
+    ensureSyncConnected,
+    isSessionMaterialized,
+    setMembershipPublisher,
+    requestSessionSnapshot,
+  ]);
 
   // Realtime publish timing for annotation changes — the "accepted operation
   // timing" from task-annotation-shared-session-realtime's slice_scope, split
@@ -3054,14 +3132,16 @@ function App() {
             showNotification('error', t('context_menu.reference_broken_target'));
             return;
           }
-          await addNodesToVisualization([details.node], []);
-          setFocusNodeId(target);
+          publishMembership('nodes_added', [details.node.id], {
+            nodes: [details.node],
+            onDrawn: () => setFocusNodeId(target),
+          });
         } catch {
           showNotification('error', t('context_menu.reference_broken_target'));
         }
       }
     },
-    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
+    [sessionId, switchToSession, showNotification, t, publishMembership, setFocusNodeId]
   );
 
   const handleRenameSession = useCallback(
@@ -3293,13 +3373,14 @@ function App() {
       if (syncRef.current?.sessionId !== sessionAtStart) return;
       const nodes = found.map((r) => r?.node).filter(Boolean);
       if (nodes.length) {
-        addNodesToVisualization(
-          nodes,
-          found.flatMap((r) => r?.edges || [])
+        publishMembership(
+          'nodes_added',
+          nodes.map((n) => n.id),
+          { nodes, edges: found.flatMap((r) => r?.edges || []) }
         );
       }
     },
-    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, publishMembership]
   );
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
@@ -3856,7 +3937,7 @@ function App() {
           cancelText={t('common.cancel')}
           confirmStyle="danger"
           onConfirm={() => {
-            clearVisualization();
+            clearBoard();
             setClearConfirm(null);
           }}
           onCancel={() => setClearConfirm(null)}

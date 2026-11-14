@@ -26,7 +26,7 @@ async function composedToolResult(pushed) {
   return { action: pushed.action, nodes, edges: [...edges.values()] };
 }
 
-export function useToolResultCommands({ sessionId, opStreamReady, latestViewport }) {
+export function useToolResultCommands({ sessionId, opStreamReady, latestViewport, syncRef }) {
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
   // rather than a single last-applied slot, and keyed by the server-assigned
   // command_id rather than payload content, so a later *legitimately* repeated
@@ -34,7 +34,10 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // mistaken for the same broadcast delivered twice.
   const appliedCommandIdsRef = useRef([]);
 
-  // Apply a tool result's nodes and edges to the canvas.
+  // Apply a tool result's nodes and edges to the canvas. The server applied
+  // the push's membership, so this draws only the nodes the session holds (the
+  // rest are drawn, or were dropped, by membership broadcasts) and never sends
+  // membership back.
   const applyToCanvas = useCallback(
     (toolResult) => {
       const {
@@ -44,11 +47,12 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         updateVisualization: updateViz,
         clearVisualization: clearViz,
       } = useGraphStore.getState();
+      const sync = syncRef?.current;
+      const held = (n) => !sync || sync.isMember(n.id);
 
       const filtered = (toolResult.nodes || []).filter(
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
       );
-
       // Merge returned nodes into the current view (additive placement). Shared
       // by the explicit add_to_visualization action and the no-explicit-action
       // default so a plain additive request never clears the canvas.
@@ -63,7 +67,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             }
           : null;
         const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-        addNodes(positioned, toolResult.edges || []);
+        addNodes(positioned.filter(held), toolResult.edges || []);
       };
 
       if (toolResult.action === 'add_to_visualization') {
@@ -75,8 +79,22 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       ) {
         // Explicit replace/clear/load: swap the whole view for the results.
         clearViz();
-        if (filtered.length > 0) {
-          updateViz(filtered, toolResult.edges || []);
+        // Nodes added since the push was sequenced (a deferred render) stay
+        // where the server has them; named ones removed since do not return.
+        const named = new Set(filtered.map((n) => n.id));
+        const kept = currentNodes
+          .filter((n) => !named.has(n.id) && sync?.isMember(n.id))
+          .map((n) => {
+            const pos = sync.baselinePosition(n.id);
+            return pos ? { ...n, _savedPosition: pos } : n;
+          });
+        const shown = [...filtered.filter(held), ...kept];
+        const shownIds = new Set(shown.map((n) => n.id));
+        const keptEdges = kept.length
+          ? currentEdges.filter((e) => shownIds.has(e.source) && shownIds.has(e.target))
+          : [];
+        if (shown.length > 0) {
+          updateViz(shown, [...(toolResult.edges || []), ...keptEdges]);
         }
       } else if (toolResult.action === 'update_in_visualization') {
         // In-place update: replace matching nodes, keep the rest, append any
@@ -87,7 +105,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             updatedIds.has(n.id) ? filtered.find((u) => u.id === n.id) : n
           );
           const newNodes = filtered.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-          updateViz([...merged, ...newNodes], currentEdges);
+          updateViz([...merged, ...newNodes.filter(held)], currentEdges);
         }
       } else if (filtered.length > 0) {
         // No explicit view-content action: default to additive so a plain
@@ -96,7 +114,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         addNodesToView();
       }
     },
-    [latestViewport]
+    [latestViewport, syncRef]
   );
 
   const sessionIdRef = useRef(sessionId);

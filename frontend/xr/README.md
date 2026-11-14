@@ -36,7 +36,8 @@ contracts, the session-sync protocol, or the existing 2D web client.
     `frontend/web/src/services/sessionSyncClient.js` — imported across the
     workspace boundary — and reloads the authoritative session over REST on
     connect and on every resync, exactly as the 2D client does.
-  - `src/sceneModel.js` reduces the op stream (`nodes_added` / `nodes_removed`,
+  - `src/sceneModel.js` reduces the op stream (`nodes_added` / `nodes_removed` /
+    `nodes_replaced`,
     `node_moved`, `layout_applied`, `nodes_hidden` / `nodes_shown`,
     `edges_added` / `edges_removed`, `edges_hidden` / `edges_shown`,
     `session_renamed`) plus presence and remote selection claims into the flat

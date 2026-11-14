@@ -24,6 +24,7 @@ vi.mock('../store/graphStore', () => {
     addNodesToVisualization: vi.fn(),
     updateVisualization: vi.fn(),
     clearVisualization: vi.fn(),
+    publishMembership: vi.fn(),
     pulseNode: vi.fn(),
   };
   return { default: { getState: vi.fn(() => state) } };
@@ -164,16 +165,24 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().addNodesToVisualization).not.toHaveBeenCalled();
   });
 
-  it('an empty replace_visualization clears the view and renders nothing', () => {
-    const { result } = render();
-    act(() =>
-      result.current.applyToolResultCommand(
-        { action: 'replace_visualization', nodes: [], edges: [] },
-        'cmd-1'
-      )
-    );
+  it('an empty replace_visualization clears all but a node added after it', () => {
+    // Added after the push, and applied by the time the deferred render runs.
+    const sync = {
+      isMember: (id) => id === 'existing',
+      baselinePosition: () => ({ x: 1, y: 2 }),
+    };
+    const syncRef = { current: null };
+    const { result } = render({ syncRef });
+    const clear = { action: 'replace_visualization', nodes: [], edges: [] };
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-1'));
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
     expect(store().updateVisualization).not.toHaveBeenCalled();
+    syncRef.current = sync;
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-2'));
+    expect(store().updateVisualization).toHaveBeenCalledWith(
+      [{ id: 'existing', _savedPosition: { x: 1, y: 2 } }],
+      [{ id: 'e-existing', source: 'existing', target: 'existing' }]
+    );
   });
 
   it('no explicit action with nodes defaults to additive, not a full replace', () => {
@@ -284,19 +293,24 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(es.closed).toBe(true);
   });
 
-  it('routes a tool_result message through applyToolResultCommand', () => {
+  it('never sends a legacy push on as membership, whatever the server reports', () => {
     render();
     const es = FakeEventSource.instances[0];
-    act(() =>
-      es.onmessage({
-        data: JSON.stringify({
-          type: 'tool_result',
-          command_id: 'cmd-1',
-          result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
-        }),
-      })
-    );
-    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    const push = (id, applied) =>
+      act(() =>
+        es.onmessage({
+          data: JSON.stringify({
+            type: 'tool_result',
+            command_id: id,
+            membership_applied: applied,
+            result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
+          }),
+        })
+      );
+    push('cmd-1', true);
+    push('cmd-2', false);
+    expect(store().clearVisualization).toHaveBeenCalledTimes(2);
+    expect(store().publishMembership).not.toHaveBeenCalled();
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

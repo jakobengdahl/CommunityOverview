@@ -47,7 +47,6 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_activity import MEMBERSHIP_OPS
 from .session_annotations import (
     IMAGE_TYPE,
     annotation_type_of,
@@ -598,6 +597,16 @@ def _check_image_budgets(
             f"{projected_doc_bytes} bytes, over the "
             f"{max_session_document_bytes}-byte document limit"
         )
+
+
+# Push actions whose nodes a browser renders as the whole view, and those it
+# merges into the view (``update_in_visualization`` appends unknown nodes).
+_REPLACING_ACTIONS = frozenset(
+    {"load_visualization", "replace_visualization", "clear_visualization"}
+)
+_ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"})
+# Activity actor for an auto-add agent's pushes: the prefix plus its agent id.
+AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
 
 
 class SessionManager:
@@ -1563,11 +1572,7 @@ class SessionManager:
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
-                            session,
-                            {**op, "client_id": client_id},
-                            # Browser membership ops report an already-applied
-                            # canvas diff; its originating action is unknown.
-                            record_activity=op_type not in MEMBERSHIP_OPS,
+                            session, {**op, "client_id": client_id}
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -2843,7 +2848,7 @@ class SessionManager:
     def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Apply server-owned membership once, then broadcast the command.
 
-        Additive results bypass MCP request caps and produce one membership op.
+        Pushed results bypass MCP request caps; see _apply_command_membership.
         During an in-flight batch, acceptance queues delivery behind its lock;
         otherwise delivery completes inline. Returns ``False`` when the session
         is unknown so callers can fall back to the legacy registry.
@@ -2879,27 +2884,50 @@ class SessionManager:
         session = self.store.get(session_id)
         if session is None:
             return False
-        result = command.get("result", {})
-        if result.get("action") == "add_to_visualization" and command.get(
-            "tool"
-        ) not in {"session_auto_add_agent", "load_visualization", "get_saved_view"}:
-            node_ids = [
-                node["id"]
-                for node in result.get("nodes", [])
-                if isinstance(node, dict)
-                and isinstance(node.get("id"), str)
-                and node.get("type") != "Community"
-                and (node.get("data") or {}).get("type") != "Community"
-            ]
-            if node_ids:
-                # Server-applied additive results are attributable to MCP.
-                self._add_node_refs(session, "mcp-agent", node_ids)
-        elif result.get("action") == "clear_visualization":
-            self._remove_node_refs(
-                session, "mcp-agent", list(session.state.get("node_refs", []))
-            )
+        self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
         return True
+
+    def _apply_command_membership(
+        self, session: Session, command: Dict[str, Any]
+    ) -> None:
+        """Apply a push's node membership here, so browsers only render it.
+
+        The server is the only writer of membership: the resulting op reaches
+        every subscriber before the command, and browsers never send
+        membership back for what they render. A change is one activity record,
+        attributed to the pusher.
+        """
+        result = command.get("result")
+        if not isinstance(result, dict):
+            return
+        action = result.get("action")
+        node_ids = [
+            node["id"]
+            for node in result.get("nodes") or []
+            if isinstance(node, dict)
+            and isinstance(node.get("id"), str)
+            and node.get("type") != "Community"
+            and (node.get("data") or {}).get("type") != "Community"
+        ]
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        if action in _REPLACING_ACTIONS:
+            # Browsers swap the whole view for the result's nodes: one op.
+            self._apply_op_sync(
+                session,
+                session.id,
+                actor,
+                {"op": "nodes_replaced", "node_ids": node_ids, "client_id": actor},
+            )
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            self._add_node_refs(session, actor, node_ids)
 
     # ---------------- summon to viewport ----------------
 

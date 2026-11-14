@@ -1,6 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
+// covers: frontend/web/src/components/FloatingSearch.jsx
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import FloatingSearch from './FloatingSearch';
@@ -50,6 +51,7 @@ function makeStore(overrides = {}) {
     nodes: [],
     hiddenNodeIds: [],
     addNodesToVisualization: vi.fn(),
+    publishMembership: vi.fn(),
     clearVisualization: vi.fn(),
     setFocusNodeId: vi.fn(),
     setPendingGroups: vi.fn(),
@@ -205,16 +207,20 @@ describe('FloatingSearch async behavior', () => {
     });
 
     expect(store.clearVisualization).toHaveBeenCalledTimes(1);
-    expect(store.addNodesToVisualization).toHaveBeenCalledWith(
-      [
-        {
-          id: 'fresh-node',
-          name: 'Fresh node',
-          type: 'Capability',
-          _savedPosition: { x: 10, y: 20 },
-        },
-      ],
-      []
+    expect(store.publishMembership).toHaveBeenCalledWith(
+      'nodes_replaced',
+      ['fresh-node'],
+      expect.objectContaining({
+        nodes: [
+          {
+            id: 'fresh-node',
+            name: 'Fresh node',
+            type: 'Capability',
+            _savedPosition: { x: 10, y: 20 },
+          },
+        ],
+        edges: [],
+      })
     );
 
     await act(async () => {
@@ -227,6 +233,6 @@ describe('FloatingSearch async behavior', () => {
     });
 
     expect(store.clearVisualization).toHaveBeenCalledTimes(1);
-    expect(store.addNodesToVisualization).toHaveBeenCalledTimes(1);
+    expect(store.publishMembership).toHaveBeenCalledTimes(1);
   });
 });

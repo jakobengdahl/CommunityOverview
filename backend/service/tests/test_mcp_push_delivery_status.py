@@ -382,9 +382,12 @@ async def test_delivery_report_is_not_fed_back_into_the_canvas_payload(wired):
 
 
 @pytest.mark.asyncio
-async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path):
-    """A legacy-only browser on an id the hub never stored is still delivered to."""
-    tools, registry, _manager = _wire(tmp_path)
+async def test_legacy_only_session_is_delivered_and_its_membership_applied_by_the_server(
+    tmp_path,
+):
+    """A legacy-only browser on an id the hub never stored is delivered to, and
+    the server materialises it and applies the push once, attributed to MCP."""
+    tools, registry, manager = _wire(tmp_path)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
         delivery = _delivery(tools, UNKNOWN_SESSION_ID)
@@ -393,6 +396,11 @@ async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path)
         assert delivery["live_consumers"] == 1
         assert "warning" not in delivery
         assert await _settle(lambda: len(received) == 1)
+        session = manager.get_session(UNKNOWN_SESSION_ID)
+        assert session.state["node_refs"] == ["alpha"]
+        assert [(r["op"], r["actor"]) for r in session.activity_log] == [
+            ("nodes_added", "mcp-agent")
+        ]
 
 
 # ---------------------------------------------------------------------------

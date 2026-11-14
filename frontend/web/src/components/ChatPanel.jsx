@@ -63,7 +63,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     updateChatMessage,
     nodes,
     edges,
-    addNodesToVisualization,
+    publishMembership,
     updateVisualization,
     clearVisualization,
     chatPanelOpen,
@@ -164,7 +164,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       const currentNodes = useGraphStore.getState().nodes;
       const allEdges = [...edges, ...(result.edges || [])];
       const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-      addNodesToVisualization(positionedNodes, result.edges || []);
+      publishMembership(
+        'nodes_added',
+        positionedNodes.map((n) => n.id),
+        { nodes: positionedNodes, edges: result.edges || [] }
+      );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
       const viewName = toolResult.name;
@@ -191,11 +195,13 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       // first so a clear-and-add turn (clear_visualization carrying nodes) shows
       // the new nodes, and an empty replace ends up empty. Kept identical to the
       // useToolResultCommands path so both delivery channels behave the same.
-      clearVisualization();
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
-        const filteredNodes = filterCommunityNodes(toolResult.nodes);
-        updateVisualization(filteredNodes, toolResult.edges || []);
-      }
+      clearVisualization({ keepNodes: true });
+      const filteredNodes = filterCommunityNodes(toolResult.nodes || []);
+      publishMembership(
+        'nodes_replaced',
+        filteredNodes.map((n) => n.id),
+        { nodes: filteredNodes, edges: toolResult.edges || [] }
+      );
     } else if (toolResult.action === 'add_to_visualization') {
       addNodesToView(toolResult);
     } else if (toolResult.action === 'update_in_visualization') {
@@ -214,7 +220,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           updatedNodeIds.has(n.id) ? updatedNodes.find((un) => un.id === n.id) : n
         );
         const newNodes = updatedNodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-        update([...mergedNodes, ...newNodes], currentEdges);
+        update(mergedNodes, currentEdges);
+        publishMembership(
+          'nodes_added',
+          newNodes.map((n) => n.id),
+          { nodes: newNodes }
+        );
       }
     } else if (toolResult.action === 'mark_nodes') {
       useGraphStore.getState().setNodeMarks(toolResult.marks || []);
@@ -452,7 +463,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         const currentNodes = useGraphStore.getState().nodes;
         const allEdges = [...edges, ...(response.toolResult.edges || [])];
         const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
+        publishMembership(
+          'nodes_added',
+          positionedNodes.map((n) => n.id),
+          { nodes: positionedNodes, edges: response.toolResult.edges || [] }
+        );
       }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
@@ -548,12 +563,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       });
 
       if (deleteConfirmation.node_ids) {
-        const deletedIds = new Set(deleteConfirmation.node_ids);
-        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
-        const newEdges = edges.filter(
-          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
-        );
-        updateVisualization(newNodes, newEdges);
+        publishMembership('nodes_removed', [...new Set(deleteConfirmation.node_ids)]);
       }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;

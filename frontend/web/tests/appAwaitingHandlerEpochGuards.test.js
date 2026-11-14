@@ -1,3 +1,4 @@
+// covers: frontend/web/src/utils/sessionScopedGraphEdits.js
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import useGraphStore from '../src/store/graphStore';
@@ -709,9 +710,10 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
   });
 
   it('does not load after only the session epoch moved', async () => {
+    const before = nodeIds();
     const { inFlight } = run(bumpSessionOnly);
     expect(await inFlight).toBe(false);
-    expect(store().nodes).toEqual([]);
+    expect(nodeIds()).toEqual(before); // the view's replace was never sent
     expect(store().pendingGroups).toBeNull();
   });
 

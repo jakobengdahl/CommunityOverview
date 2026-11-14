@@ -163,6 +163,7 @@ Op catalogue (v1):
 | Op | Payload | Conflict rule |
 |---|---|---|
 | `nodes_added` / `nodes_removed` | node_ids | set union / set removal, idempotent |
+| `nodes_replaced` | node_ids | membership becomes exactly node_ids (saved-view load, clear); no-op if unchanged |
 | `node_moved` | node_id, position | LWW per node (server arrival order) |
 | `edges_added` / `edges_removed` / `edges_updated` | edges (`edges_removed`: edge_ids) | fan-out only — broadcast to all subscribers, no session state mutated (edges live in the graph, R14); a peer whose node set is unchanged never re-hydrates, so a drag-drawn edge, a deletion, or an attribute change between two present nodes needs this to render for everyone |
 | `nodes_hidden` / `nodes_shown`, `edges_hidden` / `edges_shown` | ids | set ops, idempotent |
@@ -517,6 +518,16 @@ steps 6–8.
 >   group edits) through one place instead of wiring an explicit op emitter into
 >   each, and inherently collapses a bulk position change into a single
 >   `layout_applied` op (keeping big layouts under the server's per-batch cap).
+>   Node membership is the exception: the server is its only writer. The diff
+>   never emits a membership op; a user's own add, removal or clear is sent
+>   explicitly (`sendMembership`), the baseline and the canvas take
+>   membership only from the server's broadcasts (an own add is drawn from
+>   its broadcast, with the nodes it was sent with; an own removal or clear
+>   takes nodes off the canvas on its broadcast, so a node read still in
+>   flight cannot bring one back), and a node read that
+>   settles after a newer membership
+>   version (the stream seq of the last membership op, snapshot or catch-up)
+>   keeps only the nodes the server still holds.
 >   Ops batch on a short debounce; transient POST failures requeue with backoff,
 >   `400`/`413` drop to avoid poisoning the queue.
 > - **Echo-safety without a store guard flag.** The baseline mirrors what the

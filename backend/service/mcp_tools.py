@@ -52,6 +52,8 @@ from backend.core.session_manager import (
     RevisionConflict,
     SessionLimitReached,
     SessionNotFound,
+    _ADDITIVE_ACTIONS,
+    _REPLACING_ACTIONS,
 )
 from backend.core.image_ingest import (
     ImageFetchError,
@@ -6366,6 +6368,14 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
     return origins
 
 
+def _carries_membership(result: Dict[str, Any]) -> bool:
+    """Whether applying *result* changes a session's node membership."""
+    action = result.get("action")
+    return action in _REPLACING_ACTIONS or (
+        action in _ADDITIVE_ACTIONS and bool(result.get("nodes"))
+    )
+
+
 def _push_to_session(
     session_registry,
     session_id: Optional[str],
@@ -6407,10 +6417,10 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    MCP additive pushes to a stored shared session apply node references on the
-    server before broadcasting, attributed to MCP. Saved-view and auto-add
-    agent pushes remain client-applied and produce no membership activity.
-    Legacy-only sessions still rely on the browser applying the command. An
+    Every push applies its node membership on the server before broadcasting
+    (``SessionManager._apply_command_membership``), materialising a session
+    a browser holds only client-side (a legacy registry entry), so browsers only render it and never
+    send it back. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6432,16 +6442,6 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
-    legacy_enqueued = False
-    legacy_consumers = 0
-    if session_registry and session_registry.is_valid_session_id(session_id):
-        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
-        # A registry that cannot report its consumers cannot support a delivery
-        # claim, so the verdict falls back to the hub rather than assuming a
-        # reader that may not be there.
-        counter = getattr(session_registry, "consumer_count", None)
-        if callable(counter):
-            legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
     # The two hub calls fail independently and mean different things, so they are
@@ -6451,6 +6451,19 @@ def _push_to_session(
     hub_publish_failed = False
     hub_presence_read = True
     if session_manager is not None:
+        if (
+            _carries_membership(command_result)
+            and session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and session_registry.session_exists(session_id)
+        ):
+            try:
+                # The server is the only writer of pushed membership, so a
+                # session a browser holds but never stored is materialised here
+                # rather than by whichever browser renders the push first.
+                session_manager.get_or_create(session_id)
+            except Exception:
+                pass
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
@@ -6462,6 +6475,16 @@ def _push_to_session(
             # Best-effort mirror to the hub; never break the legacy push path.
             hub_published = False
             hub_publish_failed = True
+    legacy_enqueued = False
+    legacy_consumers = 0
+    if session_registry and session_registry.is_valid_session_id(session_id):
+        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy_consumers = max(0, int(counter(session_id)))
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (

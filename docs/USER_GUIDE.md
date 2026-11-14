@@ -938,26 +938,26 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
-Node additions and removals applied directly by the server are recorded, without
-undo: server-handled UI actions, MCP add/remove tools, additive MCP visualization
-pushes to stored shared sessions, and server-applied clears. Each actual change
-produces one record; repeated additions or removals that change nothing produce
-no record.
-
-**Known gap:** additions arriving by saved-view load or client-side sync are not
-yet recorded. Saved-view/replacement pushes (`load_visualization` /
-`get_saved_view`), browser membership sync, and session auto-add agent pushes
-remain client-applied and record no membership activity in this release. Their
-origin cannot be reliably attributed from a browser's canvas diff. Legacy-only
-visualization channels also depend on a browser applying the push.
+Node additions and removals are recorded, without undo, whenever the server
+applies them: MCP add/remove tools and every visualization push to a stored
+shared session — additive results, saved-view loads and replacements
+(`get_saved_view`), clears, and session auto-add agent additions. The server
+applies the push's membership change itself and every browser only renders it,
+so each actual change produces one record however many browsers are open; a
+load that replaces existing nodes, or a clear, is one record. Repeated
+additions or removals that change nothing produce no record. Nodes you add,
+remove or clear on your own canvas are sent to the server as the same kind of
+change and recorded as yours; your canvas shows the change once the server has
+applied it, at the same moment as everyone else's.
 
 Membership records retain a total count and at most 100 IDs
 (`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.
 They have their own 500-record cap (`DEFAULT_MAX_MEMBERSHIP_RECORDS`) and the
 same seven-day age limit, so they never evict undoable activity from its separate
-500-record budget. User actions use the user's presence identity; automated
-writes display **via MCP**. The shared MCP client ID does not identify individual agents or
-users; records are per change, not per viewer or per actor.
+500-record budget. User actions use the user's presence identity; MCP writes
+display **via MCP** and auto-add agent additions display **via auto-add agent**
+(the record's actor carries the agent id). The shared MCP client ID does not
+identify individual agents or users; records are per change, not per viewer.
 
 A session can also carry a **description** — what it
 is for and what the next participant should pick up — set with the MCP

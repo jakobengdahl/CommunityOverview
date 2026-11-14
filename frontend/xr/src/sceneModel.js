@@ -127,6 +127,13 @@ export function applyOp(scene, op) {
       for (const id of added) nodes[id] = emptyNode(id);
       return { ...scene, nodes };
     }
+    case 'nodes_replaced': {
+      // A whole-view swap: drop what it does not name, then add what it does.
+      const keep = new Set(op.node_ids || []);
+      const stale = Object.keys(scene.nodes).filter((id) => !keep.has(id));
+      const dropped = applyOp(scene, { op: 'nodes_removed', node_ids: stale });
+      return applyOp(dropped, { op: 'nodes_added', node_ids: op.node_ids });
+    }
     case 'nodes_removed': {
       const drop = (op.node_ids || []).filter((id) => scene.nodes[id]);
       if (!drop.length) return scene;

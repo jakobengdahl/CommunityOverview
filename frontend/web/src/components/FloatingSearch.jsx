@@ -14,6 +14,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
     nodes: vizNodes,
     hiddenNodeIds,
     addNodesToVisualization,
+    publishMembership,
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
@@ -284,9 +285,11 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               : [];
           if (selectionRef.current !== selectionId) return;
 
-          clearVisualization();
+          clearVisualization({ keepNodes: true });
+          let loadedNodes = [];
+          let loadedEdges = [];
           if (nodeIds.length > 0) {
-            const loadedNodes = details
+            loadedNodes = details
               .filter((d) => d?.success)
               .map((d) => {
                 const n = d.node;
@@ -316,19 +319,29 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
                 }
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-              addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+              loadedEdges = Array.from(edgeMap.values());
             }
           }
-
-          if (savedViewAnnotations.groups.length > 0) {
-            setPendingGroups({
-              groups: savedViewAnnotations.groups,
-              parentIds: savedViewAnnotations.parentIds,
-            });
-          }
-          if (savedViewAnnotations.annotations.length > 0) {
-            setPendingAnnotations(savedViewAnnotations.annotations);
-          }
+          // Groups and annotations wait for the nodes they frame.
+          publishMembership(
+            'nodes_replaced',
+            loadedNodes.map((n) => n.id),
+            {
+              nodes: loadedNodes,
+              edges: loadedEdges,
+              onDrawn: () => {
+                if (savedViewAnnotations.groups.length > 0) {
+                  setPendingGroups({
+                    groups: savedViewAnnotations.groups,
+                    parentIds: savedViewAnnotations.parentIds,
+                  });
+                }
+                if (savedViewAnnotations.annotations.length > 0) {
+                  setPendingAnnotations(savedViewAnnotations.annotations);
+                }
+              },
+            }
+          );
         } catch (err) {
           if (selectionRef.current !== selectionId) return;
           console.error('Error loading saved view:', err);
@@ -352,7 +365,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
         setTimeout(() => setFocusNodeId(node.id), 100);
       } else {
         // Add node and fetch edges connecting it to existing visualization nodes
-        addNodesToVisualization([node], []);
+        publishMembership('nodes_added', [node.id], { nodes: [node] });
         try {
           const related = await api.getRelatedNodes(node.id, { depth: 1 });
           if (selectionRef.current !== selectionId) return;
@@ -383,6 +396,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       vizNodes,
       hiddenNodeIds,
       addNodesToVisualization,
+      publishMembership,
       clearVisualization,
       setFocusNodeId,
       setPendingGroups,

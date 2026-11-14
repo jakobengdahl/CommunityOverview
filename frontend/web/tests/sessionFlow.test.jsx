@@ -1,4 +1,6 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 
 import * as sessionStore from '../src/services/sessionStore';
@@ -147,11 +149,7 @@ FakeEventSource.microtaskMessagesByUrl = {};
 global.EventSource = FakeEventSource;
 
 // The sync client posts op batches with global fetch; capture them.
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -167,6 +165,42 @@ const defaultMockImplementations = [
   ...Object.values(api).filter((fn) => vi.isMockFunction(fn)),
   global.fetch,
 ].map((fn) => [fn, fn.getMockImplementation()]);
+
+// The server's view of every session but 5555-6666 for a resync reload:
+// node-a and node-b, so a recovered op has something to act on.
+function reloadWithNodesAB() {
+  const original = api.getSession.getMockImplementation();
+  api.getSession.mockImplementation(async (id, opts) =>
+    id === '5555-6666'
+      ? original(id, opts)
+      : {
+          id,
+          state: { node_refs: ['node-a', 'node-b'] },
+          resolved: { nodes: [NODE_A, NODE_B], edges: [] },
+          roster: [],
+        }
+  );
+}
+
+// A recovered op whose replay waits on a node read until release(): an edge
+// add in a staged session, read from the composed view. A recovered
+// membership op is not replayed (its broadcast draws it), so this is the op
+// that can pause the replay loop. Its ends come from reloadWithNodesAB.
+function stallingRecoveredOp() {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+  api.getNodeDetails.mockImplementation(async (id) => {
+    if (id !== 'node-a') return { success: false };
+    await gate;
+    return { node: NODE_A, edges: [] };
+  });
+  reloadWithNodesAB();
+  const op = { op: 'edges_added', edges: [{ id: 'e-ab', source: 'node-a', target: 'node-b' }] };
+  return { op, release };
+}
 
 function renderApp() {
   return render(
@@ -247,9 +281,31 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalled();
     });
+    // Layout only: membership is never part of a snapshot save.
     const ops = opsFrom(global.fetch);
-    expect(ops).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
-    expect(ops).toContainEqual({ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } });
+    expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
+  });
+
+  it("a user's add sends the node's position without waiting for the autosave debounce", async () => {
+    renderApp();
+    act(() => {
+      useGraphStore.getState().addNodesToVisualization([NODE_A], []);
+      useGraphStore.getState().publishMembership('nodes_added', ['node-a']);
+    });
+    // waitFor gives up after 1000ms, before the 1500ms debounce would save.
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toEqual([
+        { op: 'nodes_added', node_ids: ['node-a'] },
+        { op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } },
+      ]);
+    });
+  });
+
+  it('an add naming no nodes does not create the session', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().publishMembership('nodes_added', []));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/'))).toEqual([]);
   });
 
   // The canvas discards its position undo/redo history on this counter, so the
@@ -319,7 +375,7 @@ describe('Server-backed session lifecycle', () => {
       expect(connectSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
     await waitFor(() => {
-      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
+      expect(opsFrom(global.fetch).map((op) => op.op)).toContain('node_moved');
     });
 
     connectSpy.mockRestore();
@@ -338,23 +394,28 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalled();
     });
-    expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_added', node_ids: ['node-a'] });
-
-    // Clear the canvas — what a double-Escape, a last-node delete, or an MCP
-    // clear_visualization does. Now that the session is materialised (the
-    // save above connected its sync client), this empty state must still
-    // reach the server via the debounced auto-save (R4/D14) instead of
-    // scheduleAutoSave's own emptiness guard silently dropping it.
-    act(() => {
-      useGraphStore.getState().clearVisualization();
+    // The user clears the materialised session: the empty membership reaches
+    // the server as one explicit replace, not through the debounced autosave,
+    // and the nodes leave the canvas on its broadcast.
+    fireEvent.click(screen.getByLabelText('Clear canvas'));
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_replaced', node_ids: [] });
+      expect(useGraphStore.getState().nodes).toEqual([]);
     });
+  });
 
-    await waitFor(
-      () => {
-        expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_removed', node_ids: ['node-a'] });
-      },
-      { timeout: 3000 }
+  it('an own replace applies on its broadcast, redrawing a shown node it carries', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    const viewed = { ...NODE_A, _savedPosition: { x: 9, y: 9 } };
+    act(() =>
+      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], { nodes: [viewed] })
     );
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes).toEqual([viewed]);
+    });
   });
 
   it('MCP command dedup: same command_id is skipped, a different command_id re-applies (R5)', async () => {
@@ -412,13 +473,16 @@ describe('Server-backed session lifecycle', () => {
   // (never-delivered) ops before that reload and replays them afterwards, so
   // the local edit survives instead of silently vanishing.
   it('a reconnect resync restores a local edit that never reached the server, and reports the recovery', async () => {
-    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    // The add is not replayed onto the canvas: the flush sends it and its
+    // broadcast draws it.
+    const pendingOps = [
+      { op: 'nodes_hidden', node_ids: ['node-a'] },
+      { op: 'nodes_added', node_ids: ['node-x'] },
+    ];
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
-      .mockReturnValue([pendingOp]);
-    api.getNodeDetails.mockImplementation(async (id) =>
-      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
-    );
+      .mockReturnValue(pendingOps);
+    reloadWithNodesAB();
 
     const { container } = renderApp();
 
@@ -455,11 +519,13 @@ describe('Server-backed session lifecycle', () => {
       });
     });
 
-    // The reload would otherwise have wiped node-a from the canvas along with
-    // it — it must come back, and the recovery must be reported to the user.
+    // The reload would otherwise have dropped the hide — it must come back,
+    // and the recovery must be reported to the user.
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+      expect(useGraphStore.getState().hiddenNodeIds).toContain('node-a');
     });
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).not.toContain('node-x');
+    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-x');
     await waitFor(() => {
       expect(
         screen.getByText('Reconnected — restored 1 change(s) made while offline')
@@ -475,7 +541,7 @@ describe('Server-backed session lifecycle', () => {
   // before the destructive apply must pick it up too.
   it('recovers an op enqueued while the reload request is still in flight', async () => {
     let callCount = 0;
-    const lateOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const lateOp = { op: 'nodes_hidden', node_ids: ['node-a'] };
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockImplementation(() => {
@@ -485,9 +551,7 @@ describe('Server-backed session lifecycle', () => {
         // while it was in flight.
         return callCount === 1 ? [] : [lateOp];
       });
-    api.getNodeDetails.mockImplementation(async (id) =>
-      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
-    );
+    reloadWithNodesAB();
 
     const { container } = renderApp();
     act(() => {
@@ -518,7 +582,7 @@ describe('Server-backed session lifecycle', () => {
     });
 
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+      expect(useGraphStore.getState().hiddenNodeIds).toContain('node-a');
     });
     expect(callCount).toBeGreaterThanOrEqual(2);
 
@@ -671,13 +735,10 @@ describe('Server-backed session lifecycle', () => {
   // slow reload settles must not run two overlapping resyncs — that would
   // replay the same pending ops twice and show a duplicate recovery toast.
   it('a second reconnect while a resync is still in flight does not start a second reload', async () => {
-    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const pendingOp = { op: 'nodes_hidden', node_ids: ['node-a'] };
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue([pendingOp]);
-    api.getNodeDetails.mockImplementation(async (id) =>
-      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
-    );
 
     let releaseGetSession;
     const getSessionGate = new Promise((resolve) => {
@@ -690,7 +751,12 @@ describe('Server-backed session lifecycle', () => {
     api.getSession.mockImplementationOnce(async (id) => {
       getSessionCalls.push(id);
       await getSessionGate;
-      return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
+      return {
+        id,
+        state: { node_refs: ['node-a'] },
+        resolved: { nodes: [NODE_A], edges: [] },
+        roster: [],
+      };
     });
 
     const { container } = renderApp();
@@ -740,7 +806,7 @@ describe('Server-backed session lifecycle', () => {
 
     // The (single) in-flight resync still completed and recovered the op.
     await waitFor(() => {
-      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+      expect(useGraphStore.getState().hiddenNodeIds).toContain('node-a');
     });
     expect(resyncLoads()).toBe(1);
 
@@ -768,7 +834,7 @@ describe('Server-backed session lifecycle', () => {
   // collaborator's later genuine edit to the same annotation. See
   // foldOpIntoBaseline's docstring in sessionSyncClient.js.
   it('folds each recovered op into the sync baseline, not just the canvas', async () => {
-    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const pendingOp = { op: 'nodes_hidden', node_ids: ['node-a'] };
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue([pendingOp]);
@@ -947,25 +1013,14 @@ describe('Server-backed session lifecycle', () => {
   it('stops replaying recovered ops once the user switches sessions mid-replay', async () => {
     sessionStore.touchSession('5555-6666');
 
-    let releaseNodeA;
-    const nodeAGate = new Promise((resolve) => {
-      releaseNodeA = resolve;
-    });
     // Two ops in the "offline" batch: the first stalls on its node fetch (so
     // the test can switch sessions while the loop is paused there), the
     // second must never apply once that switch has happened.
-    const pendingOps = [
-      { op: 'nodes_added', node_ids: ['node-a'] },
-      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
-    ];
+    const { op: stalling, release: releaseNodeA } = stallingRecoveredOp();
+    const pendingOps = [stalling, { op: 'nodes_hidden', node_ids: ['ghost-node'] }];
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue(pendingOps);
-    api.getNodeDetails.mockImplementation(async (id) => {
-      if (id !== 'node-a') return { success: false };
-      await nodeAGate;
-      return { node: NODE_A, edges: [] };
-    });
 
     const { container } = renderApp();
     act(() => {
@@ -1455,23 +1510,11 @@ describe('Server-backed session lifecycle', () => {
   it('stops replaying recovered ops after switching away and back to the same session', async () => {
     sessionStore.touchSession('5555-6666');
     sessionStore.touchSession('7777-8888');
-    let releaseNodeA;
-    const nodeAGate = new Promise((resolve) => {
-      releaseNodeA = resolve;
-    });
-    const pendingOps = [
-      { op: 'nodes_added', node_ids: ['node-a'] },
-      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
-    ];
+    const { op: stalling, release: releaseNodeA } = stallingRecoveredOp();
+    const pendingOps = [stalling, { op: 'nodes_hidden', node_ids: ['ghost-node'] }];
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue(pendingOps);
-    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
-    api.getNodeDetails.mockImplementation(async (id) => {
-      if (id !== 'node-a') return { success: false };
-      await nodeAGate;
-      return { node: NODE_A, edges: [] };
-    });
 
     try {
       renderApp();
@@ -1505,7 +1548,7 @@ describe('Server-backed session lifecycle', () => {
       fireEvent.click(screen.getByTitle('Menu'));
       fireEvent.click(screen.getByText('7777-8888'));
       await waitFor(() => {
-        expect(useGraphStore.getState().nodes).toEqual([]);
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
       });
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1520,7 +1563,6 @@ describe('Server-backed session lifecycle', () => {
     } finally {
       releaseNodeA();
       getPendingOpsSpy.mockRestore();
-      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
     }
   });
 
@@ -2001,24 +2043,12 @@ describe('Server-backed session lifecycle', () => {
   // its now-stale batch over what the newer resync established.
   it('a resync superseded mid-replay on the same client stops replaying', async () => {
     const timeouts = holdRequestTimeouts();
-    let releaseNodeA;
-    const nodeAGate = new Promise((resolve) => {
-      releaseNodeA = resolve;
-    });
     let recovering = true;
-    const pendingOps = [
-      { op: 'nodes_added', node_ids: ['node-a'] },
-      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
-    ];
+    const { op: stalling, release: releaseNodeA } = stallingRecoveredOp();
+    const pendingOps = [stalling, { op: 'nodes_hidden', node_ids: ['ghost-node'] }];
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockImplementation(() => (recovering ? pendingOps : []));
-    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
-    api.getNodeDetails.mockImplementation(async (id) => {
-      if (id !== 'node-a') return { success: false };
-      await nodeAGate;
-      return { node: NODE_A, edges: [] };
-    });
 
     try {
       const { container } = renderApp();
@@ -2063,7 +2093,6 @@ describe('Server-backed session lifecycle', () => {
       releaseNodeA();
       timeouts.restore();
       getPendingOpsSpy.mockRestore();
-      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
     }
   });
 

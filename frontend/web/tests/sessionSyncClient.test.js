@@ -8,6 +8,7 @@ import {
   foldAckedAnnotationOp,
   foldRemoteAnnotationOp,
   isAnnotationOpStale,
+  hydrateAddedNodes,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import {
@@ -80,10 +81,8 @@ beforeEach(() => {
 
 // ── computeOps ───────────────────────────────────────────────────────────
 describe('computeOps', () => {
-  it('emits nodes_added and nodes_removed as set ops', () => {
-    const ops = computeOps({ node_refs: ['a', 'b'] }, { node_refs: ['b', 'c'] });
-    expect(ops).toContainEqual({ op: 'nodes_added', node_ids: ['c'] });
-    expect(ops).toContainEqual({ op: 'nodes_removed', node_ids: ['a'] });
+  it('never derives a membership op from a snapshot', () => {
+    expect(computeOps({ node_refs: ['a', 'b'] }, { node_refs: ['b', 'c'] })).toEqual([]);
   });
 
   it('emits node_moved only for positions that actually changed', () => {
@@ -359,14 +358,14 @@ describe('SessionSyncClient', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(FakeEventSource.instances[0].url).toContain('client_id=client-me');
 
-    client.syncState({ node_refs: ['a'] });
+    client.syncState({ hidden_node_ids: ['a'] });
     await flush();
     expect(fetchImpl.calls).toHaveLength(0); // not ready yet
 
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
     await flush();
     expect(fetchImpl.calls).toHaveLength(1);
-    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_hidden', node_ids: ['a'] });
     expect(fetchImpl.calls[0].body.client_id).toBe('client-me');
   });
 
@@ -378,13 +377,13 @@ describe('SessionSyncClient', () => {
     client.connect();
     // Not ready yet (no snapshot delivered) — same "offline" condition as the
     // buffering test above, so the op sits in the queue rather than flushing.
-    client.syncState({ node_refs: ['a'] });
-    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    client.syncState({ hidden_node_ids: ['a'] });
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_hidden', node_ids: ['a'] });
 
     // Returns a copy: mutating it must not reach into the live queue.
     const snapshot = client.getPendingOps();
-    snapshot.push({ op: 'nodes_added', node_ids: ['bogus'] });
-    expect(client.getPendingOps()).not.toContainEqual({ op: 'nodes_added', node_ids: ['bogus'] });
+    snapshot.push({ op: 'nodes_hidden', node_ids: ['bogus'] });
+    expect(client.getPendingOps()).not.toContainEqual({ op: 'nodes_hidden', node_ids: ['bogus'] });
 
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
     await flush();
@@ -409,12 +408,12 @@ describe('SessionSyncClient', () => {
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
     await flush();
 
-    client.syncState({ node_refs: ['a'] });
+    client.syncState({ hidden_node_ids: ['a'] });
     await flush(); // lets the 1ms-debounced flush start the (gated) POST
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     // Spliced out of _queue already (the POST is in flight) — still reported.
-    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_hidden', node_ids: ['a'] });
 
     releasePost();
     await flush();
@@ -447,6 +446,8 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'catch_up', seq: 6, ops: [{ op: 'nodes_added', node_ids: ['x'] }] });
     expect(onResync).toHaveBeenCalledTimes(1);
     expect(onResync).toHaveBeenLastCalledWith();
+    // A read started before the reconnect is stale against what it carried.
+    expect(client.membershipVersion).toBe(6);
   });
 
   // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
@@ -522,6 +523,116 @@ describe('SessionSyncClient', () => {
     };
     es.emit({ type: 'command', command });
     expect(onCommand).toHaveBeenCalledWith(command);
+  });
+
+  // The four hydration races of review rounds 1-4: with the server as the only
+  // writer of membership, an autosave cannot remove a member and a read
+  // settling across a newer membership version cannot restore one.
+  const gatedReads = () => {
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    const read = async (id) => {
+      await gate;
+      return { node: { id }, edges: [{ id: `e-${id}` }] };
+    };
+    return { read, release };
+  };
+  const membershipOp = (es, clientId, op, nodeIds, seq) =>
+    es.emit({ type: 'op', client_id: clientId, op: { op, node_ids: nodeIds }, seq });
+
+  it('an autosave writes no membership while a member is still being read', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.setBaseline({ node_refs: ['old'], positions: { new: { x: 7, y: 8 } } }, { seq: 0 });
+    membershipOp(es, 'other', 'nodes_added', ['new'], 1);
+    client.syncState({ node_refs: [] }); // 'new' is still being read, 'old' never was
+    client.syncState({ node_refs: ['old', 'mine'] }); // 'mine' not yet confirmed
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+    expect(['old', 'new', 'mine'].map((id) => client.isMember(id))).toEqual([true, true, false]);
+    expect(client.baselinePosition('new')).toEqual({ x: 7, y: 8 });
+  });
+
+  it.each([
+    ['a user removal', 'nodes_removed', ['a'], [{ id: 'b' }]],
+    ['a local clear', 'nodes_replaced', [], []],
+  ])(
+    '%s is one explicit op, applied on its echo, past which a read keeps only members',
+    async (_l, op, ids, left) => {
+      const onRemoteOps = vi.fn();
+      const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      membershipOp(es, 'other', 'nodes_added', ['a', 'b'], 1);
+      const { read, release } = gatedReads();
+      const hydration = hydrateAddedNodes(client, ['a', 'b'], read);
+      client.sendMembership(op, ids); // no autosave runs before the flush
+      await flush();
+      expect(fetchImpl.calls[0].body.ops).toEqual([{ op, node_ids: ids }]);
+      expect(client.isMember('a')).toBe(true); // nothing changes before the echo
+      membershipOp(es, 'client-me', op, ids, 2);
+      expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op, node_ids: ids }]);
+      release();
+      expect((await hydration).nodes).toEqual(left);
+    }
+  );
+
+  it('a read across a server-applied replace keeps only the replacement', async () => {
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    membershipOp(es, 'other', 'nodes_added', ['old'], 1);
+    const { read, release } = gatedReads();
+    const hydration = hydrateAddedNodes(client, ['old'], read);
+    membershipOp(es, 'mcp-agent', 'nodes_replaced', ['new'], 2); // a saved-view push
+    release();
+    expect(await hydration).toEqual({ nodes: [], edges: [] });
+    client.syncState({ node_refs: ['new'] }); // the push rendered it
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+    expect(onRemoteOps.mock.calls.map(([[op]]) => op.op)).toEqual([
+      'nodes_added',
+      'nodes_replaced',
+    ]);
+  });
+
+  it('an own add is drawn only from its broadcast, from what it was sent with', async () => {
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const onDrawn = vi.fn();
+    const edge = { id: 'e-x', source: 'x', target: 'y' };
+    client.sendMembership('nodes_added', ['x'], { nodes: [{ id: 'x' }], edges: [edge], onDrawn });
+    await flush();
+    membershipOp(es, 'other', 'nodes_replaced', [], 1); // sequenced before the add
+    expect([client.isMember('x'), onDrawn.mock.calls.length]).toEqual([false, 0]);
+    membershipOp(es, 'client-me', 'nodes_added', ['x'], 2); // own broadcast is applied
+    expect(onRemoteOps.mock.calls.map(([[op]]) => op.op)).toEqual([
+      'nodes_replaced',
+      'nodes_added',
+    ]);
+    const read = vi.fn();
+    const sent = client.takeSentNodes(['x']);
+    expect(await hydrateAddedNodes(client, ['x'], read, sent)).toEqual({
+      nodes: [{ id: 'x' }],
+      edges: [edge],
+    });
+    expect(read).not.toHaveBeenCalled();
+    sent.onDrawn();
+    expect(onDrawn).toHaveBeenCalledTimes(1);
+    expect(client.takeSentNodes(['x']).nodes.size).toBe(0); // taken once
+    // A replace the server found unchanged is not broadcast: its ack draws it.
+    client.sendMembership('nodes_replaced', ['x'], { nodes: [{ id: 'x' }] });
+    await flush();
+    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
+    expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
   });
 
   it('forwards a summon from another client and skips its own echo', () => {
@@ -978,7 +1089,7 @@ describe('SessionSyncClient', () => {
     const { client } = makeClient({ fetchImpl });
     client.connect();
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'] });
+    client.syncState({ hidden_node_ids: ['a'] });
     await flush();
     expect(client.seq).toBe(42);
   });
@@ -1003,19 +1114,19 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(30);
       expect(fetchImpl.calls).toHaveLength(1); // requeued, waiting out the backoff
       await vi.advanceTimersByTimeAsync(500); // _scheduleRetry's 500ms floor elapses
       expect(fetchImpl.calls).toHaveLength(2);
-      expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+      expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_hidden', node_ids: ['a'] });
 
       const dropFetch = makeFetch([{ ok: false, status: 400 }]);
       const onDropped = vi.fn();
       const { client: c2 } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
       c2.connect();
       FakeEventSource.instances[1].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      c2.syncState({ node_refs: ['x'] });
+      c2.syncState({ hidden_node_ids: ['x'] });
       await vi.advanceTimersByTimeAsync(30);
       expect(onDropped).toHaveBeenCalled();
       expect(dropFetch.calls).toHaveLength(1); // not retried
@@ -1042,7 +1153,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['x'] });
+      client.syncState({ hidden_node_ids: ['x'] });
       await vi.advanceTimersByTimeAsync(30);
 
       expect(onDropped).toHaveBeenCalled();
@@ -1069,7 +1180,7 @@ describe('SessionSyncClient', () => {
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(30); // let the first flush's fetch settle
 
       // Terminal handling: onDropped fires with the 409 status so the UI can
@@ -1077,7 +1188,7 @@ describe('SessionSyncClient', () => {
       // queue rather than sitting there to be resent.
       expect(onDropped).toHaveBeenCalledTimes(1);
       expect(onDropped.mock.calls[0][1]).toBe(409);
-      expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
+      expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_hidden');
       expect(client.getPendingOps()).toEqual([]);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
@@ -1150,19 +1261,19 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(10);
       expect(fetchImpl.calls).toHaveLength(1);
 
-      client.syncState({ node_refs: ['a', 'b'] }); // enqueued during the backoff
+      client.syncState({ hidden_node_ids: ['a', 'b'] }); // enqueued during the backoff
       await vi.advanceTimersByTimeAsync(480);
       expect(fetchImpl.calls).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(40);
       expect(fetchImpl.calls).toHaveLength(2);
       expect(fetchImpl.calls[1].body.ops).toEqual([
-        { op: 'nodes_added', node_ids: ['a'] },
-        { op: 'nodes_added', node_ids: ['b'] },
+        { op: 'nodes_hidden', node_ids: ['a'] },
+        { op: 'nodes_hidden', node_ids: ['b'] },
       ]);
     } finally {
       vi.useRealTimers();
@@ -1187,11 +1298,11 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, flushIntervalMs: 100 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(100);
       expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
 
-      client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+      client.syncState({ hidden_node_ids: ['a', 'b'] }); // schedules a 100ms debounce
       await vi.advanceTimersByTimeAsync(10);
       failFirst();
       await vi.advanceTimersByTimeAsync(480);
@@ -1214,7 +1325,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(1200); // two 20ms timeouts, each followed by a 500ms backoff
       // Each hung POST times out and releases `_flushing`, so the client keeps
       // reattempting instead of freezing on the first hung request forever. If the
@@ -1251,11 +1362,11 @@ describe('SessionSyncClient', () => {
         const { client } = makeClient({ fetchImpl, flushIntervalMs: 100, ...overrides });
         client.connect();
         FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-        client.syncState({ node_refs: ['a'] });
+        client.syncState({ hidden_node_ids: ['a'] });
         await vi.advanceTimersByTimeAsync(100);
         expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
 
-        client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+        client.syncState({ hidden_node_ids: ['a', 'b'] }); // schedules a 100ms debounce
         await vi.advanceTimersByTimeAsync(10);
         failFirst(); // the timeout variant fails at +50ms on its own
         await vi.advanceTimersByTimeAsync(480);
@@ -1277,7 +1388,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, flushIntervalMs: 200 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(200);
       expect(fetchImpl.calls).toHaveLength(1);
 
@@ -1298,15 +1409,15 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(10);
       await vi.advanceTimersByTimeAsync(500); // the retry resends and succeeds
       expect(fetchImpl.calls).toHaveLength(2);
 
-      client.syncState({ node_refs: ['a', 'b'] });
+      client.syncState({ hidden_node_ids: ['a', 'b'] });
       await vi.advanceTimersByTimeAsync(10);
       expect(fetchImpl.calls).toHaveLength(3);
-      expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+      expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['b'] }]);
     } finally {
       vi.useRealTimers();
     }
@@ -1330,21 +1441,21 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, flushIntervalMs: 20 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(20);
       expect(bodies).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(500); // the retry POST starts and hangs
       expect(bodies).toHaveLength(2);
 
-      client.syncState({ node_refs: ['a', 'b'] });
+      client.syncState({ hidden_node_ids: ['a', 'b'] });
       await vi.advanceTimersByTimeAsync(100);
       expect(bodies).toHaveLength(2);
 
       releaseRetry();
       await vi.advanceTimersByTimeAsync(20);
       expect(bodies).toHaveLength(3);
-      expect(bodies[2].ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+      expect(bodies[2].ops).toEqual([{ op: 'nodes_hidden', node_ids: ['b'] }]);
     } finally {
       vi.useRealTimers();
     }
@@ -1358,7 +1469,7 @@ describe('SessionSyncClient', () => {
       client.connect();
       const es = FakeEventSource.instances[0];
       es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(10);
       expect(fetchImpl.calls).toHaveLength(1);
 
@@ -1381,17 +1492,17 @@ describe('SessionSyncClient', () => {
       client.connect();
       const es = FakeEventSource.instances[0];
       es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(10);
       es.error(false); // transient drop: not ready until the stream catches up
       await vi.advanceTimersByTimeAsync(1000);
       expect(fetchImpl.calls).toHaveLength(1);
-      expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+      expect(client.getPendingOps()).toEqual([{ op: 'nodes_hidden', node_ids: ['a'] }]);
 
       es.emit({ type: 'catch_up', seq: 0, ops: [] });
       await vi.advanceTimersByTimeAsync(10);
       expect(fetchImpl.calls).toHaveLength(2);
-      expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+      expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['a'] }]);
     } finally {
       vi.useRealTimers();
     }
@@ -1404,7 +1515,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'] });
+      client.syncState({ hidden_node_ids: ['a'] });
       await vi.advanceTimersByTimeAsync(10);
       client.close();
       await vi.advanceTimersByTimeAsync(2000);
@@ -1465,11 +1576,14 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
+      client.syncState({
+        hidden_node_ids: ['a'],
+        annotations: [{ id: 'n1', kind: 'note', text: 'x' }],
+      });
       await vi.advanceTimersByTimeAsync(60);
       // The valid nodes_added was delivered in its own batch; the annotation was dropped.
       const sent = fetchImpl.calls();
-      expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
+      expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_hidden')).toBe(true);
       expect(onDropped).toHaveBeenCalled();
       expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
     } finally {
@@ -1487,7 +1601,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
+      client.syncState({ hidden_node_ids: ['a'], hidden_edge_ids: ['h'] }); // 2 ops in one batch
       await client.flush();
       expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
 
@@ -1497,8 +1611,8 @@ describe('SessionSyncClient', () => {
       // Both requeued ops left as their own single-op batches despite close().
       const singles = fetchImpl.calls.slice(1).map((c) => c.body.ops);
       expect(singles).toEqual([
-        [{ op: 'nodes_added', node_ids: ['a'] }],
-        [{ op: 'nodes_hidden', node_ids: ['h'] }],
+        [{ op: 'nodes_hidden', node_ids: ['a'] }],
+        [{ op: 'edges_hidden', edge_ids: ['h'] }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -1522,18 +1636,18 @@ describe('SessionSyncClient', () => {
     const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
     client.connect();
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] });
+    client.syncState({ hidden_node_ids: ['a'], hidden_edge_ids: ['h'] });
     await client.flush(); // batch rejected -> force-single, both ops requeued
 
     const flushPromise = client.flush();
     expect(fetchImpl.calls).toHaveLength(2);
-    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
-    expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['a'] }]);
+    expect(client.getPendingOps()).toEqual([{ op: 'nodes_hidden', node_ids: ['a'] }]);
 
     releasePost();
     await flushPromise;
     expect(client.getPendingOps()).toEqual([]);
-    expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['h'] }]);
+    expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'edges_hidden', edge_ids: ['h'] }]);
   });
 
   it('teardown flush drains the remainder even while a force-single op is in flight', async () => {
@@ -1557,7 +1671,7 @@ describe('SessionSyncClient', () => {
       const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
+      client.syncState({ hidden_node_ids: ['a'], hidden_edge_ids: ['h'], dimmed_node_ids: ['e'] }); // 3 ops
       await client.flush(); // batch rejected → force-single, all 3 requeued
       await vi.advanceTimersByTimeAsync(10); // debounce resends op 1, which now hangs
       expect(fetchImpl.sent).toHaveLength(2);
@@ -1567,8 +1681,8 @@ describe('SessionSyncClient', () => {
       await vi.advanceTimersByTimeAsync(10);
       release();
       expect(fetchImpl.sent.slice(2)).toEqual([
-        [{ op: 'nodes_hidden', node_ids: ['h'] }],
-        [{ op: 'edges_hidden', edge_ids: ['e'] }],
+        [{ op: 'edges_hidden', edge_ids: ['h'] }],
+        [{ op: 'nodes_dimmed', node_ids: ['e'] }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -1581,13 +1695,13 @@ describe('SessionSyncClient', () => {
     // window — only the debounced auto-flush should wait for _ready.
     const { client, fetchImpl } = makeClient({ flushIntervalMs: 60_000 });
     client.connect();
-    client.syncState({ node_refs: ['a'] });
+    client.syncState({ hidden_node_ids: ['a'] });
     await flush();
     expect(fetchImpl.calls).toHaveLength(0); // never-ready: auto-flush stays quiet
 
     await client.flush();
     expect(fetchImpl.calls).toHaveLength(1);
-    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    expect(fetchImpl.calls[0].body.ops).toContainEqual({ op: 'nodes_hidden', node_ids: ['a'] });
   });
 
   it('dispatches session lifecycle events to handlers', () => {
@@ -1895,7 +2009,7 @@ describe('SessionSyncClient', () => {
 
     // Our own op is assigned seq 11 by the server — _seq advances to 11 via POST
     // response, but _appliedSeq stays at 9 (no stream event for 10 or 11 yet).
-    client.syncState({ node_refs: ['mine'] });
+    client.syncState({ hidden_node_ids: ['mine'] });
     await flush();
     expect(client.seq).toBe(11); // _seq = 11 (POST-inflated)
 
@@ -1928,12 +2042,12 @@ describe('SessionSyncClient', () => {
     es.emit({
       type: 'op',
       client_id: 'client-other',
-      op: { op: 'nodes_added', node_ids: ['a'] },
+      op: { op: 'nodes_hidden', node_ids: ['a'] },
       seq: 6,
     });
     expect(client.appliedSeq).toBe(6);
 
-    client.syncState({ node_refs: ['mine'] });
+    client.syncState({ hidden_node_ids: ['mine'] });
     await flush();
     expect(client.seq).toBe(11);
     expect(client.appliedSeq).toBe(6);
@@ -1981,7 +2095,7 @@ describe('SessionSyncClient', () => {
     const es = FakeEventSource.instances[0];
     es.emit({ type: 'snapshot', seq: 9, session: { state: {} } });
 
-    client.syncState({ node_refs: ['mine'] });
+    client.syncState({ hidden_node_ids: ['mine'] });
     await flush();
     expect(client.seq).toBe(11); // advanced eagerly by the POST response
 
@@ -1990,11 +2104,11 @@ describe('SessionSyncClient', () => {
     es.emit({
       type: 'op',
       client_id: 'client-other',
-      op: { op: 'nodes_added', node_ids: ['theirs'] },
+      op: { op: 'nodes_hidden', node_ids: ['theirs'] },
       seq: 10,
     });
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
-    expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'nodes_added', node_ids: ['theirs'] }], {
+    expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'nodes_hidden', node_ids: ['theirs'] }], {
       clientId: 'client-other',
       sessionId: '1234-5678',
     });

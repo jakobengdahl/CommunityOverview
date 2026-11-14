@@ -3947,6 +3947,8 @@ _MCP_UNMETERED_CALLS = {
     # Like create_session, copying allocates a session without spending a bucket.
     "copy_session",
     "create_session",
+    # A push materialises the browser's session so the server applies it.
+    "get_or_create",
     "get_session",
     "list_activity",
     "list_sessions",
@@ -4025,6 +4027,7 @@ _MCP_UNMETERED_RUNS = {
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
     "copy_session": lambda mgr, sid: mgr.copy_session(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
+    "get_or_create": lambda mgr, sid: mgr.get_or_create(sid),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_activity": lambda mgr, sid: mgr.list_activity(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),

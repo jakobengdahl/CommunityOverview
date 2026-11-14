@@ -1,5 +1,5 @@
 # covers: backend/core/session_manager.py
-"""Server-owned membership recording and browser-sync exclusions."""
+"""Server-owned membership recording for pushes and direct writes."""
 
 import asyncio
 import threading
@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
-from backend.core.session_manager import _TokenBucket
+from backend.core.session_manager import AUTO_ADD_ACTOR_PREFIX, _TokenBucket
 from backend.core.tests.test_session_manager import _manager, _drain
 
 pytestmark = pytest.mark.asyncio
@@ -108,8 +108,9 @@ class TestServerMembership:
         await asyncio.gather(*pending)
 
         assert s.state["node_refs"] == ([] if clear_after_add else ["existing", "new"])
-        assert len(s.activity_log) == (2 if clear_after_add else 1)
-        assert s.activity_log[-1]["actor"] == "mcp-agent"
+        assert [r["actor"] for r in s.activity_log] == ["c1", "mcp-agent"] + (
+            ["mcp-agent"] if clear_after_add else []
+        )
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == (
@@ -118,7 +119,7 @@ class TestServerMembership:
                 else ["op", "op", "command"]
             )
             if clear_after_add:
-                assert events[3]["op"]["op"] == "nodes_removed"
+                assert events[3]["op"]["op"] == "nodes_replaced"
                 assert events[3]["seq"] == 3
                 assert events[4]["command"] == clear
             assert [event["seq"] for event in events[:2]] == [1, 2]
@@ -127,7 +128,7 @@ class TestServerMembership:
         assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
 
     @pytest.mark.parametrize("viewers", [0, 2])
-    async def test_clear_push_records_server_removal_once(self, viewers):
+    async def test_clear_push_is_one_replace_record(self, viewers):
         mgr = _manager()
         s = mgr.create_session()
         ids = [f"n{i}" for i in range(501)]
@@ -142,63 +143,80 @@ class TestServerMembership:
         assert mgr.push_command(s.id, command)
         assert s.state["node_refs"] == []
         record = s.activity_log[-1]
-        assert record["actor"] == "mcp-agent"
-        assert record["op"] == "nodes_removed"
-        assert record["affected"] == {
-            "kind": "nodes",
-            "count": len(ids),
-            "ids": ids[:MAX_ACTIVITY_NODE_IDS],
-        }
+        assert (record["op"], record["actor"]) == ("nodes_replaced", "mcp-agent")
+        assert record["affected"] == {"kind": "nodes", "count": 0, "ids": []}
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == ["op", "command"]
-            assert events[0]["op"]["node_ids"] == ids
-        # Browser echoes and repeated clears cannot create another activity.
-        for i in range(viewers):
-            await mgr.apply_ops(
-                s.id, f"c{i}", None, [{"op": "nodes_removed", "node_ids": ids}]
-            )
+            assert events[0]["op"]["node_ids"] == []
+        # Clearing an empty view changes nothing and records nothing.
         assert mgr.push_command(s.id, command)
         assert len(s.activity_log) == 2
 
     @pytest.mark.parametrize(
-        "tool,action",
+        "source,tool,action,expected,record",
         [
-            ("load_visualization", "load_visualization"),
-            ("get_saved_view", "replace_visualization"),
-            ("get_saved_view", "load_visualization"),
-            ("get_saved_view", "add_to_visualization"),
-            ("session_auto_add_agent", "add_to_visualization"),
+            ("push", "get_saved_view", "load_visualization", ["new"], "nodes_replaced"),
+            (
+                "push",
+                "get_saved_view",
+                "replace_visualization",
+                ["new"],
+                "nodes_replaced",
+            ),
+            (
+                "push",
+                "search_graph",
+                "update_in_visualization",
+                ["old", "new"],
+                "nodes_added",
+            ),
+            (
+                "push",
+                "session_auto_add_agent",
+                "add_to_visualization",
+                ["old", "new"],
+                "nodes_added",
+            ),
+            ("browser", None, "nodes_replaced", ["new"], "nodes_replaced"),
         ],
     )
-    async def test_client_applied_push_and_sync_do_not_record(self, tool, action):
+    async def test_membership_change_is_one_record_whatever_the_viewers(
+        self, source, tool, action, expected, record
+    ):
+        """A saved-view load or auto-add is one op and one record, by its author."""
         mgr = _manager()
         s = mgr.create_session()
         mgr.add_node_refs(s.id, "owner", ["old"])
-        sub, _ = mgr.connect(s.id, "browser", "Viewer")
-        await _drain(sub)
-        command = {
-            "tool": tool,
-            "result": {"action": action, "nodes": [{"id": "new"}]},
-        }
-        assert mgr.push_command(s.id, command)
-        assert s.state["node_refs"] == ["old"]
-        assert [e["type"] for e in await _drain(sub)] == ["command"]
-        await mgr.apply_ops(
-            s.id,
-            "browser",
-            None,
-            [
-                {"op": "nodes_removed", "node_ids": ["old"]},
-                {"op": "nodes_added", "node_ids": ["new"]},
-                {"op": "node_moved", "node_id": "new", "position": {"x": 1, "y": 2}},
-            ],
-        )
-        assert s.state["node_refs"] == ["new"]
-        assert [(r["op"], r["actor"]) for r in s.activity_log] == [
-            ("nodes_added", "owner"),
-            ("node_moved", "browser"),
-        ]
+        mgr.apply_layout(s.id, "owner", positions={"old": {"x": 1, "y": 2}})
+        browsers = [f"browser{i}" for i in range(3)]
+        subs = [mgr.connect(s.id, b, b)[0] for b in browsers]
+        for sub in subs:
+            await _drain(sub)
+        if source == "browser":
+            actor = "browser0"
+            await mgr.apply_ops(
+                s.id, actor, None, [{"op": action, "node_ids": ["new", "new"]}]
+            )
+        else:
+            actor = (
+                f"{AUTO_ADD_ACTOR_PREFIX}agent-1"
+                if tool == "session_auto_add_agent"
+                else "mcp-agent"
+            )
+            result = {
+                "action": action,
+                "nodes": [{"id": "new"}, {"id": "c", "type": "Community"}],
+                "agent_id": "agent-1",
+            }
+            assert mgr.push_command(s.id, {"tool": tool, "result": result})
+        assert s.state["node_refs"] == expected
+        assert ("old" in s.state["positions"]) == ("old" in expected)
+        assert [(r["op"], r["actor"]) for r in s.activity_log[2:]] == [(record, actor)]
+        for sub in subs:
+            events = await _drain(sub)
+            ops = [e["op"]["op"] for e in events if e["type"] == "op"]
+            assert ops == [record]
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()
