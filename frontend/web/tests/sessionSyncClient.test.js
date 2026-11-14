@@ -555,20 +555,30 @@ describe('SessionSyncClient', () => {
     expect(client.baselinePosition('new')).toEqual({ x: 7, y: 8 });
   });
 
-  it('a user removal during hydration is one explicit op, and a read settling before its echo drops the node', async () => {
-    const { client, fetchImpl } = makeClient();
-    client.connect();
-    const es = FakeEventSource.instances[0];
-    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    membershipOp(es, 'other', 'nodes_added', ['a', 'b'], 1);
-    const { read, release } = gatedReads();
-    const hydration = hydrateAddedNodes(client, ['a', 'b'], read);
-    client.sendMembership('nodes_removed', ['a']);
-    await flush();
-    expect(fetchImpl.calls[0].body.ops).toEqual([{ op: 'nodes_removed', node_ids: ['a'] }]);
-    release(); // settles before the removal's echo
-    expect(await hydration).toEqual({ nodes: [{ id: 'b' }], edges: [{ id: 'e-b' }] });
-  });
+  it.each([
+    ['a user removal', 'nodes_removed', ['a'], [{ id: 'b' }]],
+    ['a local clear', 'nodes_replaced', [], []],
+  ])(
+    '%s is one explicit op, applied on its echo, past which a read keeps only members',
+    async (_l, op, ids, left) => {
+      const onRemoteOps = vi.fn();
+      const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      membershipOp(es, 'other', 'nodes_added', ['a', 'b'], 1);
+      const { read, release } = gatedReads();
+      const hydration = hydrateAddedNodes(client, ['a', 'b'], read);
+      client.sendMembership(op, ids); // no autosave runs before the flush
+      await flush();
+      expect(fetchImpl.calls[0].body.ops).toEqual([{ op, node_ids: ids }]);
+      expect(client.isMember('a')).toBe(true); // nothing changes before the echo
+      membershipOp(es, 'client-me', op, ids, 2);
+      expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op, node_ids: ids }]);
+      release();
+      expect((await hydration).nodes).toEqual(left);
+    }
+  );
 
   it('a read across a server-applied replace keeps only the replacement', async () => {
     const onRemoteOps = vi.fn();
@@ -589,21 +599,6 @@ describe('SessionSyncClient', () => {
       'nodes_added',
       'nodes_replaced',
     ]);
-  });
-
-  it('a local clear is sent at once as a replace, and reads settling before its echo stay cleared', async () => {
-    const { client, fetchImpl } = makeClient();
-    client.connect();
-    const es = FakeEventSource.instances[0];
-    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    membershipOp(es, 'other', 'nodes_added', ['a', 'b'], 1);
-    const { read, release } = gatedReads();
-    const hydration = hydrateAddedNodes(client, ['a', 'b'], read);
-    client.sendMembership('nodes_replaced', []); // no autosave runs before the flush
-    await flush();
-    expect(fetchImpl.calls[0].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: [] }]);
-    release(); // settles before the clear's echo
-    expect(await hydration).toEqual({ nodes: [], edges: [] });
   });
 
   it('an own add is drawn only from its broadcast, from what it was sent with', async () => {
@@ -637,7 +632,7 @@ describe('SessionSyncClient', () => {
     client.sendMembership('nodes_replaced', ['x'], { nodes: [{ id: 'x' }] });
     await flush();
     expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
-    expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op: 'nodes_added', node_ids: ['x'] }]);
+    expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
   });
 
   it('forwards a summon from another client and skips its own echo', () => {

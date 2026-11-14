@@ -395,10 +395,26 @@ describe('Server-backed session lifecycle', () => {
       expect(global.fetch).toHaveBeenCalled();
     });
     // The user clears the materialised session: the empty membership reaches
-    // the server as one explicit replace, not through the debounced autosave.
+    // the server as one explicit replace, not through the debounced autosave,
+    // and the nodes leave the canvas on its broadcast.
     fireEvent.click(screen.getByLabelText('Clear canvas'));
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     await waitFor(() => {
       expect(opsFrom(global.fetch)).toContainEqual({ op: 'nodes_replaced', node_ids: [] });
+      expect(useGraphStore.getState().nodes).toEqual([]);
+    });
+  });
+
+  it('an own replace applies on its broadcast, redrawing a shown node it carries', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    const viewed = { ...NODE_A, _savedPosition: { x: 9, y: 9 } };
+    act(() =>
+      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], { nodes: [viewed] })
+    );
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes).toEqual([viewed]);
     });
   });
 

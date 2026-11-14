@@ -122,7 +122,6 @@ export async function applyEdgeUpdate({
  * @param {Object} params
  * @param {Object} params.deleteDialog  The pending confirmation ({ nodeId | nodeIds, isMultiple }).
  * @param {Function} params.deleteNodes  API call: delete nodes from the graph.
- * @param {Function} params.removeNode  Store action: drop a node from the canvas.
  * @param {Function} params.setDeleteDialog  Store action: set/close the confirmation.
  * @param {Function} params.showNotification  Surface success/failure to the user.
  * @returns {Promise<boolean>} Whether the canvas was updated.
@@ -130,7 +129,6 @@ export async function applyEdgeUpdate({
 export async function confirmNodeDelete({
   deleteDialog,
   deleteNodes,
-  removeNode,
   setDeleteDialog,
   showNotification,
 }) {
@@ -139,10 +137,7 @@ export async function confirmNodeDelete({
     const ids = deleteDialog.isMultiple ? deleteDialog.nodeIds : [deleteDialog.nodeId];
     await deleteNodes(ids, true);
     const current = !isStaleSessionEpoch(requestEpoch);
-    if (current) {
-      ids.forEach((id) => removeNode(id));
-      publishMembership('nodes_removed', ids);
-    }
+    if (current) publishMembership('nodes_removed', ids);
     showNotification(
       'success',
       deleteDialog.isMultiple ? `${ids.length} nodes deleted` : 'Node deleted'
@@ -485,7 +480,7 @@ export async function loadSavedViewNode({
     const savedEdges = nodeData.metadata?.edges || [];
     const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
     if (nodeIds.length > 0) {
-      clearVisualization();
+      clearVisualization({ keepNodes: true });
       const scope = captureCanvasScope();
       const details = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
       if (scope.canvasReplaced()) return false;

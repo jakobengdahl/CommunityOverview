@@ -195,7 +195,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       // first so a clear-and-add turn (clear_visualization carrying nodes) shows
       // the new nodes, and an empty replace ends up empty. Kept identical to the
       // useToolResultCommands path so both delivery channels behave the same.
-      clearVisualization();
+      clearVisualization({ keepNodes: true });
       const filteredNodes = filterCommunityNodes(toolResult.nodes || []);
       publishMembership(
         'nodes_replaced',
@@ -563,13 +563,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       });
 
       if (deleteConfirmation.node_ids) {
-        const deletedIds = new Set(deleteConfirmation.node_ids);
-        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
-        const newEdges = edges.filter(
-          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
-        );
-        updateVisualization(newNodes, newEdges);
-        publishMembership('nodes_removed', [...deletedIds]);
+        publishMembership('nodes_removed', [...new Set(deleteConfirmation.node_ids)]);
       }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;

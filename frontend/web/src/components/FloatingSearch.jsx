@@ -285,7 +285,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               : [];
           if (selectionRef.current !== selectionId) return;
 
-          clearVisualization();
+          clearVisualization({ keepNodes: true });
           let loadedNodes = [];
           let loadedEdges = [];
           if (nodeIds.length > 0) {

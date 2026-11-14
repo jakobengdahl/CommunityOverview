@@ -525,14 +525,18 @@ function App() {
           // A replace (a saved-view load or clear anywhere) keeps only the
           // nodes it names; both then draw the named nodes this canvas lacks.
           // This is the only place a node joins the canvas, this browser's
-          // own adds included: they are drawn from what they were sent with.
+          // own adds included: they are drawn from what they were sent with,
+          // and a node an own replace carries is redrawn from it, so a view
+          // load places a node already shown where the view has it.
           const keep = new Set(op.node_ids || []);
-          const dropped =
-            op.op === 'nodes_replaced' ? store.nodes.filter((n) => !keep.has(n.id)) : [];
-          dropped.forEach((n) => removeNode(n.id));
           const client = syncRef.current;
           const sent = client?.takeSentNodes(op.node_ids);
-          const have = new Set(store.nodes.map((n) => n.id));
+          const dropped =
+            op.op === 'nodes_replaced'
+              ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
+              : [];
+          dropped.forEach((n) => removeNode(n.id));
+          const have = new Set(useGraphStore.getState().nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length || !client) {
             sent?.onDrawn();
@@ -1045,7 +1049,6 @@ function App() {
       if (removeMissing && missing.length) {
         // A discarded staged create is gone from the graph: take it out of the
         // session too. Every viewer may send this; the repeats change nothing.
-        missing.forEach((id) => removeNode(id));
         publishMembership('nodes_removed', missing);
       }
       const current = useGraphStore.getState();
@@ -1079,7 +1082,7 @@ function App() {
       setNodes(nodes);
       setEdges(edges);
     },
-    [syncRef, setNodes, setEdges, removeNode, publishMembership]
+    [syncRef, setNodes, setEdges, publishMembership]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -1166,9 +1169,10 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
-  // A user clear empties the session too, as one explicit replace.
+  // A user clear empties the session too, as one explicit replace; its nodes
+  // leave on the replace's broadcast.
   const clearBoard = useCallback(() => {
-    clearVisualization();
+    clearVisualization({ keepNodes: true });
     publishMembership('nodes_replaced', []);
   }, [clearVisualization, publishMembership]);
 
@@ -1390,7 +1394,7 @@ function App() {
             const positioned = result.nodes.map((n) =>
               result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
             );
-            clearVisualization();
+            clearVisualization({ keepNodes: true });
             publishMembership(
               'nodes_replaced',
               positioned.map((n) => n.id),
@@ -1826,11 +1830,10 @@ function App() {
     await confirmNodeDelete({
       deleteDialog,
       deleteNodes: api.deleteNodes,
-      removeNode,
       setDeleteDialog,
       showNotification,
     });
-  }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
+  }, [deleteDialog, setDeleteDialog, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -2049,8 +2052,9 @@ function App() {
 
   // This browser's own membership changes go to the session as explicit ops;
   // the first add materialises it, as a first save would. Removing from a
-  // session that does not exist yet has nothing to change. Added nodes are
-  // drawn when the server broadcasts the op, and the layout save follows at
+  // session that does not exist yet has nothing to change; the store applies
+  // what is not sent at once. A sent change is rendered when the server
+  // broadcasts the op, and after an add the layout save follows at
   // once rather than after the debounce: until their positions arrive,
   // another browser places them itself and its own save would overwrite
   // them, a drag made here meanwhile included.
@@ -2062,10 +2066,7 @@ function App() {
         nothingToSend || (removes && !isSessionMaterialized())
           ? null
           : ensureSyncConnected(sessionId);
-      if (!client) {
-        payload.onDrawn?.();
-        return;
-      }
+      if (!client) return false;
       client.sendMembership(op, nodeIds, {
         ...payload,
         onDrawn: () => {
@@ -2075,6 +2076,7 @@ function App() {
           setTimeout(() => requestSessionSnapshot(null), 0);
         },
       });
+      return true;
     });
     return () => setMembershipPublisher(null);
   }, [

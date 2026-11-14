@@ -15,7 +15,7 @@
  *  - Node membership is the exception: the server is its only writer. A
  *    snapshot never carries it; this browser's own adds, removals and
  *    replacements go out as explicit ops (`sendMembership`), and the baseline
- *    and the canvas take added nodes only from the server's broadcasts, this
+ *    and the canvas change membership only on the server's broadcasts, this
  *    client's own included.
  *  - Stay echo-safe: the baseline mirrors what the server already has, so a
  *    remote op the host re-applies (updating the baseline) never bounces back
@@ -325,28 +325,20 @@ export function computeOps(prevState, nextState) {
  * read. A result read across a newer membership version is stale: it keeps
  * only the nodes the server still holds, since a later removal or replace
  * must not be undone by a late read, while a node still held has no other op
- * left to render it. A node this client itself removed or cleared during the
- * read is dropped too, before that change's echo arrives. Edges come only
- * from the kept nodes.
+ * left to render it. Edges come only from the kept nodes.
  */
 export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = null) {
   const version = client.membershipVersion;
-  const read = (id) => {
-    const node = sent?.nodes.get(id);
-    if (node) return { node, edges: sent.edges.filter((e) => e.source === id || e.target === id) };
-    return getNodeDetails(id).catch(() => null);
-  };
-  const dropped = client.watchLocalDrops();
-  let reads;
-  try {
-    reads = await Promise.all(nodeIds.map(read));
-  } finally {
-    client.unwatchLocalDrops(dropped);
-  }
-  const stale = client.membershipVersion !== version;
-  const kept = reads.filter(
-    (r) => r?.node && !dropped.has(r.node.id) && (!stale || client.isMember(r.node.id))
+  const reads = await Promise.all(
+    nodeIds.map((id) => {
+      const node = sent?.nodes.get(id);
+      if (node)
+        return { node, edges: sent.edges.filter((e) => e.source === id || e.target === id) };
+      return getNodeDetails(id).catch(() => null);
+    })
   );
+  const stale = client.membershipVersion !== version;
+  const kept = reads.filter((r) => r?.node && (!stale || client.isMember(r.node.id)));
   return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
 }
 
@@ -806,9 +798,6 @@ export class SessionSyncClient {
     // the op's {edges, onDrawn}. Data only: the canvas still takes the node
     // from the broadcast (takeSentNodes).
     this._sentNodes = new Map();
-    // One set per in-flight hydration, collecting the nodes this client
-    // removes or clears meanwhile (watchLocalDrops).
-    this._dropWatchers = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -911,21 +900,6 @@ export class SessionSyncClient {
 
   get membershipVersion() {
     return this._membershipVersion;
-  }
-
-  /**
-   * Collect, until `unwatchLocalDrops`, the nodes this client's own removals
-   * and replaces drop from the view. They leave the canvas at once, while the
-   * membership version moves only when their echo arrives.
-   */
-  watchLocalDrops() {
-    const dropped = new Set();
-    this._dropWatchers.add(dropped);
-    return dropped;
-  }
-
-  unwatchLocalDrops(dropped) {
-    this._dropWatchers.delete(dropped);
   }
 
   // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
@@ -1488,23 +1462,23 @@ export class SessionSyncClient {
 
   /**
    * A replace the server found unchanged is not broadcast; its ack says the
-   * session already holds those nodes, so the host draws them as their
-   * broadcast would have (the ones still held), and a dropped op's sent
-   * nodes are let go.
+   * session already holds those nodes, so the host is handed the replace as
+   * its broadcast would have been (the nodes still held), and a dropped op's
+   * sent nodes are let go.
    */
   _settleSentMembership(batch, applied) {
     const replaced = (applied || [])
       .filter((entry) => entry?.op === 'nodes_replaced')
       .map((entry) => [...new Set(entry.node_ids || [])].sort().join('\n'));
     for (const op of batch) {
-      if (op.op !== 'nodes_replaced' || !op.node_ids.length) continue;
+      if (op.op !== 'nodes_replaced') continue;
       const at = replaced.indexOf([...op.node_ids].sort().join('\n'));
       if (at >= 0) {
         replaced.splice(at, 1);
       } else if (applied) {
         const held = op.node_ids.filter((id) => this.isMember(id));
         this.takeSentNodes(op.node_ids.filter((id) => !this.isMember(id)));
-        this.handlers.onRemoteOps?.([{ op: 'nodes_added', node_ids: held }], {
+        this.handlers.onRemoteOps?.([{ op: 'nodes_replaced', node_ids: held }], {
           sessionId: this.sessionId,
         });
       }
@@ -1519,9 +1493,9 @@ export class SessionSyncClient {
   /**
    * Send this browser's own membership change — `nodes_added`,
    * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
-   * as one explicit op. Neither the baseline nor the canvas gains a node
-   * until the server broadcasts it back; `nodes` (with `edges`) is what that
-   * broadcast then draws instead of reading, and `onDrawn` runs once it has.
+   * as one explicit op. Neither the baseline nor the canvas changes until the
+   * server broadcasts it back; `nodes` (with `edges`) is what that broadcast
+   * then draws instead of reading, and `onDrawn` runs once it has.
    */
   sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null } = {}) {
     if (!MEMBERSHIP_OPS.has(op)) return;
@@ -1529,16 +1503,6 @@ export class SessionSyncClient {
     if (!ids.length && op !== 'nodes_replaced') return;
     const sent = { edges, onDrawn };
     const named = new Set(op === 'nodes_removed' ? [] : ids);
-    const drops =
-      op === 'nodes_removed'
-        ? ids
-        : op === 'nodes_replaced'
-          ? this._baseline.node_refs.filter((id) => !named.has(id))
-          : [];
-    for (const watcher of this._dropWatchers) {
-      named.forEach((id) => watcher.delete(id));
-      drops.forEach((id) => watcher.add(id));
-    }
     const carried = nodes.filter((node) => named.has(node?.id));
     carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
     this._enqueue([{ op, node_ids: ids }]);

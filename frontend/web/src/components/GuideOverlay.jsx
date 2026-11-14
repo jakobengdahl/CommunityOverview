@@ -205,7 +205,6 @@ function GuideOverlay() {
           if (nodeId && !cancelled) {
             await api.deleteNodes([nodeId], true);
             if (!cancelled) {
-              useGraphStore.getState().removeNode(nodeId);
               useGraphStore.getState().publishMembership('nodes_removed', [nodeId]);
             }
           }
@@ -250,7 +249,7 @@ function GuideOverlay() {
                 const savedEdges = viewNode.metadata?.edges || [];
                 if (!cancelled) {
                   const s = useGraphStore.getState();
-                  s.clearVisualization();
+                  s.clearVisualization({ keepNodes: true });
                   s.publishMembership(
                     'nodes_replaced',
                     loadedNodes.map((n) => n.id),
@@ -264,7 +263,7 @@ function GuideOverlay() {
           // ── Visualization control ─────────────────────────────────────────
         } else if (action === 'clear_visualization' || action === 'clear') {
           if (!cancelled) {
-            useGraphStore.getState().clearVisualization();
+            useGraphStore.getState().clearVisualization({ keepNodes: true });
             useGraphStore.getState().publishMembership('nodes_replaced', []);
           }
         } else if (action === 'focus_node') {
