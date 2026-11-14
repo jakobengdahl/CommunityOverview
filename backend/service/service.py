@@ -433,6 +433,7 @@ class GraphService:
                     "op": "graph_changes_merged",
                     "merge_id": merge_id,
                     "removals": [list(key) for key in plan.removals],
+                    "dropped_node_ids": self._nodes_gone_from_graph(plan.removals),
                 },
             )
         return access.attach_mutation_attribution(
@@ -447,6 +448,15 @@ class GraphService:
             },
             event_context,
         )
+
+    def _nodes_gone_from_graph(self, removals) -> List[str]:
+        """The node keys among *removals* the graph does not hold: a discarded
+        create, a merged delete, a create merged under a new id."""
+        return [
+            entity_id
+            for kind, entity_id in removals
+            if kind == "node" and self._storage.get_node(entity_id) is None
+        ]
 
     def _replayed_items(self, record: Dict[str, Any], graph_access) -> List[Dict]:
         """A replayed merge's items, as far as the caller's view covers them
@@ -508,6 +518,7 @@ class GraphService:
                 {
                     "op": "graph_changes_discarded",
                     "removals": [list(key) for key in removed],
+                    "dropped_node_ids": self._nodes_gone_from_graph(removed),
                 },
             )
         return {

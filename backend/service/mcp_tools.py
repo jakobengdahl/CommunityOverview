@@ -329,6 +329,14 @@ def _session_aware(
     return wrapper
 
 
+_MEMBERSHIP_UNAPPLIED_WARNING = (
+    "Nothing received this push: the server could not store the session it "
+    "targets (the session id may be retired, or the server's session limit "
+    "reached), so its nodes were not added and it was sent to no browser."
+    + _UNDELIVERED_PUSH_REMEDY
+)
+
+
 def _undelivered_push_warning(
     *,
     registry_configured: bool,
@@ -6420,7 +6428,8 @@ def _push_to_session(
     Every push applies its node membership on the server before broadcasting
     (``SessionManager._apply_command_membership``), materialising a session
     a browser holds only client-side (a legacy registry entry), so browsers only render it and never
-    send it back. An
+    send it back. A push whose membership cannot be applied (the session cannot
+    be stored) is sent to no browser and reported undelivered. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6450,6 +6459,7 @@ def _push_to_session(
     # and the second of those must not be reported as a non-delivery.
     hub_publish_failed = False
     hub_presence_read = True
+    membership_unapplied = False
     if session_manager is not None:
         if (
             _carries_membership(command_result)
@@ -6463,21 +6473,29 @@ def _push_to_session(
                 # rather than by whichever browser renders the push first.
                 session_manager.get_or_create(session_id)
             except Exception:
-                pass
+                # Retired id, session limit: no browser writes membership back,
+                # so a legacy render alone would show nodes the session never
+                # gains. The push goes nowhere rather than half-applied.
+                membership_unapplied = True
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
             hub_clients = 0
             hub_presence_read = False
-        try:
-            hub_published = bool(session_manager.push_command(session_id, command))
-        except Exception:
-            # Best-effort mirror to the hub; never break the legacy push path.
-            hub_published = False
-            hub_publish_failed = True
+        if not membership_unapplied:
+            try:
+                hub_published = bool(session_manager.push_command(session_id, command))
+            except Exception:
+                # Best-effort mirror to the hub; never break the legacy push path.
+                hub_published = False
+                hub_publish_failed = True
     legacy_enqueued = False
     legacy_consumers = 0
-    if session_registry and session_registry.is_valid_session_id(session_id):
+    if (
+        session_registry
+        and session_registry.is_valid_session_id(session_id)
+        and not membership_unapplied
+    ):
         legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
         # A registry that cannot report its consumers cannot support a delivery
         # claim, so the verdict falls back to the hub rather than assuming a
@@ -6507,15 +6525,19 @@ def _push_to_session(
         "live_consumers": legacy_consumers + hub_clients,
     }
     if not delivered:
-        delivery["warning"] = _undelivered_push_warning(
-            registry_configured=bool(session_registry),
-            legacy_enqueued=legacy_enqueued,
-            legacy_consumers=legacy_consumers,
-            hub_configured=session_manager is not None,
-            hub_publish_failed=hub_publish_failed,
-            hub_presence_read=hub_presence_read,
-            hub_published=hub_published,
-            hub_clients=hub_clients,
-            outcome_unknown=outcome_unknown,
+        delivery["warning"] = (
+            _MEMBERSHIP_UNAPPLIED_WARNING
+            if membership_unapplied
+            else _undelivered_push_warning(
+                registry_configured=bool(session_registry),
+                legacy_enqueued=legacy_enqueued,
+                legacy_consumers=legacy_consumers,
+                hub_configured=session_manager is not None,
+                hub_publish_failed=hub_publish_failed,
+                hub_presence_read=hub_presence_read,
+                hub_published=hub_published,
+                hub_clients=hub_clients,
+                outcome_unknown=outcome_unknown,
+            )
         )
     return delivery

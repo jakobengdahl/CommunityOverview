@@ -1046,10 +1046,12 @@ function App() {
         )
       );
       if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
-      if (removeMissing && missing.length) {
-        // A discarded staged create is gone from the graph: take it out of the
-        // session too. Every viewer may send this; the repeats change nothing.
-        publishMembership('nodes_removed', missing);
+      if (removeMissing) {
+        // A discarded staged create is gone from the graph. The server's
+        // discard or merge op takes it out of the session itself, so it only
+        // leaves this canvas: a viewer that sent the removal would be
+        // recorded for a change it did not make.
+        missing.forEach((id) => removeNode(id));
       }
       const current = useGraphStore.getState();
       const present = new Set(current.nodes.map((n) => n.id));
@@ -1082,7 +1084,7 @@ function App() {
       setNodes(nodes);
       setEdges(edges);
     },
-    [syncRef, setNodes, setEdges, publishMembership]
+    [syncRef, setNodes, setEdges, removeNode]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive

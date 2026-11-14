@@ -3265,6 +3265,50 @@ describe('Server-backed session lifecycle', () => {
       expect(api.getNodeDetails).toHaveBeenCalledWith('node-a');
     });
 
+    it("a collaborator's discard drops the discarded create from this canvas only", async () => {
+      sessionStore.touchSession('5555-6666');
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      await switchViaDrawer('5555-6666');
+      await waitFor(() =>
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b'])
+      );
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []);
+      });
+      api.getNodeDetails.mockImplementation(async (id) => {
+        if (id === 'node-a') throw Object.assign(new Error('gone'), { status: 404 });
+        return { node: NODE_B, edges: [] };
+      });
+      await waitFor(() => expect(streamsFor('5555-6666')).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      global.fetch.mockClear();
+      await act(async () => {
+        streamsFor('5555-6666')[0].onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 5,
+            client_id: 'graph-staging',
+            op: {
+              op: 'graph_changes_discarded',
+              removals: [['node', 'node-a']],
+              dropped_node_ids: ['node-a'],
+            },
+          }),
+        });
+      });
+      await waitFor(() =>
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b'])
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      // The server's discard op already took it out of the session.
+      expect(opsFrom(global.fetch).map((o) => o.op)).not.toContain('nodes_removed');
+    });
+
     it('deleting a staged session discards its changes and lands in a staged one', async () => {
       stagingOn();
       getSessionAnswering({ '7777-8888': { ...directPayload('7777-8888'), write_mode: 'staged' } });

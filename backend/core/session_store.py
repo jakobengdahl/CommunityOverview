@@ -1327,6 +1327,13 @@ class SessionStore:
                 op.get("merge_id"), str
             ):
                 raise OpError("graph_changes_merged carries its merge id")
+            # Nodes the change took out of the graph (a discarded create, a
+            # merged delete, a create merged under a new id) leave the session
+            # with it, in this one op, so no browser has to remove them.
+            members = set(state["node_refs"])
+            dropped = [n for n in op.get("dropped_node_ids") or [] if n in members]
+            _drop_node_refs(state, dropped)
+            applied["dropped_node_ids"] = dropped
             activity_kwargs = {
                 "affected": {"kind": "layer", "keys": copy.deepcopy(removals)},
                 "before": None,
