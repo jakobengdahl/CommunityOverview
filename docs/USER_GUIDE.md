@@ -947,7 +947,8 @@ so each actual change produces one record however many browsers are open; a
 load that replaces existing nodes, or a clear, is one record. Repeated
 additions or removals that change nothing produce no record. Nodes you add,
 remove or clear on your own canvas are sent to the server as the same kind of
-change and recorded as yours.
+change and recorded as yours; your canvas shows the change once the server has
+applied it, at the same moment as everyone else's.
 
 Membership records retain a total count and at most 100 IDs
 (`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.

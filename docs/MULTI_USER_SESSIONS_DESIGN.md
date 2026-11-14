@@ -522,7 +522,9 @@ steps 6–8.
 >   never emits a membership op; a user's own add, removal or clear is sent
 >   explicitly (`sendMembership`), the baseline and the canvas take
 >   membership only from the server's broadcasts (an own add is drawn from
->   its broadcast, with the nodes it was sent with), and a node read that
+>   its broadcast, with the nodes it was sent with; an own removal or clear
+>   takes nodes off the canvas on its broadcast, so a node read still in
+>   flight cannot bring one back), and a node read that
 >   settles after a newer membership
 >   version (the stream seq of the last membership op, snapshot or catch-up)
 >   keeps only the nodes the server still holds.
