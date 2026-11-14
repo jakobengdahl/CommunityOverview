@@ -293,7 +293,7 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(es.closed).toBe(true);
   });
 
-  it('sends a legacy push on as membership only when the server did not apply it', () => {
+  it('never sends a legacy push on as membership, whatever the server reports', () => {
     render();
     const es = FakeEventSource.instances[0];
     const push = (id, applied) =>
@@ -308,13 +308,9 @@ describe('useToolResultCommands legacy SSE stream', () => {
         })
       );
     push('cmd-1', true);
-    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
-    expect(store().publishMembership).not.toHaveBeenCalled();
     push('cmd-2', false);
-    expect(store().publishMembership).toHaveBeenCalledWith('nodes_replaced', ['n1'], {
-      nodes: [{ id: 'n1', type: 'Goal' }],
-      edges: [],
-    });
+    expect(store().clearVisualization).toHaveBeenCalledTimes(2);
+    expect(store().publishMembership).not.toHaveBeenCalled();
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

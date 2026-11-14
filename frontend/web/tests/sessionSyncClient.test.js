@@ -555,7 +555,7 @@ describe('SessionSyncClient', () => {
     expect(client.baselinePosition('new')).toEqual({ x: 7, y: 8 });
   });
 
-  it('a user removal during hydration is one explicit op, and the late read drops the node', async () => {
+  it('a user removal during hydration is one explicit op, and a read settling before its echo drops the node', async () => {
     const { client, fetchImpl } = makeClient();
     client.connect();
     const es = FakeEventSource.instances[0];
@@ -566,8 +566,7 @@ describe('SessionSyncClient', () => {
     client.sendMembership('nodes_removed', ['a']);
     await flush();
     expect(fetchImpl.calls[0].body.ops).toEqual([{ op: 'nodes_removed', node_ids: ['a'] }]);
-    membershipOp(es, 'client-me', 'nodes_removed', ['a'], 2); // own echo is applied
-    release();
+    release(); // settles before the removal's echo
     expect(await hydration).toEqual({ nodes: [{ id: 'b' }], edges: [{ id: 'e-b' }] });
   });
 
@@ -592,7 +591,7 @@ describe('SessionSyncClient', () => {
     ]);
   });
 
-  it('a local clear is sent at once as a replace, and late reads stay cleared', async () => {
+  it('a local clear is sent at once as a replace, and reads settling before its echo stay cleared', async () => {
     const { client, fetchImpl } = makeClient();
     client.connect();
     const es = FakeEventSource.instances[0];
@@ -603,8 +602,7 @@ describe('SessionSyncClient', () => {
     client.sendMembership('nodes_replaced', []); // no autosave runs before the flush
     await flush();
     expect(fetchImpl.calls[0].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: [] }]);
-    membershipOp(es, 'client-me', 'nodes_replaced', [], 2);
-    release();
+    release(); // settles before the clear's echo
     expect(await hydration).toEqual({ nodes: [], edges: [] });
   });
 

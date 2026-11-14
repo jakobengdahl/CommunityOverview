@@ -325,7 +325,9 @@ export function computeOps(prevState, nextState) {
  * read. A result read across a newer membership version is stale: it keeps
  * only the nodes the server still holds, since a later removal or replace
  * must not be undone by a late read, while a node still held has no other op
- * left to render it. Edges come only from the kept nodes.
+ * left to render it. A node this client itself removed or cleared during the
+ * read is dropped too, before that change's echo arrives. Edges come only
+ * from the kept nodes.
  */
 export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = null) {
   const version = client.membershipVersion;
@@ -334,9 +336,17 @@ export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = 
     if (node) return { node, edges: sent.edges.filter((e) => e.source === id || e.target === id) };
     return getNodeDetails(id).catch(() => null);
   };
-  const reads = await Promise.all(nodeIds.map(read));
+  const dropped = client.watchLocalDrops();
+  let reads;
+  try {
+    reads = await Promise.all(nodeIds.map(read));
+  } finally {
+    client.unwatchLocalDrops(dropped);
+  }
   const stale = client.membershipVersion !== version;
-  const kept = reads.filter((r) => r?.node && (!stale || client.isMember(r.node.id)));
+  const kept = reads.filter(
+    (r) => r?.node && !dropped.has(r.node.id) && (!stale || client.isMember(r.node.id))
+  );
   return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
 }
 
@@ -796,6 +806,9 @@ export class SessionSyncClient {
     // the op's {edges, onDrawn}. Data only: the canvas still takes the node
     // from the broadcast (takeSentNodes).
     this._sentNodes = new Map();
+    // One set per in-flight hydration, collecting the nodes this client
+    // removes or clears meanwhile (watchLocalDrops).
+    this._dropWatchers = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -898,6 +911,21 @@ export class SessionSyncClient {
 
   get membershipVersion() {
     return this._membershipVersion;
+  }
+
+  /**
+   * Collect, until `unwatchLocalDrops`, the nodes this client's own removals
+   * and replaces drop from the view. They leave the canvas at once, while the
+   * membership version moves only when their echo arrives.
+   */
+  watchLocalDrops() {
+    const dropped = new Set();
+    this._dropWatchers.add(dropped);
+    return dropped;
+  }
+
+  unwatchLocalDrops(dropped) {
+    this._dropWatchers.delete(dropped);
   }
 
   // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
@@ -1501,6 +1529,16 @@ export class SessionSyncClient {
     if (!ids.length && op !== 'nodes_replaced') return;
     const sent = { edges, onDrawn };
     const named = new Set(op === 'nodes_removed' ? [] : ids);
+    const drops =
+      op === 'nodes_removed'
+        ? ids
+        : op === 'nodes_replaced'
+          ? this._baseline.node_refs.filter((id) => !named.has(id))
+          : [];
+    for (const watcher of this._dropWatchers) {
+      named.forEach((id) => watcher.delete(id));
+      drops.forEach((id) => watcher.add(id));
+    }
     const carried = nodes.filter((node) => named.has(node?.id));
     carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
     this._enqueue([{ op, node_ids: ids }]);

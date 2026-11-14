@@ -34,20 +34,18 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // mistaken for the same broadcast delivered twice.
   const appliedCommandIdsRef = useRef([]);
 
-  // Apply a tool result's nodes and edges to the canvas. A push the server
-  // already applied draws only the nodes the session holds (the rest are
-  // drawn, or were dropped, by membership broadcasts); `publish` marks one it
-  // could not apply (see the legacy stream below), whose nodes this browser
-  // sends and then draws from the op's broadcast.
+  // Apply a tool result's nodes and edges to the canvas. The server applied
+  // the push's membership, so this draws only the nodes the session holds (the
+  // rest are drawn, or were dropped, by membership broadcasts) and never sends
+  // membership back.
   const applyToCanvas = useCallback(
-    (toolResult, { publish = false } = {}) => {
+    (toolResult) => {
       const {
         nodes: currentNodes,
         edges: currentEdges,
         addNodesToVisualization: addNodes,
         updateVisualization: updateViz,
         clearVisualization: clearViz,
-        publishMembership,
       } = useGraphStore.getState();
       const sync = syncRef?.current;
       const held = (n) => !sync || sync.isMember(n.id);
@@ -55,13 +53,6 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       const filtered = (toolResult.nodes || []).filter(
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
       );
-      const send = (op, nodes, edges = []) =>
-        publishMembership(
-          op,
-          nodes.map((n) => n.id),
-          { nodes, edges }
-        );
-
       // Merge returned nodes into the current view (additive placement). Shared
       // by the explicit add_to_visualization action and the no-explicit-action
       // default so a plain additive request never clears the canvas.
@@ -76,8 +67,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             }
           : null;
         const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-        if (publish) send('nodes_added', positioned, toolResult.edges || []);
-        else addNodes(positioned.filter(held), toolResult.edges || []);
+        addNodes(positioned.filter(held), toolResult.edges || []);
       };
 
       if (toolResult.action === 'add_to_visualization') {
@@ -89,10 +79,6 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       ) {
         // Explicit replace/clear/load: swap the whole view for the results.
         clearViz();
-        if (publish) {
-          send('nodes_replaced', filtered, toolResult.edges || []);
-          return;
-        }
         // Nodes added since the push was sequenced (a deferred render) stay
         // where the server has them; named ones removed since do not return.
         const named = new Set(filtered.map((n) => n.id));
@@ -119,12 +105,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
             updatedIds.has(n.id) ? filtered.find((u) => u.id === n.id) : n
           );
           const newNodes = filtered.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-          if (publish) {
-            updateViz(merged, currentEdges);
-            send('nodes_added', newNodes);
-          } else {
-            updateViz([...merged, ...newNodes.filter(held)], currentEdges);
-          }
+          updateViz([...merged, ...newNodes.filter(held)], currentEdges);
         }
       } else if (filtered.length > 0) {
         // No explicit view-content action: default to additive so a plain
@@ -148,7 +129,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
   // handover from the legacy stream to the op stream (or a brief overlap
   // window) the same MCP push can be broadcast on both.
   const applyToolResultCommand = useCallback(
-    (pushed, commandId, { publish = false } = {}) => {
+    (pushed, commandId) => {
       if (!pushed) return;
       if (commandId) {
         if (appliedCommandIdsRef.current.includes(commandId)) return;
@@ -163,7 +144,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       // Pushes apply in the order they arrived: one waiting on its composed
       // re-read holds back every later one.
       if (!api.isActiveSessionPossiblyStaged() && pendingRef.current === 0) {
-        applyToCanvas(pushed, { publish });
+        applyToCanvas(pushed);
         return;
       }
       const target = sessionIdRef.current;
@@ -179,7 +160,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
           // keep the canvas rather than clear it for nothing.
           const replaces = ['load_visualization', 'replace_visualization'].includes(pushed.action);
           if (replaces && (pushed.nodes || []).length && !toolResult.nodes.length) return;
-          applyToCanvas(toolResult, { publish });
+          applyToCanvas(toolResult);
         })
         .catch(() => {})
         .finally(() => {
@@ -228,11 +209,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
           return;
         }
         if (cmd.type !== 'tool_result' || !cmd.result) return;
-        // The server marks a push whose membership it applied; only one it
-        // could not (no stored session yet) is sent on by this browser.
-        applyToolResultCommand(cmd.result, cmd.command_id, {
-          publish: cmd.membership_applied === false,
-        });
+        applyToolResultCommand(cmd.result, cmd.command_id);
       } catch (err) {
         console.error('[Session SSE] parse error:', err);
       }

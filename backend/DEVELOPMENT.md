@@ -1419,9 +1419,9 @@ none writes it back. A change is one activity record, attributed to
 push. The server writes membership for browsers too: their autosave never
 carries it, and a user's own add, removal or clear is sent as one explicit
 `nodes_added`, `nodes_removed` or `nodes_replaced` op.
-Reading stored state confirms membership, not delivery to a live canvas. The
-legacy-stream copy of a push carries `membership_applied`; only when it is
-`false` (no stored session yet) does the browser send the membership itself.
+Reading stored state confirms membership, not delivery to a live canvas. A
+push to a session a browser holds only on the legacy stream materialises it
+first, so the server applies that membership too and no browser sends it.
 Undelivered is not the same as discarded, though: when the session has a legacy
 registry entry with nothing draining it, the command still waits in that
 entry's bounded queue (oldest dropped first), and a browser that opens the
