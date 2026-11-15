@@ -657,6 +657,22 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
   });
 
+  it('a resync runs the follow-ups of own adds it holds and lets go of lost ones', async () => {
+    const { client } = makeClient();
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const [held, lost, waiting] = [vi.fn(), vi.fn(), vi.fn()];
+    client.sendMembership('nodes_added', ['x'], { nodes: [{ id: 'x' }], onDrawn: held });
+    client.sendMembership('nodes_added', ['z'], { nodes: [{ id: 'z' }], onDrawn: lost });
+    await flush(); // applied, but their broadcasts are lost to the reconnect
+    client.sendMembership('nodes_added', ['y'], { nodes: [{ id: 'y' }], onDrawn: waiting });
+    const pending = client.getPendingOps();
+    client.setBaseline({ node_refs: ['x', 'y'] }, { seq: 9 });
+    client.takeResyncedSentNodes(pending).onDrawn();
+    expect([held, lost, waiting].map((f) => f.mock.calls.length)).toEqual([1, 0, 0]);
+    expect([...client.takeSentNodes(['x', 'y', 'z']).nodes.keys()]).toEqual(['y']);
+  });
+
   it('forwards a summon from another client and skips its own echo', () => {
     const onViewportSummoned = vi.fn();
     const { client } = makeClient({ handlers: { onViewportSummoned } });

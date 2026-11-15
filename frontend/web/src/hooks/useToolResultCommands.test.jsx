@@ -306,10 +306,10 @@ describe('useToolResultCommands legacy SSE stream', () => {
     push('cmd-0', { action: 'add_to_visualization', nodes: [] }); // changes no membership
     expect(onServerMembership).not.toHaveBeenCalled();
     push('cmd-1', { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] });
-    push('cmd-2', { action: 'clear_visualization', nodes: [] });
+    push('cmd-2', { action: 'clear_visualization', nodes: [] }); // materialises nothing
     expect(store().clearVisualization).toHaveBeenCalledTimes(2);
     expect(store().publishMembership).not.toHaveBeenCalled();
-    expect(onServerMembership).toHaveBeenCalledTimes(2);
+    expect(onServerMembership).toHaveBeenCalledTimes(1);
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

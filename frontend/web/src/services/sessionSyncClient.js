@@ -904,6 +904,20 @@ export class SessionSyncClient {
     };
   }
 
+  /**
+   * After a full resync, which replaces the broadcasts of whatever it covers:
+   * take what own adds and replaces no pending op still names were sent with,
+   * for the nodes the reloaded membership holds. The rest are let go.
+   */
+  takeResyncedSentNodes(pendingOps) {
+    const waiting = new Set(
+      (pendingOps || []).filter((op) => MEMBERSHIP_OPS.has(op?.op)).flatMap((op) => op.node_ids)
+    );
+    const settled = [...this._sentNodes.keys()].filter((id) => !waiting.has(id));
+    this.takeSentNodes(settled.filter((id) => !this.isMember(id)));
+    return this.takeSentNodes(settled);
+  }
+
   get membershipVersion() {
     return this._membershipVersion;
   }

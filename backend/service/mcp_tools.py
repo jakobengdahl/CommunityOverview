@@ -134,14 +134,14 @@ _INVALID_SESSION_ID_ERROR = (
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
-# Appended to every undelivered-push warning: a push writes no session state, so
-# an agent that simply retries it gets the same silence. It deliberately names
+# Appended to every undelivered-push warning: an agent that simply retries an
+# undelivered push gets the same silence. It deliberately names
 # this report, not connect_to_visualization_session, as the verdict: that tool
 # is read before the push, and a consumer present then can be gone by the time
 # the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
-    " A push is not stored in the session's state — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than a "
+    " To change what the session holds whether or not a canvas is open, use "
+    "add_nodes_to_session. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
@@ -465,8 +465,8 @@ def register_mcp_tools(
 
         The three read tools return the service payload verbatim, so without
         this an agent cannot tell a push that landed on a canvas from one that
-        went nowhere: a push writes no session state, so there is nothing to
-        read back either.
+        went nowhere: the session's stored state says what it holds, not
+        whether a canvas showed it.
 
         What keeps this report out of what the canvas receives is the copy
         ``_push_to_session`` takes (``command_result = dict(result)``), not the
@@ -811,12 +811,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -939,12 +940,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -1717,12 +1719,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             The nodes and edges to display in the visualization, with position
@@ -3177,10 +3180,10 @@ def register_mcp_tools(
         ``add_nodes_to_session`` writes the session's stored state whether or
         not anyone has it open. Passing the session id as
         ``visualization_session_id`` to the search/related tools is not a
-        substitute: a push writes no session state, so its nodes land only if a
-        canvas receives it and adds them. Check ``visualization_delivery``
-        (``delivered``, ``status``) on such a result before assuming the push
-        reached anything.
+        substitute: such a push stores its nodes only in a session the server
+        already holds or can create, and shows them only on a canvas that
+        receives it. Check ``visualization_delivery`` (``delivered``,
+        ``status``) on such a result before assuming the push reached anything.
 
         Args:
             name: Optional display name. Names are not required to be unique; when
@@ -6377,10 +6380,14 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
 
 
 def _carries_membership(result: Dict[str, Any]) -> bool:
-    """Whether applying *result* changes a session's node membership."""
+    """Whether applying *result* gives a session that holds nothing nodes.
+
+    A clear or an empty replace changes nothing in a session never stored, so
+    it does not materialise one.
+    """
     action = result.get("action")
-    return action in _REPLACING_ACTIONS or (
-        action in _ADDITIVE_ACTIONS and bool(result.get("nodes"))
+    return (action in _REPLACING_ACTIONS or action in _ADDITIVE_ACTIONS) and bool(
+        result.get("nodes")
     )
 
 
@@ -6393,9 +6400,9 @@ def _push_to_session(
 ) -> Dict[str, Any]:
     """Push *result* to a browser session if *session_id* is set.
 
-    When the result has nodes but no explicit *action*, defaults to
-    "add_to_visualization" so external AI tools add to the canvas rather
-    than silently replacing it.
+    When the result has nodes but no *action* the canvas knows (none, or a
+    free-form one), it is pushed as "add_to_visualization" so external AI
+    tools add to the canvas rather than silently replacing it.
 
     The command goes to the legacy single-consumer registry (current frontend)
     and, when a *session_manager* is supplied, is also broadcast to the new
@@ -6439,7 +6446,14 @@ def _push_to_session(
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}
     command_result = dict(result)
-    if "action" not in command_result and command_result.get("nodes"):
+    action = command_result.get("action")
+    if (
+        action not in _REPLACING_ACTIONS
+        and action not in _ADDITIVE_ACTIONS
+        and command_result.get("nodes")
+    ):
+        # search_graph passes its action through unchecked, and browsers draw
+        # any other node-carrying push as an add: the server applies it as one.
         command_result["action"] = "add_to_visualization"
     # A unique id lets the browser dedupe the legacy stream and the hub
     # broadcast delivering the same push during the handover between them

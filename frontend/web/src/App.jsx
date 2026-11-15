@@ -974,6 +974,9 @@ function App() {
         // the second one, if the annotation was already edited in between,
         // would revert that edit.
         selfIngestedImageAnnotationIdsRef.current.clear();
+        // An own add or replace the reload already holds gets no broadcast
+        // now: run its follow-ups (saved-view groups, focus) here.
+        client.takeResyncedSentNodes(pendingOps).onDrawn();
         // Fold every recovered op into the sync baseline *before* replaying
         // any of them onto the canvas. Two consequences of skipping this
         // (review round 3): the next auto-save's diff would see the baseline

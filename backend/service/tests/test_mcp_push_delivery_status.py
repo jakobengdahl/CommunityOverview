@@ -37,8 +37,8 @@ UNDELIVERED_KEYS = DELIVERED_KEYS | {"warning"}
 # module's own constant would pass whatever that constant were rewritten to,
 # including advice that inverts this one.
 EXPECTED_REMEDY = (
-    " A push is not stored in the session's state — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than a "
+    " To change what the session holds whether or not a canvas is open, use "
+    "add_nodes_to_session. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
@@ -429,6 +429,35 @@ async def test_a_push_the_server_cannot_store_reaches_no_browser(
         await _settle(lambda: bool(received), turns=50)
         assert received == []
         assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+        # A clear changes nothing in a session never stored, so it needs none.
+        cleared = tools["clear_visualization"](
+            visualization_session_id=UNKNOWN_SESSION_ID
+        )
+        assert cleared["success"] is True
+        assert await _settle(lambda: len(received) == 1)
+        assert received[0]["result"]["action"] == "clear_visualization"
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_a_push_under_an_unknown_action_is_stored_and_sent_as_an_add(wired):
+    """search_graph passes a free-form action through: the server stores its
+    nodes and every browser receives it as the add it draws."""
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id) as received:
+        tools["search_graph"](
+            query="Alpha", action="show_these", visualization_session_id=session_id
+        )
+        assert await _settle(lambda: len(received) == 1)
+        assert received[0]["result"]["action"] == "add_to_visualization"
+        session = manager.get_session(session_id)
+        assert session.state["node_refs"] == ["alpha"]
+        assert [(r["op"], r["actor"]) for r in session.activity_log] == [
+            ("nodes_added", "mcp-agent")
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -27,12 +27,13 @@ async function composedToolResult(pushed) {
 }
 
 // Push actions whose membership the server applies (see
-// SessionManager._apply_command_membership).
+// SessionManager._apply_command_membership). Only a push carrying nodes can
+// have materialised the session (_carries_membership in mcp_tools.py).
 const REPLACING_ACTIONS = ['load_visualization', 'replace_visualization', 'clear_visualization'];
 const ADDITIVE_ACTIONS = ['add_to_visualization', 'update_in_visualization'];
 const carriesMembership = (result) =>
-  REPLACING_ACTIONS.includes(result.action) ||
-  (ADDITIVE_ACTIONS.includes(result.action) && (result.nodes || []).length > 0);
+  [...REPLACING_ACTIONS, ...ADDITIVE_ACTIONS].includes(result.action) &&
+  (result.nodes || []).length > 0;
 
 export function useToolResultCommands({
   sessionId,
@@ -124,7 +125,8 @@ export function useToolResultCommands({
       } else if (filtered.length > 0) {
         // No explicit view-content action: default to additive so a plain
         // additive request (or any node-returning tool) never silently clears
-        // the current view.
+        // the current view. The server sends any node-carrying push under a
+        // known action, so for a push this draws nothing it did not store.
         addNodesToView();
       }
     },
