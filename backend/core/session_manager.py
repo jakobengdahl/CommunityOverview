@@ -70,6 +70,7 @@ from .session_store import (
     Session,
     SessionRetired,
     SessionStore,
+    _validate_position,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -674,6 +675,11 @@ class SessionManager:
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
         self._pending_pushes: set[asyncio.Task] = set()
+        # The app's loop, so a push from a worker thread is applied there.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -2862,6 +2868,20 @@ class SessionManager:
         """
         if self.store.get(session_id) is None:
             return False
+        try:
+            running: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = self._loop
+        if loop is not None and loop.is_running() and running is not loop:
+            # A producer off the loop (a node-create listener in a worker
+            # thread) must not touch session state or the lock concurrently
+            # with apply_ops: the push is accepted and applied on the loop.
+            command = copy.deepcopy(command)
+            loop.call_soon_threadsafe(
+                self._push_command_on_loop, session_id, command, on_published
+            )
+            return True
         queue_name = f"session-push:{session_id}"
         if self._lock(session_id).locked() or any(
             task.get_name() == queue_name for task in self._pending_pushes
@@ -2878,6 +2898,17 @@ class SessionManager:
             task.add_done_callback(self._pending_pushes.discard)
             return True
         return self._publish_command(session_id, command, on_published)
+
+    def _push_command_on_loop(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]],
+    ) -> None:
+        try:
+            self.push_command(session_id, command, on_published)
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
 
     async def _push_command_after_batch(
         self,
@@ -2950,8 +2981,54 @@ class SessionManager:
                 actor,
                 {"op": "nodes_replaced", "node_ids": node_ids, "client_id": actor},
             )
+            self._apply_replaced_layout(session, actor, result, node_ids)
         elif action in _ADDITIVE_ACTIONS and node_ids:
             self._add_node_refs(session, actor, node_ids)
+
+    def _apply_replaced_layout(
+        self,
+        session: Session,
+        actor: str,
+        result: Dict[str, Any],
+        node_ids: List[str],
+    ) -> None:
+        """Store a loaded view's positions and hidden ids with its replace.
+
+        Browsers then render them from the session instead of each writing its
+        own layout back. They belong to the replace's one activity record, so
+        these ops record none of their own.
+        """
+        members = set(node_ids)
+        stored = session.state.get("positions", {})
+        positions: Dict[str, Any] = {}
+        for node_id, position in (result.get("positions") or {}).items():
+            if node_id not in members:
+                continue
+            try:
+                position = _validate_position(position)
+            except OpError:
+                continue
+            if stored.get(node_id) != position:
+                positions[node_id] = position
+        ops: List[Dict[str, Any]] = []
+        if positions:
+            ops.append({"op": "layout_applied", "positions": positions})
+        hidden_ids = result.get("hidden_node_ids")
+        if isinstance(hidden_ids, list):
+            target = {i for i in hidden_ids if isinstance(i, str) and i in members}
+            current = set(session.state.get("hidden_node_ids", []))
+            if current - target:
+                ops.append({"op": "nodes_shown", "node_ids": sorted(current - target)})
+            if target - current:
+                ops.append({"op": "nodes_hidden", "node_ids": sorted(target - current)})
+        for op in ops:
+            self._apply_op_sync(
+                session,
+                session.id,
+                actor,
+                {**op, "client_id": actor},
+                record_activity=False,
+            )
 
     # ---------------- summon to viewport ----------------
 

@@ -875,6 +875,11 @@ export class SessionSyncClient {
     return p ? { x: p.x, y: p.y } : null;
   }
 
+  /** The node ids the baseline holds hidden. */
+  baselineHiddenNodeIds() {
+    return [...this._baseline.hidden_node_ids];
+  }
+
   /** Whether the server's membership, as last broadcast, holds `nodeId`. */
   isMember(nodeId) {
     return this._baseline.node_refs.includes(nodeId);

@@ -25,6 +25,7 @@ vi.mock('../store/graphStore', () => {
     updateVisualization: vi.fn(),
     clearVisualization: vi.fn(),
     publishMembership: vi.fn(),
+    setHiddenNodeIds: vi.fn(),
     pulseNode: vi.fn(),
   };
   return { default: { getState: vi.fn(() => state) } };
@@ -131,16 +132,36 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     });
   });
 
-  it('load_visualization clears then replaces the canvas', () => {
-    const { result } = render();
+  it('load_visualization replaces the canvas with the layout the session stored', () => {
+    // The server stored the view's positions and hidden ids before the command.
+    const sync = {
+      isMember: (id) => id === 'n1' || id === 'n2',
+      baselinePosition: (id) => (id === 'n1' ? { x: 1, y: 2 } : null),
+      baselineHiddenNodeIds: () => ['n2', 'gone'],
+    };
+    const { result } = render({ syncRef: { current: sync } });
     act(() =>
       result.current.applyToolResultCommand(
-        { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }], edges: [] },
+        {
+          action: 'load_visualization',
+          nodes: [
+            { id: 'n1', type: 'Goal' },
+            { id: 'n2', type: 'Goal' },
+          ],
+          edges: [],
+        },
         'cmd-1'
       )
     );
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
-    expect(store().updateVisualization).toHaveBeenCalledWith([{ id: 'n1', type: 'Goal' }], []);
+    expect(store().updateVisualization).toHaveBeenCalledWith(
+      [
+        { id: 'n1', type: 'Goal', _savedPosition: { x: 1, y: 2 } },
+        { id: 'n2', type: 'Goal' },
+      ],
+      []
+    );
+    expect(store().setHiddenNodeIds).toHaveBeenCalledWith(['n2']);
   });
 
   it('clear_visualization with no nodes clears without a replace', () => {
@@ -170,6 +191,7 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     const sync = {
       isMember: (id) => id === 'existing',
       baselinePosition: () => ({ x: 1, y: 2 }),
+      baselineHiddenNodeIds: () => [],
     };
     const syncRef = { current: null };
     const { result } = render({ syncRef });

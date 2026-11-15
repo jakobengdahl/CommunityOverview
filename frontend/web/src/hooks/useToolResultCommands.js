@@ -94,16 +94,17 @@ export function useToolResultCommands({
       ) {
         // Explicit replace/clear/load: swap the whole view for the results.
         clearViz();
+        // Every node goes where the server has it (a loaded view's layout is
+        // stored with its replace), so no viewer writes its own layout back.
+        const atServerPosition = (n) => {
+          const pos = sync?.baselinePosition(n.id);
+          return pos ? { ...n, _savedPosition: pos } : n;
+        };
         // Nodes added since the push was sequenced (a deferred render) stay
         // where the server has them; named ones removed since do not return.
         const named = new Set(filtered.map((n) => n.id));
-        const kept = currentNodes
-          .filter((n) => !named.has(n.id) && sync?.isMember(n.id))
-          .map((n) => {
-            const pos = sync.baselinePosition(n.id);
-            return pos ? { ...n, _savedPosition: pos } : n;
-          });
-        const shown = [...filtered.filter(held), ...kept];
+        const kept = currentNodes.filter((n) => !named.has(n.id) && sync?.isMember(n.id));
+        const shown = [...filtered.filter(held), ...kept].map(atServerPosition);
         const shownIds = new Set(shown.map((n) => n.id));
         const keptEdges = kept.length
           ? currentEdges.filter((e) => shownIds.has(e.source) && shownIds.has(e.target))
@@ -111,6 +112,9 @@ export function useToolResultCommands({
         if (shown.length > 0) {
           updateViz(shown, [...(toolResult.edges || []), ...keptEdges]);
         }
+        // The clear reset hidden ids the session still holds; keep them.
+        const hidden = sync ? sync.baselineHiddenNodeIds().filter((id) => shownIds.has(id)) : [];
+        if (hidden.length) useGraphStore.getState().setHiddenNodeIds(hidden);
       } else if (toolResult.action === 'update_in_visualization') {
         // In-place update: replace matching nodes, keep the rest, append any
         // genuinely new nodes. Kept in sync with the ChatPanel apply path.

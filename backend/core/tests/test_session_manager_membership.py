@@ -58,11 +58,14 @@ class TestServerMembership:
         # Delivery neither spends a fresh budget nor replenishes an empty one.
         assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
 
+    @pytest.mark.parametrize("off_loop", [False, True])
     @pytest.mark.parametrize("clear_after_add", [False, True])
     async def test_additive_push_waits_for_inflight_batch(
-        self, monkeypatch, clear_after_add
+        self, monkeypatch, clear_after_add, off_loop
     ):
+        """A push, from the loop or a worker thread, applies after the batch."""
         mgr = _manager()
+        mgr.set_event_loop(asyncio.get_running_loop())
         s = mgr.create_session()
         subs = [mgr.connect(s.id, client, client)[0] for client in ("c1", "c2")]
         for sub in subs:
@@ -91,13 +94,21 @@ class TestServerMembership:
         }
         try:
             assert await asyncio.to_thread(entered.wait, 2)
-            assert mgr.push_command(s.id, command) is True
+
+            async def push(cmd):
+                if not off_loop:
+                    return mgr.push_command(s.id, cmd)
+                accepted = await asyncio.to_thread(mgr.push_command, s.id, cmd)
+                await asyncio.sleep(0)  # the hop onto the loop
+                return accepted
+
+            assert await push(command) is True
             clear = {
                 "tool": "clear_visualization",
                 "result": {"action": "clear_visualization"},
             }
             if clear_after_add:
-                assert mgr.push_command(s.id, clear) is True
+                assert await push(clear) is True
             pending = list(mgr._pending_pushes)
             assert len(pending) == (2 if clear_after_add else 1)
             for sub in subs:
@@ -221,6 +232,57 @@ class TestServerMembership:
             events = await _drain(sub)
             ops = [e["op"]["op"] for e in events if e["type"] == "op"]
             assert ops == [record]
+
+    async def test_saved_view_load_stores_its_layout_in_its_one_record(self):
+        """Viewers render a load's positions and hidden ids from the session."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.add_node_refs(s.id, "owner", ["a", "b"])
+        mgr.apply_layout(s.id, "owner", positions={"a": {"x": 5, "y": 5}})
+        mgr.apply_layout(s.id, "owner", positions={"b": {"x": 7, "y": 7}})
+        mgr.store.apply_state_op(s, {"op": "nodes_hidden", "node_ids": ["a"]})
+        subs = [mgr.connect(s.id, f"c{i}", "Alice")[0] for i in range(2)]
+        for sub in subs:
+            await _drain(sub)
+        records = len(s.activity_log)
+        result = {
+            "action": "load_visualization",
+            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "positions": {
+                "a": {"x": 1, "y": 2},
+                "b": {"x": 7, "y": 7},
+                "c": {"x": 3, "y": 4},
+                "group-1": {"x": 0, "y": 0},
+                "gone": {"x": 9, "y": 9},
+            },
+            "hidden_node_ids": ["c", "gone"],
+        }
+        assert mgr.push_command(s.id, {"tool": "get_saved_view", "result": result})
+
+        assert s.state["positions"] == {
+            "a": {"x": 1.0, "y": 2.0},
+            "b": {"x": 7.0, "y": 7.0},
+            "c": {"x": 3.0, "y": 4.0},
+        }
+        assert s.state["hidden_node_ids"] == ["c"]
+        assert [(r["op"], r["actor"]) for r in s.activity_log[records:]] == [
+            ("nodes_replaced", "mcp-agent")
+        ]
+        for sub in subs:
+            events = await _drain(sub)
+            assert [
+                e["op"]["op"] if e["type"] == "op" else e["type"] for e in events
+            ] == [
+                "nodes_replaced",
+                "layout_applied",
+                "nodes_shown",
+                "nodes_hidden",
+                "command",
+            ]
+            assert events[1]["op"]["positions"] == {
+                "a": {"x": 1.0, "y": 2.0},
+                "c": {"x": 3.0, "y": 4.0},
+            }
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()
