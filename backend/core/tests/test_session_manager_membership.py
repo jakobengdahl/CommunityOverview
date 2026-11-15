@@ -228,10 +228,14 @@ class TestServerMembership:
             assert mgr.push_command(s.id, {"tool": tool, "result": result})
         assert s.state["node_refs"] == expected
         assert ("old" in s.state["positions"]) == ("old" in expected)
-        # A pushed add is placed once, here, not by each viewer saving its own.
-        placed = source == "push" and record == "nodes_added"
+        # A pushed node is placed once, here, not by each viewer saving its own.
+        placed = source == "push"
         assert s.state["positions"].get("new") == (
-            {"x": 281.0, "y": 2.0} if placed else None
+            None
+            if not placed
+            else {"x": 281.0, "y": 2.0}
+            if record == "nodes_added"
+            else {"x": 400.0, "y": 300.0}
         )
         assert [(r["op"], r["actor"]) for r in s.activity_log[2:]] == [(record, actor)]
         for sub in subs:
@@ -271,6 +275,8 @@ class TestServerMembership:
                 "gone": {"x": 9, "y": 9},
             },
             "hidden_node_ids": ["c", "gone"],
+            # get_saved_view always carries its (legacy-format) overlays.
+            "annotations": [],
         }
         view_annotations = [
             {"id": "kept", "type": "note"},
@@ -319,6 +325,27 @@ class TestServerMembership:
                 "a": {"x": 1.0, "y": 2.0},
                 "c": {"x": 3.0, "y": 4.0},
             }
+
+    async def test_failed_push_layout_keeps_membership_and_broadcasts(
+        self, monkeypatch
+    ):
+        """A layout op that fails after the replace still lets the command out."""
+        mgr = _manager()
+        s = mgr.create_session()
+        sub = mgr.connect(s.id, "c0", "Alice")[0]
+        await _drain(sub)
+        apply = mgr._apply_op_sync
+
+        def failing(session, sid, client, op, **kw):
+            if op["op"] == "layout_applied":
+                raise RuntimeError("persist failed")
+            return apply(session, sid, client, op, **kw)
+
+        monkeypatch.setattr(mgr, "_apply_op_sync", failing)
+        result = {"action": "replace_visualization", "nodes": [{"id": "n"}]}
+        assert mgr.push_command(s.id, {"tool": "search_graph", "result": result})
+        assert s.state["node_refs"] == ["n"]
+        assert [e["type"] for e in await _drain(sub)] == ["op", "command"]
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()

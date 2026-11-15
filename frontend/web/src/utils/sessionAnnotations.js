@@ -53,6 +53,16 @@ export function savedViewMetadataToCanvasMetadata(metadata = {}) {
   };
 }
 
+// A SavedView node's layout as a session replace carries it (see
+// SessionSyncClient.sendMembership); the canvas's clear left nothing hidden.
+export function savedViewLayout(metadata = {}) {
+  return {
+    positions: metadata.positions || {},
+    hidden_node_ids: [],
+    annotations: legacyMetadataToAnnotationDocument(metadata).annotations,
+  };
+}
+
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
   const skip = { onSkipped: skippedAnnotation };
   if (metadata.annotation_document)

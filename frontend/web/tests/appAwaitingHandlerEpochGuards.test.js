@@ -670,6 +670,26 @@ describe('loadSavedViewNode (saved-view double-click load)', () => {
     expect(showNotification).toHaveBeenCalledWith('info', 'Loaded saved view: My view');
   });
 
+  it('in a session sends the view with its one replace and saves nothing itself', async () => {
+    const publish = vi.fn(() => true);
+    store().setMembershipPublisher(publish);
+    const clearSpy = vi.spyOn(store(), 'clearVisualization');
+    try {
+      const { inFlight } = run();
+      expect(await inFlight).toBe(true);
+    } finally {
+      store().setMembershipPublisher(null);
+    }
+    expect(publish).toHaveBeenCalledTimes(1);
+    const [op, ids, { view: sent }] = publish.mock.calls[0];
+    expect([op, ids]).toEqual(['nodes_replaced', ['v1', 'v2']]);
+    expect(sent.positions).toEqual({ v1: { x: 1, y: 2 } });
+    expect(sent.annotations.map((a) => a.id).sort()).toEqual(['g1', 'note-1']);
+    expect(clearSpy).not.toHaveBeenCalled();
+    expect(store().pendingGroups).toBeNull();
+    expect(store().pendingAnnotations).toBeNull();
+  });
+
   it('prefers the edges saved with the view, filtered by edge_ids otherwise', async () => {
     const saved = { ...view, metadata: { ...view.metadata, edges: [edge('kept', 'v1', 'v2')] } };
     const first = run(null, saved);

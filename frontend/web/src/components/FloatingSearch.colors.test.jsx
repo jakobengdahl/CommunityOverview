@@ -220,6 +220,8 @@ describe('FloatingSearch async behavior', () => {
           },
         ],
         edges: [],
+        // The view's layout rides the replace for a session to store with it.
+        view: expect.objectContaining({ positions: { 'fresh-node': { x: 10, y: 20 } } }),
       })
     );
 

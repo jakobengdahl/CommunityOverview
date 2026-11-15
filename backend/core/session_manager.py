@@ -3099,6 +3099,7 @@ class SessionManager:
                 {"op": "nodes_replaced", "node_ids": node_ids, "client_id": actor},
             )
             self._apply_replaced_layout(session, actor, result, node_ids)
+            self._place_added_nodes(session, actor, result, node_ids)
         elif action in _ADDITIVE_ACTIONS and node_ids:
             added = self._add_node_refs(session, actor, node_ids)["added"]
             if added:
@@ -3115,15 +3116,33 @@ class SessionManager:
 
         Browsers then render them from the session instead of each writing its
         own layout back. They belong to the replace's one activity record, so
-        these ops record none of their own.
+        these ops record none of their own. A pushed result's annotations are
+        not the session's document format, so the overlays are left as they are.
         """
-        for op in _replaced_view_ops(session, result, node_ids):
+        view = {f: result[f] for f in ("positions", "hidden_node_ids") if f in result}
+        for op in _replaced_view_ops(session, view, node_ids):
+            self._apply_layout_op(session, actor, op)
+
+    def _apply_layout_op(
+        self, session: Session, actor: str, op: Dict[str, Any]
+    ) -> None:
+        """Apply a push's layout op as part of its membership change's record.
+
+        The membership is already stored and recorded, so a layout op that
+        fails (rolled back on its own) must not stop the command's broadcast.
+        """
+        try:
             self._apply_op_sync(
                 session,
                 session.id,
                 actor,
                 {**op, "client_id": actor},
                 record_activity=False,
+            )
+        except Exception:
+            logger.exception(
+                "layout for a pushed membership change failed in session %s",
+                session.id,
             )
 
     def _place_added_nodes(
@@ -3136,7 +3155,8 @@ class SessionManager:
         """Store a position for each node a push added without one.
 
         Every browser then draws the node where the session has it instead of
-        placing it itself and saving that back. Part of the add's one record.
+        placing it itself and saving that back. Part of the add's (or
+        replace's) one record.
         """
         stored = session.state.get("positions", {})
         given = (
@@ -3154,12 +3174,8 @@ class SessionManager:
         if unplaced:
             positions.update(_grid_positions(stored, session, unplaced))
         if positions:
-            self._apply_op_sync(
-                session,
-                session.id,
-                actor,
-                {"op": "layout_applied", "positions": positions, "client_id": actor},
-                record_activity=False,
+            self._apply_layout_op(
+                session, actor, {"op": "layout_applied", "positions": positions}
             )
 
     # ---------------- summon to viewport ----------------

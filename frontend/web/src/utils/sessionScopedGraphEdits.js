@@ -1,5 +1,5 @@
 import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
-import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
+import { savedViewLayout, savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
 
 // The user's own membership change, sent to the session as an explicit op.
 // Added nodes are drawn by the server's broadcast of it, from `nodes`/`edges`;
@@ -450,8 +450,8 @@ export async function setEdgeType({
 /**
  * Load a SavedView node's contents onto the canvas, replacing what is there.
  *
- * The canvas is cleared before the node fetches, so the scope is captured after
- * that clear. A switch or a later wholesale replace — another saved view, a
+ * In a session the view's layout goes with the replace; otherwise the canvas is
+ * cleared and its overlays queued once the nodes are drawn. A switch or a later wholesale replace — another saved view, a
  * session load or resync, the clear action — supersedes this load, and its nodes
  * must not be added on top of whatever replaced them.
  *
@@ -480,7 +480,6 @@ export async function loadSavedViewNode({
     const savedEdges = nodeData.metadata?.edges || [];
     const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
     if (nodeIds.length > 0) {
-      clearVisualization({ keepNodes: true });
       const scope = captureCanvasScope();
       const details = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
       if (scope.canvasReplaced()) return false;
@@ -510,28 +509,30 @@ export async function loadSavedViewNode({
         }
       }
       const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-      // Groups and annotations wait for the nodes they frame.
-      const restoreAnnotations = () => {
-        if (savedViewAnnotations.groups.length > 0) {
-          setPendingGroups({
-            groups: savedViewAnnotations.groups,
-            parentIds: savedViewAnnotations.parentIds,
-          });
-        }
-        if (savedViewAnnotations.annotations.length > 0) {
-          setPendingAnnotations(savedViewAnnotations.annotations);
-        }
-      };
-      publishMembership(
+      // A session stores the view's layout with the replace's one record and
+      // every browser renders it from there, so none is saved back.
+      const sent = publishMembership(
         'nodes_replaced',
         loadedNodes.map((n) => n.id),
         {
           nodes: loadedNodes,
           edges: Array.from(edgeMap.values()),
           draw: addNodesToVisualization,
-          onDrawn: loadedNodes.length > 0 ? restoreAnnotations : null,
+          view: savedViewLayout(nodeData.metadata),
         }
       );
+      if (!sent) {
+        clearVisualization({ keepNodes: true });
+        if (loadedNodes.length > 0 && savedViewAnnotations.groups.length > 0) {
+          setPendingGroups({
+            groups: savedViewAnnotations.groups,
+            parentIds: savedViewAnnotations.parentIds,
+          });
+        }
+        if (loadedNodes.length > 0 && savedViewAnnotations.annotations.length > 0) {
+          setPendingAnnotations(savedViewAnnotations.annotations);
+        }
+      }
     }
     showNotification('info', `Loaded saved view: ${nodeData.name || nodeData.label}`);
     return true;

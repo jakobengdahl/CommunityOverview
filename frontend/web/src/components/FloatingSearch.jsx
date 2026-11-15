@@ -5,7 +5,7 @@ import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
-import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
+import { savedViewLayout, savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
 import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
 function FloatingSearch({ variant = 'floating', onTeleport }) {
@@ -285,7 +285,6 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               : [];
           if (selectionRef.current !== selectionId) return;
 
-          clearVisualization({ keepNodes: true });
           let loadedNodes = [];
           let loadedEdges = [];
           if (nodeIds.length > 0) {
@@ -322,26 +321,29 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               loadedEdges = Array.from(edgeMap.values());
             }
           }
-          // Groups and annotations wait for the nodes they frame.
-          publishMembership(
+          // A session stores the view's layout with the replace's one record
+          // and every browser renders it from there, so none is saved back.
+          const sent = publishMembership(
             'nodes_replaced',
             loadedNodes.map((n) => n.id),
             {
               nodes: loadedNodes,
               edges: loadedEdges,
-              onDrawn: () => {
-                if (savedViewAnnotations.groups.length > 0) {
-                  setPendingGroups({
-                    groups: savedViewAnnotations.groups,
-                    parentIds: savedViewAnnotations.parentIds,
-                  });
-                }
-                if (savedViewAnnotations.annotations.length > 0) {
-                  setPendingAnnotations(savedViewAnnotations.annotations);
-                }
-              },
+              view: savedViewLayout(node.metadata),
             }
           );
+          if (!sent) {
+            clearVisualization({ keepNodes: true });
+            if (savedViewAnnotations.groups.length > 0) {
+              setPendingGroups({
+                groups: savedViewAnnotations.groups,
+                parentIds: savedViewAnnotations.parentIds,
+              });
+            }
+            if (savedViewAnnotations.annotations.length > 0) {
+              setPendingAnnotations(savedViewAnnotations.annotations);
+            }
+          }
         } catch (err) {
           if (selectionRef.current !== selectionId) return;
           console.error('Error loading saved view:', err);
