@@ -710,7 +710,8 @@ const conversationStates = new Map();
 export async function sendChatMessage(messages, documentContext = null, options = {}) {
   const key = options.conversationId;
   if (!key) throw new Error('sendChatMessage requires options.conversationId');
-  const body = { messages };
+  // The server binds pending actions to this id; confirmChatAction must send it back.
+  const body = { messages, conversation_id: key };
   if (conversationStates.has(key)) {
     body.conversation_state = conversationStates.get(key);
   }
@@ -722,12 +723,14 @@ export async function sendChatMessage(messages, documentContext = null, options 
 /**
  * Run a pending action the server recorded, by its single-use token.
  * @param {string} token
+ * @param {string} conversationId - The key of the conversation whose turn recorded the action
  * @returns {Promise<Object>} The tool result, or `{ error_code }` when refused
  */
-export async function confirmChatAction(token) {
+export async function confirmChatAction(token, conversationId) {
+  if (!conversationId) throw new Error('confirmChatAction requires a conversationId');
   return apiFetch(`${UI_API_BASE}/chat/confirm`, {
     method: 'POST',
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, conversation_id: conversationId }),
   });
 }
 

@@ -11,9 +11,10 @@ import './PendingActionCard.css';
  * answers with an explicit outcome (no assistant turn): a failure shows its
  * message; a successful run shows its message and hands the raw tool result to
  * onConfirmed, so the caller applies its side effects (e.g. confirmed nodes
- * join the view).
+ * join the view). conversationId is the key of the conversation whose turn
+ * recorded the action; the server refuses a confirmation from any other.
  */
-function PendingActionCard({ action, disabled = false, onConfirmed }) {
+function PendingActionCard({ action, conversationId, disabled = false, onConfirmed }) {
   const { t } = useI18n();
   const [status, setStatus] = useState(null);
   const [reply, setReply] = useState(null);
@@ -22,7 +23,7 @@ function PendingActionCard({ action, disabled = false, onConfirmed }) {
   const confirm = async () => {
     setBusy(true);
     try {
-      const response = await api.confirmChatAction(action.token);
+      const response = await api.confirmChatAction(action.token, conversationId);
       if (response?.error_code === 'confirmation_unknown')
         setStatus(t('chat.pending_action_unknown'));
       else if (response?.error_code === 'access_denied') setStatus(t('chat.pending_action_denied'));

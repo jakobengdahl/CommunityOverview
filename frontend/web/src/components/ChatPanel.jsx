@@ -986,6 +986,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                   <PendingActionCard
                     key={action.token}
                     action={action}
+                    conversationId={chatConversationId}
                     disabled={isProcessing}
                     onConfirmed={applyToolResultSideEffects}
                   />
