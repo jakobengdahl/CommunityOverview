@@ -405,9 +405,14 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
-  it('an own replace applies on its broadcast, redrawing a shown node it carries', async () => {
+  it('an own replace applies on its broadcast, redrawing a shown node at the position it carries', async () => {
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    // node-a's canvas position reaches the sync baseline before the view loads.
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'node_moved' }));
+    });
     const viewed = { ...NODE_A, _savedPosition: { x: 9, y: 9 } };
     act(() =>
       useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], { nodes: [viewed] })

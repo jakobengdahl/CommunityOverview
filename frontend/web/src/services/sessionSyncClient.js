@@ -1482,9 +1482,8 @@ export class SessionSyncClient {
 
   /**
    * A replace the server found unchanged is not broadcast; its ack says the
-   * session already holds those nodes, so the host is handed the replace as
-   * its broadcast would have been (the nodes still held), and a dropped op's
-   * sent nodes are let go.
+   * session already holds those nodes, so the host is handed a replace naming
+   * the membership now held, and a dropped op's sent nodes are let go.
    */
   _settleSentMembership(batch, applied) {
     const replaced = (applied || [])
@@ -1496,8 +1495,10 @@ export class SessionSyncClient {
       if (at >= 0) {
         replaced.splice(at, 1);
       } else if (applied) {
-        const held = op.node_ids.filter((id) => this.isMember(id));
+        // The membership as now broadcast, not as sent: a remote add
+        // sequenced after it may already have arrived.
         this.takeSentNodes(op.node_ids.filter((id) => !this.isMember(id)));
+        const held = [...this._baseline.node_refs];
         this.handlers.onRemoteOps?.([{ op: 'nodes_replaced', node_ids: held }], {
           sessionId: this.sessionId,
         });

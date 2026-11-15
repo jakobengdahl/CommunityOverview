@@ -348,6 +348,7 @@ def _undelivered_push_warning(
     hub_published: bool,
     hub_clients: int,
     outcome_unknown: bool,
+    legacy_withheld: bool = False,
 ) -> str:
     """Say why nothing received a push, reading the reason off the actual state.
 
@@ -367,6 +368,11 @@ def _undelivered_push_warning(
     """
     if not registry_configured:
         legacy_reason = "no legacy push channel is configured"
+    elif legacy_withheld:
+        legacy_reason = (
+            "it was not sent to the legacy push channel, since the server could "
+            "not confirm its nodes were added to the session"
+        )
     elif legacy_enqueued and legacy_consumers == 0:
         legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
@@ -6436,7 +6442,8 @@ def _push_to_session(
     (``SessionManager._apply_command_membership``), materialising a session
     a browser holds only client-side (a legacy registry entry), so browsers only render it and never
     send it back. A push whose membership cannot be applied (the session cannot
-    be stored) is sent to no browser and reported undelivered. An
+    be stored, or applying it raised) is sent to no browser and reported
+    undelivered. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6474,6 +6481,7 @@ def _push_to_session(
     hub_publish_failed = False
     hub_presence_read = True
     membership_unapplied = False
+    legacy_withheld = False
     if session_manager is not None:
         if (
             _carries_membership(command_result)
@@ -6503,12 +6511,20 @@ def _push_to_session(
                 # Best-effort mirror to the hub; never break the legacy push path.
                 hub_published = False
                 hub_publish_failed = True
+                # Applying the membership may be what failed (and rolled back);
+                # a legacy-only browser would then render nodes the session
+                # never gained, so it is not sent the push either.
+                pushed = command_result.get("action")
+                legacy_withheld = pushed in _REPLACING_ACTIONS or (
+                    pushed in _ADDITIVE_ACTIONS and bool(command_result.get("nodes"))
+                )
     legacy_enqueued = False
     legacy_consumers = 0
     if (
         session_registry
         and session_registry.is_valid_session_id(session_id)
         and not membership_unapplied
+        and not legacy_withheld
     ):
         legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
         # A registry that cannot report its consumers cannot support a delivery
@@ -6552,6 +6568,7 @@ def _push_to_session(
                 hub_published=hub_published,
                 hub_clients=hub_clients,
                 outcome_unknown=outcome_unknown,
+                legacy_withheld=legacy_withheld,
             )
         )
     return delivery

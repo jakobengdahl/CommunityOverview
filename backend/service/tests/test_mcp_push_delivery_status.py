@@ -939,18 +939,20 @@ class _PresenceBlindHub(SessionManager):
 
 
 @pytest.mark.asyncio
-async def test_a_broken_hub_is_reported_not_raised(tmp_path):
-    """A hub failure must not break the tool, nor be reported as delivery."""
+async def test_a_membership_push_the_hub_failed_to_apply_reaches_no_browser(tmp_path):
+    """A hub failure must not break the tool, nor be reported as delivery, and
+    a push whose membership may not have been applied is not rendered."""
     broken = _FullyBrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
-    tools, registry, _manager = _wire(tmp_path, session_manager=broken)
+    tools, registry, manager = _wire(tmp_path, session_manager=broken)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
         delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        # The legacy path is independent and still delivers.
-        assert delivery["delivered"] is True
-        assert delivery["live_consumers"] == 1
-        assert await _settle(lambda: len(received) == 1)
+        assert delivery["delivered"] is False
+        assert delivery["status"] == "not_delivered"
+        await _settle(lambda: bool(received), turns=50)
+        assert received == []
+        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == []
 
 
 def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):

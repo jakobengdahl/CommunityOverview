@@ -586,6 +586,9 @@ function App() {
           // from settling at an auto-layout spot and re-emitting a wrong position.
           if (addNodes.length) {
             const positioned = addNodes.map((n) => {
+              // What an own add or replace carries places its node: the
+              // baseline still holds a redrawn node's old canvas position.
+              if (sent?.nodes.has(n.id) && n._savedPosition) return n;
               const pos = syncRef.current?.baselinePosition(n.id);
               return pos ? { ...n, _savedPosition: pos } : n;
             });

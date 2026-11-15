@@ -650,11 +650,15 @@ describe('SessionSyncClient', () => {
     sent.onDrawn();
     expect(onDrawn).toHaveBeenCalledTimes(1);
     expect(client.takeSentNodes(['x']).nodes.size).toBe(0); // taken once
-    // A replace the server found unchanged is not broadcast: its ack draws it.
+    // A replace the server found unchanged is not broadcast: its ack draws
+    // the membership then held, a remote add broadcast before the ack included.
     client.sendMembership('nodes_replaced', ['x'], { nodes: [{ id: 'x' }] });
+    membershipOp(es, 'other', 'nodes_added', ['y'], 3);
     await flush();
     expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
-    expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
+    expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([
+      { op: 'nodes_replaced', node_ids: ['x', 'y'] },
+    ]);
   });
 
   it('a resync runs the follow-ups of own adds it holds and lets go of lost ones', async () => {
