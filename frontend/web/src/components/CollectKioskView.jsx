@@ -367,7 +367,12 @@ function CollectKioskView({ shortName }) {
                   <div className="kiosk-untrusted-notice">{t('chat.untrusted_content_used')}</div>
                 )}
                 {msg.pendingActions?.map((action) => (
-                  <PendingActionCard key={action.token} action={action} disabled={isProcessing} />
+                  <PendingActionCard
+                    key={action.token}
+                    action={action}
+                    conversationId={conversationId}
+                    disabled={isProcessing}
+                  />
                 ))}
                 {msg.form && (
                   <CollectionForm
