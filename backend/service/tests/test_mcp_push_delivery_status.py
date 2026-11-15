@@ -915,7 +915,7 @@ def test_clear_visualization_accepts_op_stream_presence_without_registry(tmp_pat
 class _BrokenHub(SessionManager):
     """A hub whose publish raises, as a swapped-in bus can."""
 
-    def push_command(self, session_id, command):
+    def push_command(self, session_id, command, on_published=None):
         raise RuntimeError("hub unreachable")
 
 
@@ -953,6 +953,31 @@ async def test_a_membership_push_the_hub_failed_to_apply_reaches_no_browser(tmp_
         await _settle(lambda: bool(received), turns=50)
         assert received == []
         assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_push_queued_behind_a_batch_reaches_legacy_only_once_applied(wired):
+    """A membership push queued behind an in-flight batch is sent to a legacy
+    browser after the hub applies it, and never when that apply fails."""
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+    apply = manager._apply_command_membership
+
+    def failing_apply(session, command):
+        raise RuntimeError("persistence down")
+
+    async with _legacy_consumer(registry, session_id) as received:
+        for applier, expected in ((failing_apply, []), (apply, [["alpha"]])):
+            manager._apply_command_membership = applier
+            async with manager._lock(session_id):
+                _search(tools, session_id)
+                await _settle(lambda: bool(received), turns=50)
+                assert received == []
+            await _settle(lambda: bool(received), turns=200)
+            assert [[n["id"] for n in c["result"]["nodes"]] for c in received] == (
+                expected
+            )
+    assert manager.get_session(session_id).state["node_refs"] == ["alpha"]
 
 
 def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):

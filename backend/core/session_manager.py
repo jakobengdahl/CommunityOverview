@@ -2845,13 +2845,20 @@ class SessionManager:
 
     # ---------------- MCP push ----------------
 
-    def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+    def push_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+    ) -> bool:
         """Apply server-owned membership once, then broadcast the command.
 
         Pushed results bypass MCP request caps; see _apply_command_membership.
         During an in-flight batch, acceptance queues delivery behind its lock;
-        otherwise delivery completes inline. Returns ``False`` when the session
-        is unknown so callers can fall back to the legacy registry.
+        otherwise delivery completes inline. ``on_published`` runs only once
+        the membership is applied and the command broadcast, inline or queued.
+        Returns ``False`` when the session is unknown so callers can fall back
+        to the legacy registry.
         """
         if self.store.get(session_id) is None:
             return False
@@ -2864,28 +2871,39 @@ class SessionManager:
             # rolls back, preserving op/command order for every subscriber.
             command = copy.deepcopy(command)
             task = asyncio.get_running_loop().create_task(
-                self._push_command_after_batch(session_id, command), name=queue_name
+                self._push_command_after_batch(session_id, command, on_published),
+                name=queue_name,
             )
             self._pending_pushes.add(task)
             task.add_done_callback(self._pending_pushes.discard)
             return True
-        return self._publish_command(session_id, command)
+        return self._publish_command(session_id, command, on_published)
 
     async def _push_command_after_batch(
-        self, session_id: str, command: Dict[str, Any]
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
     ) -> None:
         try:
             async with self._lock(session_id):
-                self._publish_command(session_id, command)
+                self._publish_command(session_id, command, on_published)
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
-    def _publish_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+    def _publish_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+    ) -> bool:
         session = self.store.get(session_id)
         if session is None:
             return False
         self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
+        if on_published is not None:
+            on_published()
         return True
 
     def _apply_command_membership(

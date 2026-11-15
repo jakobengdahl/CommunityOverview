@@ -20,6 +20,7 @@ from .attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS
 import functools
 import inspect
 import json
+import logging
 import math
 import secrets
 from typing import List, Optional, Dict, Any, Callable, Tuple
@@ -102,6 +103,8 @@ from backend.runtime.authorization import (
 from . import access, graph_merge_plan
 from .service import GraphService
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
+
+logger = logging.getLogger(__name__)
 
 # Server-owned session state records node x/y but not rendered node dimensions
 # (design §3.8: the browser no longer uploads canvas geometry). Agents still need
@@ -6443,7 +6446,8 @@ def _push_to_session(
     a browser holds only client-side (a legacy registry entry), so browsers only render it and never
     send it back. A push whose membership cannot be applied (the session cannot
     be stored, or applying it raised) is sent to no browser and reported
-    undelivered. An
+    undelivered; one queued behind an in-flight batch reaches a legacy browser
+    only after that apply succeeds. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6482,9 +6486,40 @@ def _push_to_session(
     hub_presence_read = True
     membership_unapplied = False
     legacy_withheld = False
+    # A push carrying membership reaches a legacy browser only after the hub
+    # applied it: legacy browsers render without writing membership back, so a
+    # render ahead of a failed apply would show nodes the session never gains.
+    legacy_gated = session_manager is not None and _carries_membership(command_result)
+    legacy = {"sent": False, "enqueued": False, "consumers": 0}
+
+    def _send_legacy() -> None:
+        legacy["sent"] = True
+        if not (
+            session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and not membership_unapplied
+            and not legacy_withheld
+        ):
+            return
+        legacy["enqueued"] = bool(
+            session_registry.push_command_sync(session_id, command)
+        )
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+
+    def _send_legacy_after_apply() -> None:
+        try:
+            _send_legacy()
+        except Exception:
+            logger.exception("legacy push failed for session %s", session_id)
+
     if session_manager is not None:
         if (
-            _carries_membership(command_result)
+            legacy_gated
             and session_registry
             and session_registry.is_valid_session_id(session_id)
             and session_registry.session_exists(session_id)
@@ -6506,33 +6541,36 @@ def _push_to_session(
             hub_presence_read = False
         if not membership_unapplied:
             try:
-                hub_published = bool(session_manager.push_command(session_id, command))
+                if legacy_gated:
+                    hub_published = bool(
+                        session_manager.push_command(
+                            session_id, command, on_published=_send_legacy_after_apply
+                        )
+                    )
+                else:
+                    hub_published = bool(
+                        session_manager.push_command(session_id, command)
+                    )
             except Exception:
                 # Best-effort mirror to the hub; never break the legacy push path.
                 hub_published = False
                 hub_publish_failed = True
-                # Applying the membership may be what failed (and rolled back);
-                # a legacy-only browser would then render nodes the session
-                # never gained, so it is not sent the push either.
-                pushed = command_result.get("action")
-                legacy_withheld = pushed in _REPLACING_ACTIONS or (
-                    pushed in _ADDITIVE_ACTIONS and bool(command_result.get("nodes"))
-                )
-    legacy_enqueued = False
-    legacy_consumers = 0
-    if (
-        session_registry
-        and session_registry.is_valid_session_id(session_id)
-        and not membership_unapplied
-        and not legacy_withheld
-    ):
-        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
-        # A registry that cannot report its consumers cannot support a delivery
-        # claim, so the verdict falls back to the hub rather than assuming a
-        # reader that may not be there.
+                # Applying the membership may be what failed (and rolled back),
+                # so a gated push is not sent to a legacy browser either.
+                legacy_withheld = legacy_gated and not legacy["sent"]
+    if hub_published and legacy_gated and not legacy["sent"]:
+        # Queued behind an in-flight batch: the legacy send follows the apply.
+        # Like the queued hub publish, acceptance stands in for delivery.
+        legacy["enqueued"] = bool(
+            session_registry and session_registry.is_valid_session_id(session_id)
+        )
         counter = getattr(session_registry, "consumer_count", None)
-        if callable(counter):
-            legacy_consumers = max(0, int(counter(session_id)))
+        if legacy["enqueued"] and callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+    elif not legacy["sent"]:
+        _send_legacy()
+    legacy_enqueued = legacy["enqueued"]
+    legacy_consumers = legacy["consumers"]
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (
