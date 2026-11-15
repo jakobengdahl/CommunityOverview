@@ -16,12 +16,16 @@ import './PendingActionCard.css';
  * Dismissing sends nothing; the token expires. The outcome (dismissed, done,
  * failed) goes to onSettled so the owner stores it as action.settled: a card
  * remounted from the stored message (e.g. a reopened mobile sheet) then shows
- * that outcome instead of offering Confirm again.
+ * that outcome instead of offering Confirm again. A confirm in flight is stored
+ * as a running outcome, so a card remounted before it answers offers neither
+ * Confirm (a second run) nor Dismiss (overwriting the real outcome); the stored
+ * outcome, when the owner keeps one, wins over this instance's own.
  */
 function PendingActionCard({ action, conversationId, disabled = false, onConfirmed, onSettled }) {
   const { t } = useI18n();
-  const [settled, setSettled] = useState(action.settled ?? null);
+  const [localSettled, setSettled] = useState(null);
   const [busy, setBusy] = useState(false);
+  const settled = action.settled ?? localSettled;
 
   const settle = (key, params, reply = null) => {
     const outcome = { key, params, reply };
@@ -31,6 +35,7 @@ function PendingActionCard({ action, conversationId, disabled = false, onConfirm
 
   const confirm = async () => {
     setBusy(true);
+    onSettled?.({ key: 'chat.pending_action_running' });
     try {
       const response = await api.confirmChatAction(action.token, conversationId);
       if (response?.error_code === 'confirmation_unknown') settle('chat.pending_action_unknown');
