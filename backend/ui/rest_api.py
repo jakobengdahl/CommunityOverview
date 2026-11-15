@@ -111,6 +111,7 @@ class ChatRequest(BaseModel):
         None,
         description="IDs of nodes the user has selected in the canvas",
     )
+    conversation_id: Optional[str] = Field(None, min_length=1, max_length=256)
     conversation_state: Optional[str] = Field(
         None,
         max_length=4096,
@@ -166,6 +167,9 @@ class ChatResponse(BaseModel):
 
 
 class ConfirmActionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    conversation_id: str = Field(..., min_length=1, max_length=256)
     token: str = Field(..., min_length=1, max_length=256)
 
 
@@ -246,7 +250,12 @@ def create_ui_router(
             # Convert messages to dict format
             messages = [msg.model_dump() for msg in request.messages]
 
-            with use_request_authorization(headers=http_request.headers):
+            with use_request_authorization(
+                headers=http_request.headers,
+                authenticated_principal=http_request.scope.get(
+                    "communityoverview.authenticated_principal"
+                ),
+            ):
                 result = await run_chat_off_event_loop(
                     chat_service.process_message,
                     messages=messages,
@@ -260,6 +269,7 @@ def create_ui_router(
                     visible_node_ids=request.visible_node_ids,
                     selected_node_ids=request.selected_node_ids,
                     conversation_state=request.conversation_state,
+                    conversation_id=request.conversation_id,
                 )
 
             return ChatResponse(
@@ -278,9 +288,16 @@ def create_ui_router(
     @_chat_logging_boundary
     async def confirm_action(request: ConfirmActionRequest, http_request: Request):
         try:
-            with use_request_authorization(headers=http_request.headers):
+            with use_request_authorization(
+                headers=http_request.headers,
+                authenticated_principal=http_request.scope.get(
+                    "communityoverview.authenticated_principal"
+                ),
+            ):
                 return await run_chat_off_event_loop(
-                    chat_service.confirm_action, token=request.token
+                    chat_service.confirm_action,
+                    token=request.token,
+                    conversation_id=request.conversation_id,
                 )
         except Exception as exc:
             _log_chat_exception("Error in /chat/confirm endpoint", exc)
@@ -376,7 +393,12 @@ def create_ui_router(
             LLM response with any tool results
         """
         try:
-            with use_request_authorization(headers=http_request.headers):
+            with use_request_authorization(
+                headers=http_request.headers,
+                authenticated_principal=http_request.scope.get(
+                    "communityoverview.authenticated_principal"
+                ),
+            ):
                 result = await run_chat_off_event_loop(
                     chat_service.process_chat_request,
                     user_message=request.message,
@@ -421,7 +443,12 @@ def create_ui_router(
             Proposed nodes with similarity information
         """
         try:
-            with use_request_authorization(headers=http_request.headers):
+            with use_request_authorization(
+                headers=http_request.headers,
+                authenticated_principal=http_request.scope.get(
+                    "communityoverview.authenticated_principal"
+                ),
+            ):
                 result = await run_chat_off_event_loop(
                     chat_service.propose_nodes_from_text,
                     text=request.text,
@@ -500,7 +527,12 @@ def create_ui_router(
                     or "Please analyze this document and summarize its main points."
                 )
 
-                with use_request_authorization(headers=http_request.headers):
+                with use_request_authorization(
+                    headers=http_request.headers,
+                    authenticated_principal=http_request.scope.get(
+                        "communityoverview.authenticated_principal"
+                    ),
+                ):
                     chat_result = await run_chat_off_event_loop(
                         chat_service.process_chat_request,
                         user_message=user_message,
@@ -595,7 +627,12 @@ def create_ui_router(
         Returns:
             Provider info, available tools, and graph stats
         """
-        with use_request_authorization(headers=http_request.headers):
+        with use_request_authorization(
+            headers=http_request.headers,
+            authenticated_principal=http_request.scope.get(
+                "communityoverview.authenticated_principal"
+            ),
+        ):
             return chat_service.get_system_info()
 
     @router.get("/supported-formats")

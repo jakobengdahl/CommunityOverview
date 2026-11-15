@@ -403,6 +403,7 @@ def test_every_captured_authorization_input_is_rebound_for_the_call(storage):
             return super().evaluate(context)
 
     inputs = {
+        "authenticated_principal": {"kind": "user", "id": "user-42"},
         "headers": {"x-communityoverview-actor-id": "h-actor"},
         "actor_id": "user-42",
         "actor_type": "human",

@@ -85,7 +85,12 @@ describe('ChatPanel conversation state', () => {
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
     const body = sentBody(1);
     expect(body.conversation_state).toBe('state-1');
-    expect({ ...body, conversation_state: fixture.conversation_state }).toEqual(fixture);
+    expect(body.conversation_id).toBe(useGraphStore.getState().chatConversationId);
+    expect({
+      ...body,
+      conversation_id: fixture.conversation_id,
+      conversation_state: fixture.conversation_state,
+    }).toEqual(fixture);
   });
 
   it('keeps the signed reply in the replayed history when a tool side effect throws', async () => {
@@ -164,8 +169,9 @@ describe('ChatPanel conversation state', () => {
     expect(sentBody(5).messages).toEqual([{ role: 'user', content: 'fresh' }]);
   });
 
-  it('shows a pending action exactly as recorded, runs it only through the confirmation route and applies its result', async () => {
+  it('shows a pending action exactly as recorded, confirms it only through the confirmation route under the conversation that recorded it, and applies its result', async () => {
     resetStore();
+    const { chatConversationId } = useGraphStore.getState();
     const action = { token: 't-1', tool: 'add_nodes', arguments: { nodes: [{ name: 'X' }] } };
     global.fetch
       .mockResolvedValueOnce(
@@ -202,7 +208,11 @@ describe('ChatPanel conversation state', () => {
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
     const [url, options] = global.fetch.mock.calls[1];
     expect(url).toMatch(/\/ui\/chat\/confirm$/);
-    expect(JSON.parse(options.body)).toEqual({ token: 't-1' });
+    expect(sentBody(0).conversation_id).toBe(chatConversationId);
+    expect(JSON.parse(options.body)).toEqual({
+      token: 't-1',
+      conversation_id: chatConversationId,
+    });
     const status = await screen.findByRole('status');
     expect(within(status).getByText('Added X')).toBeInTheDocument();
     await waitFor(() =>

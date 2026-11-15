@@ -475,6 +475,7 @@ def _refuse_graph_scope(payload: Any) -> None:
 
 
 _AUTHORIZATION_KEYS = (
+    "authenticated_principal",
     "headers",
     "actor_id",
     "actor_type",

@@ -7,6 +7,7 @@
     { "role": "assistant", "content": "Mock response from LLM" },
     { "role": "user", "content": "Keep it after all" }
   ],
+  "conversation_id": "<conversation_id>",
   "conversation_state": "<conversation_state>",
   "federation_depth": 1,
   "visible_node_ids": ["n1"],
