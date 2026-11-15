@@ -244,16 +244,20 @@ describe('ChatPanel conversation state', () => {
     expect(useGraphStore.getState().nodes).toEqual([]);
   });
 
-  it('dismissing a pending action sends nothing and leaves it unconfirmable', async () => {
+  it('a dismissed pending action stays dismissed when the panel remounts and sends nothing', async () => {
     resetStore();
     const action = { token: 't-3', tool: 'delete_nodes', arguments: { node_ids: ['n1'] } };
     global.fetch.mockResolvedValueOnce(
       streamed({ content: 'needs confirmation', pending_actions: [action] })
     );
-    render(<ChatPanel />);
+    const { unmount } = render(<ChatPanel />);
     await send('read the file');
     fireEvent.click(await screen.findByRole('button', { name: en.chat.pending_action_dismiss }));
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
 
+    // The mobile sheet unmounts with the panel; the card remounts from the store.
+    unmount();
+    render(<ChatPanel />);
     expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
     expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
     expect(global.fetch).toHaveBeenCalledTimes(1);

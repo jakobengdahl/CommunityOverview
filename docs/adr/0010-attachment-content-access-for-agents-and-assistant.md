@@ -1342,4 +1342,6 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   tainted, never clean, and needs the same sticky routing as pending actions.
   A continued conversation without a `conversation_id` never verifies clean.
 - **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
-  closes the card without sending anything; the token then expires.
+  sends nothing and the token then expires. The card's outcome (dismissed,
+  done, failed) is kept with the chat message, so a remounted card shows it
+  instead of offering **Confirm and run** again.
