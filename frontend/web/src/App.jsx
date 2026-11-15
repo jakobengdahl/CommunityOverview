@@ -421,11 +421,22 @@ function App() {
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
   // commands (external pulse-trigger URLs) share the channel and dedup.
+  // A push the server applied membership for materialised the session: join
+  // its op stream, reloading from seq 0 unless a client already holds a
+  // baseline for it.
+  const joinPushedSession = useCallback(() => {
+    if (syncRef.current?.sessionId === sessionId) {
+      ensureSyncConnected(sessionId);
+      return;
+    }
+    ensureSyncConnected(sessionId)?.setBaseline({}, { seq: 0 });
+  }, [sessionId, syncRef, ensureSyncConnected]);
   const { applyToolResultCommand, applyPulseCommand } = useToolResultCommands({
     sessionId,
     opStreamReady,
     latestViewport,
     syncRef,
+    onServerMembership: joinPushedSession,
   });
 
   // Apply a single remote op incrementally onto the local store + canvas. This
@@ -536,11 +547,25 @@ function App() {
               ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
               : [];
           dropped.forEach((n) => removeNode(n.id));
+          // An own add's result edges between nodes already on the canvas
+          // have no node to hydrate them with: draw those from what was sent.
+          const drawSentEdges = () => {
+            const now = useGraphStore.getState();
+            const onCanvas = new Set(now.nodes.map((n) => n.id));
+            const haveEdges = new Set(now.edges.map((e) => e.id));
+            const edges = (sent?.edges || []).filter(
+              (e) =>
+                e?.id && !haveEdges.has(e.id) && onCanvas.has(e.source) && onCanvas.has(e.target)
+            );
+            if (edges.length) addNodesToVisualization([], edges);
+            return edges.length > 0;
+          };
           const have = new Set(useGraphStore.getState().nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length || !client) {
+            const drew = drawSentEdges();
             sent?.onDrawn();
-            return dropped.length > 0;
+            return dropped.length > 0 || drew;
           }
           // The only case here with an internal await, so the only one where
           // the session or its membership can change out from under it: a
@@ -565,10 +590,11 @@ function App() {
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            drawSentEdges();
             sent.onDrawn();
             return true;
           }
-          return dropped.length > 0;
+          return drawSentEdges() || dropped.length > 0;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];

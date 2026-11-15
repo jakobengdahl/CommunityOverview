@@ -119,7 +119,7 @@ class TestServerMembership:
                 else ["op", "op", "command"]
             )
             if clear_after_add:
-                assert events[3]["op"]["op"] == "nodes_replaced"
+                assert events[3]["op"]["op"] == "nodes_removed"
                 assert events[3]["seq"] == 3
                 assert events[4]["command"] == clear
             assert [event["seq"] for event in events[:2]] == [1, 2]
@@ -128,7 +128,7 @@ class TestServerMembership:
         assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
 
     @pytest.mark.parametrize("viewers", [0, 2])
-    async def test_clear_push_is_one_replace_record(self, viewers):
+    async def test_clear_push_records_server_removal_once(self, viewers):
         mgr = _manager()
         s = mgr.create_session()
         ids = [f"n{i}" for i in range(501)]
@@ -143,12 +143,16 @@ class TestServerMembership:
         assert mgr.push_command(s.id, command)
         assert s.state["node_refs"] == []
         record = s.activity_log[-1]
-        assert (record["op"], record["actor"]) == ("nodes_replaced", "mcp-agent")
-        assert record["affected"] == {"kind": "nodes", "count": 0, "ids": []}
+        assert (record["op"], record["actor"]) == ("nodes_removed", "mcp-agent")
+        assert record["affected"] == {
+            "kind": "nodes",
+            "count": len(ids),
+            "ids": ids[:MAX_ACTIVITY_NODE_IDS],
+        }
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == ["op", "command"]
-            assert events[0]["op"]["node_ids"] == []
+            assert events[0]["op"]["node_ids"] == ids
         # Clearing an empty view changes nothing and records nothing.
         assert mgr.push_command(s.id, command)
         assert len(s.activity_log) == 2

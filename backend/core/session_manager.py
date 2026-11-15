@@ -2918,7 +2918,13 @@ class SessionManager:
             and agent_id
             else "mcp-agent"
         )
-        if action in _REPLACING_ACTIONS:
+        if action == "clear_visualization" and not node_ids:
+            # A plain clear is recorded as what it removed, not as an empty
+            # replace; a clear carrying nodes is a replace.
+            self._remove_node_refs(
+                session, actor, list(session.state.get("node_refs", []))
+            )
+        elif action in _REPLACING_ACTIONS:
             # Browsers swap the whole view for the result's nodes: one op.
             self._apply_op_sync(
                 session,

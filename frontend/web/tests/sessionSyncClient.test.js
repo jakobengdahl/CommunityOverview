@@ -601,6 +601,28 @@ describe('SessionSyncClient', () => {
     ]);
   });
 
+  it.each(['graph_changes_discarded', 'graph_changes_merged'])(
+    'a read across a %s that drops a node does not return it',
+    async (op) => {
+      const { client } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      membershipOp(es, 'other', 'nodes_added', ['gone', 'kept'], 1);
+      const { read, release } = gatedReads();
+      const hydration = hydrateAddedNodes(client, ['gone', 'kept'], read);
+      es.emit({
+        type: 'op',
+        client_id: 'server',
+        op: { op, removals: [], merge_id: 'm1', dropped_node_ids: ['gone'] },
+        seq: 2,
+      });
+      expect([client.isMember('gone'), client.isMember('kept')]).toEqual([false, true]);
+      release();
+      expect((await hydration).nodes).toEqual([{ id: 'kept' }]);
+    }
+  );
+
   it('an own add is drawn only from its broadcast, from what it was sent with', async () => {
     const onRemoteOps = vi.fn();
     const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });

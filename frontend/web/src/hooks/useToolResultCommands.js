@@ -26,7 +26,21 @@ async function composedToolResult(pushed) {
   return { action: pushed.action, nodes, edges: [...edges.values()] };
 }
 
-export function useToolResultCommands({ sessionId, opStreamReady, latestViewport, syncRef }) {
+// Push actions whose membership the server applies (see
+// SessionManager._apply_command_membership).
+const REPLACING_ACTIONS = ['load_visualization', 'replace_visualization', 'clear_visualization'];
+const ADDITIVE_ACTIONS = ['add_to_visualization', 'update_in_visualization'];
+const carriesMembership = (result) =>
+  REPLACING_ACTIONS.includes(result.action) ||
+  (ADDITIVE_ACTIONS.includes(result.action) && (result.nodes || []).length > 0);
+
+export function useToolResultCommands({
+  sessionId,
+  opStreamReady,
+  latestViewport,
+  syncRef,
+  onServerMembership,
+}) {
   // Bounded recent-command-id history for MCP push dedup (R5) — a small LRU
   // rather than a single last-applied slot, and keyed by the server-assigned
   // command_id rather than payload content, so a later *legitimately* repeated
@@ -119,6 +133,8 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const onServerMembershipRef = useRef(onServerMembership);
+  onServerMembershipRef.current = onServerMembership;
   const queueRef = useRef(Promise.resolve());
   const pendingRef = useRef(0);
 
@@ -210,6 +226,9 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         }
         if (cmd.type !== 'tool_result' || !cmd.result) return;
         applyToolResultCommand(cmd.result, cmd.command_id);
+        // The server applied this push's membership, so the session exists
+        // there: join it, or this browser's removals would stay local.
+        if (carriesMembership(cmd.result)) onServerMembershipRef.current?.();
       } catch (err) {
         console.error('[Session SSE] parse error:', err);
       }

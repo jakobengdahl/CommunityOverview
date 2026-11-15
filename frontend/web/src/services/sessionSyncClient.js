@@ -373,6 +373,12 @@ export function applyOpToMirror(mirrorState, op) {
       );
       break;
     }
+    case 'graph_changes_discarded':
+    case 'graph_changes_merged':
+      // Nodes the change took out of the graph left the session with it.
+      return op.dropped_node_ids?.length
+        ? applyOpToMirror(m, { op: 'nodes_removed', node_ids: op.dropped_node_ids })
+        : m;
     case 'node_moved':
       if (op.node_id && op.position)
         m.positions = { ...m.positions, [op.node_id]: roundPos(op.position) };
@@ -2065,7 +2071,8 @@ export class SessionSyncClient {
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
-          if (MEMBERSHIP_OPS.has(op.op) && typeof data.seq === 'number') {
+          const changesMembers = MEMBERSHIP_OPS.has(op.op) || op.dropped_node_ids?.length > 0;
+          if (changesMembers && typeof data.seq === 'number') {
             this._membershipVersion = data.seq;
           }
         }

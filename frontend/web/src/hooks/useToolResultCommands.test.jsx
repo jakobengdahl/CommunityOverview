@@ -293,24 +293,23 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(es.closed).toBe(true);
   });
 
-  it('never sends a legacy push on as membership, whatever the server reports', () => {
-    render();
+  it('never sends a legacy push on as membership, and joins the session the server applied it to', () => {
+    const onServerMembership = vi.fn();
+    render({ onServerMembership });
     const es = FakeEventSource.instances[0];
-    const push = (id, applied) =>
+    const push = (id, result) =>
       act(() =>
         es.onmessage({
-          data: JSON.stringify({
-            type: 'tool_result',
-            command_id: id,
-            membership_applied: applied,
-            result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
-          }),
+          data: JSON.stringify({ type: 'tool_result', command_id: id, result }),
         })
       );
-    push('cmd-1', true);
-    push('cmd-2', false);
+    push('cmd-0', { action: 'add_to_visualization', nodes: [] }); // changes no membership
+    expect(onServerMembership).not.toHaveBeenCalled();
+    push('cmd-1', { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] });
+    push('cmd-2', { action: 'clear_visualization', nodes: [] });
     expect(store().clearVisualization).toHaveBeenCalledTimes(2);
     expect(store().publishMembership).not.toHaveBeenCalled();
+    expect(onServerMembership).toHaveBeenCalledTimes(2);
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {

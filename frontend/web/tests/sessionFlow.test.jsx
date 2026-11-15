@@ -418,6 +418,21 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
+  it('an own add draws its edges between nodes already shown', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    const edge = { id: 'e-ab', source: 'node-a', target: 'node-b' };
+    act(() =>
+      useGraphStore.getState().publishMembership('nodes_added', ['node-a', 'node-b'], {
+        nodes: [NODE_A, NODE_B],
+        edges: [edge],
+      })
+    );
+    await waitFor(() => {
+      expect(useGraphStore.getState().edges.map((e) => e.id)).toEqual(['e-ab']);
+    });
+  });
+
   it('MCP command dedup: same command_id is skipped, a different command_id re-applies (R5)', async () => {
     renderApp();
 
@@ -444,6 +459,24 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
+    // The server applied the push's membership; the browser joins the op
+    // stream, where its broadcast arrives.
+    const opSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find((es) => es.url.includes('/api/sessions/'));
+      expect(found).toBeTruthy();
+      return found;
+    });
+    await act(async () => new Promise((r) => setTimeout(r, 10))); // its snapshot
+    act(() =>
+      opSource.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          client_id: 'mcp-agent',
+          op: { op: 'nodes_added', node_ids: ['node-a'] },
+          seq: 1,
+        }),
+      })
+    );
 
     act(() => {
       useGraphStore.getState().removeNode('node-a');
