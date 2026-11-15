@@ -1335,10 +1335,11 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   record is in memory, per process and kept for
   `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, at most 100,000
   conversations, oldest dropped first; no clean token is issued while a
-  conversation is in it, so any older clean token has expired when it is
-  dropped. Since the record is per process, a clean token verifies only in the
-  process that issued it and only if issued after that process last evicted
-  an entry. The record is complete because a process serves only a
+  conversation is in it, so an entry dropped at TTL expiry has outlived any
+  older clean token, but one dropped to stay within the cap may not have.
+  Hence, and since the record is per process, a clean token verifies only in
+  the process that issued it and only if issued after that process last
+  evicted an entry. The record is complete because a process serves only a
   `conversation_id` it minted: it replaces any other with a fresh one,
   returned as the response's `conversation_id`, which `api.js` sends on that
   conversation key's later requests and confirmations. So another worker
