@@ -24,7 +24,8 @@ _PROCESS_KEY = secrets.token_bytes(32)
 # conversation id) -> time marked. A client holding an older clean token could
 # otherwise replay the history up to it and come back clean. An entry older
 # than the TTL is dropped: no clean token is issued while it is held, so every
-# clean token issued before it has expired too.
+# clean token issued before it has expired too. Its mark time still advances
+# _evicted_through, for turns that started before it (_issue_state).
 _TAINTED_MAX = 100_000
 _tainted = OrderedDict()
 _tainted_lock = threading.Lock()
@@ -103,36 +104,43 @@ def _marked_tainted(actor, conversation_id):
     return marked is not None and time.time() - marked <= _ttl()
 
 
-def _issue_state(tainted, actor, conversation_id):
+def _issue_state(tainted, actor, conversation_id, started_at):
     """The token's taint and issue time, decided against the record atomically.
 
     A turn whose start predates a concurrent tainting turn's mark is issued a
-    tainted token too, so no clean token is issued after a mark.
+    tainted token too, so no clean token is issued after a mark, even one since
+    expired or dropped: a dropped mark made after the turn started may be its.
     """
     global _evicted_through
     key = _conversation_key(actor, conversation_id)
     with _tainted_lock:
         now = time.time()
+        if started_at is None:
+            started_at = now
         marked = _tainted.get(key)
-        tainted = tainted or (marked is not None and now - marked <= _ttl())
+        tainted = (
+            tainted
+            or (marked is not None and (now - marked <= _ttl() or marked >= started_at))
+            or started_at <= _evicted_through
+        )
         if tainted and conversation_id is not None:
             _tainted[key] = now
             _tainted.move_to_end(key)
             while _tainted:
                 oldest = next(iter(_tainted.values()))
-                if now - oldest > _ttl():
-                    _tainted.popitem(last=False)
-                elif len(_tainted) > _TAINTED_MAX:
-                    _tainted.popitem(last=False)
-                    _evicted_through = max(_evicted_through, oldest)
-                else:
+                if now - oldest <= _ttl() and len(_tainted) <= _TAINTED_MAX:
                     break
+                _tainted.popitem(last=False)
+                _evicted_through = max(_evicted_through, oldest)
         return tainted, int(now)
 
 
-def issue(*, tainted, actor, messages, reply, conversation_id=None):
-    """Token over the conversation as the server saw it after this turn."""
-    tainted, issued_at = _issue_state(tainted, actor, conversation_id)
+def issue(*, tainted, actor, messages, reply, conversation_id=None, started_at=None):
+    """Token over the conversation as the server saw it after this turn.
+
+    started_at: when the turn read its taint status, before taint_status.
+    """
+    tainted, issued_at = _issue_state(tainted, actor, conversation_id, started_at)
     body = _b64(
         _canonical(
             {

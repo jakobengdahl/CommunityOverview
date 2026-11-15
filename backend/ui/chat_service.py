@@ -21,6 +21,7 @@ import json
 import re
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
 
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
@@ -1039,6 +1040,7 @@ class ChatService:
                         for m in messages
                     ]
                 )
+                started_at = time.time()
                 status = conversation_states.taint_status(
                     received, conversation_state, context["actor"], conversation_id
                 )
@@ -1081,6 +1083,7 @@ class ChatService:
                     messages=received,
                     reply=result["content"],
                     conversation_id=conversation_id,
+                    started_at=started_at,
                 )
                 result["conversation_id"] = conversation_id
             return result

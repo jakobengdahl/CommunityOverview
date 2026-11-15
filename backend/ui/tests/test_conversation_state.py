@@ -187,6 +187,37 @@ def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, repl
     assert result["untrusted_content_used"] and result["pending_actions"]
 
 
+@pytest.mark.parametrize("drop", ["overflow", "expiry"])
+def test_turn_started_before_a_dropped_mark_is_issued_tainted(monkeypatch, drop):
+    """A mark made after a turn started taints it even once evicted or expired."""
+    start = time.time()
+    clock = SimpleNamespace(time=lambda: start + 1)
+    monkeypatch.setattr(conversation_state, "time", clock)
+    actor, hi = {"id": "a"}, [{"role": "user", "content": "hi"}]
+    conversation_state.issue(
+        tainted=True, actor=actor, messages=hi, reply="x", conversation_id="c"
+    )
+    if drop == "overflow":
+        monkeypatch.setattr(conversation_state, "_TAINTED_MAX", 1)
+    else:
+        clock.time = lambda: start + 86400 + 50
+    conversation_state.issue(
+        tainted=True, actor={}, messages=[], reply="x", conversation_id="other"
+    )
+    assert len(conversation_state._tainted) == 1
+    token = conversation_state.issue(
+        tainted=False,
+        actor=actor,
+        messages=hi,
+        reply="ok",
+        conversation_id="c",
+        started_at=start,
+    )
+    replay = [*hi, {"role": "assistant", "content": "ok"}]
+    status = conversation_state.taint_status(replay, token, actor, "c")
+    assert status == conversation_state.TAINTED
+
+
 def test_only_the_minting_process_serves_a_conversation(chat_service, monkeypatch):
     service, llm = chat_service
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
