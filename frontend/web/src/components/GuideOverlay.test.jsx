@@ -10,7 +10,7 @@ import en from '../i18n/en.json';
 import { expectAllKeysResolved, missingKeys } from '../test/strictI18n';
 
 vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
-vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
+vi.mock('../services/api', () => ({ searchGraph: vi.fn(), getNodeDetails: vi.fn() }));
 
 const g = en.guide;
 const initialState = useGraphStore.getState();
@@ -24,6 +24,7 @@ beforeEach(() => {
   // Shared module mock: without a reset its calls and queued results carry
   // over between tests.
   api.searchGraph.mockReset();
+  api.getNodeDetails.mockReset();
 });
 
 afterEach(() => {
@@ -113,6 +114,25 @@ describe('GuideOverlay', () => {
     expect(api.searchGraph).toHaveBeenCalledTimes(1);
     expect(api.searchGraph).toHaveBeenCalledWith('ai', { nodeTypes: undefined, limit: 30 });
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['n1']);
+  });
+
+  it('sends a tour-loaded saved view with its layout and clears nothing locally', async () => {
+    const metadata = { node_ids: ['n1'], positions: { n1: { x: 5, y: 6 } } };
+    api.searchGraph.mockResolvedValueOnce({ nodes: [{ id: 'v1', name: 'View', metadata }] });
+    api.getNodeDetails.mockResolvedValueOnce({ success: true, node: { id: 'n1' } });
+    const publisher = vi.fn(() => true);
+    useGraphStore.getState().setMembershipPublisher(publisher);
+    useGraphStore.setState({ hiddenNodeIds: ['n9'] });
+    render(<GuideOverlay />);
+    start([{ type: 'load_saved_view', view_name: 'View', text: 'Loaded' }, { text: 'Next' }]);
+
+    expect(await screen.findByText('Loaded')).toBeInTheDocument();
+    expect(publisher).toHaveBeenCalledTimes(1);
+    const [op, ids, { view }] = publisher.mock.calls[0];
+    expect([op, ids]).toEqual(['nodes_replaced', ['n1']]);
+    expect(view.positions).toEqual(metadata.positions);
+    expect(useGraphStore.getState().hiddenNodeIds).toEqual(['n9']);
+    useGraphStore.getState().setMembershipPublisher(null);
   });
 
   it('shows a failed action error and lets the visitor move on', async () => {

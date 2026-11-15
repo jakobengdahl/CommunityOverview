@@ -3,6 +3,7 @@ import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
+import { savedViewLayout } from '../utils/sessionAnnotations';
 import './GuideOverlay.css';
 
 const TOOLTIP_WIDTH = 340;
@@ -248,13 +249,19 @@ function GuideOverlay() {
                 const loadedNodes = details.filter((d) => d?.success).map((d) => d.node);
                 const savedEdges = viewNode.metadata?.edges || [];
                 if (!cancelled) {
+                  // A session stores the view's layout with the replace's one
+                  // record, so this browser clears and saves back nothing.
                   const s = useGraphStore.getState();
-                  s.clearVisualization({ keepNodes: true });
-                  s.publishMembership(
+                  const sent = s.publishMembership(
                     'nodes_replaced',
                     loadedNodes.map((n) => n.id),
-                    { nodes: loadedNodes, edges: savedEdges }
+                    {
+                      nodes: loadedNodes,
+                      edges: savedEdges,
+                      view: savedViewLayout(viewNode.metadata),
+                    }
                   );
+                  if (!sent) s.clearVisualization({ keepNodes: true });
                 }
               }
             }

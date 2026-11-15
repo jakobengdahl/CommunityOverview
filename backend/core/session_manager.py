@@ -404,6 +404,14 @@ def _restore_deleted_ids(session: Session, saved: List[str]) -> None:
     session._deleted_annotation_ids.extend(saved)
 
 
+def _forget_deleted_id(session: Session, ann_id: Any) -> None:
+    """Let a deliberate re-create of ``ann_id`` past its delete tombstone."""
+    try:
+        session._deleted_annotation_ids.remove(ann_id)
+    except ValueError:
+        pass
+
+
 _ABSENT = object()
 
 
@@ -1687,6 +1695,13 @@ class SessionManager:
                                 target = _claimed_annotation_target(view_op, session)
                                 if working_leases.get(target, client_id) != client_id:
                                     continue
+                                # Loading a view restores its annotations even
+                                # when an earlier load deleted them.
+                                held_deleted = list(session._deleted_annotation_ids)
+                                if view_op["op"] == "annotation_created":
+                                    _forget_deleted_id(
+                                        session, view_op["annotation"].get("id")
+                                    )
                                 try:
                                     applied_op = self.store.apply_state_op(
                                         session,
@@ -1694,6 +1709,7 @@ class SessionManager:
                                         record_activity=False,
                                     )
                                 except OpError:
+                                    _restore_deleted_ids(session, held_deleted)
                                     continue
                                 if applied_op is not None:
                                     state_changed = True

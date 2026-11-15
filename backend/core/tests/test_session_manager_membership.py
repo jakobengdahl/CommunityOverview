@@ -325,6 +325,11 @@ class TestServerMembership:
                 "a": {"x": 1.0, "y": 2.0},
                 "c": {"x": 3.0, "y": 4.0},
             }
+        if via == "browser":
+            # Reloading a view brings back the annotations a load deleted.
+            reload = {**op, "annotations": [{"id": "dropped", "type": "note"}]}
+            await mgr.apply_ops(s.id, actor, None, [reload])
+            assert [a["id"] for a in s.state["annotations"]] == ["dropped"]
 
     async def test_failed_push_layout_keeps_membership_and_broadcasts(
         self, monkeypatch
