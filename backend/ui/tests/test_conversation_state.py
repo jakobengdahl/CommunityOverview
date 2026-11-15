@@ -4,6 +4,7 @@
 import json
 import secrets
 import time
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,13 @@ WRITE = {"name": "add_nodes", "input": {"nodes": [{"name": "W", "type": "Actor"}
 ACTOR = {"x-communityoverview-actor-id": "a", "x-communityoverview-actor-type": "user"}
 
 
-def turn(service, llm, messages, state=None, calls=(), headers=ACTOR, cid=None):
+@pytest.fixture(autouse=True)
+def _fresh_taint_record(monkeypatch):
+    monkeypatch.setattr(conversation_state, "_tainted", OrderedDict())
+    monkeypatch.setattr(conversation_state, "_evicted_through", float("-inf"))
+
+
+def turn(service, llm, messages, state=None, calls=(), headers=ACTOR, cid="c"):
     llm.reset()
     llm.mock_tool_call_sequence = [list(calls)] if calls else None
     with use_request_authorization(headers=headers):
@@ -39,7 +46,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
     "change, tainted",
     [
         ("none", False),
-        ("shared_key", False),
+        ("shared_key", True),
         ("surrogate_message", False),
         ("dropped", True),
         ("forged", True),
@@ -99,7 +106,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
     elif change == "actor":
         headers = {**ACTOR, "x-communityoverview-actor-id": "b"}
     elif change.startswith("other_process") or change == "shared_key":
+        # Even with a shared key: that process's taint record is not here.
         monkeypatch.setattr(conversation_state, "_PROCESS_KEY", secrets.token_bytes(32))
+        monkeypatch.setattr(conversation_state, "_PROCESS_ID", "other")
         if change == "other_process_no_grant":
             # A revoked grant must not launder an unverifiable state clean.
             service._assistant_attachment_access = "off"
@@ -140,12 +149,16 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         assert again["untrusted_content_used"] is True
 
 
-@pytest.mark.parametrize("replay", ["truncated", "first_message", "other_id"])
+ROLLBACKS = "truncated first_message other_id no_id evicted concurrent".split()
+
+
+@pytest.mark.parametrize("replay", ROLLBACKS)
 def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, replay):
     service, llm = chat_service
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
     service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
-    cid, hi = secrets.token_hex(8), {"role": "user", "content": "hi"}
+    cid = None if replay == "no_id" else secrets.token_hex(8)
+    hi = {"role": "user", "content": "hi"}
     first = turn(service, llm, [hi], cid=cid)
     clean = [hi, {"role": "assistant", "content": first["content"]}]
     state, get_schema = first["conversation_state"], {"name": "get_schema", "input": {}}
@@ -153,6 +166,22 @@ def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, repl
     assert read["untrusted_content_used"]
     history = [] if replay == "first_message" else clean
     key = secrets.token_hex(8) if replay == "other_id" else cid
+    if replay == "evicted":
+        monkeypatch.setattr(conversation_state, "_TAINTED_MAX", 1)
+        conversation_state.issue(
+            tainted=True, actor={}, messages=[], reply="x", conversation_id="other"
+        )
+    elif replay == "concurrent":
+        # Checked before the mark, issued after; replayed once the mark expired.
+        start = time.time()
+        clock = SimpleNamespace(time=lambda: start + 100)
+        monkeypatch.setattr(conversation_state, "time", clock)
+        with monkeypatch.context() as race:
+            race.setattr(conversation_state, "taint_status", lambda *a: "clean")
+            late = turn(service, llm, [*clean, hi], state, cid=cid)
+        clock.time = lambda: start + 86400 + 50
+        history = [*clean, hi, {"role": "assistant", "content": late["content"]}]
+        state = late["conversation_state"]
     result = turn(service, llm, [*history, hi], state, [WRITE], cid=key)
     assert result["untrusted_content_used"] and result["pending_actions"]
 

@@ -1333,9 +1333,13 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   later request with that pair as tainted, so replaying a shorter history
   with an older clean token, or no history at all, does not clear it. That
   record is in memory, per process and kept for
-  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` (any older clean token has
-  expired by then), at most 100,000 conversations, oldest dropped first; it
-  needs the same sticky routing as pending actions. A request without a
-  `conversation_id` has only the token's own checks.
+  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, at most 100,000
+  conversations, oldest dropped first; no clean token is issued while a
+  conversation is in it, so any older clean token has expired when it is
+  dropped. Since the record is per process, a clean token verifies only in the
+  process that issued it and only if issued after that process last evicted
+  an entry: a restart, another worker or an eviction leaves a conversation
+  tainted, never clean, and needs the same sticky routing as pending actions.
+  A continued conversation without a `conversation_id` never verifies clean.
 - **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
   closes the card without sending anything; the token then expires.
