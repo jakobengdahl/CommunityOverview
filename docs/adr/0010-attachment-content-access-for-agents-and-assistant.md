@@ -1338,8 +1338,15 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   conversation is in it, so any older clean token has expired when it is
   dropped. Since the record is per process, a clean token verifies only in the
   process that issued it and only if issued after that process last evicted
-  an entry: a restart, another worker or an eviction leaves a conversation
-  tainted, never clean, and needs the same sticky routing as pending actions.
+  an entry. The record is complete because a process serves only a
+  `conversation_id` it minted: it replaces any other with a fresh one,
+  returned as the response's `conversation_id`, which `api.js` sends on that
+  conversation key's later requests and confirmations. So another worker
+  cannot taint a conversation behind the back of the process that vouches
+  for it clean. A restart, another worker or an eviction leaves a continued
+  conversation tainted, never clean (under a new id), and needs the same
+  sticky routing as pending actions; a shared
+  `ATTACHMENT_CONVERSATION_STATE_KEY` no longer changes that.
   A continued conversation without a `conversation_id` never verifies clean.
 - **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
   sends nothing and the token then expires. The card's outcome (dismissed,

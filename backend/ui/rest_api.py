@@ -161,6 +161,9 @@ class ChatResponse(BaseModel):
     conversation_state: Optional[str] = Field(
         None, description="Signed state to send with the next request"
     )
+    conversation_id: Optional[str] = Field(
+        None, description="Conversation identity to send with the next request"
+    )
     untrusted_content_used: bool = Field(
         False, description="Attachment file content was in this turn"
     )
@@ -278,6 +281,7 @@ def create_ui_router(
                 toolResult=result.get("toolResult"),
                 pending_actions=result.get("pending_actions", []),
                 conversation_state=result.get("conversation_state"),
+                conversation_id=result.get("conversation_id"),
                 untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
         except Exception as exc:
@@ -415,6 +419,7 @@ def create_ui_router(
                 toolResult=result.get("toolResult"),
                 pending_actions=result.get("pending_actions", []),
                 conversation_state=result.get("conversation_state"),
+                conversation_id=result.get("conversation_id"),
                 untrusted_content_used=bool(result.get("untrusted_content_used")),
             )
         except Exception as exc:
@@ -548,6 +553,7 @@ def create_ui_router(
                     toolResult=chat_result.get("toolResult"),
                     pending_actions=chat_result.get("pending_actions", []),
                     conversation_state=chat_result.get("conversation_state"),
+                    conversation_id=chat_result.get("conversation_id"),
                     untrusted_content_used=bool(
                         chat_result.get("untrusted_content_used")
                     ),

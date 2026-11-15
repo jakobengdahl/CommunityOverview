@@ -24,7 +24,7 @@ def _fresh_taint_record(monkeypatch):
     monkeypatch.setattr(conversation_state, "_evicted_through", float("-inf"))
 
 
-def turn(service, llm, messages, state=None, calls=(), headers=ACTOR, cid="c"):
+def turn(service, llm, messages, state=None, calls=(), headers=ACTOR, cid=None):
     llm.reset()
     llm.mock_tool_call_sequence = [list(calls)] if calls else None
     with use_request_authorization(headers=headers):
@@ -39,6 +39,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
     first = client.post("/ui/chat", json={"messages": body["messages"][:1]}).json()
     assert first["content"] == body["messages"][1]["content"]
     body["conversation_state"] = first["conversation_state"]
+    body["conversation_id"] = first["conversation_id"]
     assert client.post("/ui/chat", json=body).json()["untrusted_content_used"] is False
 
 
@@ -86,7 +87,7 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         {"role": "assistant", "content": first["content"]},
         {"role": "user", "content": text.replace("hi", "write")},
     ]
-    state, headers = first["conversation_state"], ACTOR
+    state, headers, cid = first["conversation_state"], ACTOR, first["conversation_id"]
     if change == "dropped":
         state = None
     elif change == "forged":
@@ -116,13 +117,13 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         # A verified taint holds even where no attachment can be read now.
         service._assistant_attachment_access = "off"
     elif change == "replayed":
-        second = turn(service, llm, messages, state)
+        second = turn(service, llm, messages, state, cid=cid)
         assert second["untrusted_content_used"] is False
         messages += [
             {"role": "assistant", "content": second["content"]},
             {"role": "user", "content": "write"},
         ]
-    result = turn(service, llm, messages, state, calls=[WRITE], headers=headers)
+    result = turn(service, llm, messages, state, [WRITE], headers, cid)
     assert result["untrusted_content_used"] is tainted
     # Tainted from the start: the write is refused into a pending action.
     assert bool(result["pending_actions"]) is tainted
@@ -134,7 +135,7 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
                 {"role": "assistant", "content": result["content"]},
                 {"role": "user", "content": "write"},
             ]
-            later = turn(service, llm, messages, state, calls=[WRITE])
+            later = turn(service, llm, messages, state, [WRITE], cid=cid)
             assert later["untrusted_content_used"] is False
             assert not later["pending_actions"]
             state = later["conversation_state"]
@@ -145,7 +146,7 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
             {"role": "assistant", "content": result["content"]},
             {"role": "user", "content": "again"},
         ]
-        again = turn(service, llm, messages, state)
+        again = turn(service, llm, messages, state, cid=cid)
         assert again["untrusted_content_used"] is True
 
 
@@ -157,9 +158,9 @@ def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, repl
     service, llm = chat_service
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
     service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
-    cid = None if replay == "no_id" else secrets.token_hex(8)
     hi = {"role": "user", "content": "hi"}
-    first = turn(service, llm, [hi], cid=cid)
+    first = turn(service, llm, [hi])
+    cid = None if replay == "no_id" else first["conversation_id"]
     clean = [hi, {"role": "assistant", "content": first["content"]}]
     state, get_schema = first["conversation_state"], {"name": "get_schema", "input": {}}
     read = turn(service, llm, [*clean, hi], state, [get_schema], cid=cid)
@@ -186,6 +187,27 @@ def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, repl
     assert result["untrusted_content_used"] and result["pending_actions"]
 
 
+def test_only_the_minting_process_serves_a_conversation(chat_service, monkeypatch):
+    service, llm = chat_service
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    monkeypatch.setenv("ATTACHMENT_CONVERSATION_STATE_KEY", "shared")
+    service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
+    hi = {"role": "user", "content": "hi"}
+    first = turn(service, llm, [hi])
+    cid, clean = first["conversation_id"], [hi, {"role": "assistant"}, hi]
+    clean[1]["content"] = first["content"]
+    with monkeypatch.context() as other:
+        other.setattr(conversation_state, "_PROCESS_KEY", secrets.token_bytes(32))
+        other.setattr(conversation_state, "_tainted", OrderedDict())
+        read = turn(
+            service, llm, [hi], calls=[{"name": "get_schema", "input": {}}], cid=cid
+        )
+        assert read["untrusted_content_used"] and read["conversation_id"] != cid
+    # The taint went to another id, so this process's record for cid is complete.
+    back = turn(service, llm, clean, first["conversation_state"], cid=cid)
+    assert back["conversation_id"] == cid and not back["untrusted_content_used"]
+
+
 def test_empty_reply_is_a_fixed_text_that_replays_clean(chat_service, monkeypatch):
     service, llm = chat_service
     messages = [{"role": "user", "content": "hi"}]
@@ -202,5 +224,12 @@ def test_empty_reply_is_a_fixed_text_that_replays_clean(chat_service, monkeypatc
         {"role": "assistant", "content": first["content"]},
         {"role": "user", "content": "next"},
     ]
-    second = turn(service, llm, messages, first["conversation_state"])
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    second = turn(
+        service,
+        llm,
+        messages,
+        first["conversation_state"],
+        cid=first["conversation_id"],
+    )
     assert second["untrusted_content_used"] is False

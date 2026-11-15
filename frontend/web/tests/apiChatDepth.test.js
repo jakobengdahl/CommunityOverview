@@ -1,6 +1,7 @@
 // covers: frontend/web/src/services/api.js
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  confirmChatAction,
   sendChatMessage,
   sendSimpleChatMessage,
   setActiveSessionForRequests,
@@ -140,7 +141,7 @@ describe('chat progress stream', () => {
 });
 
 describe('chat conversation state', () => {
-  it('refuses a request without a key and replays each key its latest state', async () => {
+  it('refuses a request without a key and replays each key its latest state and id', async () => {
     global.fetch.mockReset();
     await expect(sendChatMessage([])).rejects.toBeInstanceOf(Error);
     expect(global.fetch).not.toHaveBeenCalled();
@@ -148,11 +149,27 @@ describe('chat conversation state', () => {
     let n = 0;
     global.fetch.mockImplementation(async () => {
       n += 1;
-      return { ok: true, json: async () => ({ content: 'ok', conversation_state: `s${n}` }) };
+      const reply = { content: 'ok', conversation_state: `s${n}`, conversation_id: `id${n}` };
+      return { ok: true, json: async () => reply };
     });
     for (const conversationId of ['state-a', 'state-a', 'state-b', 'state-a'])
       await sendChatMessage([], null, { conversationId });
-    const sent = global.fetch.mock.calls.map(([, o]) => JSON.parse(o.body).conversation_state);
-    expect(sent).toEqual([undefined, 's1', undefined, 's2']);
+    await confirmChatAction('t', 'state-a');
+    const sent = global.fetch.mock.calls.map(([, o]) => JSON.parse(o.body));
+    expect(sent.map((body) => body.conversation_state)).toEqual([
+      undefined,
+      's1',
+      undefined,
+      's2',
+      undefined,
+    ]);
+    // The server's id replaces the key, also for confirming.
+    expect(sent.map((body) => body.conversation_id)).toEqual([
+      'state-a',
+      'id1',
+      'state-b',
+      'id2',
+      'id4',
+    ]);
   });
 });

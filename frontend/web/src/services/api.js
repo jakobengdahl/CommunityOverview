@@ -696,8 +696,9 @@ export async function executeTool(toolName, args) {
 
 const UI_API_BASE = getPathRoot() + '/ui';
 
-// Latest signed conversation_state per conversation key. The server treats a
-// continued conversation without a valid clean one as tainted (ADR 0010 §5).
+// Latest signed conversation_state and server conversation_id per conversation
+// key. The server treats a continued conversation without a valid clean state
+// as tainted, and serves only ids it minted (ADR 0010 §5).
 const conversationStates = new Map();
 
 /**
@@ -710,13 +711,17 @@ const conversationStates = new Map();
 export async function sendChatMessage(messages, documentContext = null, options = {}) {
   const key = options.conversationId;
   if (!key) throw new Error('sendChatMessage requires options.conversationId');
-  // The server binds pending actions to this id; confirmChatAction must send it back.
-  const body = { messages, conversation_id: key };
-  if (conversationStates.has(key)) {
-    body.conversation_state = conversationStates.get(key);
-  }
+  // The server binds pending actions to its id; confirmChatAction sends it back.
+  const known = conversationStates.get(key);
+  const body = { messages, conversation_id: known?.id ?? key };
+  if (known?.state) body.conversation_state = known.state;
   const response = await postChat(body, documentContext, options);
-  if (response?.conversation_state) conversationStates.set(key, response.conversation_state);
+  if (response?.conversation_state) {
+    conversationStates.set(key, {
+      state: response.conversation_state,
+      id: response.conversation_id ?? body.conversation_id,
+    });
+  }
   return response;
 }
 
@@ -730,7 +735,10 @@ export async function confirmChatAction(token, conversationId) {
   if (!conversationId) throw new Error('confirmChatAction requires a conversationId');
   return apiFetch(`${UI_API_BASE}/chat/confirm`, {
     method: 'POST',
-    body: JSON.stringify({ token, conversation_id: conversationId }),
+    body: JSON.stringify({
+      token,
+      conversation_id: conversationStates.get(conversationId)?.id ?? conversationId,
+    }),
   });
 }
 

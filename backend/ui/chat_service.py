@@ -856,8 +856,10 @@ class ChatService:
                 resolving one from env/model profiles. Passed through to
                 ChatProcessor.process_message for the evaluation harness
                 (backend/evaluation); see that parameter's docstring there.
-            conversation_id: Conversation identity to bind pending actions to;
-                omitted identities are minted by the server and returned on each card.
+            conversation_id: Conversation identity to bind pending actions to.
+                One this process did not mint is replaced by a fresh one, so a
+                conversation is only ever served by one process; the identity
+                used is returned as conversation_id and on each card.
             conversation_state: The token the previous response returned. Without
                 a valid, clean one, a request continuing a conversation starts
                 tainted (ADR 0010 §5).
@@ -867,8 +869,9 @@ class ChatService:
             - content: The text response from the LLM
             - toolUsed: Name of the last tool used (if any)
             - toolResult: Result from the tool (if any)
-            - conversation_state, untrusted_content_used: The signed state for
-              the next request and whether this turn was tainted
+            - conversation_state, conversation_id, untrusted_content_used: The
+              signed state and conversation identity for the next request and
+              whether this turn was tainted
         """
         effective_prefix, collection_perms, collect_responses = (
             run_on_event_loop(
@@ -996,6 +999,10 @@ class ChatService:
                 # Empty recorded intersection must still deny every tool.
                 if not tool_allowlist:
                     tool_allowlist = ["__no_tools__"]
+            if _confirmation is None:
+                conversation_id = conversation_states.bind_conversation_id(
+                    conversation_id
+                )
             context = {
                 "conversation_id": conversation_id or secrets.token_urlsafe(32),
                 "actor": request_actor(),
@@ -1075,6 +1082,7 @@ class ChatService:
                     reply=result["content"],
                     conversation_id=conversation_id,
                 )
+                result["conversation_id"] = conversation_id
             return result
         finally:
             _request_federation_depth.reset(federation_depth_token)

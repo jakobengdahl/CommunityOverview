@@ -29,8 +29,10 @@ _TAINTED_MAX = 100_000
 _tainted = OrderedDict()
 _tainted_lock = threading.Lock()
 # The record is per process, so a clean token verifies only in the process that
-# issued it, and only if no entry marked after its issue has been evicted.
-# Restart, another worker or eviction leaves a conversation tainted, never clean.
+# issued it, and only if no entry marked after its issue has been evicted. The
+# record is complete because only the minting process serves a conversation id
+# (bind_conversation_id): another worker cannot taint one this process vouches
+# clean for. Restart, another worker or eviction leaves it tainted, never clean.
 _PROCESS_ID = secrets.token_hex(16)
 _evicted_through = float("-inf")
 
@@ -54,6 +56,29 @@ def _b64(raw):
 
 def _sign(body):
     return _b64(hmac.new(_key(), body.encode(), hashlib.sha256).digest())
+
+
+def _id_signature(nonce):
+    # The per-process key even when a shared one is set: no other process may
+    # accept an id this one minted.
+    return _b64(
+        hmac.new(
+            _PROCESS_KEY, f"{_PROCESS_ID}:{nonce}".encode(), hashlib.sha256
+        ).digest()
+    )
+
+
+def bind_conversation_id(conversation_id):
+    """The id this process serves the turn under: the given one if minted here,
+    else a fresh one, so a conversation never continues on another process."""
+    if isinstance(conversation_id, str) and conversation_id.count(".") == 1:
+        nonce, signature = conversation_id.split(".")
+        if conversation_id.isascii() and hmac.compare_digest(
+            signature, _id_signature(nonce)
+        ):
+            return conversation_id
+    nonce = secrets.token_urlsafe(24)
+    return f"{nonce}.{_id_signature(nonce)}"
 
 
 def conversation_hash(messages):
