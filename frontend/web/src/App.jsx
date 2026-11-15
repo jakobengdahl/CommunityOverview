@@ -1428,21 +1428,31 @@ function App() {
             const positioned = result.nodes.map((n) =>
               result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
             );
-            clearVisualization({ keepNodes: true });
-            publishMembership(
+            // A session stores the view's layout with the replace and every
+            // browser renders it from there, so this one does not save it back.
+            const sent = publishMembership(
               'nodes_replaced',
               positioned.map((n) => n.id),
               {
                 nodes: positioned,
                 edges: result.edges || [],
-                onDrawn: () => {
-                  if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-                  if (result.groups?.length)
-                    setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-                  if (result.annotations?.length) setPendingAnnotations(result.annotations);
+                view: {
+                  positions: result.positions || {},
+                  hidden_node_ids: result.hidden_node_ids || [],
+                  annotations: legacyMetadataToAnnotationDocument({
+                    groups: result.groups || [],
+                    parentIds: result.parentIds || {},
+                    annotations: result.annotations || [],
+                  }).annotations,
                 },
               }
             );
+            if (sent) return;
+            clearVisualization({ keepNodes: true });
+            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
+            if (result.groups?.length)
+              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
+            if (result.annotations?.length) setPendingAnnotations(result.annotations);
           },
         });
       } catch (err) {

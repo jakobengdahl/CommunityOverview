@@ -64,6 +64,12 @@ export function useToolResultCommands({
       } = useGraphStore.getState();
       const sync = syncRef?.current;
       const held = (n) => !sync || sync.isMember(n.id);
+      // Nodes go where the server has them (it stores a loaded view's layout
+      // and places what a push adds), so no viewer writes its own layout back.
+      const atServerPosition = (n) => {
+        const pos = sync?.baselinePosition(n.id);
+        return pos ? { ...n, _savedPosition: pos } : n;
+      };
 
       const filtered = (toolResult.nodes || []).filter(
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
@@ -81,8 +87,13 @@ export function useToolResultCommands({
               y: (window.innerHeight / 2 - vp.y) / vp.zoom,
             }
           : null;
-        const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-        addNodes(positioned.filter(held), toolResult.edges || []);
+        const placed = filtered.map(atServerPosition);
+        const unplaced = placed.filter((n) => !n._savedPosition);
+        const positioned = unplaced.length
+          ? positionNewNodes(unplaced, currentNodes, allEdges, { viewportCenter })
+          : [];
+        const byId = new Map(positioned.map((n) => [n.id, n]));
+        addNodes(placed.map((n) => byId.get(n.id) || n).filter(held), toolResult.edges || []);
       };
 
       if (toolResult.action === 'add_to_visualization') {
@@ -93,13 +104,10 @@ export function useToolResultCommands({
         toolResult.action === 'replace_visualization'
       ) {
         // Explicit replace/clear/load: swap the whole view for the results.
-        clearViz();
-        // Every node goes where the server has it (a loaded view's layout is
-        // stored with its replace), so no viewer writes its own layout back.
-        const atServerPosition = (n) => {
-          const pos = sync?.baselinePosition(n.id);
-          return pos ? { ...n, _savedPosition: pos } : n;
-        };
+        // In a session the server left its overlays and view settings as they
+        // were, so only the nodes are swapped: clearing them here would save
+        // their removal back from every viewer.
+        if (!sync) clearViz();
         // Nodes added since the push was sequenced (a deferred render) stay
         // where the server has them; named ones removed since do not return.
         const named = new Set(filtered.map((n) => n.id));
@@ -109,12 +117,14 @@ export function useToolResultCommands({
         const keptEdges = kept.length
           ? currentEdges.filter((e) => shownIds.has(e.source) && shownIds.has(e.target))
           : [];
-        if (shown.length > 0) {
+        if (shown.length > 0 || sync) {
           updateViz(shown, [...(toolResult.edges || []), ...keptEdges]);
         }
-        // The clear reset hidden ids the session still holds; keep them.
-        const hidden = sync ? sync.baselineHiddenNodeIds().filter((id) => shownIds.has(id)) : [];
-        if (hidden.length) useGraphStore.getState().setHiddenNodeIds(hidden);
+        if (sync) {
+          // Hidden ids as the session holds them for the nodes now shown.
+          const hidden = sync.baselineHiddenNodeIds().filter((id) => shownIds.has(id));
+          useGraphStore.getState().setHiddenNodeIds(hidden);
+        }
       } else if (toolResult.action === 'update_in_visualization') {
         // In-place update: replace matching nodes, keep the rest, append any
         // genuinely new nodes. Kept in sync with the ChatPanel apply path.

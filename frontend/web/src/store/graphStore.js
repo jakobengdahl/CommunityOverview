@@ -398,14 +398,16 @@ const useGraphStore = create((set, get) => ({
    * session. The caller changes no membership itself: the canvas follows the
    * op's broadcast, which draws `nodes`/`edges`, and `onDrawn` runs after it
    * has. With no session to send to, the change is applied here at once,
-   * drawing with `draw` when given.
+   * drawing with `draw` when given. A replace's `view` layout goes with it to
+   * the session; returns whether it was sent, so a caller applies it locally
+   * otherwise.
    */
   publishMembership: (
     op,
     nodeIds,
-    { nodes = [], edges = [], onDrawn = null, draw = null } = {}
+    { nodes = [], edges = [], onDrawn = null, draw = null, view = null } = {}
   ) => {
-    if (membershipPublisher?.(op, nodeIds, { nodes, edges, onDrawn })) return;
+    if (membershipPublisher?.(op, nodeIds, { nodes, edges, onDrawn, view })) return true;
     const state = get();
     const dropped =
       op === 'nodes_removed'
@@ -422,6 +424,7 @@ const useGraphStore = create((set, get) => ({
     }
     if (nodes.length) (draw || get().addNodesToVisualization)(nodes, edges);
     onDrawn?.();
+    return false;
   },
 
   setNodes: (nodes) => set({ nodes }),

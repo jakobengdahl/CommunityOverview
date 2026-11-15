@@ -1521,9 +1521,11 @@ export class SessionSyncClient {
    * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
    * as one explicit op. Neither the baseline nor the canvas changes until the
    * server broadcasts it back; `nodes` (with `edges`) is what that broadcast
-   * then draws instead of reading, and `onDrawn` runs once it has.
+   * then draws instead of reading, and `onDrawn` runs once it has. A replace
+   * may carry the loaded `view` (`positions`, `hidden_node_ids`,
+   * `annotations`): the server stores it with the replace's one record.
    */
-  sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null } = {}) {
+  sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null, view = null } = {}) {
     if (!MEMBERSHIP_OPS.has(op)) return;
     const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
     if (!ids.length && op !== 'nodes_replaced') return;
@@ -1531,7 +1533,8 @@ export class SessionSyncClient {
     const named = new Set(op === 'nodes_removed' ? [] : ids);
     const carried = nodes.filter((node) => named.has(node?.id));
     carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
-    this._enqueue([{ op, node_ids: ids }]);
+    const carriedView = op === 'nodes_replaced' && view ? view : {};
+    this._enqueue([{ op, node_ids: ids, ...carriedView }]);
     if (!carried.length) onDrawn?.(); // nothing for a broadcast to draw
   }
 

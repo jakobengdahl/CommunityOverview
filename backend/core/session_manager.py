@@ -37,6 +37,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -70,6 +71,7 @@ from .session_store import (
     Session,
     SessionRetired,
     SessionStore,
+    _ANNOTATION_META_FIELDS,
     _validate_position,
     is_valid_session_id,
 )
@@ -445,6 +447,93 @@ def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
         total += size
     session._activity_record_bytes = fresh
     return total
+
+
+# Fields a browser's own ``nodes_replaced`` may carry: the loaded view's
+# layout, stored with the replace rather than saved back afterwards.
+_REPLACE_VIEW_FIELDS = ("positions", "hidden_node_ids", "annotations")
+# The client id a replace's carried layout is fanned out under. Distinct from
+# the loading browser's, so it folds that layout like every other browser.
+_VIEW_LOAD_CLIENT_ID = "view-load"
+_PLACEMENT_CELL_W = 280.0
+_PLACEMENT_CELL_H = 180.0
+
+
+def _replaced_view_ops(
+    session: Session, view: Dict[str, Any], node_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """The ops that give a just-replaced session the loaded view's layout.
+
+    Positions and hidden ids are kept for the view's nodes only; the
+    annotations, when the view names them, replace the session's.
+    """
+    members = set(node_ids)
+    state = session.state
+    stored = state.get("positions", {})
+    positions: Dict[str, Any] = {}
+    for node_id, position in (view.get("positions") or {}).items():
+        if node_id not in members:
+            continue
+        try:
+            position = _validate_position(position)
+        except OpError:
+            continue
+        if stored.get(node_id) != position:
+            positions[node_id] = position
+    ops: List[Dict[str, Any]] = []
+    if positions:
+        ops.append({"op": "layout_applied", "positions": positions})
+    hidden_ids = view.get("hidden_node_ids")
+    if isinstance(hidden_ids, list):
+        target = {i for i in hidden_ids if isinstance(i, str) and i in members}
+        current = set(state.get("hidden_node_ids", []))
+        if current - target:
+            ops.append({"op": "nodes_shown", "node_ids": sorted(current - target)})
+        if target - current:
+            ops.append({"op": "nodes_hidden", "node_ids": sorted(target - current)})
+    annotations = view.get("annotations")
+    if isinstance(annotations, list):
+        wanted = [a for a in annotations if isinstance(a, dict)]
+        wanted_ids = {a.get("id") for a in wanted}
+        held = {a.get("id"): a for a in state.get("annotations", [])}
+        ops.extend(
+            {"op": "annotation_deleted", "annotation_id": ann_id}
+            for ann_id in held
+            if ann_id not in wanted_ids
+        )
+        for annotation in wanted:
+            current = held.get(annotation.get("id"))
+            if current is None or any(
+                annotation[k] != current.get(k)
+                for k in annotation
+                if k not in _ANNOTATION_META_FIELDS
+            ):
+                ops.append({"op": "annotation_created", "annotation": annotation})
+    return ops
+
+
+def _grid_positions(
+    stored: Dict[str, Any], session: Session, node_ids: List[str]
+) -> Dict[str, Dict[str, float]]:
+    """Grid places for ``node_ids`` right of the members already placed."""
+    placed = [
+        stored[n]
+        for n in session.state.get("node_refs", [])
+        if n in stored and n not in node_ids
+    ]
+    cols = max(1, math.ceil(math.sqrt(len(node_ids))))
+    if placed:
+        x0 = max(p["x"] for p in placed) + _PLACEMENT_CELL_W
+        y0 = min(p["y"] for p in placed)
+    else:
+        x0, y0 = 400.0, 300.0
+    return {
+        node_id: {
+            "x": x0 + (i % cols) * _PLACEMENT_CELL_W,
+            "y": y0 + (i // cols) * _PLACEMENT_CELL_H,
+        }
+        for i, node_id in enumerate(node_ids)
+    }
 
 
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
@@ -1498,6 +1587,10 @@ class SessionManager:
                 self._validate_claim_op(op)
             elif op_type not in STATE_OPS or op_type in SERVER_ONLY_OPS:
                 raise OpError(f"unknown op: {op_type!r}")
+            if op_type == "nodes_replaced":
+                for field, kind in zip(_REPLACE_VIEW_FIELDS, (dict, list, list)):
+                    if field in op and not isinstance(op[field], kind):
+                        raise OpError(f"nodes_replaced '{field}' is malformed")
 
         async with self._lock(session_id):
             # Re-fetch inside the lock rather than reusing the check above
@@ -1541,7 +1634,7 @@ class SessionManager:
             # state op's effect on `session.state` as it walks the same list.
             working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
 
-            # ("state", applied) | ("claim", op_type, element_ids)
+            # ("state", applied[, fan-out client id]) | ("claim", op_type, element_ids)
             # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
             # in arrival order
             pending: List[Tuple[Any, ...]] = []
@@ -1577,13 +1670,36 @@ class SessionManager:
                             holder = working_leases.get(conflict_id)
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
+                        view = {f: op[f] for f in _REPLACE_VIEW_FIELDS if f in op}
+                        op = {k: v for k, v in op.items() if k not in view}
                         result = self.store.apply_state_op(
                             session, {**op, "client_id": client_id}
                         )
-                        if result is None:
-                            continue  # legitimate no-op (e.g. update on deleted annotation)
-                        state_changed = True
-                        pending.append(("state", result))
+                        if result is not None:
+                            state_changed = True
+                            pending.append(("state", result))
+                        if view:
+                            # The loaded view's layout joins its replace's one
+                            # record; what cannot apply is left as it was.
+                            for view_op in _replaced_view_ops(
+                                session, view, session.state["node_refs"]
+                            ):
+                                target = _claimed_annotation_target(view_op, session)
+                                if working_leases.get(target, client_id) != client_id:
+                                    continue
+                                try:
+                                    applied_op = self.store.apply_state_op(
+                                        session,
+                                        {**view_op, "client_id": client_id},
+                                        record_activity=False,
+                                    )
+                                except OpError:
+                                    continue
+                                if applied_op is not None:
+                                    state_changed = True
+                                    pending.append(
+                                        ("state", applied_op, _VIEW_LOAD_CLIENT_ID)
+                                    )
                 if state_changed:
                     # Snapshot on the loop thread, persist the copy off-thread:
                     # the worker must never read ``session.state`` while a
@@ -1647,12 +1763,13 @@ class SessionManager:
                         session_id,
                         {
                             "type": "op",
-                            "client_id": client_id,
+                            "client_id": entry[2] if len(entry) > 2 else client_id,
                             "op": result,
                             "seq": result["seq"],
                         },
                     )
-                    applied.append(result)
+                    if len(entry) == 2:
+                        applied.append(result)
                 elif kind == "claim":
                     _, op_type, element_ids = entry
                     if op_type == "selection_claimed":
@@ -2983,7 +3100,9 @@ class SessionManager:
             )
             self._apply_replaced_layout(session, actor, result, node_ids)
         elif action in _ADDITIVE_ACTIONS and node_ids:
-            self._add_node_refs(session, actor, node_ids)
+            added = self._add_node_refs(session, actor, node_ids)["added"]
+            if added:
+                self._place_added_nodes(session, actor, result, added)
 
     def _apply_replaced_layout(
         self,
@@ -2998,35 +3117,48 @@ class SessionManager:
         own layout back. They belong to the replace's one activity record, so
         these ops record none of their own.
         """
-        members = set(node_ids)
-        stored = session.state.get("positions", {})
-        positions: Dict[str, Any] = {}
-        for node_id, position in (result.get("positions") or {}).items():
-            if node_id not in members:
-                continue
-            try:
-                position = _validate_position(position)
-            except OpError:
-                continue
-            if stored.get(node_id) != position:
-                positions[node_id] = position
-        ops: List[Dict[str, Any]] = []
-        if positions:
-            ops.append({"op": "layout_applied", "positions": positions})
-        hidden_ids = result.get("hidden_node_ids")
-        if isinstance(hidden_ids, list):
-            target = {i for i in hidden_ids if isinstance(i, str) and i in members}
-            current = set(session.state.get("hidden_node_ids", []))
-            if current - target:
-                ops.append({"op": "nodes_shown", "node_ids": sorted(current - target)})
-            if target - current:
-                ops.append({"op": "nodes_hidden", "node_ids": sorted(target - current)})
-        for op in ops:
+        for op in _replaced_view_ops(session, result, node_ids):
             self._apply_op_sync(
                 session,
                 session.id,
                 actor,
                 {**op, "client_id": actor},
+                record_activity=False,
+            )
+
+    def _place_added_nodes(
+        self,
+        session: Session,
+        actor: str,
+        result: Dict[str, Any],
+        added: List[str],
+    ) -> None:
+        """Store a position for each node a push added without one.
+
+        Every browser then draws the node where the session has it instead of
+        placing it itself and saving that back. Part of the add's one record.
+        """
+        stored = session.state.get("positions", {})
+        given = (
+            result.get("positions") if isinstance(result.get("positions"), dict) else {}
+        )
+        positions: Dict[str, Any] = {}
+        unplaced: List[str] = []
+        for node_id in added:
+            if node_id in stored:
+                continue
+            try:
+                positions[node_id] = _validate_position(given.get(node_id))
+            except OpError:
+                unplaced.append(node_id)
+        if unplaced:
+            positions.update(_grid_positions(stored, session, unplaced))
+        if positions:
+            self._apply_op_sync(
+                session,
+                session.id,
+                actor,
+                {"op": "layout_applied", "positions": positions, "client_id": actor},
                 record_activity=False,
             )
 

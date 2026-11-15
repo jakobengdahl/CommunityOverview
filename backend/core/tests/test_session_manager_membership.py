@@ -52,9 +52,9 @@ class TestServerMembership:
         }
         for sub in subs:
             events = await _drain(sub)
-            assert [event["type"] for event in events] == ["op", "command"]
+            assert [event["type"] for event in events] == ["op", "op", "command"]
             assert events[0]["op"]["node_ids"] == node_ids
-            assert events[1]["command"] == command
+            assert events[2]["command"] == command
         # Delivery neither spends a fresh budget nor replenishes an empty one.
         assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
 
@@ -125,18 +125,19 @@ class TestServerMembership:
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == (
-                ["op", "op", "command", "op", "command"]
+                ["op", "op", "op", "command", "op", "command"]
                 if clear_after_add
-                else ["op", "op", "command"]
+                else ["op", "op", "op", "command"]
             )
             if clear_after_add:
-                assert events[3]["op"]["op"] == "nodes_removed"
-                assert events[3]["seq"] == 3
-                assert events[4]["command"] == clear
-            assert [event["seq"] for event in events[:2]] == [1, 2]
+                assert events[4]["op"]["op"] == "nodes_removed"
+                assert events[4]["seq"] == 4
+                assert events[5]["command"] == clear
+            assert [event["seq"] for event in events[:3]] == [1, 2, 3]
             assert events[1]["op"]["node_ids"] == ["new"]
-            assert events[2]["command"] == command
-        assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
+            assert events[2]["op"]["op"] == "layout_applied"
+            assert events[3]["command"] == command
+        assert mgr.catch_up(s.id, 0)["seq"] == (4 if clear_after_add else 3)
 
     @pytest.mark.parametrize("viewers", [0, 2])
     async def test_clear_push_records_server_removal_once(self, viewers):
@@ -227,20 +228,34 @@ class TestServerMembership:
             assert mgr.push_command(s.id, {"tool": tool, "result": result})
         assert s.state["node_refs"] == expected
         assert ("old" in s.state["positions"]) == ("old" in expected)
+        # A pushed add is placed once, here, not by each viewer saving its own.
+        placed = source == "push" and record == "nodes_added"
+        assert s.state["positions"].get("new") == (
+            {"x": 281.0, "y": 2.0} if placed else None
+        )
         assert [(r["op"], r["actor"]) for r in s.activity_log[2:]] == [(record, actor)]
         for sub in subs:
             events = await _drain(sub)
             ops = [e["op"]["op"] for e in events if e["type"] == "op"]
-            assert ops == [record]
+            assert ops == [record] + (["layout_applied"] if placed else [])
 
-    async def test_saved_view_load_stores_its_layout_in_its_one_record(self):
-        """Viewers render a load's positions and hidden ids from the session."""
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    async def test_saved_view_load_stores_its_layout_in_its_one_record(self, via):
+        """Viewers render a load's layout from the session; only the replace records."""
         mgr = _manager()
         s = mgr.create_session()
         mgr.add_node_refs(s.id, "owner", ["a", "b"])
         mgr.apply_layout(s.id, "owner", positions={"a": {"x": 5, "y": 5}})
         mgr.apply_layout(s.id, "owner", positions={"b": {"x": 7, "y": 7}})
         mgr.store.apply_state_op(s, {"op": "nodes_hidden", "node_ids": ["a"]})
+        for ann_id in ("kept", "dropped"):
+            mgr.store.apply_state_op(
+                s,
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": ann_id, "type": "note"},
+                },
+            )
         subs = [mgr.connect(s.id, f"c{i}", "Alice")[0] for i in range(2)]
         for sub in subs:
             await _drain(sub)
@@ -257,7 +272,24 @@ class TestServerMembership:
             },
             "hidden_node_ids": ["c", "gone"],
         }
-        assert mgr.push_command(s.id, {"tool": "get_saved_view", "result": result})
+        view_annotations = [
+            {"id": "kept", "type": "note"},
+            {"id": "new", "type": "note", "text": "x"},
+            {"id": "bad", "type": "nonsense"},
+        ]
+        if via == "push":
+            actor, fan_out = "mcp-agent", "mcp-agent"
+            assert mgr.push_command(s.id, {"tool": "get_saved_view", "result": result})
+        else:
+            actor, fan_out = "c0", "view-load"
+            op = {
+                "op": "nodes_replaced",
+                "node_ids": [n["id"] for n in result["nodes"]],
+                "positions": result["positions"],
+                "hidden_node_ids": result["hidden_node_ids"],
+                "annotations": view_annotations,
+            }
+            await mgr.apply_ops(s.id, actor, None, [op])
 
         assert s.state["positions"] == {
             "a": {"x": 1.0, "y": 2.0},
@@ -265,20 +297,24 @@ class TestServerMembership:
             "c": {"x": 3.0, "y": 4.0},
         }
         assert s.state["hidden_node_ids"] == ["c"]
+        # A browser's load replaces the overlays too; a push leaves them.
+        assert [a["id"] for a in s.state["annotations"]] == (
+            ["kept", "dropped"] if via == "push" else ["kept", "new"]
+        )
         assert [(r["op"], r["actor"]) for r in s.activity_log[records:]] == [
-            ("nodes_replaced", "mcp-agent")
+            ("nodes_replaced", actor)
         ]
+        layout = ["layout_applied", "nodes_shown", "nodes_hidden"]
         for sub in subs:
             events = await _drain(sub)
             assert [
-                e["op"]["op"] if e["type"] == "op" else e["type"] for e in events
-            ] == [
-                "nodes_replaced",
-                "layout_applied",
-                "nodes_shown",
-                "nodes_hidden",
-                "command",
-            ]
+                (e["op"]["op"], e["client_id"]) if e["type"] == "op" else e["type"]
+                for e in events
+            ] == [("nodes_replaced", actor)] + [(o, fan_out) for o in layout] + (
+                ["command"]
+                if via == "push"
+                else [("annotation_deleted", fan_out), ("annotation_created", fan_out)]
+            )
             assert events[1]["op"]["positions"] == {
                 "a": {"x": 1.0, "y": 2.0},
                 "c": {"x": 3.0, "y": 4.0},

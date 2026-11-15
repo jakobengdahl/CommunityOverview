@@ -92,13 +92,18 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().clearVisualization).toHaveBeenCalledTimes(2);
   });
 
-  it('add_to_visualization positions new nodes and adds them, dropping Community nodes', () => {
-    const { result } = render();
+  it('add_to_visualization places only nodes the server has not, dropping Community nodes', () => {
+    const sync = {
+      isMember: () => true,
+      baselinePosition: (id) => (id === 'n0' ? { x: 5, y: 6 } : null),
+    };
+    const { result } = render({ syncRef: { current: sync } });
     act(() =>
       result.current.applyToolResultCommand(
         {
           action: 'add_to_visualization',
           nodes: [
+            { id: 'n0', type: 'Goal' },
             { id: 'n1', type: 'Goal' },
             { id: 'c1', type: 'Community' },
           ],
@@ -111,7 +116,10 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     const [filtered] = positionNewNodes.mock.calls[0];
     expect(filtered.map((n) => n.id)).toEqual(['n1']);
     expect(store().addNodesToVisualization).toHaveBeenCalledWith(
-      [{ id: 'n1', type: 'Goal', positioned: true }],
+      [
+        { id: 'n0', type: 'Goal', _savedPosition: { x: 5, y: 6 } },
+        { id: 'n1', type: 'Goal', positioned: true },
+      ],
       [{ id: 'e1' }]
     );
   });
@@ -132,7 +140,7 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     });
   });
 
-  it('load_visualization replaces the canvas with the layout the session stored', () => {
+  it('load_visualization in a session swaps only the nodes, at the layout it stored', () => {
     // The server stored the view's positions and hidden ids before the command.
     const sync = {
       isMember: (id) => id === 'n1' || id === 'n2',
@@ -153,7 +161,8 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
         'cmd-1'
       )
     );
-    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    // Clearing would drop the overlays the session keeps (and save that back).
+    expect(store().clearVisualization).not.toHaveBeenCalled();
     expect(store().updateVisualization).toHaveBeenCalledWith(
       [
         { id: 'n1', type: 'Goal', _savedPosition: { x: 1, y: 2 } },

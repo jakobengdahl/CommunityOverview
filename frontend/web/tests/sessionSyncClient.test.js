@@ -652,10 +652,14 @@ describe('SessionSyncClient', () => {
     expect(client.takeSentNodes(['x']).nodes.size).toBe(0); // taken once
     // A replace the server found unchanged is not broadcast: its ack draws
     // the membership then held, a remote add broadcast before the ack included.
-    client.sendMembership('nodes_replaced', ['x'], { nodes: [{ id: 'x' }] });
+    // A loaded view's layout rides the replace, for the server to store with it.
+    const view = { positions: { x: { x: 1, y: 2 } }, hidden_node_ids: ['x'], annotations: [] };
+    client.sendMembership('nodes_replaced', ['x'], { nodes: [{ id: 'x' }], view });
     membershipOp(es, 'other', 'nodes_added', ['y'], 3);
     await flush();
-    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_replaced', node_ids: ['x'] }]);
+    expect(fetchImpl.calls[1].body.ops).toEqual([
+      { op: 'nodes_replaced', node_ids: ['x'], ...view },
+    ]);
     expect(onRemoteOps.mock.calls.at(-1)[0]).toEqual([
       { op: 'nodes_replaced', node_ids: ['x', 'y'] },
     ]);
