@@ -112,6 +112,8 @@
     "pending_action_notice": "Filinnehåll fanns i samtalet. Assistenten bad om att köra åtgärden nedan; kontrollera exakt verktyg och argument innan du bekräftar.",
     "pending_action_tool": "Verktyg:",
     "pending_action_confirm": "Bekräfta och kör",
+    "pending_action_dismiss": "Avfärda",
+    "pending_action_dismissed": "Avfärdad. Inget kördes.",
     "pending_action_done": "Klart.",
     "pending_action_unknown": "Bekräftelsen gäller inte längre. Skicka begäran igen.",
     "pending_action_denied": "Du får inte bekräfta den här åtgärden.",

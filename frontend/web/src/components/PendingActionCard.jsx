@@ -13,6 +13,7 @@ import './PendingActionCard.css';
  * onConfirmed, so the caller applies its side effects (e.g. confirmed nodes
  * join the view). conversationId is the key of the conversation whose turn
  * recorded the action; the server refuses a confirmation from any other.
+ * Dismissing only closes the card: nothing is sent, and the token expires.
  */
 function PendingActionCard({ action, conversationId, disabled = false, onConfirmed }) {
   const { t } = useI18n();
@@ -65,9 +66,18 @@ function PendingActionCard({ action, conversationId, disabled = false, onConfirm
           {reply && <MarkdownMessage>{reply}</MarkdownMessage>}
         </div>
       ) : (
-        <button type="button" onClick={confirm} disabled={disabled || busy}>
-          {t('chat.pending_action_confirm')}
-        </button>
+        <div className="pending-action-buttons">
+          <button type="button" onClick={confirm} disabled={disabled || busy}>
+            {t('chat.pending_action_confirm')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatus(t('chat.pending_action_dismissed'))}
+            disabled={busy}
+          >
+            {t('chat.pending_action_dismiss')}
+          </button>
+        </div>
       )}
     </div>
   );

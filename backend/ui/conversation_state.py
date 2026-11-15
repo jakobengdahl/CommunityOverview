@@ -6,7 +6,9 @@ import hmac
 import json
 import os
 import secrets
+import threading
 import time
+from collections import OrderedDict
 
 from backend.llm.llm_providers import positive_int_setting
 
@@ -16,6 +18,14 @@ EMPTY_REPLY_TEXT = "(no text reply)"
 # Unset key: a per-process key, so another process's token fails verification
 # and the conversation errs towards tainted.
 _PROCESS_KEY = secrets.token_bytes(32)
+
+# Conversations this process has issued a tainted state for, by (actor,
+# conversation id) -> time marked. A client holding an older clean token could
+# otherwise replay the history up to it and come back clean. An entry older
+# than the TTL is dropped: every clean token issued before it has expired too.
+_TAINTED_MAX = 100_000
+_tainted = OrderedDict()
+_tainted_lock = threading.Lock()
 
 
 def _key():
@@ -47,13 +57,42 @@ def conversation_hash(messages):
     ).hexdigest()
 
 
-def issue(*, tainted, actor, messages, reply):
+def _ttl():
+    return positive_int_setting("ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS", 86400)
+
+
+def _conversation_key(actor, conversation_id):
+    return _canonical([actor, conversation_id])
+
+
+def _mark_tainted(actor, conversation_id):
+    now = time.time()
+    key = _conversation_key(actor, conversation_id)
+    with _tainted_lock:
+        _tainted[key] = now
+        _tainted.move_to_end(key)
+        while _tainted and (
+            len(_tainted) > _TAINTED_MAX or now - next(iter(_tainted.values())) > _ttl()
+        ):
+            _tainted.popitem(last=False)
+
+
+def _marked_tainted(actor, conversation_id):
+    with _tainted_lock:
+        marked = _tainted.get(_conversation_key(actor, conversation_id))
+    return marked is not None and time.time() - marked <= _ttl()
+
+
+def issue(*, tainted, actor, messages, reply, conversation_id=None):
     """Token over the conversation as the server saw it after this turn."""
+    if tainted and conversation_id is not None:
+        _mark_tainted(actor, conversation_id)
     body = _b64(
         _canonical(
             {
                 "tainted": bool(tainted),
                 "actor": actor,
+                "conversation_id": conversation_id,
                 "issued_at": int(time.time()),
                 "hash": conversation_hash(
                     [*messages, {"role": "assistant", "content": reply}]
@@ -70,8 +109,12 @@ TAINTED = "tainted"
 UNVERIFIED = "unverified"
 
 
-def taint_status(messages, token, actor):
-    """CLEAN, TAINTED (a valid token says so) or UNVERIFIED (treat as tainted)."""
+def taint_status(messages, token, actor, conversation_id=None):
+    """CLEAN, TAINTED (a valid token or this process says so) or UNVERIFIED."""
+    # Checked before the new-conversation case: truncating a tainted
+    # conversation's history, even to its first message, must not clean it.
+    if conversation_id is not None and _marked_tainted(actor, conversation_id):
+        return TAINTED
     last = max(
         (i for i, m in enumerate(messages) if m.get("role") == "assistant"),
         default=-1,
@@ -91,11 +134,11 @@ def taint_status(messages, token, actor):
     if not isinstance(state, dict):
         return UNVERIFIED
     issued_at = state.get("issued_at")
-    ttl = positive_int_setting("ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS", 86400)
     if not (
         state.get("actor") == actor
+        and state.get("conversation_id") == conversation_id
         and isinstance(issued_at, int)
-        and 0 <= time.time() - issued_at <= ttl
+        and 0 <= time.time() - issued_at <= _ttl()
     ):
         return UNVERIFIED
     # A signed taint holds even if the history was edited since: dropping the
@@ -107,6 +150,6 @@ def taint_status(messages, token, actor):
     return CLEAN
 
 
-def starts_clean(messages, token, actor):
+def starts_clean(messages, token, actor, conversation_id=None):
     """Whether a request may start untainted; anything unverifiable is tainted."""
-    return taint_status(messages, token, actor) == CLEAN
+    return taint_status(messages, token, actor, conversation_id) == CLEAN

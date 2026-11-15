@@ -17,11 +17,13 @@ WRITE = {"name": "add_nodes", "input": {"nodes": [{"name": "W", "type": "Actor"}
 ACTOR = {"x-communityoverview-actor-id": "a", "x-communityoverview-actor-type": "user"}
 
 
-def turn(service, llm, messages, state=None, calls=(), headers=ACTOR):
+def turn(service, llm, messages, state=None, calls=(), headers=ACTOR, cid=None):
     llm.reset()
     llm.mock_tool_call_sequence = [list(calls)] if calls else None
     with use_request_authorization(headers=headers):
-        return service.process_message(messages, conversation_state=state)
+        return service.process_message(
+            messages, conversation_state=state, conversation_id=cid
+        )
 
 
 def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
@@ -136,6 +138,23 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
         ]
         again = turn(service, llm, messages, state)
         assert again["untrusted_content_used"] is True
+
+
+@pytest.mark.parametrize("replay", ["truncated", "first_message", "other_id"])
+def test_rollback_to_a_clean_state_stays_tainted(chat_service, monkeypatch, replay):
+    service, llm = chat_service
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    service._processor.tools_map["get_schema"] = lambda: {"untrusted_content": True}
+    cid, hi = secrets.token_hex(8), {"role": "user", "content": "hi"}
+    first = turn(service, llm, [hi], cid=cid)
+    clean = [hi, {"role": "assistant", "content": first["content"]}]
+    state, get_schema = first["conversation_state"], {"name": "get_schema", "input": {}}
+    read = turn(service, llm, [*clean, hi], state, [get_schema], cid=cid)
+    assert read["untrusted_content_used"]
+    history = [] if replay == "first_message" else clean
+    key = secrets.token_hex(8) if replay == "other_id" else cid
+    result = turn(service, llm, [*history, hi], state, [WRITE], cid=key)
+    assert result["untrusted_content_used"] and result["pending_actions"]
 
 
 def test_empty_reply_is_a_fixed_text_that_replays_clean(chat_service, monkeypatch):

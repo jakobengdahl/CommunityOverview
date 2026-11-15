@@ -2028,16 +2028,21 @@ settings above accept positive integers; invalid values use their defaults.
 
 The taint outlives the turn. Every chat response carries `conversation_state`,
 a signed token over whether the conversation is tainted, the request actor, the
-issue time and a SHA-256 of the conversation as the server saw it (role and
+request's `conversation_id`, the issue time and a SHA-256 of the conversation as the server saw it (role and
 content of every message received, plus the returned reply), and
 `untrusted_content_used` when the turn was tainted. `/ui/chat` and
 `/ui/chat/stream` accept it back as `conversation_state`. A request whose
 `messages` hold no assistant message starts clean; a token that verifies and
 says tainted starts it tainted; any other starts tainted, when
 `ATTACHMENT_CONTENT_ACCESS` is not `off` for the instance (whatever the caller's
-own grant), unless its token verifies, names the same actor, is younger than
+own grant), unless its token verifies, names the same actor and
+`conversation_id`, is younger than
 `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, hashes equal to its messages up to
-the last assistant message, and says untainted. A reply with no text is
+the last assistant message, and says untainted. Once a process has issued a
+tainted token for an actor's `conversation_id`, it treats every later request
+with that pair as tainted, also one replaying a shorter history with an older
+clean token or no history at all (in memory, per process, kept for the TTL; a
+request without `conversation_id` has only the token). A reply with no text is
 returned, and hashed, as a fixed non-empty text. The web client keeps the latest
 token per conversation key in `api.sendChatMessage` (`options.conversationId` is
 required) and replays exactly the messages it sent and received; client-made

@@ -1033,7 +1033,7 @@ class ChatService:
                     ]
                 )
                 status = conversation_states.taint_status(
-                    received, conversation_state, context["actor"]
+                    received, conversation_state, context["actor"], conversation_id
                 )
                 inherited_taint = status != conversation_states.CLEAN
                 # Only attachment reads taint, so with attachments off for the
@@ -1073,6 +1073,7 @@ class ChatService:
                     actor=context["actor"],
                     messages=received,
                     reply=result["content"],
+                    conversation_id=conversation_id,
                 )
             return result
         finally:

@@ -1316,3 +1316,26 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
     and proposals);
   - `docs/USER_GUIDE.md` (asking the assistant about attached files);
   - `.env.example` (the new settings).
+
+## Implementation status
+
+§5's taint guard has landed in full:
+
+- **Agent runs** (#1138): the per-run taint rule in `AutonomyGate.wrap`.
+- **Assistant and kiosk, server side** (#1162): tainted turns, pending
+  actions, `POST /ui/chat/confirm`, the signed `conversation_state`
+  (`backend/ui/conversation_state.py`) and the client replay in `api.js`,
+  `ChatPanel.jsx` and `CollectKioskView.jsx`.
+- **Rollback and conversation binding:** two additions to the second bullet
+  of "The taint outlives the turn". The token also signs the request's
+  `conversation_id` and verifies only for the same one. And a process that
+  has issued a tainted token for an actor's `conversation_id` treats every
+  later request with that pair as tainted, so replaying a shorter history
+  with an older clean token, or no history at all, does not clear it. That
+  record is in memory, per process and kept for
+  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` (any older clean token has
+  expired by then), at most 100,000 conversations, oldest dropped first; it
+  needs the same sticky routing as pending actions. A request without a
+  `conversation_id` has only the token's own checks.
+- **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
+  closes the card without sending anything; the token then expires.

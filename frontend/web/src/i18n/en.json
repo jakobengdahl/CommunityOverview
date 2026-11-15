@@ -112,6 +112,8 @@
     "pending_action_notice": "File content was in this conversation. The assistant asked to run the action below; check the exact tool and arguments before you confirm.",
     "pending_action_tool": "Tool:",
     "pending_action_confirm": "Confirm and run",
+    "pending_action_dismiss": "Dismiss",
+    "pending_action_dismissed": "Dismissed. Nothing was run.",
     "pending_action_done": "Done.",
     "pending_action_unknown": "This confirmation is no longer valid. Send the request again.",
     "pending_action_denied": "You are not allowed to confirm this action.",
