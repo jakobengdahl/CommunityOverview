@@ -1316,3 +1316,40 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
     and proposals);
   - `docs/USER_GUIDE.md` (asking the assistant about attached files);
   - `.env.example` (the new settings).
+
+## Implementation status
+
+§5's taint guard has landed in full:
+
+- **Agent runs** (#1138): the per-run taint rule in `AutonomyGate.wrap`.
+- **Assistant and kiosk, server side** (#1162): tainted turns, pending
+  actions, `POST /ui/chat/confirm`, the signed `conversation_state`
+  (`backend/ui/conversation_state.py`) and the client replay in `api.js`,
+  `ChatPanel.jsx` and `CollectKioskView.jsx`.
+- **Rollback and conversation binding:** two additions to the second bullet
+  of "The taint outlives the turn". The token also signs the request's
+  `conversation_id` and verifies only for the same one. And a process that
+  has issued a tainted token for an actor's `conversation_id` treats every
+  later request with that pair as tainted, so replaying a shorter history
+  with an older clean token, or no history at all, does not clear it. That
+  record is in memory, per process and kept for
+  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, at most 100,000
+  conversations, oldest dropped first; no clean token is issued while a
+  conversation is in it, so an entry dropped at TTL expiry has outlived any
+  older clean token, but one dropped to stay within the cap may not have.
+  Hence, and since the record is per process, a clean token verifies only in
+  the process that issued it and only if issued after that process last
+  evicted an entry. The record is complete because a process serves only a
+  `conversation_id` it minted: it replaces any other with a fresh one,
+  returned as the response's `conversation_id`, which `api.js` sends on that
+  conversation key's later requests and confirmations. So another worker
+  cannot taint a conversation behind the back of the process that vouches
+  for it clean. A restart, another worker or an eviction leaves a continued
+  conversation tainted, never clean (under a new id), and needs the same
+  sticky routing as pending actions; a shared
+  `ATTACHMENT_CONVERSATION_STATE_KEY` no longer changes that.
+  A continued conversation without a `conversation_id` never verifies clean.
+- **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
+  sends nothing and the token then expires. The card's outcome (dismissed,
+  done, failed) is kept with the chat message, so a remounted card shows it
+  instead of offering **Confirm and run** again.

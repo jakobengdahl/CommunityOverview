@@ -22,3 +22,8 @@
   word-break: break-word;
   font-size: 0.75rem;
 }
+
+.pending-action-buttons {
+  display: flex;
+  gap: 0.5rem;
+}

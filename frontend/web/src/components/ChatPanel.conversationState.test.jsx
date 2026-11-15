@@ -243,4 +243,50 @@ describe('ChatPanel conversation state', () => {
     expect(status.textContent).toBe(en.chat.pending_action_failed.replace('{message}', reason));
     expect(useGraphStore.getState().nodes).toEqual([]);
   });
+
+  it('a dismissed pending action stays dismissed when the panel remounts and sends nothing', async () => {
+    resetStore();
+    const action = { token: 't-3', tool: 'delete_nodes', arguments: { node_ids: ['n1'] } };
+    global.fetch.mockResolvedValueOnce(
+      streamed({ content: 'needs confirmation', pending_actions: [action] })
+    );
+    const { unmount } = render(<ChatPanel />);
+    await send('read the file');
+    fireEvent.click(await screen.findByRole('button', { name: en.chat.pending_action_dismiss }));
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
+
+    // The mobile sheet unmounts with the panel; the card remounts from the store.
+    unmount();
+    render(<ChatPanel />);
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
+    expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a card remounted while its confirm is in flight offers neither Confirm nor Dismiss and then shows the real outcome', async () => {
+    resetStore();
+    const action = { token: 't-4', tool: 'add_nodes', arguments: { nodes: [{ name: 'Z' }] } };
+    let answer;
+    global.fetch
+      .mockResolvedValueOnce(streamed({ content: 'needs confirmation', pending_actions: [action] }))
+      .mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const { unmount } = render(<ChatPanel />);
+    await send('read the file');
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+
+    unmount();
+    render(<ChatPanel />);
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_running);
+    expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
+    expect(screen.queryByRole('button', { name: en.chat.pending_action_dismiss })).toBeNull();
+
+    answer(json({ outcome: 'ok', message: '', result: { success: true, nodes: [], edges: [] } }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(en.chat.pending_action_done)
+    );
+    const [stored] = useGraphStore.getState().chatMessages.at(-1).pendingActions;
+    expect(stored.settled.key).toBe('chat.pending_action_done');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });
