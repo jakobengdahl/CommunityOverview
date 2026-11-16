@@ -473,6 +473,37 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => expect(seenAtRelease).toEqual([['node-b']]));
   });
 
+  it('an add carrying view-layout keys applies none of them', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    await act(async () => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: {
+            op: 'nodes_added',
+            node_ids: ['node-a'],
+            hidden_node_ids: ['node-a'],
+            annotations: [{ id: 'ann-x', type: 'note', text: 'x', version: 1 }],
+            removed_annotation_ids: ['ann-y'],
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(useGraphStore.getState().hiddenNodeIds).toEqual([]);
+    expect(canvasProps.remoteAnnotationOps || []).toEqual([]);
+  });
+
   it('an older view load still reading its nodes never draws its annotations over a later one', async () => {
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A], []));

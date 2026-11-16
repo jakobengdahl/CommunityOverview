@@ -614,9 +614,12 @@ function App() {
           );
           if (Object.keys(moved).length)
             setRemotePositions((prev) => ({ ...(prev || {}), ...moved }));
-          if (Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
+          // Only a replace carries a view's hidden ids and annotations, and
+          // only for a replace does the mirror fold them (applyOpToMirror).
+          const isReplace = op.op === 'nodes_replaced';
+          if (isReplace && Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
           const drawAnnotations = () => {
-            if (!Array.isArray(op.annotations)) return;
+            if (!isReplace || !Array.isArray(op.annotations)) return;
             const removed = op.removed_annotation_ids || [];
             if (removed.length)
               setRemoteAnnotationOps((prev) => [

@@ -1081,7 +1081,15 @@ class SessionStore:
             placed = dict(given)
             if op.get("positions") is not None:
                 placed.update(_place_unplaced(state, added))
-            applied.pop("positions", None)
+            # Only a replace carries a view's layout; a browser's add relayed
+            # with those keys would have every receiver apply and save them.
+            for key in (
+                "positions",
+                "hidden_node_ids",
+                "annotations",
+                "removed_annotation_ids",
+            ):
+                applied.pop(key, None)
             if placed:
                 applied["positions"] = placed
         elif op_type == "nodes_removed":
