@@ -484,6 +484,24 @@ function App() {
   // it started.
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
+  // Autosave holds released once the canvas has drawn what a broadcast
+  // queued: each waits for the commit of the tick it was queued with, and
+  // App's effects run after GraphCanvas's in that commit, so the snapshot a
+  // release may request renders with the drawn nodes.
+  const layoutReleasesRef = useRef({ tick: 0, pending: [] });
+  const [layoutReleaseTick, setLayoutReleaseTick] = useState(0);
+  useEffect(() => {
+    const releases = layoutReleasesRef.current;
+    const due = releases.pending.filter((entry) => entry.tick <= layoutReleaseTick);
+    releases.pending = releases.pending.filter((entry) => entry.tick > layoutReleaseTick);
+    due.forEach((entry) => entry.release());
+  }, [layoutReleaseTick]);
+  const releaseAfterDraw = useCallback((release) => {
+    const releases = layoutReleasesRef.current;
+    releases.tick += 1;
+    releases.pending.push({ tick: releases.tick, release });
+    setLayoutReleaseTick(releases.tick);
+  }, []);
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -551,7 +569,7 @@ function App() {
           // loaded view's annotations); until all of it is drawn, autosave
           // waits, so no part of it is saved back as this user's change.
           const release = client?.holdLayoutSave() || (() => {});
-          const releaseSoon = () => setTimeout(release, 0);
+          const releaseSoon = () => releaseAfterDraw(release);
           const droppedIds = new Set(dropped.map((n) => n.id));
           const shown = new Set(store.nodes.map((n) => n.id));
           const moved = Object.fromEntries(
@@ -849,6 +867,7 @@ function App() {
       setRemoteAnnotationOps,
       syncRef,
       applyAnnotationUpsertToCanvas,
+      releaseAfterDraw,
     ]
   );
 

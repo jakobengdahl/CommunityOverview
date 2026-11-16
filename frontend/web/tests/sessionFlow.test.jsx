@@ -23,6 +23,9 @@ vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
   }) {
     canvasProps.baselineEpoch = canvasBaselineEpoch;
     useEffect(() => {
+      canvasProps.committedNodeIds = nodes.map((n) => n.id);
+    });
+    useEffect(() => {
       if (saveViewSignal > 0 && onSaveView) {
         onSaveView({
           nodes: nodes.map((n) => ({ id: n.id, position: { x: 11, y: 22 }, parentId: undefined })),
@@ -424,6 +427,48 @@ describe('Server-backed session lifecycle', () => {
     });
     // The rest of the view's layout is drawn from the same broadcast.
     expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']);
+  });
+
+  it('a broadcast view releases its autosave hold only once the canvas has drawn it', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-b' ? { node: NODE_B, edges: [] } : { success: false }
+    );
+    const seenAtRelease = [];
+    const hold = SessionSyncClient.prototype.holdLayoutSave;
+    vi.spyOn(SessionSyncClient.prototype, 'holdLayoutSave').mockImplementation(function () {
+      const release = hold.call(this);
+      return () => {
+        seenAtRelease.push(canvasProps.committedNodeIds);
+        release();
+      };
+    });
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    // React renders nothing inside act until it ends, so a release that does
+    // not wait for the canvas's commit fires here against the old nodes.
+    await act(async () => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: {
+            op: 'nodes_replaced',
+            node_ids: ['node-b'],
+            positions: { 'node-b': { x: 1, y: 2 } },
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await waitFor(() => expect(seenAtRelease).toEqual([['node-b']]));
   });
 
   it('an own add draws its edges between nodes already shown', async () => {

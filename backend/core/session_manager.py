@@ -565,14 +565,33 @@ def _annotation_embedded_image_bytes(annotation: Any) -> int:
     return data_url_byte_length(url)
 
 
-def _op_embedded_image_bytes(op: Dict[str, Any]) -> int:
-    """``_annotation_embedded_image_bytes`` for an ops-batch entry: only
-    ``annotation_created``/``annotation_updated`` ops can carry an
-    annotation payload at all.
+def _check_op_image_sizes(op: Dict[str, Any]) -> int:
+    """Raise ``ImageBudgetExceeded`` if an embedded image *op* carries is over
+    the per-image limit; else return the JSON length of their data URLs.
+
+    ``annotation_created``/``annotation_updated`` carry one annotation and
+    ``nodes_replaced`` a loaded view's whole list, so a view load is held to
+    the per-image limit whether a browser batch or a push applies it.
     """
-    if op.get("op") not in ("annotation_created", "annotation_updated"):
+    if op.get("op") in ("annotation_created", "annotation_updated"):
+        annotations = [op.get("annotation")]
+    elif op.get("op") == "nodes_replaced" and isinstance(op.get("annotations"), list):
+        annotations = op["annotations"]
+    else:
         return 0
-    return _annotation_embedded_image_bytes(op.get("annotation"))
+    url_bytes = 0
+    for annotation in annotations:
+        image_bytes = _annotation_embedded_image_bytes(annotation)
+        if not image_bytes:
+            continue
+        if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
+            raise ImageBudgetExceeded(
+                f"embedded image is {image_bytes} bytes, exceeding "
+                f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
+                "per-image limit"
+            )
+        url_bytes += len(json.dumps(annotation["image"]["url"]))
+    return url_bytes
 
 
 def _check_image_budgets(
@@ -639,7 +658,9 @@ def _check_session_totals(
     session image or document budget.
 
     Shared by a browser batch (``apply_ops``) and a pushed result's membership
-    op, so the same view load is admitted or refused on both paths.
+    op, so the same view load is admitted or refused on both paths; both
+    check each image against the per-image limit first
+    (``_check_op_image_sizes``).
     """
     total_image_bytes = _session_image_bytes(session)
     if total_image_bytes > max_session_image_bytes:
@@ -1510,21 +1531,16 @@ class SessionManager:
         # reference-only ops, not a multi-hundred-KB picture
         # (smallfix-embedded-image-over-op-batch-cap-immovable) — so it is
         # excluded from this sum rather than making every non-image op share a
-        # cap wide enough to admit one.
+        # cap wide enough to admit one. A `nodes_replaced` view load is
+        # charged for everything but its embedded images' data URLs.
         non_image_bytes = 0
         for op in ops:
             if not isinstance(op, dict):
                 continue
-            image_bytes = _op_embedded_image_bytes(op)
-            if image_bytes:
-                if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
-                    raise ImageBudgetExceeded(
-                        f"embedded image is {image_bytes} bytes, exceeding "
-                        f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
-                        "per-image limit"
-                    )
+            image_url_bytes = _check_op_image_sizes(op)
+            if image_url_bytes and op.get("op") != "nodes_replaced":
                 continue
-            non_image_bytes += len(json.dumps(op))
+            non_image_bytes += len(json.dumps(op)) - image_url_bytes
         if non_image_bytes > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
@@ -3054,6 +3070,7 @@ class SessionManager:
                 "client_id": actor,
                 **_pushed_view(result),
             }
+            _check_op_image_sizes(op)
             for target in self.store.replaced_annotation_targets(session, op):
                 holder = self.leases.snapshot(session.id).get(target)
                 if holder is not None and holder != actor:

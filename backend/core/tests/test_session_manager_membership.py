@@ -27,6 +27,9 @@ from backend.core.tests.test_session_manager import (
 
 pytestmark = pytest.mark.asyncio
 
+# The largest padding-free image size within the per-image cap.
+_LARGEST_EXACT_IMAGE = DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES // 3 * 3
+
 
 class TestServerMembership:
     @pytest.mark.parametrize(
@@ -363,23 +366,38 @@ class TestServerMembership:
         assert (s.state, s.seq, s.activity_log) == before
         assert await _drain(sub) == []
 
-    async def test_pushed_view_load_is_held_to_the_session_image_budget(self):
-        """Images that each pass the per-image cap but together exceed the
-        session budget refuse a pushed load, as they would a browser batch."""
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    @pytest.mark.parametrize("over", ["per_image", "session"])
+    async def test_view_load_is_held_to_the_image_budgets(self, via, over):
+        """One image over the per-image cap, or images each within it but
+        together over the session budget, refuse a view load on both paths."""
         mgr, s = self._seeded_session()
         sub = mgr.connect(s.id, "c0", "Alice")[0]
         await _drain(sub)
         before = copy.deepcopy((s.state, s.seq, s.activity_log))
-        count = DEFAULT_MAX_SESSION_IMAGE_BYTES // DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES + 1
+        if over == "per_image":
+            sizes = [_LARGEST_EXACT_IMAGE + 3]
+        else:
+            count = DEFAULT_MAX_SESSION_IMAGE_BYTES // _LARGEST_EXACT_IMAGE
+            sizes = [_LARGEST_EXACT_IMAGE] * (count + 1)
         images = [
-            _image_annotation(f"img{i}", data_bytes=DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES)
-            for i in range(count)
+            _image_annotation(f"img{i}", data_bytes=n) for i, n in enumerate(sizes)
         ]
         view = {"positions": {}, "hidden_node_ids": [], "annotations": images}
         with pytest.raises(ImageBudgetExceeded):
-            await self._load_view(mgr, s, "push", view)
+            await self._load_view(mgr, s, via, view)
         assert (s.state, s.seq, s.activity_log) == before
         assert await _drain(sub) == []
+
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    async def test_view_load_with_an_image_within_the_per_image_cap_applies(self, via):
+        """An image larger than the flat op-batch cap but within the per-image
+        cap is admitted on both paths."""
+        mgr, s = self._seeded_session()
+        image = _image_annotation("img", data_bytes=_LARGEST_EXACT_IMAGE)
+        view = {"positions": {}, "hidden_node_ids": [], "annotations": [image]}
+        await self._load_view(mgr, s, via, view)
+        assert [a["id"] for a in s.state["annotations"]] == ["img"]
 
     @pytest.mark.parametrize("via", ["push", "browser"])
     async def test_view_load_cannot_change_an_annotation_leased_by_another(self, via):
