@@ -484,6 +484,9 @@ function App() {
   // it started.
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
+  // Broadcast ops apply one at a time, in stream order: a replace awaiting its
+  // node reads must not draw its annotations over a later op's.
+  const remoteOpsChainRef = useRef(Promise.resolve());
   // Autosave holds released once the canvas has drawn what a broadcast
   // queued: each waits for the commit of the tick it was queued with, and
   // App's effects run after GraphCanvas's in that commit, so the snapshot a
@@ -2851,7 +2854,9 @@ function App() {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
           if (!handleStagedSessionOp(op)) {
-            applyRemoteOp(op);
+            remoteOpsChainRef.current = remoteOpsChainRef.current
+              .then(() => applyRemoteOp(op))
+              .catch(() => {});
           } else if (op.op === 'graph_change_staged') {
             refreshStagedEntities(op);
           } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {

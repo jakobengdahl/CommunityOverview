@@ -20,8 +20,10 @@ vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
     saveViewSignal = 0,
     onSaveView,
     canvasBaselineEpoch,
+    remoteAnnotationOps,
   }) {
     canvasProps.baselineEpoch = canvasBaselineEpoch;
+    canvasProps.remoteAnnotationOps = remoteAnnotationOps;
     useEffect(() => {
       canvasProps.committedNodeIds = nodes.map((n) => n.id);
     });
@@ -469,6 +471,47 @@ describe('Server-backed session lifecycle', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     await waitFor(() => expect(seenAtRelease).toEqual([['node-b']]));
+  });
+
+  it('an older view load still reading its nodes never draws its annotations over a later one', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    let resolveRead;
+    api.getNodeDetails.mockImplementation(
+      (id) =>
+        new Promise((resolve) => {
+          resolveRead = () => resolve(id === 'node-b' ? { node: NODE_B, edges: [] } : {});
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    const note = (text) => ({ id: 'ann-1', type: 'note', text, version: 1 });
+    const deliver = (seq, op) =>
+      source.onmessage({
+        data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+      });
+    await act(async () => {
+      deliver(2000, {
+        op: 'nodes_replaced',
+        node_ids: ['node-a', 'node-b'],
+        annotations: [note('older')],
+      });
+      deliver(2001, { op: 'nodes_replaced', node_ids: ['node-a'], annotations: [note('newer')] });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      resolveRead();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const upserts = (canvasProps.remoteAnnotationOps || []).filter(
+      (o) => o.action === 'upsert-overlay' && o.overlay.id === 'ann-1'
+    );
+    expect(upserts.at(-1).overlay.text).toBe('newer');
   });
 
   it('an own add draws its edges between nodes already shown', async () => {
