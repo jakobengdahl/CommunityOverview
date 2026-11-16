@@ -360,8 +360,23 @@ class TestServerMembership:
         assert [a["id"] for a in s.state["annotations"]] == ["dropped"]
 
     @pytest.mark.parametrize("via", ["push", "browser"])
-    async def test_view_load_that_cannot_apply_applies_nothing(self, via):
-        """One unreadable part refuses the whole load: no state, record or event."""
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {
+                "annotations": [
+                    {"id": "new", "type": "note"},
+                    {"id": "x", "type": "nope"},
+                ]
+            },
+            {"annotations": [{"id": "new", "type": "note"}, "not-an-object"]},
+            {"positions": {"a": {"x": 1, "y": 2}, "b": {"x": "far"}}},
+            {"hidden_node_ids": ["a", 7]},
+        ],
+    )
+    async def test_view_load_that_cannot_apply_applies_nothing(self, via, bad):
+        """One unreadable part refuses the whole load on both paths: no state,
+        record or event."""
         mgr, s = self._seeded_session()
         sub = mgr.connect(s.id, "c0", "Alice")[0]
         await _drain(sub)
@@ -369,7 +384,8 @@ class TestServerMembership:
         view = {
             "positions": {"a": {"x": 1, "y": 2}},
             "hidden_node_ids": [],
-            "annotations": [{"id": "new", "type": "note"}, {"id": "x", "type": "nope"}],
+            "annotations": [{"id": "new", "type": "note"}],
+            **bad,
         }
         with pytest.raises(OpError):
             await self._load_view(mgr, s, via, view)

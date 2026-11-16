@@ -89,13 +89,18 @@ const RESYNC_MAX_FETCHES = 3;
 
 // A broadcast op's node read, bounded like the sync requests: ops apply one
 // at a time, so a read that never settles would hold every later op (and a
-// held autosave) with it. A read that times out counts as failed.
+// held autosave) with it. A read that times out is aborted and counts as
+// failed; the race still settles it when a fetch ignores the signal.
 function readNodeForRemoteOp(nodeId) {
+  const controller = new AbortController();
   let timer;
   return Promise.race([
-    api.getNodeDetails(nodeId),
+    api.getNodeDetails(nodeId, { signal: controller.signal }),
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('node read timed out')), SYNC_REQUEST_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('node read timed out'));
+      }, SYNC_REQUEST_TIMEOUT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -259,7 +264,19 @@ function App() {
   // session epoch before React re-renders, and the ?view= load must not see the
   // previous id in that gap.
   const sessionIdRef = useRef(sessionId);
+  // Bumped on every session switch. A broadcast op is bound to the generation
+  // it arrived in and stops at its next step once that is no longer current,
+  // so nothing queued in the session left behind lands in the next one.
+  const sessionGenerationRef = useRef(0);
+  // Broadcast ops apply one at a time, in stream order: a replace awaiting its
+  // node reads must not draw its annotations over a later op's. A switch
+  // starts a new chain, so an op left behind cannot hold the new session's.
+  const remoteOpsChainRef = useRef(Promise.resolve());
   const setSessionId = useCallback((id) => {
+    if (id !== sessionIdRef.current) {
+      sessionGenerationRef.current += 1;
+      remoteOpsChainRef.current = Promise.resolve();
+    }
     sessionIdRef.current = id;
     // Before any request is made from the new session: graph requests carry a
     // session's header only while it is the active one and known staged.
@@ -497,10 +514,6 @@ function App() {
   // it started.
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
-  // Broadcast ops apply one at a time, in stream order: a replace awaiting its
-  // node reads must not draw its annotations over a later op's. Each session
-  // has its own chain, so an op left behind cannot hold a new session's.
-  const remoteOpsChainRef = useRef({ sessionId: null, tail: Promise.resolve() });
   // Autosave holds released once the canvas has drawn what a broadcast
   // queued: each waits for the commit of the tick it was queued with, and
   // App's effects run after GraphCanvas's in that commit, so the snapshot a
@@ -520,7 +533,12 @@ function App() {
     setLayoutReleaseTick(releases.tick);
   }, []);
   const applyRemoteOp = useCallback(
-    async (op, heldLayoutRelease = null) => {
+    async (op, heldLayoutRelease = null, generation = sessionGenerationRef.current) => {
+      const isCurrent = () => sessionGenerationRef.current === generation;
+      if (!isCurrent()) {
+        heldLayoutRelease?.();
+        return false; // queued in a session since left
+      }
       const store = useGraphStore.getState();
       if (
         (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
@@ -530,7 +548,6 @@ function App() {
         // the stream reaches anyone holding the session id: read it from the
         // composed view instead, which asks the authorization hook
         // (docs/SESSION_OVERLAY_CONTRACT.md §15).
-        const sessionAtStart = syncRef.current?.sessionId;
         const removalsAtStart = edgeRemovalSeqRef.current.seq;
         const inFlight = edgeRemovalSeqRef.current.inFlight;
         inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
@@ -547,7 +564,7 @@ function App() {
           if (left > 0) inFlight.set(removalsAtStart, left);
           else inFlight.delete(removalsAtStart);
         }
-        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        if (!isCurrent()) return false; // switched away while fetching
         const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
         const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
         const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
@@ -641,7 +658,7 @@ function App() {
             release();
             throw err;
           }
-          if (syncRef.current !== client) {
+          if (!isCurrent() || syncRef.current !== client) {
             release();
             return false; // switched away while fetching
           }
@@ -2869,18 +2886,16 @@ function App() {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
           if (!handleStagedSessionOp(op)) {
-            const chain = remoteOpsChainRef.current;
-            if (chain.sessionId !== sessionId) {
-              chain.sessionId = sessionId;
-              chain.tail = Promise.resolve();
-            }
+            const generation = sessionGenerationRef.current;
             // The sync baseline already holds this op's layout: autosave
             // waits from now, not from when the ops ahead of it are done.
             const release =
               op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
                 ? syncRef.current?.holdLayoutSave() || null
                 : null;
-            chain.tail = chain.tail.then(() => applyRemoteOp(op, release)).catch(() => release?.());
+            remoteOpsChainRef.current = remoteOpsChainRef.current
+              .then(() => applyRemoteOp(op, release, generation))
+              .catch(() => release?.());
           } else if (op.op === 'graph_change_staged') {
             refreshStagedEntities(op);
           } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {

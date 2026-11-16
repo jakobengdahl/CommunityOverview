@@ -562,7 +562,7 @@ describe('Server-backed session lifecycle', () => {
     expect(holds).toHaveBeenCalledTimes(1);
   });
 
-  it('a node read that never settles holds later ops only until its timeout', async () => {
+  it('a node read that never settles holds later ops only until its timeout, then is aborted', async () => {
     const timeouts = holdRequestTimeouts();
     try {
       renderApp();
@@ -573,7 +573,11 @@ describe('Server-backed session lifecycle', () => {
           expect.objectContaining({ op: 'nodes_added' })
         );
       });
-      api.getNodeDetails.mockImplementation(() => new Promise(() => {}));
+      const signals = [];
+      api.getNodeDetails.mockImplementation((id, { signal } = {}) => {
+        signals.push(signal);
+        return new Promise(() => {});
+      });
       const source = FakeEventSource.instances
         .filter((es) => es.url.includes('/api/sessions/'))
         .at(-1);
@@ -589,12 +593,14 @@ describe('Server-backed session lifecycle', () => {
       expect(useGraphStore.getState().hiddenNodeIds).toEqual([]);
       act(() => timeouts.fireAll());
       await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']));
+      expect(signals.map((signal) => signal?.aborted)).toEqual([true]);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     } finally {
       timeouts.restore();
     }
   });
 
-  it("an op left waiting in the session being left does not hold the new session's ops", async () => {
+  it('an op left waiting in the session being left neither holds nor touches the new session', async () => {
     sessionStore.touchSession('5555-6666');
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
@@ -602,7 +608,14 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
     });
-    api.getNodeDetails.mockImplementation(() => new Promise(() => {}));
+    let openGate;
+    const gate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    api.getNodeDetails.mockImplementation(async () => {
+      await gate;
+      return { node: { id: 'node-c', type: 'Actor', name: 'Actor C' }, edges: [] };
+    });
     const streamFor = (id) =>
       FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/`)).at(-1);
     const first = FakeEventSource.instances
@@ -615,6 +628,14 @@ describe('Server-backed session lifecycle', () => {
           seq: 2000,
           client_id: 'someone-else',
           op: { op: 'nodes_added', node_ids: ['node-c'] },
+        }),
+      });
+      first.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2001,
+          client_id: 'someone-else',
+          op: { op: 'nodes_dimmed', node_ids: ['node-b'] },
         }),
       });
     });
@@ -636,6 +657,14 @@ describe('Server-backed session lifecycle', () => {
       });
     });
     await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-b']));
+    // The old session's read settles: neither its op nor the one queued
+    // behind it applies here.
+    await act(async () => {
+      openGate();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    expect(useGraphStore.getState().dimmedNodeIds).toEqual([]);
   });
 
   it('an own add draws its edges between nodes already shown', async () => {
@@ -778,7 +807,7 @@ describe('Server-backed session lifecycle', () => {
       expect(useGraphStore.getState().hiddenNodeIds).toContain('node-a');
     });
     expect(useGraphStore.getState().nodes.map((n) => n.id)).not.toContain('node-x');
-    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-x');
+    expect(api.getNodeDetails.mock.calls.map(([id]) => id)).not.toContain('node-x');
     await waitFor(() => {
       expect(
         screen.getByText('Reconnected — restored 1 change(s) made while offline')
@@ -1230,7 +1259,7 @@ describe('Server-backed session lifecycle', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
-    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-a');
+    expect(api.getNodeDetails.mock.calls.map(([id]) => id)).not.toContain('node-a');
 
     getPendingOpsSpy.mockRestore();
   });
@@ -1304,7 +1333,9 @@ describe('Server-backed session lifecycle', () => {
     });
 
     // The replay loop is now paused inside applyRemoteOp's fetch for node-a.
-    await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+    await waitFor(() =>
+      expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+    );
 
     // Switch to a different, already-known session while that fetch is
     // still pending.
@@ -1791,7 +1822,9 @@ describe('Server-backed session lifecycle', () => {
           }),
         });
       });
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+      await waitFor(() =>
+        expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+      );
 
       fireEvent.click(screen.getByTitle('Menu'));
       fireEvent.click(screen.getByText('5555-6666'));
@@ -2323,7 +2356,9 @@ describe('Server-backed session lifecycle', () => {
       const loadsBefore = loads();
 
       act(() => source.onmessage(catchUpMessage()));
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+      await waitFor(() =>
+        expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+      );
 
       recovering = false;
       act(() => timeouts.fireAll());
@@ -3515,7 +3550,7 @@ describe('Server-backed session lifecycle', () => {
       await waitFor(() =>
         expect(useGraphStore.getState().edges.map((e) => [e.id, e.label])).toEqual([['e1', 'read']])
       );
-      expect(api.getNodeDetails).toHaveBeenCalledWith('node-a');
+      expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a');
     });
 
     it("a collaborator's discard drops the discarded create from this canvas only", async () => {

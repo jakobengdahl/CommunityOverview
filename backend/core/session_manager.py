@@ -70,7 +70,6 @@ from .session_store import (
     Session,
     SessionRetired,
     SessionStore,
-    _validate_position,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -450,27 +449,21 @@ def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
 def _pushed_view(result: Dict[str, Any]) -> Dict[str, Any]:
     """The layout a pushed result carries, as a ``nodes_replaced`` view.
 
+    Passed through unfiltered, so the store validates it exactly as it does a
+    browser's replace and refuses the whole load when any part is malformed.
     Only a result in the session's annotation format (``annotation_document``)
     replaces the annotations; a legacy-only view leaves them as they are.
-    Unreadable positions are skipped, so the server places those nodes.
     """
-    view: Dict[str, Any] = {}
-    positions = result.get("positions")
-    if isinstance(positions, dict):
-        view["positions"] = {}
-        for node_id, position in positions.items():
-            try:
-                view["positions"][node_id] = _validate_position(position)
-            except OpError:
-                continue
-    hidden = result.get("hidden_node_ids")
-    if isinstance(hidden, list):
-        view["hidden_node_ids"] = [h for h in hidden if isinstance(h, str)]
+    view = {
+        key: result[key]
+        for key in ("positions", "hidden_node_ids")
+        if result.get(key) is not None
+    }
     document = result.get("annotation_document")
     if isinstance(document, dict):
         document = document.get("annotations")
-    if isinstance(document, list):
-        view["annotations"] = [a for a in document if isinstance(a, dict)]
+    if document is not None:
+        view["annotations"] = document
     return view
 
 
