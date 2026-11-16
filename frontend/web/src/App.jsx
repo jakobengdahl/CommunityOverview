@@ -2962,6 +2962,8 @@ function App() {
         }
         resyncFromServer(sessionId);
       },
+      // A change made while a broadcast held autosave is saved now.
+      onHeldSaveReleased: () => requestSessionSnapshot(null),
     };
   }, [
     sessionId,
@@ -2974,6 +2976,7 @@ function App() {
     refreshStagedEntities,
     refreshStagedDiff,
     resyncFromServer,
+    requestSessionSnapshot,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
     clearVisualization,

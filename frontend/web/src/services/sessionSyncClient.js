@@ -719,7 +719,8 @@ export class SessionSyncClient {
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
    *   onStreamRefused (the stream answered 404 before it ever opened: the
-   *   session id is retired),
+   *   session id is retired), onHeldSaveReleased (a snapshot arrived while a
+   *   broadcast held autosave; the host takes a fresh one now),
    *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -821,6 +822,7 @@ export class SessionSyncClient {
     // Broadcasts still being drawn (holdLayoutSave), and the nodes this
     // browser's user moved since the last snapshot (noteUserMoved).
     this._renderHolds = 0;
+    this._savePendingRelease = false;
     this._userMoved = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
@@ -1426,7 +1428,8 @@ export class SessionSyncClient {
   /**
    * Hold autosave while a broadcast is drawn; returns the release. Until then
    * the canvas shows part of the server's layout, and a diff would send the
-   * rest back as this user's change.
+   * rest back as this user's change. A snapshot skipped meanwhile is asked
+   * for again once the last hold is released.
    */
   holdLayoutSave() {
     this._renderHolds += 1;
@@ -1435,6 +1438,9 @@ export class SessionSyncClient {
       if (released) return;
       released = true;
       this._renderHolds -= 1;
+      if (this._renderHolds > 0 || !this._savePendingRelease) return;
+      this._savePendingRelease = false;
+      if (!this._closed) this.handlers.onHeldSaveReleased?.();
     };
   }
 
@@ -1515,8 +1521,12 @@ export class SessionSyncClient {
    */
   syncState(state) {
     // A broadcast still being drawn: the canvas is between two layouts, and
-    // what the user changed meanwhile is diffed by the next snapshot.
-    if (this._renderHolds > 0) return;
+    // what the user changed meanwhile is diffed by the snapshot taken when
+    // the hold is released.
+    if (this._renderHolds > 0) {
+      this._savePendingRelease = true;
+      return;
+    }
     const next = normalizeMirror(state);
     // A position the canvas computed for a member the server has none for is
     // this browser's rendering, not its user's change: it is kept, not sent.

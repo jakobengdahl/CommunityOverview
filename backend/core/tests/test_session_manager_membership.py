@@ -8,13 +8,22 @@ import threading
 import pytest
 
 from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
+from backend.core.image_ingest import (
+    DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES,
+    DEFAULT_MAX_SESSION_IMAGE_BYTES,
+)
 from backend.core.session_manager import (
     AUTO_ADD_ACTOR_PREFIX,
+    ImageBudgetExceeded,
     LeaseConflict,
     _TokenBucket,
 )
 from backend.core.session_store import OpError
-from backend.core.tests.test_session_manager import _manager, _drain
+from backend.core.tests.test_session_manager import (
+    _drain,
+    _image_annotation,
+    _manager,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -351,6 +360,24 @@ class TestServerMembership:
         }
         with pytest.raises(OpError):
             await self._load_view(mgr, s, via, view)
+        assert (s.state, s.seq, s.activity_log) == before
+        assert await _drain(sub) == []
+
+    async def test_pushed_view_load_is_held_to_the_session_image_budget(self):
+        """Images that each pass the per-image cap but together exceed the
+        session budget refuse a pushed load, as they would a browser batch."""
+        mgr, s = self._seeded_session()
+        sub = mgr.connect(s.id, "c0", "Alice")[0]
+        await _drain(sub)
+        before = copy.deepcopy((s.state, s.seq, s.activity_log))
+        count = DEFAULT_MAX_SESSION_IMAGE_BYTES // DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES + 1
+        images = [
+            _image_annotation(f"img{i}", data_bytes=DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES)
+            for i in range(count)
+        ]
+        view = {"positions": {}, "hidden_node_ids": [], "annotations": images}
+        with pytest.raises(ImageBudgetExceeded):
+            await self._load_view(mgr, s, "push", view)
         assert (s.state, s.seq, s.activity_log) == before
         assert await _drain(sub) == []
 

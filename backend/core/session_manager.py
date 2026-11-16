@@ -627,6 +627,37 @@ def _check_image_budgets(
         )
 
 
+def _check_session_totals(
+    session: "Session",
+    snapshot: Dict[str, Any],
+    *,
+    max_session_image_bytes: int,
+    max_session_document_bytes: int,
+) -> None:
+    """Raise ``ImageBudgetExceeded`` if the session, with its ops already
+    applied in memory (``snapshot`` from ``_detached_snapshot``), is over the
+    session image or document budget.
+
+    Shared by a browser batch (``apply_ops``) and a pushed result's membership
+    op, so the same view load is admitted or refused on both paths.
+    """
+    total_image_bytes = _session_image_bytes(session)
+    if total_image_bytes > max_session_image_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session's total "
+            f"embedded image data to {total_image_bytes} "
+            f"bytes, over the {max_session_image_bytes}-byte "
+            "session limit"
+        )
+    total_doc_bytes = _document_bytes(snapshot, session)
+    if total_doc_bytes > max_session_document_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session document to "
+            f"{total_doc_bytes} bytes, over the "
+            f"{max_session_document_bytes}-byte document limit"
+        )
+
+
 # Push actions whose nodes a browser renders as the whole view, and those it
 # merges into the view (``update_in_visualization`` appends unknown nodes).
 _REPLACING_ACTIONS = frozenset(
@@ -1637,21 +1668,12 @@ class SessionManager:
                     # not just images — before that snapshot is persisted; the
                     # `except Exception` below rolls it back like any other
                     # mid-batch failure.
-                    total_image_bytes = _session_image_bytes(session)
-                    if total_image_bytes > max_session_image_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session's total "
-                            f"embedded image data to {total_image_bytes} "
-                            f"bytes, over the {max_session_image_bytes}-byte "
-                            "session limit"
-                        )
-                    total_doc_bytes = _document_bytes(snapshot, session)
-                    if total_doc_bytes > max_session_document_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session document to "
-                            f"{total_doc_bytes} bytes, over the "
-                            f"{max_session_document_bytes}-byte document limit"
-                        )
+                    _check_session_totals(
+                        session,
+                        snapshot,
+                        max_session_image_bytes=max_session_image_bytes,
+                        max_session_document_bytes=max_session_document_bytes,
+                    )
                     await asyncio.to_thread(self.store.persist_snapshot, snapshot)
             except Exception:
                 session.state = saved_state
@@ -2725,6 +2747,7 @@ class SessionManager:
         *,
         record_activity: bool = True,
         trusted_replay: bool = False,
+        enforce_session_budgets: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -2743,6 +2766,8 @@ class SessionManager:
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
         prior state is not re-judged as fresh caller input.
+        ``enforce_session_budgets`` applies apply_ops' session image/document
+        budgets to the result, for an op that can carry embedded images.
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
@@ -2762,6 +2787,13 @@ class SessionManager:
                 trusted_replay=trusted_replay,
             )
             if applied is not None:
+                if enforce_session_budgets:
+                    _check_session_totals(
+                        session,
+                        _detached_snapshot(session),
+                        max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                        max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                    )
                 self.store.persist(session)
         except Exception:
             session.state = saved_state
@@ -3026,7 +3058,9 @@ class SessionManager:
                 holder = self.leases.snapshot(session.id).get(target)
                 if holder is not None and holder != actor:
                     raise LeaseConflict(target, holder)
-            self._apply_op_sync(session, session.id, actor, op)
+            self._apply_op_sync(
+                session, session.id, actor, op, enforce_session_budgets=True
+            )
         elif action in _ADDITIVE_ACTIONS and node_ids:
             self._add_node_refs(
                 session,

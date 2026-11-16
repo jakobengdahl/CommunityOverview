@@ -556,7 +556,8 @@ describe('SessionSyncClient', () => {
   });
 
   it('saves only layout its user changed, never what drawing a broadcast computed', async () => {
-    const { client, fetchImpl } = makeClient();
+    const onHeldSaveReleased = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onHeldSaveReleased } });
     client.connect();
     const es = FakeEventSource.instances[0];
     es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
@@ -572,7 +573,13 @@ describe('SessionSyncClient', () => {
     const release = client.holdLayoutSave();
     // Half drawn: nothing hidden or annotated yet, 'a' still at its old place.
     client.syncState({ node_refs: ['a'], positions: { a: { x: 50, y: 50 } } });
+    expect(onHeldSaveReleased).not.toHaveBeenCalled();
     release();
+    release();
+    // The skipped snapshot is asked for again, once; a hold nothing skipped asks none.
+    expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
+    client.holdLayoutSave()();
+    expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
     // Drawn: the canvas placed 'b' itself, which the server never had.
     const drawn = { positions: { a: { x: 1, y: 2 }, b: { x: 9, y: 9 } }, annotations: [note] };
     client.syncState({ ...drawn, node_refs: ['a', 'b'], hidden_node_ids: ['a'] });
