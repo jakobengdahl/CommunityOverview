@@ -555,6 +555,38 @@ describe('SessionSyncClient', () => {
     expect(client.baselinePosition('new')).toEqual({ x: 7, y: 8 });
   });
 
+  it('saves only layout its user changed, never what drawing a broadcast computed', async () => {
+    const { client, fetchImpl } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const note = { id: 'n1', type: 'note', kind: 'note', text: 'x', version: 1 };
+    const op = {
+      op: 'nodes_replaced',
+      node_ids: ['a', 'b'],
+      positions: { a: { x: 1, y: 2 } },
+      hidden_node_ids: ['a'],
+      annotations: [note],
+    };
+    es.emit({ type: 'op', client_id: 'other', seq: 1, op });
+    const release = client.holdLayoutSave();
+    // Half drawn: nothing hidden or annotated yet, 'a' still at its old place.
+    client.syncState({ node_refs: ['a'], positions: { a: { x: 50, y: 50 } } });
+    release();
+    // Drawn: the canvas placed 'b' itself, which the server never had.
+    const drawn = { positions: { a: { x: 1, y: 2 }, b: { x: 9, y: 9 } }, annotations: [note] };
+    client.syncState({ ...drawn, node_refs: ['a', 'b'], hidden_node_ids: ['a'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+    client.noteUserMoved(['b']);
+    const moved = { ...drawn.positions, b: { x: 10, y: 10 } };
+    client.syncState({ ...drawn, positions: moved, node_refs: ['a', 'b'], hidden_node_ids: ['a'] });
+    await flush();
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'node_moved', node_id: 'b', position: { x: 10, y: 10 } },
+    ]);
+  });
+
   it.each([
     ['a user removal', 'nodes_removed', ['a'], [{ id: 'b' }]],
     ['a local clear', 'nodes_replaced', [], []],

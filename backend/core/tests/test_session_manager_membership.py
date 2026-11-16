@@ -2,12 +2,14 @@
 """Server-owned membership recording for pushes and direct writes."""
 
 import asyncio
+import copy
 import threading
 
 import pytest
 
 from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
 from backend.core.session_manager import AUTO_ADD_ACTOR_PREFIX, _TokenBucket
+from backend.core.session_store import OpError
 from backend.core.tests.test_session_manager import _manager, _drain
 
 pytestmark = pytest.mark.asyncio
@@ -52,9 +54,9 @@ class TestServerMembership:
         }
         for sub in subs:
             events = await _drain(sub)
-            assert [event["type"] for event in events] == ["op", "op", "command"]
+            assert [event["type"] for event in events] == ["op", "command"]
             assert events[0]["op"]["node_ids"] == node_ids
-            assert events[2]["command"] == command
+            assert events[1]["command"] == command
         # Delivery neither spends a fresh budget nor replenishes an empty one.
         assert mgr._mcp_bucket.consume(actor, 200) is (not exhausted)
 
@@ -125,19 +127,18 @@ class TestServerMembership:
         for sub in subs:
             events = await _drain(sub)
             assert [event["type"] for event in events] == (
-                ["op", "op", "op", "command", "op", "command"]
+                ["op", "op", "command", "op", "command"]
                 if clear_after_add
-                else ["op", "op", "op", "command"]
+                else ["op", "op", "command"]
             )
             if clear_after_add:
-                assert events[4]["op"]["op"] == "nodes_removed"
-                assert events[4]["seq"] == 4
-                assert events[5]["command"] == clear
-            assert [event["seq"] for event in events[:3]] == [1, 2, 3]
+                assert events[3]["op"]["op"] == "nodes_removed"
+                assert events[3]["seq"] == 3
+                assert events[4]["command"] == clear
+            assert [event["seq"] for event in events[:2]] == [1, 2]
             assert events[1]["op"]["node_ids"] == ["new"]
-            assert events[2]["op"]["op"] == "layout_applied"
-            assert events[3]["command"] == command
-        assert mgr.catch_up(s.id, 0)["seq"] == (4 if clear_after_add else 3)
+            assert events[2]["command"] == command
+        assert mgr.catch_up(s.id, 0)["seq"] == (3 if clear_after_add else 2)
 
     @pytest.mark.parametrize("viewers", [0, 2])
     async def test_clear_push_records_server_removal_once(self, viewers):
@@ -228,29 +229,48 @@ class TestServerMembership:
             assert mgr.push_command(s.id, {"tool": tool, "result": result})
         assert s.state["node_refs"] == expected
         assert ("old" in s.state["positions"]) == ("old" in expected)
-        # A pushed node is placed once, here, not by each viewer saving its own.
-        placed = source == "push"
-        assert s.state["positions"].get("new") == (
-            None
-            if not placed
-            else {"x": 281.0, "y": 2.0}
+        # A node is placed once, by the server in the same op, not by each
+        # viewer saving its own.
+        placed = (
+            {"x": 281.0, "y": 2.0}
             if record == "nodes_added"
             else {"x": 400.0, "y": 300.0}
         )
+        assert s.state["positions"]["new"] == placed
         assert [(r["op"], r["actor"]) for r in s.activity_log[2:]] == [(record, actor)]
         for sub in subs:
             events = await _drain(sub)
-            ops = [e["op"]["op"] for e in events if e["type"] == "op"]
-            assert ops == [record] + (["layout_applied"] if placed else [])
+            ops = [e["op"] for e in events if e["type"] == "op"]
+            assert [op["op"] for op in ops] == [record]
+            assert ops[0]["positions"]["new"] == placed
 
-    @pytest.mark.parametrize("via", ["push", "browser"])
-    async def test_saved_view_load_stores_its_layout_in_its_one_record(self, via):
-        """Viewers render a load's layout from the session; only the replace records."""
+    @staticmethod
+    async def _load_view(mgr, s, via, view):
+        """Load a saved view as a push (get_saved_view) or a browser's replace."""
+        ids = ["a", "b", "c"]
+        if via == "push":
+            result = {
+                "action": "load_visualization",
+                "nodes": [{"id": n} for n in ids],
+                "positions": view["positions"],
+                "hidden_node_ids": view["hidden_node_ids"],
+                "annotation_document": {
+                    "schema_version": 1,
+                    "annotations": view["annotations"],
+                },
+            }
+            assert mgr.push_command(s.id, {"tool": "get_saved_view", "result": result})
+            return "mcp-agent"
+        op = {"op": "nodes_replaced", "node_ids": ids, **view}
+        await mgr.apply_ops(s.id, "c0", None, [op])
+        return "c0"
+
+    @staticmethod
+    def _seeded_session():
         mgr = _manager()
         s = mgr.create_session()
-        mgr.add_node_refs(s.id, "owner", ["a", "b"])
+        mgr.add_node_refs(s.id, "owner", ["a", "b", "d"])
         mgr.apply_layout(s.id, "owner", positions={"a": {"x": 5, "y": 5}})
-        mgr.apply_layout(s.id, "owner", positions={"b": {"x": 7, "y": 7}})
         mgr.store.apply_state_op(s, {"op": "nodes_hidden", "node_ids": ["a"]})
         for ann_id in ("kept", "dropped"):
             mgr.store.apply_state_op(
@@ -260,97 +280,75 @@ class TestServerMembership:
                     "annotation": {"id": ann_id, "type": "note"},
                 },
             )
+        return mgr, s
+
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    async def test_saved_view_load_is_one_op_and_one_record(self, via):
+        """Membership, positions, hidden ids, groups and annotations: one op."""
+        mgr, s = self._seeded_session()
         subs = [mgr.connect(s.id, f"c{i}", "Alice")[0] for i in range(2)]
         for sub in subs:
             await _drain(sub)
         records = len(s.activity_log)
-        result = {
-            "action": "load_visualization",
-            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
-            "positions": {
-                "a": {"x": 1, "y": 2},
-                "b": {"x": 7, "y": 7},
-                "c": {"x": 3, "y": 4},
-                "group-1": {"x": 0, "y": 0},
-                "gone": {"x": 9, "y": 9},
-            },
+        group = {"id": "g", "type": "group", "member_node_ids": ["a", "d"]}
+        view = {
+            "positions": {"a": {"x": 1, "y": 2}, "gone": {"x": 9, "y": 9}, "c": None},
             "hidden_node_ids": ["c", "gone"],
-            # get_saved_view always carries its (legacy-format) overlays.
-            "annotations": [],
+            "annotations": [{"id": "kept", "type": "note"}, group],
         }
-        view_annotations = [
-            {"id": "kept", "type": "note"},
-            {"id": "new", "type": "note", "text": "x"},
-            {"id": "bad", "type": "nonsense"},
-        ]
-        if via == "push":
-            actor, fan_out = "mcp-agent", "mcp-agent"
-            assert mgr.push_command(s.id, {"tool": "get_saved_view", "result": result})
-        else:
-            actor, fan_out = "c0", "view-load"
-            op = {
-                "op": "nodes_replaced",
-                "node_ids": [n["id"] for n in result["nodes"]],
-                "positions": result["positions"],
-                "hidden_node_ids": result["hidden_node_ids"],
-                "annotations": view_annotations,
-            }
-            await mgr.apply_ops(s.id, actor, None, [op])
+        actor = await self._load_view(mgr, s, via, view)
 
+        assert s.state["node_refs"] == ["a", "b", "c"]
+        # b keeps its place; c, with none, is placed by the server.
         assert s.state["positions"] == {
             "a": {"x": 1.0, "y": 2.0},
-            "b": {"x": 7.0, "y": 7.0},
-            "c": {"x": 3.0, "y": 4.0},
+            "b": {"x": 281.0, "y": 2.0},
+            "c": {"x": 561.0, "y": 2.0},
         }
         assert s.state["hidden_node_ids"] == ["c"]
-        # A browser's load replaces the overlays too; a push leaves them.
-        assert [a["id"] for a in s.state["annotations"]] == (
-            ["kept", "dropped"] if via == "push" else ["kept", "new"]
-        )
+        assert [
+            (a["id"], a.get("member_node_ids")) for a in s.state["annotations"]
+        ] == [
+            ("kept", None),
+            ("g", ["a"]),
+        ]
         assert [(r["op"], r["actor"]) for r in s.activity_log[records:]] == [
             ("nodes_replaced", actor)
         ]
-        layout = ["layout_applied", "nodes_shown", "nodes_hidden"]
         for sub in subs:
             events = await _drain(sub)
-            assert [
-                (e["op"]["op"], e["client_id"]) if e["type"] == "op" else e["type"]
-                for e in events
-            ] == [("nodes_replaced", actor)] + [(o, fan_out) for o in layout] + (
-                ["command"]
-                if via == "push"
-                else [("annotation_deleted", fan_out), ("annotation_created", fan_out)]
+            assert [e["type"] for e in events] == ["op"] + (
+                ["command"] if via == "push" else []
             )
-            assert events[1]["op"]["positions"] == {
-                "a": {"x": 1.0, "y": 2.0},
-                "c": {"x": 3.0, "y": 4.0},
-            }
-        if via == "browser":
-            # Reloading a view brings back the annotations a load deleted.
-            reload = {**op, "annotations": [{"id": "dropped", "type": "note"}]}
-            await mgr.apply_ops(s.id, actor, None, [reload])
-            assert [a["id"] for a in s.state["annotations"]] == ["dropped"]
+            op = events[0]["op"]
+            assert (op["op"], events[0]["client_id"]) == ("nodes_replaced", actor)
+            assert op["positions"] == s.state["positions"]
+            assert op["hidden_node_ids"] == ["c"]
+            assert op["annotations"] == s.state["annotations"]
+            assert op["removed_annotation_ids"] == ["dropped"]
 
-    async def test_failed_push_layout_keeps_membership_and_broadcasts(
-        self, monkeypatch
-    ):
-        """A layout op that fails after the replace still lets the command out."""
-        mgr = _manager()
-        s = mgr.create_session()
+        # Reloading a view brings back an annotation an earlier load deleted.
+        await self._load_view(
+            mgr, s, via, {**view, "annotations": [{"id": "dropped", "type": "note"}]}
+        )
+        assert [a["id"] for a in s.state["annotations"]] == ["dropped"]
+
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    async def test_view_load_that_cannot_apply_applies_nothing(self, via):
+        """One unreadable part refuses the whole load: no state, record or event."""
+        mgr, s = self._seeded_session()
         sub = mgr.connect(s.id, "c0", "Alice")[0]
         await _drain(sub)
-        apply = mgr._apply_op_sync
-
-        def failing(session, sid, client, op, **kw):
-            if op["op"] == "layout_applied":
-                raise RuntimeError("persist failed")
-            return apply(session, sid, client, op, **kw)
-
-        monkeypatch.setattr(mgr, "_apply_op_sync", failing)
-        result = {"action": "replace_visualization", "nodes": [{"id": "n"}]}
-        assert mgr.push_command(s.id, {"tool": "search_graph", "result": result})
-        assert s.state["node_refs"] == ["n"]
-        assert [e["type"] for e in await _drain(sub)] == ["op", "command"]
+        before = copy.deepcopy((s.state, s.seq, s.activity_log))
+        view = {
+            "positions": {"a": {"x": 1, "y": 2}},
+            "hidden_node_ids": [],
+            "annotations": [{"id": "new", "type": "note"}, {"id": "x", "type": "nope"}],
+        }
+        with pytest.raises(OpError):
+            await self._load_view(mgr, s, via, view)
+        assert (s.state, s.seq, s.activity_log) == before
+        assert await _drain(sub) == []
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()

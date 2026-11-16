@@ -547,6 +547,31 @@ function App() {
               ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
               : [];
           dropped.forEach((n) => removeNode(n.id));
+          // The op carries the layout it leaves (positions, hidden ids, a
+          // loaded view's annotations); until all of it is drawn, autosave
+          // waits, so no part of it is saved back as this user's change.
+          const release = client?.holdLayoutSave() || (() => {});
+          const releaseSoon = () => setTimeout(release, 0);
+          const droppedIds = new Set(dropped.map((n) => n.id));
+          const shown = new Set(store.nodes.map((n) => n.id));
+          const moved = Object.fromEntries(
+            Object.entries(op.positions || {}).filter(
+              ([id]) => shown.has(id) && !droppedIds.has(id)
+            )
+          );
+          if (Object.keys(moved).length)
+            setRemotePositions((prev) => ({ ...(prev || {}), ...moved }));
+          if (Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
+          const drawAnnotations = () => {
+            if (!Array.isArray(op.annotations)) return;
+            const removed = op.removed_annotation_ids || [];
+            if (removed.length)
+              setRemoteAnnotationOps((prev) => [
+                ...(prev || []),
+                ...removed.map((id) => ({ action: 'delete', id })),
+              ]);
+            op.annotations.forEach(applyAnnotationUpsertToCanvas);
+          };
           // An own add's result edges between nodes already on the canvas
           // have no node to hydrate them with: draw those from what was sent.
           const drawSentEdges = () => {
@@ -564,6 +589,8 @@ function App() {
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length || !client) {
             const drew = drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
             sent?.onDrawn();
             return dropped.length > 0 || drew;
           }
@@ -571,13 +598,18 @@ function App() {
           // the session or its membership can change out from under it: a
           // session switch mid-fetch (review round 5), or a membership change
           // that lands before the reads settle (hydrateAddedNodes).
-          const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
-            client,
-            missing,
-            api.getNodeDetails,
-            sent
-          );
-          if (syncRef.current !== client) return false; // switched away while fetching
+          let read;
+          try {
+            read = await hydrateAddedNodes(client, missing, api.getNodeDetails, sent);
+          } catch (err) {
+            release();
+            throw err;
+          }
+          if (syncRef.current !== client) {
+            release();
+            return false; // switched away while fetching
+          }
+          const { nodes: addNodes, edges: addEdges } = read;
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -585,19 +617,23 @@ function App() {
           // op, which is dropped when the node isn't mounted yet) prevents the node
           // from settling at an auto-layout spot and re-emitting a wrong position.
           if (addNodes.length) {
+            // Where the op placed each node; the server gives every node it
+            // brings in a position.
             const positioned = addNodes.map((n) => {
-              // What an own add or replace carries places its node: the
-              // baseline still holds a redrawn node's old canvas position.
-              if (sent?.nodes.has(n.id) && n._savedPosition) return n;
               const pos = syncRef.current?.baselinePosition(n.id);
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
             drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
             sent.onDrawn();
             return true;
           }
-          return drawSentEdges() || dropped.length > 0;
+          const drew = drawSentEdges();
+          drawAnnotations();
+          releaseSoon();
+          return drew || dropped.length > 0;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
@@ -2219,8 +2255,9 @@ function App() {
   // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
-    (_nodeId, _position, nodeType) => {
+    (nodeId, _position, nodeType) => {
       canvasEditEpochRef.current += 1;
+      syncRef.current?.noteUserMoved([nodeId]);
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
         return;

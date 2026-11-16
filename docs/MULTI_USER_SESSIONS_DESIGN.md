@@ -162,8 +162,8 @@ Op catalogue (v1):
 
 | Op | Payload | Conflict rule |
 |---|---|---|
-| `nodes_added` / `nodes_removed` | node_ids | set union / set removal, idempotent |
-| `nodes_replaced` | node_ids, optional positions / hidden_node_ids / annotations | membership becomes exactly node_ids (saved-view load, clear); no-op if unchanged. A browser's load carries the view's layout, which the server applies unrecorded with the replace and fans out under client id `view-load` |
+| `nodes_added` / `nodes_removed` | node_ids; `nodes_added` optional positions | set union / set removal, idempotent. An add carrying a `positions` object (a push, a browser's own add) stores them and has the server place the other added nodes in the same op; the broadcast carries every position it set. The MCP add tool sends none, leaving its nodes for the agent to arrange |
+| `nodes_replaced` | node_ids, optional positions / hidden_node_ids / annotations | membership becomes exactly node_ids (saved-view load, clear) together with the view's layout, as one sequenced op and one activity record, all-or-nothing: any part that cannot apply (an invalid annotation or position, a leased annotation) refuses the whole op. Positions are kept for members only and every member left without one is placed by the server; hidden_node_ids becomes the hidden set; annotations (groups included) become the session's annotation list by stable id, restoring ids an earlier delete tombstoned. The broadcast carries node_ids, every member's position, the hidden set and, with annotations, the list and `removed_annotation_ids`. No-op only if nothing changes |
 | `node_moved` | node_id, position | LWW per node (server arrival order) |
 | `edges_added` / `edges_removed` / `edges_updated` | edges (`edges_removed`: edge_ids) | fan-out only — broadcast to all subscribers, no session state mutated (edges live in the graph, R14); a peer whose node set is unchanged never re-hydrates, so a drag-drawn edge, a deletion, or an attribute change between two present nodes needs this to render for everyone |
 | `nodes_hidden` / `nodes_shown`, `edges_hidden` / `edges_shown` | ids | set ops, idempotent |

@@ -286,17 +286,16 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
   });
 
-  it("a user's add sends the node's position without waiting for the autosave debounce", async () => {
+  it("a user's add sends the node's position with the add, not after it", async () => {
     renderApp();
+    const placed = { ...NODE_A, position: { x: 11, y: 22 } };
     act(() => {
-      useGraphStore.getState().addNodesToVisualization([NODE_A], []);
-      useGraphStore.getState().publishMembership('nodes_added', ['node-a']);
+      useGraphStore.getState().publishMembership('nodes_added', ['node-a'], { nodes: [placed] });
     });
     // waitFor gives up after 1000ms, before the 1500ms debounce would save.
     await waitFor(() => {
       expect(opsFrom(global.fetch)).toEqual([
-        { op: 'nodes_added', node_ids: ['node-a'] },
-        { op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } },
+        { op: 'nodes_added', node_ids: ['node-a'], positions: { 'node-a': { x: 11, y: 22 } } },
       ]);
     });
   });
@@ -408,19 +407,23 @@ describe('Server-backed session lifecycle', () => {
   it('an own replace applies on its broadcast, redrawing a shown node at the position it carries', async () => {
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
-    // node-a's canvas position reaches the sync baseline before the view loads.
     act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
     await waitFor(() => {
-      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'node_moved' }));
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
     });
     const viewed = { ...NODE_A, _savedPosition: { x: 9, y: 9 } };
     act(() =>
-      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], { nodes: [viewed] })
+      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], {
+        nodes: [viewed],
+        view: { positions: { 'node-a': { x: 9, y: 9 } }, hidden_node_ids: ['node-a'] },
+      })
     );
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
     await waitFor(() => {
       expect(useGraphStore.getState().nodes).toEqual([viewed]);
     });
+    // The rest of the view's layout is drawn from the same broadcast.
+    expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']);
   });
 
   it('an own add draws its edges between nodes already shown', async () => {
