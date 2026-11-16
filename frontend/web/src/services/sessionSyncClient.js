@@ -342,6 +342,17 @@ export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = 
   return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
 }
 
+// The server omits a group's unset textColor, but the canvas side
+// (createAnnotation) always carries ''; without this the next local diff would
+// publish a phantom `textColor: ''` patch.
+function withGroupTextColor(ann) {
+  const merged = { ...ann };
+  if ((merged.type ?? merged.kind) === 'group' && typeof merged.textColor !== 'string') {
+    merged.textColor = '';
+  }
+  return merged;
+}
+
 /**
  * Apply a single applied op to the baseline mirror (client-side mirror of the
  * server's state transforms). Keeping the baseline current for *remote* ops is
@@ -355,6 +366,8 @@ export function applyOpToMirror(mirrorState, op) {
   switch (type) {
     case 'nodes_added':
       m.node_refs = Array.from(new Set([...m.node_refs, ...(op.node_ids || [])]));
+      // The server places every node it adds in the same op.
+      for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
       break;
     case 'nodes_removed':
     case 'nodes_replaced': {
@@ -371,6 +384,20 @@ export function applyOpToMirror(mirrorState, op) {
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
           : a
       );
+      // A replace carries the layout it leaves: every member's position, the
+      // hidden set and, for a loaded view, the annotations it changed or removed.
+      if (replace) {
+        for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
+        if (Array.isArray(op.hidden_node_ids)) m.hidden_node_ids = [...op.hidden_node_ids];
+        if (Array.isArray(op.annotations)) {
+          const changed = new Map(op.annotations.map((a) => [a.id, withGroupTextColor(a)]));
+          const removed = new Set(op.removed_annotation_ids || []);
+          m.annotations = [
+            ...m.annotations.filter((a) => !removed.has(a.id) && !changed.has(a.id)),
+            ...changed.values(),
+          ];
+        }
+      }
       break;
     }
     case 'graph_changes_discarded':
@@ -434,13 +461,7 @@ export function applyOpToMirror(mirrorState, op) {
       if (ann && ann.id) {
         const idx = m.annotations.findIndex((a) => a.id === ann.id);
         const next = m.annotations.slice();
-        const merged = idx === -1 ? { ...ann } : { ...next[idx], ...ann };
-        // The server omits a group's unset textColor, but the canvas side
-        // (createAnnotation) always carries ''; without this the next local
-        // diff would publish a phantom `textColor: ''` patch.
-        if ((merged.type ?? merged.kind) === 'group' && typeof merged.textColor !== 'string') {
-          merged.textColor = '';
-        }
+        const merged = withGroupTextColor(idx === -1 ? ann : { ...next[idx], ...ann });
         if (idx === -1) next.push(merged);
         else next[idx] = merged;
         m.annotations = next;
@@ -705,7 +726,8 @@ export class SessionSyncClient {
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
    *   onStreamRefused (the stream answered 404 before it ever opened: the
-   *   session id is retired),
+   *   session id is retired), onHeldSaveReleased (a snapshot arrived while a
+   *   broadcast held autosave; the host takes a fresh one now),
    *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -804,6 +826,11 @@ export class SessionSyncClient {
     // the op's {edges, onDrawn}. Data only: the canvas still takes the node
     // from the broadcast (takeSentNodes).
     this._sentNodes = new Map();
+    // Broadcasts still being drawn (holdLayoutSave), and the nodes this
+    // browser's user moved since the last snapshot (noteUserMoved).
+    this._renderHolds = 0;
+    this._savePendingRelease = false;
+    this._userMoved = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -1406,6 +1433,30 @@ export class SessionSyncClient {
   }
 
   /**
+   * Hold autosave while a broadcast is drawn; returns the release. Until then
+   * the canvas shows part of the server's layout, and a diff would send the
+   * rest back as this user's change. A snapshot skipped meanwhile is asked
+   * for again once the last hold is released.
+   */
+  holdLayoutSave() {
+    this._renderHolds += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._renderHolds -= 1;
+      if (this._renderHolds > 0 || !this._savePendingRelease) return;
+      this._savePendingRelease = false;
+      if (!this._closed) this.handlers.onHeldSaveReleased?.();
+    };
+  }
+
+  /** Nodes this browser's user moved: their positions are saved even unplaced. */
+  noteUserMoved(nodeIds) {
+    for (const id of nodeIds || []) this._userMoved.add(id);
+  }
+
+  /**
    * Fold one op into the baseline directly, the same way the SSE `onmessage`
    * handler folds a remote op before dispatching it (see `_handleEvent`'s
    * 'op' case) — for a caller that applied an op to the canvas *without* it
@@ -1476,7 +1527,29 @@ export class SessionSyncClient {
    * a node still being read is placed where the server has it.
    */
   syncState(state) {
+    // A broadcast still being drawn: the canvas is between two layouts, and
+    // what the user changed meanwhile is diffed by the snapshot taken when
+    // the hold is released.
+    if (this._renderHolds > 0) {
+      this._savePendingRelease = true;
+      return;
+    }
     const next = normalizeMirror(state);
+    // A position the canvas computed for a member the server has none for is
+    // this browser's rendering, not its user's change: it is kept, not sent.
+    const computed = {};
+    const members = new Set(this._baseline.node_refs);
+    for (const id of next.node_refs) {
+      const unplaced = members.has(id) && !this._baseline.positions[id];
+      if (unplaced && next.positions[id] && !this._userMoved.has(id)) {
+        computed[id] = next.positions[id];
+      }
+    }
+    this._userMoved.clear();
+    this._baseline = {
+      ...this._baseline,
+      positions: { ...this._baseline.positions, ...computed },
+    };
     const ops = computeOps(this._baseline, next);
     const sent = predictAnnotationVersionsForSend(this._baseline, next, ops);
     sent.node_refs = this._baseline.node_refs;
@@ -1523,7 +1596,8 @@ export class SessionSyncClient {
    * server broadcasts it back; `nodes` (with `edges`) is what that broadcast
    * then draws instead of reading, and `onDrawn` runs once it has. A replace
    * may carry the loaded `view` (`positions`, `hidden_node_ids`,
-   * `annotations`): the server stores it with the replace's one record.
+   * `annotations`), and an add the positions its nodes were drawn at: the
+   * server applies them in the same op, placing every node left without one.
    */
   sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null, view = null } = {}) {
     if (!MEMBERSHIP_OPS.has(op)) return;
@@ -1533,7 +1607,16 @@ export class SessionSyncClient {
     const named = new Set(op === 'nodes_removed' ? [] : ids);
     const carried = nodes.filter((node) => named.has(node?.id));
     carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
-    const carriedView = op === 'nodes_replaced' && view ? view : {};
+    let carriedView = {};
+    if (op === 'nodes_replaced' && view) carriedView = view;
+    if (op === 'nodes_added') {
+      const positions = {};
+      for (const node of carried) {
+        const pos = node._savedPosition || node.position;
+        if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') positions[node.id] = pos;
+      }
+      carriedView = { positions }; // the server places the nodes it lacks
+    }
     this._enqueue([{ op, node_ids: ids, ...carriedView }]);
     if (!carried.length) onDrawn?.(); // nothing for a broadcast to draw
   }

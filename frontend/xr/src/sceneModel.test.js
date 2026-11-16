@@ -125,10 +125,17 @@ describe('applyOp', () => {
     expect(scene.nodes.n3.x).toBe(5);
   });
 
-  it('keeps exactly the nodes nodes_replaced names, untouched if already there', () => {
-    const scene = applyOp(base, { op: 'nodes_replaced', node_ids: ['n2', 'n3'] });
+  it('keeps exactly the nodes nodes_replaced names, at the layout it carries', () => {
+    const scene = applyOp(base, {
+      op: 'nodes_replaced',
+      node_ids: ['n2', 'n3'],
+      positions: { n3: { x: 5, y: 6 } },
+      hidden_node_ids: ['n3'],
+    });
     expect(Object.keys(scene.nodes).sort()).toEqual(['n2', 'n3']);
     expect(scene.nodes.n2).toEqual(base.nodes.n2);
+    expect([scene.nodes.n3.x, scene.nodes.n3.y]).toEqual([5, 6]);
+    expect(scene.hiddenNodeIds).toEqual(['n3']);
   });
 
   it('drops removed nodes and their hide entries', () => {

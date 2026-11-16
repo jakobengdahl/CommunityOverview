@@ -28,9 +28,8 @@ export const EMPTY_SCENE = Object.freeze({
 });
 
 function emptyNode(id) {
-  // A `nodes_added` op carries ids only, so identity and position both arrive
-  // later — the name/type from a REST hydration, the position from the
-  // `node_moved` / `layout_applied` op the originator emits in the same batch.
+  // A `nodes_added` op carries ids and positions, so identity arrives later,
+  // from a REST hydration.
   // Until then the node is known but not renderable (see `renderableNodes`).
   return { id, name: null, type: null, x: null, y: null, hydrated: false };
 }
@@ -125,14 +124,20 @@ export function applyOp(scene, op) {
       if (!added.length) return scene;
       const nodes = { ...scene.nodes };
       for (const id of added) nodes[id] = emptyNode(id);
-      return { ...scene, nodes };
+      // The server places what it adds in the same op.
+      return applyOp({ ...scene, nodes }, { op: 'layout_applied', positions: op.positions });
     }
     case 'nodes_replaced': {
-      // A whole-view swap: drop what it does not name, then add what it does.
+      // A whole-view swap: drop what it does not name, then add what it does,
+      // at the positions and with the hidden set the op leaves.
       const keep = new Set(op.node_ids || []);
       const stale = Object.keys(scene.nodes).filter((id) => !keep.has(id));
       const dropped = applyOp(scene, { op: 'nodes_removed', node_ids: stale });
-      return applyOp(dropped, { op: 'nodes_added', node_ids: op.node_ids });
+      const added = applyOp(dropped, { op: 'nodes_added', node_ids: op.node_ids });
+      const placed = applyOp(added, { op: 'layout_applied', positions: op.positions });
+      return Array.isArray(op.hidden_node_ids)
+        ? { ...placed, hiddenNodeIds: addIds([], op.hidden_node_ids) }
+        : placed;
     }
     case 'nodes_removed': {
       const drop = (op.node_ids || []).filter((id) => scene.nodes[id]);

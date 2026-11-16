@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 import secrets
@@ -630,6 +631,56 @@ def _drop_node_refs(state: Dict[str, Any], removals: List[str]) -> None:
             ann["member_node_ids"] = [m for m in members if m not in drop]
 
 
+_PLACEMENT_CELL_W = 280.0
+_PLACEMENT_CELL_H = 180.0
+
+
+def _given_positions(op: Dict[str, Any], node_ids: List[str]) -> Dict[str, Any]:
+    """The op's ``positions`` for ``node_ids``; other keys and nulls are skipped."""
+    positions = op.get("positions")
+    if positions is None:
+        return {}
+    if not isinstance(positions, dict):
+        raise OpError(f"{op.get('op')}: 'positions' must be an object")
+    wanted = set(node_ids)
+    return {
+        node_id: _validate_position(position)
+        for node_id, position in positions.items()
+        if node_id in wanted and position is not None
+    }
+
+
+def _place_unplaced(state: Dict[str, Any], node_ids: List[str]) -> Dict[str, Any]:
+    """Grid places for the members in ``node_ids`` that have no position yet.
+
+    Right of the members already placed, so every browser draws a node a push,
+    a replace or an add brought in without a position at the same place.
+    """
+    unplaced = [n for n in node_ids if n not in state["positions"]]
+    if not unplaced:
+        return {}
+    placed = [
+        state["positions"][n]
+        for n in state["node_refs"]
+        if n in state["positions"] and n not in unplaced
+    ]
+    cols = max(1, math.ceil(math.sqrt(len(unplaced))))
+    if placed:
+        x0 = max(p["x"] for p in placed) + _PLACEMENT_CELL_W
+        y0 = min(p["y"] for p in placed)
+    else:
+        x0, y0 = 400.0, 300.0
+    positions = {
+        node_id: {
+            "x": x0 + (i % cols) * _PLACEMENT_CELL_W,
+            "y": y0 + (i // cols) * _PLACEMENT_CELL_H,
+        }
+        for i, node_id in enumerate(unplaced)
+    }
+    state["positions"].update(positions)
+    return positions
+
+
 class SessionStore:
     """In-memory registry of sessions backed by a persistence seam.
 
@@ -858,6 +909,126 @@ class SessionStore:
 
     # ---------------- op application ----------------
 
+    def _replaced_state(
+        self, session: Session, op: Dict[str, Any]
+    ) -> Optional[tuple[Dict[str, Any], List[str], List[str]]]:
+        """The state a ``nodes_replaced`` op leaves, built on a copy.
+
+        Returns ``(state, tombstoned annotation ids, restored annotation ids)``,
+        or ``None`` when nothing would change. Raises ``OpError`` before
+        anything is touched when any part of the op cannot apply.
+
+        Membership becomes exactly ``node_ids``. The optional view layout:
+        ``positions`` (members only, nulls skipped), ``hidden_node_ids`` (the
+        hidden set, members only) and ``annotations`` (the session's whole
+        annotation list, by stable id; groups are annotations). A view's
+        annotation is restored even when an earlier delete tombstoned its id.
+        Every member left without a position is given one.
+        """
+        before = session.state
+        kept = _union([], _require_id_list(op, "node_ids"))
+        members = set(kept)
+        given = _given_positions(op, kept)
+        hidden = op.get("hidden_node_ids")
+        if hidden is not None:
+            hidden = _require_id_list(op, "hidden_node_ids")
+        view_annotations = op.get("annotations")
+        if view_annotations is not None and not isinstance(view_annotations, list):
+            raise OpError("nodes_replaced: 'annotations' must be a list")
+
+        state = copy.deepcopy(before)
+        if members != set(before["node_refs"]):
+            _drop_node_refs(state, [n for n in state["node_refs"] if n not in members])
+            state["node_refs"] = kept
+        state["positions"].update(given)
+        _place_unplaced(state, state["node_refs"])
+        if hidden is not None:
+            state["hidden_node_ids"] = [h for h in _union([], hidden) if h in members]
+        tombstoned: List[str] = []
+        restored: List[str] = []
+        if view_annotations is not None:
+            held = {a.get("id"): a for a in state["annotations"]}
+            annotations: List[Dict[str, Any]] = []
+            # An id listed twice keeps its last entry, as a map by id would.
+            last = {
+                a.get("id"): i
+                for i, a in enumerate(view_annotations)
+                if isinstance(a, dict) and isinstance(a.get("id"), str)
+            }
+            for i, raw in enumerate(view_annotations):
+                if isinstance(raw, dict) and last.get(raw.get("id"), i) != i:
+                    continue
+                annotation = _validate_annotation(raw, require_id=False)
+                if not isinstance(annotation.get("id"), str):
+                    annotation["id"] = secrets.token_hex(8)
+                if isinstance(annotation.get("member_node_ids"), list):
+                    annotation["member_node_ids"] = [
+                        m for m in annotation["member_node_ids"] if m in members
+                    ]
+                existing = held.pop(annotation["id"], None)
+                if existing is not None and existing.get("type") != annotation["type"]:
+                    existing = None
+                _require_ingested_image(annotation, existing)
+                _require_safe_reference_target(annotation, existing)
+                changed = [
+                    k
+                    for k in annotation
+                    if k not in _ANNOTATION_META_FIELDS
+                    and annotation[k] != (existing or {}).get(k)
+                ]
+                removed = [
+                    k
+                    for k in existing or {}
+                    if k not in _ANNOTATION_META_FIELDS and k not in annotation
+                ]
+                if existing is not None and not changed and not removed:
+                    annotations.append(existing)
+                    continue
+                if existing is None:
+                    annotation.setdefault("created_by", op.get("client_id"))
+                    annotation["version"] = _INITIAL_ANNOTATION_VERSION
+                    annotation["field_versions"] = {}
+                else:
+                    version = int(existing.get("version") or 1) + 1
+                    field_versions = dict(existing.get("field_versions") or {})
+                    field_versions.update({k: version for k in changed + removed})
+                    annotation["created_by"] = existing.get("created_by")
+                    annotation["version"] = version
+                    annotation["field_versions"] = field_versions
+                annotation["updated_at"] = _now_iso()
+                annotations.append(annotation)
+                if annotation["id"] in session._deleted_annotation_ids:
+                    restored.append(annotation["id"])
+            if len(annotations) > self._max_annotations:
+                raise OpError("annotation limit reached for this session")
+            state["annotations"] = annotations
+            tombstoned = [a for a in held if isinstance(a, str)]
+
+        if state == before:
+            return None
+        return state, tombstoned, restored
+
+    def replaced_annotation_targets(
+        self, session: Session, op: Dict[str, Any]
+    ) -> List[str]:
+        """Ids of the held annotations a ``nodes_replaced`` op would change or drop.
+
+        Derived from the state the op would leave, so the edit-lease check
+        sees exactly what applying it changes. Raises ``OpError`` when the op
+        cannot apply.
+        """
+        if op.get("op") != "nodes_replaced" or op.get("annotations") is None:
+            return []
+        replaced = self._replaced_state(session, op)
+        if replaced is None:
+            return []
+        after = {a.get("id"): a for a in replaced[0]["annotations"]}
+        return [
+            a.get("id")
+            for a in session.state.get("annotations", [])
+            if after.get(a.get("id")) != a
+        ]
+
     def apply_state_op(
         self,
         session: Session,
@@ -899,22 +1070,62 @@ class SessionStore:
             set(state["node_refs"]) if op_type in MEMBERSHIP_OPS else set()
         )
         if op_type == "nodes_added":
-            state["node_refs"] = _union(
-                state["node_refs"], _require_id_list(op, "node_ids")
-            )
+            node_ids = _require_id_list(op, "node_ids")
+            added = [n for n in _union([], node_ids) if n not in membership_before]
+            given = _given_positions(op, added)
+            state["node_refs"] = _union(state["node_refs"], node_ids)
+            # A node joins at the position it was sent with. An op carrying
+            # positions (a push, a browser's add) has the server place the rest
+            # in this same op; the MCP add leaves them for the agent to arrange.
+            state["positions"].update(given)
+            placed = dict(given)
+            if op.get("positions") is not None:
+                placed.update(_place_unplaced(state, added))
+            # Only a replace carries a view's layout; a browser's add relayed
+            # with those keys would have every receiver apply and save them.
+            for key in (
+                "positions",
+                "hidden_node_ids",
+                "annotations",
+                "removed_annotation_ids",
+            ):
+                applied.pop(key, None)
+            if placed:
+                applied["positions"] = placed
         elif op_type == "nodes_removed":
             _drop_node_refs(state, _require_id_list(op, "node_ids"))
         elif op_type == "nodes_replaced":
             # One op for a whole-view swap (a saved-view load, a clear), so it
-            # is one sequenced change and one activity record.
-            kept = _union([], _require_id_list(op, "node_ids"))
-            if set(kept) == membership_before:
+            # is one sequenced change and one activity record. A loaded view's
+            # layout rides along and is applied all-or-nothing with it.
+            replaced = self._replaced_state(session, op)
+            if replaced is None:
                 return None
-            _drop_node_refs(
-                state, [n for n in state["node_refs"] if n not in set(kept)]
-            )
-            state["node_refs"] = kept
-            applied["node_ids"] = kept
+            state, tombstoned, restored = replaced
+            held_before = {a.get("id"): a for a in session.state["annotations"]}
+            session.state = state
+            for ann_id in restored:
+                while ann_id in session._deleted_annotation_ids:
+                    session._deleted_annotation_ids.remove(ann_id)
+            session._deleted_annotation_ids.extend(tombstoned)
+            applied["node_ids"] = list(state["node_refs"])
+            applied["positions"] = {
+                n: state["positions"][n]
+                for n in state["node_refs"]
+                if n in state["positions"]
+            }
+            applied["hidden_node_ids"] = list(state["hidden_node_ids"])
+            if op.get("annotations") is not None:
+                # Only what this op changes: the op is kept in the ring and
+                # sent to every subscriber and catch-up, so repeating unchanged
+                # annotations (image data URLs included) on every load would
+                # multiply payloads with nothing to show for it.
+                applied["annotations"] = [
+                    copy.deepcopy(a)
+                    for a in state["annotations"]
+                    if held_before.get(a.get("id")) != a
+                ]
+                applied["removed_annotation_ids"] = tombstoned
         elif op_type == "node_moved":
             node_id = op.get("node_id")
             if not isinstance(node_id, str):

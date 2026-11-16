@@ -945,12 +945,15 @@ shared session — additive results, saved-view loads and replacements
 applies the push's membership change itself and every browser only renders it,
 so each actual change produces one record however many browsers are open; a
 load that replaces existing nodes, or a clear, is one record. The layout that
-comes with the change is part of that record: a loaded view's positions,
-hidden nodes and (for a view you load yourself, from search or the canvas)
-annotations, and the place the server gives each node a push adds or brings in
-without a saved position, so no open browser saves a layout or annotation
-change of its own for it. A pushed load leaves the session's annotations as
-they are. Repeated
+comes with the change is applied with it, as one change: a loaded view's
+positions, hidden nodes, groups and annotations, and the place the server gives
+each node that arrives without a saved position. Every open browser shows that
+same layout, and none saves it back as its own change; only what you move,
+hide, group or annotate yourself is saved from your browser. If any part of a
+view cannot be applied, none of it is. Reloading a view brings back its
+annotations even if they were deleted since. A view loaded by an agent from an
+older saved view without the current annotation format leaves the session's
+annotations as they are. Repeated
 additions or removals that change nothing produce no record. Nodes you add,
 remove or clear on your own canvas are sent to the server as the same kind of
 change and recorded as yours; your canvas shows the change once the server has

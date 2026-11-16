@@ -87,6 +87,24 @@ const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 // running ahead of each payload (see resyncFromServer).
 const RESYNC_MAX_FETCHES = 3;
 
+// A broadcast op's node read, bounded like the sync requests: ops apply one
+// at a time, so a read that never settles would hold every later op (and a
+// held autosave) with it. A read that times out is aborted and counts as
+// failed; the race still settles it when a fetch ignores the signal.
+function readNodeForRemoteOp(nodeId) {
+  const controller = new AbortController();
+  let timer;
+  return Promise.race([
+    api.getNodeDetails(nodeId, { signal: controller.signal }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('node read timed out'));
+      }, SYNC_REQUEST_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
@@ -246,7 +264,19 @@ function App() {
   // session epoch before React re-renders, and the ?view= load must not see the
   // previous id in that gap.
   const sessionIdRef = useRef(sessionId);
+  // Bumped on every session switch. A broadcast op is bound to the generation
+  // it arrived in and stops at its next step once that is no longer current,
+  // so nothing queued in the session left behind lands in the next one.
+  const sessionGenerationRef = useRef(0);
+  // Broadcast ops apply one at a time, in stream order: a replace awaiting its
+  // node reads must not draw its annotations over a later op's. A switch
+  // starts a new chain, so an op left behind cannot hold the new session's.
+  const remoteOpsChainRef = useRef(Promise.resolve());
   const setSessionId = useCallback((id) => {
+    if (id !== sessionIdRef.current) {
+      sessionGenerationRef.current += 1;
+      remoteOpsChainRef.current = Promise.resolve();
+    }
     sessionIdRef.current = id;
     // Before any request is made from the new session: graph requests carry a
     // session's header only while it is the active one and known staged.
@@ -484,8 +514,31 @@ function App() {
   // it started.
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
+  // Autosave holds released once the canvas has drawn what a broadcast
+  // queued: each waits for the commit of the tick it was queued with, and
+  // App's effects run after GraphCanvas's in that commit, so the snapshot a
+  // release may request renders with the drawn nodes.
+  const layoutReleasesRef = useRef({ tick: 0, pending: [] });
+  const [layoutReleaseTick, setLayoutReleaseTick] = useState(0);
+  useEffect(() => {
+    const releases = layoutReleasesRef.current;
+    const due = releases.pending.filter((entry) => entry.tick <= layoutReleaseTick);
+    releases.pending = releases.pending.filter((entry) => entry.tick > layoutReleaseTick);
+    due.forEach((entry) => entry.release());
+  }, [layoutReleaseTick]);
+  const releaseAfterDraw = useCallback((release) => {
+    const releases = layoutReleasesRef.current;
+    releases.tick += 1;
+    releases.pending.push({ tick: releases.tick, release });
+    setLayoutReleaseTick(releases.tick);
+  }, []);
   const applyRemoteOp = useCallback(
-    async (op) => {
+    async (op, heldLayoutRelease = null, generation = sessionGenerationRef.current) => {
+      const isCurrent = () => sessionGenerationRef.current === generation;
+      if (!isCurrent()) {
+        heldLayoutRelease?.();
+        return false; // queued in a session since left
+      }
       const store = useGraphStore.getState();
       if (
         (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
@@ -495,7 +548,6 @@ function App() {
         // the stream reaches anyone holding the session id: read it from the
         // composed view instead, which asks the authorization hook
         // (docs/SESSION_OVERLAY_CONTRACT.md §15).
-        const sessionAtStart = syncRef.current?.sessionId;
         const removalsAtStart = edgeRemovalSeqRef.current.seq;
         const inFlight = edgeRemovalSeqRef.current.inFlight;
         inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
@@ -506,13 +558,13 @@ function App() {
         const sources = [...new Set(wanted.map((e) => e.source))];
         let reads;
         try {
-          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+          reads = await Promise.all(sources.map((id) => readNodeForRemoteOp(id).catch(() => null)));
         } finally {
           const left = inFlight.get(removalsAtStart) - 1;
           if (left > 0) inFlight.set(removalsAtStart, left);
           else inFlight.delete(removalsAtStart);
         }
-        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        if (!isCurrent()) return false; // switched away while fetching
         const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
         const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
         const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
@@ -547,6 +599,35 @@ function App() {
               ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
               : [];
           dropped.forEach((n) => removeNode(n.id));
+          // The op carries the layout it leaves (positions, hidden ids, a
+          // loaded view's annotations); until all of it is drawn, autosave
+          // waits, so no part of it is saved back as this user's change. A
+          // streamed op's hold was taken when it was queued (onRemoteOps).
+          const release = heldLayoutRelease || client?.holdLayoutSave() || (() => {});
+          const releaseSoon = () => releaseAfterDraw(release);
+          const droppedIds = new Set(dropped.map((n) => n.id));
+          const shown = new Set(store.nodes.map((n) => n.id));
+          const moved = Object.fromEntries(
+            Object.entries(op.positions || {}).filter(
+              ([id]) => shown.has(id) && !droppedIds.has(id)
+            )
+          );
+          if (Object.keys(moved).length)
+            setRemotePositions((prev) => ({ ...(prev || {}), ...moved }));
+          // Only a replace carries a view's hidden ids and annotations, and
+          // only for a replace does the mirror fold them (applyOpToMirror).
+          const isReplace = op.op === 'nodes_replaced';
+          if (isReplace && Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
+          const drawAnnotations = () => {
+            if (!isReplace || !Array.isArray(op.annotations)) return;
+            const removed = op.removed_annotation_ids || [];
+            if (removed.length)
+              setRemoteAnnotationOps((prev) => [
+                ...(prev || []),
+                ...removed.map((id) => ({ action: 'delete', id })),
+              ]);
+            op.annotations.forEach(applyAnnotationUpsertToCanvas);
+          };
           // An own add's result edges between nodes already on the canvas
           // have no node to hydrate them with: draw those from what was sent.
           const drawSentEdges = () => {
@@ -564,6 +645,8 @@ function App() {
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length || !client) {
             const drew = drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
             sent?.onDrawn();
             return dropped.length > 0 || drew;
           }
@@ -571,13 +654,18 @@ function App() {
           // the session or its membership can change out from under it: a
           // session switch mid-fetch (review round 5), or a membership change
           // that lands before the reads settle (hydrateAddedNodes).
-          const { nodes: addNodes, edges: addEdges } = await hydrateAddedNodes(
-            client,
-            missing,
-            api.getNodeDetails,
-            sent
-          );
-          if (syncRef.current !== client) return false; // switched away while fetching
+          let read;
+          try {
+            read = await hydrateAddedNodes(client, missing, readNodeForRemoteOp, sent);
+          } catch (err) {
+            release();
+            throw err;
+          }
+          if (!isCurrent() || syncRef.current !== client) {
+            release();
+            return false; // switched away while fetching
+          }
+          const { nodes: addNodes, edges: addEdges } = read;
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -585,19 +673,23 @@ function App() {
           // op, which is dropped when the node isn't mounted yet) prevents the node
           // from settling at an auto-layout spot and re-emitting a wrong position.
           if (addNodes.length) {
+            // Where the op placed each node; the server gives every node it
+            // brings in a position.
             const positioned = addNodes.map((n) => {
-              // What an own add or replace carries places its node: the
-              // baseline still holds a redrawn node's old canvas position.
-              if (sent?.nodes.has(n.id) && n._savedPosition) return n;
               const pos = syncRef.current?.baselinePosition(n.id);
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
             drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
             sent.onDrawn();
             return true;
           }
-          return drawSentEdges() || dropped.length > 0;
+          const drew = drawSentEdges();
+          drawAnnotations();
+          releaseSoon();
+          return drew || dropped.length > 0;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
@@ -813,6 +905,7 @@ function App() {
       setRemoteAnnotationOps,
       syncRef,
       applyAnnotationUpsertToCanvas,
+      releaseAfterDraw,
     ]
   );
 
@@ -2219,8 +2312,9 @@ function App() {
   // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
-    (_nodeId, _position, nodeType) => {
+    (nodeId, _position, nodeType) => {
       canvasEditEpochRef.current += 1;
+      syncRef.current?.noteUserMoved([nodeId]);
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
         return;
@@ -2795,7 +2889,16 @@ function App() {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
           if (!handleStagedSessionOp(op)) {
-            applyRemoteOp(op);
+            const generation = sessionGenerationRef.current;
+            // The sync baseline already holds this op's layout: autosave
+            // waits from now, not from when the ops ahead of it are done.
+            const release =
+              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
+                ? syncRef.current?.holdLayoutSave() || null
+                : null;
+            remoteOpsChainRef.current = remoteOpsChainRef.current
+              .then(() => applyRemoteOp(op, release, generation))
+              .catch(() => release?.());
           } else if (op.op === 'graph_change_staged') {
             refreshStagedEntities(op);
           } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
@@ -2925,6 +3028,8 @@ function App() {
         }
         resyncFromServer(sessionId);
       },
+      // A change made while a broadcast held autosave is saved now.
+      onHeldSaveReleased: () => requestSessionSnapshot(null),
     };
   }, [
     sessionId,
@@ -2937,6 +3042,7 @@ function App() {
     refreshStagedEntities,
     refreshStagedDiff,
     resyncFromServer,
+    requestSessionSnapshot,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
     clearVisualization,

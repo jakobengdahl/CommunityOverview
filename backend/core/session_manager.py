@@ -37,7 +37,6 @@ import asyncio
 import copy
 import json
 import logging
-import math
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -71,8 +70,6 @@ from .session_store import (
     Session,
     SessionRetired,
     SessionStore,
-    _ANNOTATION_META_FIELDS,
-    _validate_position,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -404,14 +401,6 @@ def _restore_deleted_ids(session: Session, saved: List[str]) -> None:
     session._deleted_annotation_ids.extend(saved)
 
 
-def _forget_deleted_id(session: Session, ann_id: Any) -> None:
-    """Let a deliberate re-create of ``ann_id`` past its delete tombstone."""
-    try:
-        session._deleted_annotation_ids.remove(ann_id)
-    except ValueError:
-        pass
-
-
 _ABSENT = object()
 
 
@@ -457,91 +446,25 @@ def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
     return total
 
 
-# Fields a browser's own ``nodes_replaced`` may carry: the loaded view's
-# layout, stored with the replace rather than saved back afterwards.
-_REPLACE_VIEW_FIELDS = ("positions", "hidden_node_ids", "annotations")
-# The client id a replace's carried layout is fanned out under. Distinct from
-# the loading browser's, so it folds that layout like every other browser.
-_VIEW_LOAD_CLIENT_ID = "view-load"
-_PLACEMENT_CELL_W = 280.0
-_PLACEMENT_CELL_H = 180.0
+def _pushed_view(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The layout a pushed result carries, as a ``nodes_replaced`` view.
 
-
-def _replaced_view_ops(
-    session: Session, view: Dict[str, Any], node_ids: List[str]
-) -> List[Dict[str, Any]]:
-    """The ops that give a just-replaced session the loaded view's layout.
-
-    Positions and hidden ids are kept for the view's nodes only; the
-    annotations, when the view names them, replace the session's.
+    Passed through unfiltered, so the store validates it exactly as it does a
+    browser's replace and refuses the whole load when any part is malformed.
+    Only a result in the session's annotation format (``annotation_document``)
+    replaces the annotations; a legacy-only view leaves them as they are.
     """
-    members = set(node_ids)
-    state = session.state
-    stored = state.get("positions", {})
-    positions: Dict[str, Any] = {}
-    for node_id, position in (view.get("positions") or {}).items():
-        if node_id not in members:
-            continue
-        try:
-            position = _validate_position(position)
-        except OpError:
-            continue
-        if stored.get(node_id) != position:
-            positions[node_id] = position
-    ops: List[Dict[str, Any]] = []
-    if positions:
-        ops.append({"op": "layout_applied", "positions": positions})
-    hidden_ids = view.get("hidden_node_ids")
-    if isinstance(hidden_ids, list):
-        target = {i for i in hidden_ids if isinstance(i, str) and i in members}
-        current = set(state.get("hidden_node_ids", []))
-        if current - target:
-            ops.append({"op": "nodes_shown", "node_ids": sorted(current - target)})
-        if target - current:
-            ops.append({"op": "nodes_hidden", "node_ids": sorted(target - current)})
-    annotations = view.get("annotations")
-    if isinstance(annotations, list):
-        wanted = [a for a in annotations if isinstance(a, dict)]
-        wanted_ids = {a.get("id") for a in wanted}
-        held = {a.get("id"): a for a in state.get("annotations", [])}
-        ops.extend(
-            {"op": "annotation_deleted", "annotation_id": ann_id}
-            for ann_id in held
-            if ann_id not in wanted_ids
-        )
-        for annotation in wanted:
-            current = held.get(annotation.get("id"))
-            if current is None or any(
-                annotation[k] != current.get(k)
-                for k in annotation
-                if k not in _ANNOTATION_META_FIELDS
-            ):
-                ops.append({"op": "annotation_created", "annotation": annotation})
-    return ops
-
-
-def _grid_positions(
-    stored: Dict[str, Any], session: Session, node_ids: List[str]
-) -> Dict[str, Dict[str, float]]:
-    """Grid places for ``node_ids`` right of the members already placed."""
-    placed = [
-        stored[n]
-        for n in session.state.get("node_refs", [])
-        if n in stored and n not in node_ids
-    ]
-    cols = max(1, math.ceil(math.sqrt(len(node_ids))))
-    if placed:
-        x0 = max(p["x"] for p in placed) + _PLACEMENT_CELL_W
-        y0 = min(p["y"] for p in placed)
-    else:
-        x0, y0 = 400.0, 300.0
-    return {
-        node_id: {
-            "x": x0 + (i % cols) * _PLACEMENT_CELL_W,
-            "y": y0 + (i // cols) * _PLACEMENT_CELL_H,
-        }
-        for i, node_id in enumerate(node_ids)
+    view = {
+        key: result[key]
+        for key in ("positions", "hidden_node_ids")
+        if result.get(key) is not None
     }
+    document = result.get("annotation_document")
+    if isinstance(document, dict):
+        document = document.get("annotations")
+    if document is not None:
+        view["annotations"] = document
+    return view
 
 
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
@@ -635,14 +558,33 @@ def _annotation_embedded_image_bytes(annotation: Any) -> int:
     return data_url_byte_length(url)
 
 
-def _op_embedded_image_bytes(op: Dict[str, Any]) -> int:
-    """``_annotation_embedded_image_bytes`` for an ops-batch entry: only
-    ``annotation_created``/``annotation_updated`` ops can carry an
-    annotation payload at all.
+def _check_op_image_sizes(op: Dict[str, Any]) -> int:
+    """Raise ``ImageBudgetExceeded`` if an embedded image *op* carries is over
+    the per-image limit; else return the JSON length of their data URLs.
+
+    ``annotation_created``/``annotation_updated`` carry one annotation and
+    ``nodes_replaced`` a loaded view's whole list, so a view load is held to
+    the per-image limit whether a browser batch or a push applies it.
     """
-    if op.get("op") not in ("annotation_created", "annotation_updated"):
+    if op.get("op") in ("annotation_created", "annotation_updated"):
+        annotations = [op.get("annotation")]
+    elif op.get("op") == "nodes_replaced" and isinstance(op.get("annotations"), list):
+        annotations = op["annotations"]
+    else:
         return 0
-    return _annotation_embedded_image_bytes(op.get("annotation"))
+    url_bytes = 0
+    for annotation in annotations:
+        image_bytes = _annotation_embedded_image_bytes(annotation)
+        if not image_bytes:
+            continue
+        if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
+            raise ImageBudgetExceeded(
+                f"embedded image is {image_bytes} bytes, exceeding "
+                f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
+                "per-image limit"
+            )
+        url_bytes += len(json.dumps(annotation["image"]["url"]))
+    return url_bytes
 
 
 def _check_image_budgets(
@@ -693,6 +635,39 @@ def _check_image_budgets(
         raise ImageBudgetExceeded(
             f"embedding this image would bring the session document to "
             f"{projected_doc_bytes} bytes, over the "
+            f"{max_session_document_bytes}-byte document limit"
+        )
+
+
+def _check_session_totals(
+    session: "Session",
+    snapshot: Dict[str, Any],
+    *,
+    max_session_image_bytes: int,
+    max_session_document_bytes: int,
+) -> None:
+    """Raise ``ImageBudgetExceeded`` if the session, with its ops already
+    applied in memory (``snapshot`` from ``_detached_snapshot``), is over the
+    session image or document budget.
+
+    Shared by a browser batch (``apply_ops``) and a pushed result's membership
+    op, so the same view load is admitted or refused on both paths; both
+    check each image against the per-image limit first
+    (``_check_op_image_sizes``).
+    """
+    total_image_bytes = _session_image_bytes(session)
+    if total_image_bytes > max_session_image_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session's total "
+            f"embedded image data to {total_image_bytes} "
+            f"bytes, over the {max_session_image_bytes}-byte "
+            "session limit"
+        )
+    total_doc_bytes = _document_bytes(snapshot, session)
+    if total_doc_bytes > max_session_document_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session document to "
+            f"{total_doc_bytes} bytes, over the "
             f"{max_session_document_bytes}-byte document limit"
         )
 
@@ -1549,21 +1524,16 @@ class SessionManager:
         # reference-only ops, not a multi-hundred-KB picture
         # (smallfix-embedded-image-over-op-batch-cap-immovable) — so it is
         # excluded from this sum rather than making every non-image op share a
-        # cap wide enough to admit one.
+        # cap wide enough to admit one. A `nodes_replaced` view load is
+        # charged for everything but its embedded images' data URLs.
         non_image_bytes = 0
         for op in ops:
             if not isinstance(op, dict):
                 continue
-            image_bytes = _op_embedded_image_bytes(op)
-            if image_bytes:
-                if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
-                    raise ImageBudgetExceeded(
-                        f"embedded image is {image_bytes} bytes, exceeding "
-                        f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
-                        "per-image limit"
-                    )
+            image_url_bytes = _check_op_image_sizes(op)
+            if image_url_bytes and op.get("op") != "nodes_replaced":
                 continue
-            non_image_bytes += len(json.dumps(op))
+            non_image_bytes += len(json.dumps(op)) - image_url_bytes
         if non_image_bytes > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
@@ -1595,10 +1565,6 @@ class SessionManager:
                 self._validate_claim_op(op)
             elif op_type not in STATE_OPS or op_type in SERVER_ONLY_OPS:
                 raise OpError(f"unknown op: {op_type!r}")
-            if op_type == "nodes_replaced":
-                for field, kind in zip(_REPLACE_VIEW_FIELDS, (dict, list, list)):
-                    if field in op and not isinstance(op[field], kind):
-                        raise OpError(f"nodes_replaced '{field}' is malformed")
 
         async with self._lock(session_id):
             # Re-fetch inside the lock rather than reusing the check above
@@ -1642,7 +1608,7 @@ class SessionManager:
             # state op's effect on `session.state` as it walks the same list.
             working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
 
-            # ("state", applied[, fan-out client id]) | ("claim", op_type, element_ids)
+            # ("state", applied) | ("claim", op_type, element_ids)
             # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
             # in arrival order
             pending: List[Tuple[Any, ...]] = []
@@ -1678,44 +1644,19 @@ class SessionManager:
                             holder = working_leases.get(conflict_id)
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
-                        view = {f: op[f] for f in _REPLACE_VIEW_FIELDS if f in op}
-                        op = {k: v for k, v in op.items() if k not in view}
+                        for target in self.store.replaced_annotation_targets(
+                            session, op
+                        ):
+                            holder = working_leases.get(target)
+                            if holder is not None and holder != client_id:
+                                raise LeaseConflict(target, holder)
                         result = self.store.apply_state_op(
                             session, {**op, "client_id": client_id}
                         )
-                        if result is not None:
-                            state_changed = True
-                            pending.append(("state", result))
-                        if view:
-                            # The loaded view's layout joins its replace's one
-                            # record; what cannot apply is left as it was.
-                            for view_op in _replaced_view_ops(
-                                session, view, session.state["node_refs"]
-                            ):
-                                target = _claimed_annotation_target(view_op, session)
-                                if working_leases.get(target, client_id) != client_id:
-                                    continue
-                                # Loading a view restores its annotations even
-                                # when an earlier load deleted them.
-                                held_deleted = list(session._deleted_annotation_ids)
-                                if view_op["op"] == "annotation_created":
-                                    _forget_deleted_id(
-                                        session, view_op["annotation"].get("id")
-                                    )
-                                try:
-                                    applied_op = self.store.apply_state_op(
-                                        session,
-                                        {**view_op, "client_id": client_id},
-                                        record_activity=False,
-                                    )
-                                except OpError:
-                                    _restore_deleted_ids(session, held_deleted)
-                                    continue
-                                if applied_op is not None:
-                                    state_changed = True
-                                    pending.append(
-                                        ("state", applied_op, _VIEW_LOAD_CLIENT_ID)
-                                    )
+                        if result is None:
+                            continue  # legitimate no-op (e.g. update on deleted annotation)
+                        state_changed = True
+                        pending.append(("state", result))
                 if state_changed:
                     # Snapshot on the loop thread, persist the copy off-thread:
                     # the worker must never read ``session.state`` while a
@@ -1736,21 +1677,12 @@ class SessionManager:
                     # not just images — before that snapshot is persisted; the
                     # `except Exception` below rolls it back like any other
                     # mid-batch failure.
-                    total_image_bytes = _session_image_bytes(session)
-                    if total_image_bytes > max_session_image_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session's total "
-                            f"embedded image data to {total_image_bytes} "
-                            f"bytes, over the {max_session_image_bytes}-byte "
-                            "session limit"
-                        )
-                    total_doc_bytes = _document_bytes(snapshot, session)
-                    if total_doc_bytes > max_session_document_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session document to "
-                            f"{total_doc_bytes} bytes, over the "
-                            f"{max_session_document_bytes}-byte document limit"
-                        )
+                    _check_session_totals(
+                        session,
+                        snapshot,
+                        max_session_image_bytes=max_session_image_bytes,
+                        max_session_document_bytes=max_session_document_bytes,
+                    )
                     await asyncio.to_thread(self.store.persist_snapshot, snapshot)
             except Exception:
                 session.state = saved_state
@@ -1779,13 +1711,12 @@ class SessionManager:
                         session_id,
                         {
                             "type": "op",
-                            "client_id": entry[2] if len(entry) > 2 else client_id,
+                            "client_id": client_id,
                             "op": result,
                             "seq": result["seq"],
                         },
                     )
-                    if len(entry) == 2:
-                        applied.append(result)
+                    applied.append(result)
                 elif kind == "claim":
                     _, op_type, element_ids = entry
                     if op_type == "selection_claimed":
@@ -2005,7 +1936,12 @@ class SessionManager:
         return self._add_node_refs(session, client_id, node_ids)
 
     def _add_node_refs(
-        self, session: Session, client_id: str, node_ids: List[str]
+        self,
+        session: Session,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        positions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Commit one membership change after the caller has serialized access.
 
@@ -2037,6 +1973,8 @@ class SessionManager:
             "node_ids": added,
             "client_id": client_id,
         }
+        if positions is not None:
+            op["positions"] = positions
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {
             "applied": applied,
@@ -2818,6 +2756,7 @@ class SessionManager:
         *,
         record_activity: bool = True,
         trusted_replay: bool = False,
+        enforce_session_budgets: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -2836,6 +2775,8 @@ class SessionManager:
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
         prior state is not re-judged as fresh caller input.
+        ``enforce_session_budgets`` applies apply_ops' session image/document
+        budgets to the result, for an op that can carry embedded images.
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
@@ -2855,6 +2796,13 @@ class SessionManager:
                 trusted_replay=trusted_replay,
             )
             if applied is not None:
+                if enforce_session_budgets:
+                    _check_session_totals(
+                        session,
+                        _detached_snapshot(session),
+                        max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                        max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                    )
                 self.store.persist(session)
         except Exception:
             session.state = saved_state
@@ -3107,91 +3055,28 @@ class SessionManager:
                 session, actor, list(session.state.get("node_refs", []))
             )
         elif action in _REPLACING_ACTIONS:
-            # Browsers swap the whole view for the result's nodes: one op.
+            # Browsers swap the whole view for the result's nodes: one op,
+            # carrying a loaded view's layout, applied all-or-nothing.
+            op: Dict[str, Any] = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+            for target in self.store.replaced_annotation_targets(session, op):
+                holder = self.leases.snapshot(session.id).get(target)
+                if holder is not None and holder != actor:
+                    raise LeaseConflict(target, holder)
             self._apply_op_sync(
-                session,
-                session.id,
-                actor,
-                {"op": "nodes_replaced", "node_ids": node_ids, "client_id": actor},
+                session, session.id, actor, op, enforce_session_budgets=True
             )
-            self._apply_replaced_layout(session, actor, result, node_ids)
-            self._place_added_nodes(session, actor, result, node_ids)
         elif action in _ADDITIVE_ACTIONS and node_ids:
-            added = self._add_node_refs(session, actor, node_ids)["added"]
-            if added:
-                self._place_added_nodes(session, actor, result, added)
-
-    def _apply_replaced_layout(
-        self,
-        session: Session,
-        actor: str,
-        result: Dict[str, Any],
-        node_ids: List[str],
-    ) -> None:
-        """Store a loaded view's positions and hidden ids with its replace.
-
-        Browsers then render them from the session instead of each writing its
-        own layout back. They belong to the replace's one activity record, so
-        these ops record none of their own. A pushed result's annotations are
-        not the session's document format, so the overlays are left as they are.
-        """
-        view = {f: result[f] for f in ("positions", "hidden_node_ids") if f in result}
-        for op in _replaced_view_ops(session, view, node_ids):
-            self._apply_layout_op(session, actor, op)
-
-    def _apply_layout_op(
-        self, session: Session, actor: str, op: Dict[str, Any]
-    ) -> None:
-        """Apply a push's layout op as part of its membership change's record.
-
-        The membership is already stored and recorded, so a layout op that
-        fails (rolled back on its own) must not stop the command's broadcast.
-        """
-        try:
-            self._apply_op_sync(
+            self._add_node_refs(
                 session,
-                session.id,
                 actor,
-                {**op, "client_id": actor},
-                record_activity=False,
-            )
-        except Exception:
-            logger.exception(
-                "layout for a pushed membership change failed in session %s",
-                session.id,
-            )
-
-    def _place_added_nodes(
-        self,
-        session: Session,
-        actor: str,
-        result: Dict[str, Any],
-        added: List[str],
-    ) -> None:
-        """Store a position for each node a push added without one.
-
-        Every browser then draws the node where the session has it instead of
-        placing it itself and saving that back. Part of the add's (or
-        replace's) one record.
-        """
-        stored = session.state.get("positions", {})
-        given = (
-            result.get("positions") if isinstance(result.get("positions"), dict) else {}
-        )
-        positions: Dict[str, Any] = {}
-        unplaced: List[str] = []
-        for node_id in added:
-            if node_id in stored:
-                continue
-            try:
-                positions[node_id] = _validate_position(given.get(node_id))
-            except OpError:
-                unplaced.append(node_id)
-        if unplaced:
-            positions.update(_grid_positions(stored, session, unplaced))
-        if positions:
-            self._apply_layout_op(
-                session, actor, {"op": "layout_applied", "positions": positions}
+                node_ids,
+                positions=_pushed_view(result).get("positions") or {},
             )
 
     # ---------------- summon to viewport ----------------

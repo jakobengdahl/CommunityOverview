@@ -280,6 +280,27 @@ describe('applyOpToMirror', () => {
     expect(m.annotations[0].member_node_ids).toEqual(['b']);
   });
 
+  it('a replace keeps annotations it does not name and applies the ones it changes or removes', () => {
+    const m0 = {
+      node_refs: ['a'],
+      annotations: [
+        { id: 'kept', kind: 'note', text: 'k' },
+        { id: 'edited', kind: 'note', text: 'old' },
+        { id: 'dropped', kind: 'note' },
+      ],
+    };
+    const m = applyOpToMirror(m0, {
+      op: 'nodes_replaced',
+      node_ids: ['a'],
+      annotations: [{ id: 'edited', kind: 'note', text: 'new' }],
+      removed_annotation_ids: ['dropped'],
+    });
+    expect(Object.fromEntries(m.annotations.map((a) => [a.id, a.text]))).toEqual({
+      kept: 'k',
+      edited: 'new',
+    });
+  });
+
   it('upserts and deletes annotations and updates group membership', () => {
     let m = { annotations: [] };
     m = applyOpToMirror(m, {
@@ -553,6 +574,45 @@ describe('SessionSyncClient', () => {
     expect(fetchImpl.calls).toHaveLength(0);
     expect(['old', 'new', 'mine'].map((id) => client.isMember(id))).toEqual([true, true, false]);
     expect(client.baselinePosition('new')).toEqual({ x: 7, y: 8 });
+  });
+
+  it('saves only layout its user changed, never what drawing a broadcast computed', async () => {
+    const onHeldSaveReleased = vi.fn();
+    const { client, fetchImpl } = makeClient({ handlers: { onHeldSaveReleased } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    const note = { id: 'n1', type: 'note', kind: 'note', text: 'x', version: 1 };
+    const op = {
+      op: 'nodes_replaced',
+      node_ids: ['a', 'b'],
+      positions: { a: { x: 1, y: 2 } },
+      hidden_node_ids: ['a'],
+      annotations: [note],
+    };
+    es.emit({ type: 'op', client_id: 'other', seq: 1, op });
+    const release = client.holdLayoutSave();
+    // Half drawn: nothing hidden or annotated yet, 'a' still at its old place.
+    client.syncState({ node_refs: ['a'], positions: { a: { x: 50, y: 50 } } });
+    expect(onHeldSaveReleased).not.toHaveBeenCalled();
+    release();
+    release();
+    // The skipped snapshot is asked for again, once; a hold nothing skipped asks none.
+    expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
+    client.holdLayoutSave()();
+    expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
+    // Drawn: the canvas placed 'b' itself, which the server never had.
+    const drawn = { positions: { a: { x: 1, y: 2 }, b: { x: 9, y: 9 } }, annotations: [note] };
+    client.syncState({ ...drawn, node_refs: ['a', 'b'], hidden_node_ids: ['a'] });
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(0);
+    client.noteUserMoved(['b']);
+    const moved = { ...drawn.positions, b: { x: 10, y: 10 } };
+    client.syncState({ ...drawn, positions: moved, node_refs: ['a', 'b'], hidden_node_ids: ['a'] });
+    await flush();
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'node_moved', node_id: 'b', position: { x: 10, y: 10 } },
+    ]);
   });
 
   it.each([

@@ -20,8 +20,13 @@ vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
     saveViewSignal = 0,
     onSaveView,
     canvasBaselineEpoch,
+    remoteAnnotationOps,
   }) {
     canvasProps.baselineEpoch = canvasBaselineEpoch;
+    canvasProps.remoteAnnotationOps = remoteAnnotationOps;
+    useEffect(() => {
+      canvasProps.committedNodeIds = nodes.map((n) => n.id);
+    });
     useEffect(() => {
       if (saveViewSignal > 0 && onSaveView) {
         onSaveView({
@@ -286,17 +291,16 @@ describe('Server-backed session lifecycle', () => {
     expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
   });
 
-  it("a user's add sends the node's position without waiting for the autosave debounce", async () => {
+  it("a user's add sends the node's position with the add, not after it", async () => {
     renderApp();
+    const placed = { ...NODE_A, position: { x: 11, y: 22 } };
     act(() => {
-      useGraphStore.getState().addNodesToVisualization([NODE_A], []);
-      useGraphStore.getState().publishMembership('nodes_added', ['node-a']);
+      useGraphStore.getState().publishMembership('nodes_added', ['node-a'], { nodes: [placed] });
     });
     // waitFor gives up after 1000ms, before the 1500ms debounce would save.
     await waitFor(() => {
       expect(opsFrom(global.fetch)).toEqual([
-        { op: 'nodes_added', node_ids: ['node-a'] },
-        { op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } },
+        { op: 'nodes_added', node_ids: ['node-a'], positions: { 'node-a': { x: 11, y: 22 } } },
       ]);
     });
   });
@@ -408,19 +412,290 @@ describe('Server-backed session lifecycle', () => {
   it('an own replace applies on its broadcast, redrawing a shown node at the position it carries', async () => {
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
-    // node-a's canvas position reaches the sync baseline before the view loads.
     act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
     await waitFor(() => {
-      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'node_moved' }));
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
     });
     const viewed = { ...NODE_A, _savedPosition: { x: 9, y: 9 } };
     act(() =>
-      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], { nodes: [viewed] })
+      useGraphStore.getState().publishMembership('nodes_replaced', ['node-a'], {
+        nodes: [viewed],
+        view: { positions: { 'node-a': { x: 9, y: 9 } }, hidden_node_ids: ['node-a'] },
+      })
     );
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
     await waitFor(() => {
       expect(useGraphStore.getState().nodes).toEqual([viewed]);
     });
+    // The rest of the view's layout is drawn from the same broadcast.
+    expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']);
+  });
+
+  it('a broadcast view releases its autosave hold only once the canvas has drawn it', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-b' ? { node: NODE_B, edges: [] } : { success: false }
+    );
+    const seenAtRelease = [];
+    const hold = SessionSyncClient.prototype.holdLayoutSave;
+    vi.spyOn(SessionSyncClient.prototype, 'holdLayoutSave').mockImplementation(function () {
+      const release = hold.call(this);
+      return () => {
+        seenAtRelease.push(canvasProps.committedNodeIds);
+        release();
+      };
+    });
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    // React renders nothing inside act until it ends, so a release that does
+    // not wait for the canvas's commit fires here against the old nodes.
+    await act(async () => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: {
+            op: 'nodes_replaced',
+            node_ids: ['node-b'],
+            positions: { 'node-b': { x: 1, y: 2 } },
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await waitFor(() => expect(seenAtRelease).toEqual([['node-b']]));
+  });
+
+  it('an add carrying view-layout keys applies none of them', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    await act(async () => {
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: {
+            op: 'nodes_added',
+            node_ids: ['node-a'],
+            hidden_node_ids: ['node-a'],
+            annotations: [{ id: 'ann-x', type: 'note', text: 'x', version: 1 }],
+            removed_annotation_ids: ['ann-y'],
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(useGraphStore.getState().hiddenNodeIds).toEqual([]);
+    expect(canvasProps.remoteAnnotationOps || []).toEqual([]);
+  });
+
+  it('an older view load still reading its nodes never draws its annotations over a later one', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    let resolveRead;
+    api.getNodeDetails.mockImplementation(
+      (id) =>
+        new Promise((resolve) => {
+          resolveRead = () => resolve(id === 'node-b' ? { node: NODE_B, edges: [] } : {});
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    const note = (text) => ({ id: 'ann-1', type: 'note', text, version: 1 });
+    const deliver = (seq, op) =>
+      source.onmessage({
+        data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+      });
+    await act(async () => {
+      deliver(2000, {
+        op: 'nodes_replaced',
+        node_ids: ['node-a', 'node-b'],
+        annotations: [note('older')],
+      });
+      deliver(2001, { op: 'nodes_replaced', node_ids: ['node-a'], annotations: [note('newer')] });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      resolveRead();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const upserts = (canvasProps.remoteAnnotationOps || []).filter(
+      (o) => o.action === 'upsert-overlay' && o.overlay.id === 'ann-1'
+    );
+    expect(upserts.at(-1).overlay.text).toBe('newer');
+  });
+
+  it('a view load queued behind an op still reading holds autosave from when it arrives', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a', 'node-b']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    let openGate;
+    const gate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+    api.getNodeDetails.mockImplementation(async () => {
+      await gate;
+      return { node: NODE_A, edges: [] };
+    });
+    const holds = vi.spyOn(SessionSyncClient.prototype, 'holdLayoutSave');
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    const deliver = (seq, op) =>
+      source.onmessage({
+        data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+      });
+    await act(async () => {
+      deliver(2000, {
+        op: 'edges_added',
+        edges: [{ id: 'e-ab', source: 'node-a', target: 'node-b' }],
+      });
+      deliver(2001, {
+        op: 'nodes_replaced',
+        node_ids: ['node-a'],
+        positions: { 'node-a': { x: 3, y: 4 } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The replace has not started, yet its layout is in the baseline.
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    expect(holds).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      openGate();
+    });
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
+    });
+    expect(holds).toHaveBeenCalledTimes(1);
+  });
+
+  it('a node read that never settles holds later ops only until its timeout, then is aborted', async () => {
+    const timeouts = holdRequestTimeouts();
+    try {
+      renderApp();
+      act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+      act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+      await waitFor(() => {
+        expect(opsFrom(global.fetch)).toContainEqual(
+          expect.objectContaining({ op: 'nodes_added' })
+        );
+      });
+      const signals = [];
+      api.getNodeDetails.mockImplementation((id, { signal } = {}) => {
+        signals.push(signal);
+        return new Promise(() => {});
+      });
+      const source = FakeEventSource.instances
+        .filter((es) => es.url.includes('/api/sessions/'))
+        .at(-1);
+      const deliver = (seq, op) =>
+        source.onmessage({
+          data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+        });
+      await act(async () => {
+        deliver(2000, { op: 'nodes_added', node_ids: ['node-b'] });
+        deliver(2001, { op: 'nodes_hidden', node_ids: ['node-a'] });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().hiddenNodeIds).toEqual([]);
+      act(() => timeouts.fireAll());
+      await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']));
+      expect(signals.map((signal) => signal?.aborted)).toEqual([true]);
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
+    } finally {
+      timeouts.restore();
+    }
+  });
+
+  it('an op left waiting in the session being left neither holds nor touches the new session', async () => {
+    sessionStore.touchSession('5555-6666');
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    let openGate;
+    const gate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    api.getNodeDetails.mockImplementation(async () => {
+      await gate;
+      return { node: { id: 'node-c', type: 'Actor', name: 'Actor C' }, edges: [] };
+    });
+    const streamFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/`)).at(-1);
+    const first = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    await act(async () => {
+      first.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: { op: 'nodes_added', node_ids: ['node-c'] },
+        }),
+      });
+      first.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2001,
+          client_id: 'someone-else',
+          op: { op: 'nodes_dimmed', node_ids: ['node-b'] },
+        }),
+      });
+    });
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('5555-6666'));
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    });
+    await waitFor(() => expect(streamFor('5555-6666')).toBeTruthy());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      streamFor('5555-6666').onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 1,
+          client_id: 'someone-else',
+          op: { op: 'nodes_hidden', node_ids: ['node-b'] },
+        }),
+      });
+    });
+    await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-b']));
+    // The old session's read settles: neither its op nor the one queued
+    // behind it applies here.
+    await act(async () => {
+      openGate();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    expect(useGraphStore.getState().dimmedNodeIds).toEqual([]);
   });
 
   it('an own add draws its edges between nodes already shown', async () => {
@@ -563,7 +838,7 @@ describe('Server-backed session lifecycle', () => {
       expect(useGraphStore.getState().hiddenNodeIds).toContain('node-a');
     });
     expect(useGraphStore.getState().nodes.map((n) => n.id)).not.toContain('node-x');
-    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-x');
+    expect(api.getNodeDetails.mock.calls.map(([id]) => id)).not.toContain('node-x');
     await waitFor(() => {
       expect(
         screen.getByText('Reconnected — restored 1 change(s) made while offline')
@@ -1015,7 +1290,7 @@ describe('Server-backed session lifecycle', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
-    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-a');
+    expect(api.getNodeDetails.mock.calls.map(([id]) => id)).not.toContain('node-a');
 
     getPendingOpsSpy.mockRestore();
   });
@@ -1089,7 +1364,9 @@ describe('Server-backed session lifecycle', () => {
     });
 
     // The replay loop is now paused inside applyRemoteOp's fetch for node-a.
-    await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+    await waitFor(() =>
+      expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+    );
 
     // Switch to a different, already-known session while that fetch is
     // still pending.
@@ -1576,7 +1853,9 @@ describe('Server-backed session lifecycle', () => {
           }),
         });
       });
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+      await waitFor(() =>
+        expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+      );
 
       fireEvent.click(screen.getByTitle('Menu'));
       fireEvent.click(screen.getByText('5555-6666'));
@@ -2108,7 +2387,9 @@ describe('Server-backed session lifecycle', () => {
       const loadsBefore = loads();
 
       act(() => source.onmessage(catchUpMessage()));
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+      await waitFor(() =>
+        expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a')
+      );
 
       recovering = false;
       act(() => timeouts.fireAll());
@@ -3300,7 +3581,7 @@ describe('Server-backed session lifecycle', () => {
       await waitFor(() =>
         expect(useGraphStore.getState().edges.map((e) => [e.id, e.label])).toEqual([['e1', 'read']])
       );
-      expect(api.getNodeDetails).toHaveBeenCalledWith('node-a');
+      expect(api.getNodeDetails.mock.calls.map(([id]) => id)).toContain('node-a');
     });
 
     it("a collaborator's discard drops the discarded create from this canvas only", async () => {

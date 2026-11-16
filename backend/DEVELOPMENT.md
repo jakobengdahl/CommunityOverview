@@ -1414,7 +1414,12 @@ For a stored shared session the server is the single writer of a push's
 add their nodes, and saved-view loads, replacements and clears replace the
 membership with the result's nodes. The `nodes_added` or `nodes_replaced` op is
 broadcast before the command, so every browser renders membership from it and
-none writes it back. A change is one activity record, attributed to
+none writes it back. That one op also carries the layout: a load's positions,
+hidden ids and, when the result has an `annotation_document`, its annotations
+(a legacy-only view leaves the session's annotations as they are), plus a
+server-assigned position for every node it brings in without one. It applies
+all-or-nothing: if any part fails, nothing is stored and the command is not
+broadcast. A change is one activity record, attributed to
 `mcp-agent`, or to `auto-add-agent:<agent_id>` for a session auto-add agent's
 push. The server writes membership for browsers too: their autosave never
 carries it, and a user's own add, removal or clear is sent as one explicit
