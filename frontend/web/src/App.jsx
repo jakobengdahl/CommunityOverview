@@ -87,6 +87,19 @@ const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 // running ahead of each payload (see resyncFromServer).
 const RESYNC_MAX_FETCHES = 3;
 
+// A broadcast op's node read, bounded like the sync requests: ops apply one
+// at a time, so a read that never settles would hold every later op (and a
+// held autosave) with it. A read that times out counts as failed.
+function readNodeForRemoteOp(nodeId) {
+  let timer;
+  return Promise.race([
+    api.getNodeDetails(nodeId),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('node read timed out')), SYNC_REQUEST_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
@@ -485,8 +498,9 @@ function App() {
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
   // Broadcast ops apply one at a time, in stream order: a replace awaiting its
-  // node reads must not draw its annotations over a later op's.
-  const remoteOpsChainRef = useRef(Promise.resolve());
+  // node reads must not draw its annotations over a later op's. Each session
+  // has its own chain, so an op left behind cannot hold a new session's.
+  const remoteOpsChainRef = useRef({ sessionId: null, tail: Promise.resolve() });
   // Autosave holds released once the canvas has drawn what a broadcast
   // queued: each waits for the commit of the tick it was queued with, and
   // App's effects run after GraphCanvas's in that commit, so the snapshot a
@@ -506,7 +520,7 @@ function App() {
     setLayoutReleaseTick(releases.tick);
   }, []);
   const applyRemoteOp = useCallback(
-    async (op) => {
+    async (op, heldLayoutRelease = null) => {
       const store = useGraphStore.getState();
       if (
         (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
@@ -527,7 +541,7 @@ function App() {
         const sources = [...new Set(wanted.map((e) => e.source))];
         let reads;
         try {
-          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+          reads = await Promise.all(sources.map((id) => readNodeForRemoteOp(id).catch(() => null)));
         } finally {
           const left = inFlight.get(removalsAtStart) - 1;
           if (left > 0) inFlight.set(removalsAtStart, left);
@@ -570,8 +584,9 @@ function App() {
           dropped.forEach((n) => removeNode(n.id));
           // The op carries the layout it leaves (positions, hidden ids, a
           // loaded view's annotations); until all of it is drawn, autosave
-          // waits, so no part of it is saved back as this user's change.
-          const release = client?.holdLayoutSave() || (() => {});
+          // waits, so no part of it is saved back as this user's change. A
+          // streamed op's hold was taken when it was queued (onRemoteOps).
+          const release = heldLayoutRelease || client?.holdLayoutSave() || (() => {});
           const releaseSoon = () => releaseAfterDraw(release);
           const droppedIds = new Set(dropped.map((n) => n.id));
           const shown = new Set(store.nodes.map((n) => n.id));
@@ -621,7 +636,7 @@ function App() {
           // that lands before the reads settle (hydrateAddedNodes).
           let read;
           try {
-            read = await hydrateAddedNodes(client, missing, api.getNodeDetails, sent);
+            read = await hydrateAddedNodes(client, missing, readNodeForRemoteOp, sent);
           } catch (err) {
             release();
             throw err;
@@ -2854,9 +2869,18 @@ function App() {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
           if (!handleStagedSessionOp(op)) {
-            remoteOpsChainRef.current = remoteOpsChainRef.current
-              .then(() => applyRemoteOp(op))
-              .catch(() => {});
+            const chain = remoteOpsChainRef.current;
+            if (chain.sessionId !== sessionId) {
+              chain.sessionId = sessionId;
+              chain.tail = Promise.resolve();
+            }
+            // The sync baseline already holds this op's layout: autosave
+            // waits from now, not from when the ops ahead of it are done.
+            const release =
+              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
+                ? syncRef.current?.holdLayoutSave() || null
+                : null;
+            chain.tail = chain.tail.then(() => applyRemoteOp(op, release)).catch(() => release?.());
           } else if (op.op === 'graph_change_staged') {
             refreshStagedEntities(op);
           } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {

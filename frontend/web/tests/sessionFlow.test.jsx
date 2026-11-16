@@ -514,6 +514,130 @@ describe('Server-backed session lifecycle', () => {
     expect(upserts.at(-1).overlay.text).toBe('newer');
   });
 
+  it('a view load queued behind an op still reading holds autosave from when it arrives', async () => {
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a', 'node-b']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    let openGate;
+    const gate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    api.isActiveSessionPossiblyStaged.mockReturnValue(true);
+    api.getNodeDetails.mockImplementation(async () => {
+      await gate;
+      return { node: NODE_A, edges: [] };
+    });
+    const holds = vi.spyOn(SessionSyncClient.prototype, 'holdLayoutSave');
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    const deliver = (seq, op) =>
+      source.onmessage({
+        data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+      });
+    await act(async () => {
+      deliver(2000, {
+        op: 'edges_added',
+        edges: [{ id: 'e-ab', source: 'node-a', target: 'node-b' }],
+      });
+      deliver(2001, {
+        op: 'nodes_replaced',
+        node_ids: ['node-a'],
+        positions: { 'node-a': { x: 3, y: 4 } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The replace has not started, yet its layout is in the baseline.
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    expect(holds).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      openGate();
+    });
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
+    });
+    expect(holds).toHaveBeenCalledTimes(1);
+  });
+
+  it('a node read that never settles holds later ops only until its timeout', async () => {
+    const timeouts = holdRequestTimeouts();
+    try {
+      renderApp();
+      act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+      act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+      await waitFor(() => {
+        expect(opsFrom(global.fetch)).toContainEqual(
+          expect.objectContaining({ op: 'nodes_added' })
+        );
+      });
+      api.getNodeDetails.mockImplementation(() => new Promise(() => {}));
+      const source = FakeEventSource.instances
+        .filter((es) => es.url.includes('/api/sessions/'))
+        .at(-1);
+      const deliver = (seq, op) =>
+        source.onmessage({
+          data: JSON.stringify({ type: 'op', seq, client_id: 'someone-else', op }),
+        });
+      await act(async () => {
+        deliver(2000, { op: 'nodes_added', node_ids: ['node-b'] });
+        deliver(2001, { op: 'nodes_hidden', node_ids: ['node-a'] });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().hiddenNodeIds).toEqual([]);
+      act(() => timeouts.fireAll());
+      await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-a']));
+    } finally {
+      timeouts.restore();
+    }
+  });
+
+  it("an op left waiting in the session being left does not hold the new session's ops", async () => {
+    sessionStore.touchSession('5555-6666');
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => {
+      expect(opsFrom(global.fetch)).toContainEqual(expect.objectContaining({ op: 'nodes_added' }));
+    });
+    api.getNodeDetails.mockImplementation(() => new Promise(() => {}));
+    const streamFor = (id) =>
+      FakeEventSource.instances.filter((es) => es.url.includes(`/api/sessions/${id}/`)).at(-1);
+    const first = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    await act(async () => {
+      first.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 2000,
+          client_id: 'someone-else',
+          op: { op: 'nodes_added', node_ids: ['node-c'] },
+        }),
+      });
+    });
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('5555-6666'));
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    });
+    await waitFor(() => expect(streamFor('5555-6666')).toBeTruthy());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      streamFor('5555-6666').onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 1,
+          client_id: 'someone-else',
+          op: { op: 'nodes_hidden', node_ids: ['node-b'] },
+        }),
+      });
+    });
+    await waitFor(() => expect(useGraphStore.getState().hiddenNodeIds).toEqual(['node-b']));
+  });
+
   it('an own add draws its edges between nodes already shown', async () => {
     renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A, NODE_B], []));
