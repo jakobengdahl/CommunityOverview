@@ -949,7 +949,15 @@ class SessionStore:
         if view_annotations is not None:
             held = {a.get("id"): a for a in state["annotations"]}
             annotations: List[Dict[str, Any]] = []
-            for raw in view_annotations:
+            # An id listed twice keeps its last entry, as a map by id would.
+            last = {
+                a.get("id"): i
+                for i, a in enumerate(view_annotations)
+                if isinstance(a, dict) and isinstance(a.get("id"), str)
+            }
+            for i, raw in enumerate(view_annotations):
+                if isinstance(raw, dict) and last.get(raw.get("id"), i) != i:
+                    continue
                 annotation = _validate_annotation(raw, require_id=False)
                 if not isinstance(annotation.get("id"), str):
                     annotation["id"] = secrets.token_hex(8)
@@ -999,6 +1007,27 @@ class SessionStore:
         if state == before:
             return None
         return state, tombstoned, restored
+
+    def replaced_annotation_targets(
+        self, session: Session, op: Dict[str, Any]
+    ) -> List[str]:
+        """Ids of the held annotations a ``nodes_replaced`` op would change or drop.
+
+        Derived from the state the op would leave, so the edit-lease check
+        sees exactly what applying it changes. Raises ``OpError`` when the op
+        cannot apply.
+        """
+        if op.get("op") != "nodes_replaced" or op.get("annotations") is None:
+            return []
+        replaced = self._replaced_state(session, op)
+        if replaced is None:
+            return []
+        after = {a.get("id"): a for a in replaced[0]["annotations"]}
+        return [
+            a.get("id")
+            for a in session.state.get("annotations", [])
+            if after.get(a.get("id")) != a
+        ]
 
     def apply_state_op(
         self,

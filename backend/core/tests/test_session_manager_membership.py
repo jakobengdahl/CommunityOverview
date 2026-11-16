@@ -8,7 +8,11 @@ import threading
 import pytest
 
 from backend.core.session_activity import MAX_ACTIVITY_NODE_IDS
-from backend.core.session_manager import AUTO_ADD_ACTOR_PREFIX, _TokenBucket
+from backend.core.session_manager import (
+    AUTO_ADD_ACTOR_PREFIX,
+    LeaseConflict,
+    _TokenBucket,
+)
 from backend.core.session_store import OpError
 from backend.core.tests.test_session_manager import _manager, _drain
 
@@ -349,6 +353,30 @@ class TestServerMembership:
             await self._load_view(mgr, s, via, view)
         assert (s.state, s.seq, s.activity_log) == before
         assert await _drain(sub) == []
+
+    @pytest.mark.parametrize("via", ["push", "browser"])
+    async def test_view_load_cannot_change_an_annotation_leased_by_another(self, via):
+        """Dropping a field or changing the type of a leased annotation conflicts;
+        an id listed twice is applied once, as its last entry."""
+        mgr, s = self._seeded_session()
+        for client in ("c0", "c9"):
+            mgr.connect(s.id, client, client)
+        leased = {"id": "leased", "type": "note", "text": "hi"}
+        mgr.store.apply_state_op(s, {"op": "annotation_created", "annotation": leased})
+        await mgr.apply_ops(
+            s.id, "c9", 0, [{"op": "edit_lease_acquired", "element_ids": ["leased"]}]
+        )
+        view = {"positions": {}, "hidden_node_ids": []}
+        before = copy.deepcopy((s.state, s.seq, s.activity_log))
+        for changed in ({"id": "leased", "type": "note"}, {**leased, "type": "label"}):
+            with pytest.raises(LeaseConflict):
+                await self._load_view(mgr, s, via, {**view, "annotations": [changed]})
+            assert (s.state, s.seq, s.activity_log) == before
+
+        held = copy.deepcopy(s.state["annotations"][-1])
+        twice = [{**leased, "text": "other"}, leased]
+        await self._load_view(mgr, s, via, {**view, "annotations": twice})
+        assert s.state["annotations"] == [held]
 
     async def test_direct_user_and_mcp_changes_keep_their_actor(self):
         mgr = _manager()

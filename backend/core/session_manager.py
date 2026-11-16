@@ -70,7 +70,6 @@ from .session_store import (
     Session,
     SessionRetired,
     SessionStore,
-    _ANNOTATION_META_FIELDS,
     _validate_position,
     is_valid_session_id,
 )
@@ -473,22 +472,6 @@ def _pushed_view(result: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(document, list):
         view["annotations"] = [a for a in document if isinstance(a, dict)]
     return view
-
-
-def _replaced_annotation_targets(op: Dict[str, Any], session: Session) -> List[str]:
-    """Ids of the held annotations a ``nodes_replaced`` view would change or drop."""
-    annotations = op.get("annotations")
-    if op.get("op") != "nodes_replaced" or not isinstance(annotations, list):
-        return []
-    wanted = {a.get("id"): a for a in annotations if isinstance(a, dict)}
-    targets = []
-    for held in session.state.get("annotations", []):
-        view = wanted.get(held.get("id"))
-        if view is None or any(
-            view.get(k) != held.get(k) for k in view if k not in _ANNOTATION_META_FIELDS
-        ):
-            targets.append(held.get("id"))
-    return targets
 
 
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
@@ -1621,7 +1604,9 @@ class SessionManager:
                             holder = working_leases.get(conflict_id)
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
-                        for target in _replaced_annotation_targets(op, session):
+                        for target in self.store.replaced_annotation_targets(
+                            session, op
+                        ):
                             holder = working_leases.get(target)
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(target, holder)
@@ -3037,7 +3022,7 @@ class SessionManager:
                 "client_id": actor,
                 **_pushed_view(result),
             }
-            for target in _replaced_annotation_targets(op, session):
+            for target in self.store.replaced_annotation_targets(session, op):
                 holder = self.leases.snapshot(session.id).get(target)
                 if holder is not None and holder != actor:
                     raise LeaseConflict(target, holder)
