@@ -1094,6 +1094,7 @@ class SessionStore:
             if replaced is None:
                 return None
             state, tombstoned, restored = replaced
+            held_before = {a.get("id"): a for a in session.state["annotations"]}
             session.state = state
             for ann_id in restored:
                 while ann_id in session._deleted_annotation_ids:
@@ -1107,7 +1108,15 @@ class SessionStore:
             }
             applied["hidden_node_ids"] = list(state["hidden_node_ids"])
             if op.get("annotations") is not None:
-                applied["annotations"] = copy.deepcopy(state["annotations"])
+                # Only what this op changes: the op is kept in the ring and
+                # sent to every subscriber and catch-up, so repeating unchanged
+                # annotations (image data URLs included) on every load would
+                # multiply payloads with nothing to show for it.
+                applied["annotations"] = [
+                    copy.deepcopy(a)
+                    for a in state["annotations"]
+                    if held_before.get(a.get("id")) != a
+                ]
                 applied["removed_annotation_ids"] = tombstoned
         elif op_type == "node_moved":
             node_id = op.get("node_id")

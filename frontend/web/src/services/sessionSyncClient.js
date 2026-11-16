@@ -385,11 +385,18 @@ export function applyOpToMirror(mirrorState, op) {
           : a
       );
       // A replace carries the layout it leaves: every member's position, the
-      // hidden set and, for a loaded view, the whole annotation list.
+      // hidden set and, for a loaded view, the annotations it changed or removed.
       if (replace) {
         for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
         if (Array.isArray(op.hidden_node_ids)) m.hidden_node_ids = [...op.hidden_node_ids];
-        if (Array.isArray(op.annotations)) m.annotations = op.annotations.map(withGroupTextColor);
+        if (Array.isArray(op.annotations)) {
+          const changed = new Map(op.annotations.map((a) => [a.id, withGroupTextColor(a)]));
+          const removed = new Set(op.removed_annotation_ids || []);
+          m.annotations = [
+            ...m.annotations.filter((a) => !removed.has(a.id) && !changed.has(a.id)),
+            ...changed.values(),
+          ];
+        }
       }
       break;
     }

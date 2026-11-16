@@ -280,6 +280,27 @@ describe('applyOpToMirror', () => {
     expect(m.annotations[0].member_node_ids).toEqual(['b']);
   });
 
+  it('a replace keeps annotations it does not name and applies the ones it changes or removes', () => {
+    const m0 = {
+      node_refs: ['a'],
+      annotations: [
+        { id: 'kept', kind: 'note', text: 'k' },
+        { id: 'edited', kind: 'note', text: 'old' },
+        { id: 'dropped', kind: 'note' },
+      ],
+    };
+    const m = applyOpToMirror(m0, {
+      op: 'nodes_replaced',
+      node_ids: ['a'],
+      annotations: [{ id: 'edited', kind: 'note', text: 'new' }],
+      removed_annotation_ids: ['dropped'],
+    });
+    expect(Object.fromEntries(m.annotations.map((a) => [a.id, a.text]))).toEqual({
+      kept: 'k',
+      edited: 'new',
+    });
+  });
+
   it('upserts and deletes annotations and updates group membership', () => {
     let m = { annotations: [] };
     m = applyOpToMirror(m, {

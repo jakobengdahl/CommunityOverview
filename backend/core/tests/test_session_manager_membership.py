@@ -340,8 +340,18 @@ class TestServerMembership:
             assert (op["op"], events[0]["client_id"]) == ("nodes_replaced", actor)
             assert op["positions"] == s.state["positions"]
             assert op["hidden_node_ids"] == ["c"]
-            assert op["annotations"] == s.state["annotations"]
+            # Only the annotations the load changes travel: "kept" is unchanged.
+            assert op["annotations"] == [s.state["annotations"][1]]
             assert op["removed_annotation_ids"] == ["dropped"]
+
+        # A reload differing only in a position repeats no annotation.
+        await self._load_view(
+            mgr, s, via, {**view, "positions": {"a": {"x": 3, "y": 4}}}
+        )
+        for sub in subs:
+            op = [e for e in await _drain(sub) if e["type"] == "op"][0]["op"]
+            assert (op["annotations"], op["removed_annotation_ids"]) == ([], [])
+            assert op["positions"]["a"] == {"x": 3.0, "y": 4.0}
 
         # Reloading a view brings back an annotation an earlier load deleted.
         await self._load_view(
