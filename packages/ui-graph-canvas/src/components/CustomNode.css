@@ -1,16 +1,40 @@
+/* Shared appearance values retain the legacy card palette in both themes. */
+:root {
+  --graph-card-surface: #1a1a1a;
+  --graph-card-text-primary: #ddd;
+  --graph-card-text-secondary: #999;
+  --graph-card-border: currentColor;
+  --graph-card-band-foreground: white;
+  --graph-card-focus: rgba(100, 108, 255, 0.7);
+  --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --graph-card-control-border: #1a1a1a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --graph-card-surface: white;
+    --graph-card-text-primary: #213547;
+    --graph-card-text-secondary: #666;
+    --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+    --graph-card-control-border: white;
+  }
+}
+
 .graph-custom-node {
-  background: #1a1a1a;
-  border: 2px solid;
+  background: var(--graph-card-surface);
+  border: 2px solid var(--graph-card-border);
   border-radius: 8px;
   min-width: 150px;
   max-width: 250px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--graph-card-shadow);
   position: relative;
   transition: all 0.2s ease;
 }
 
 .graph-custom-node:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--graph-card-shadow-hover);
   transform: scale(1.02);
 }
 
@@ -63,7 +87,7 @@
 
 .graph-custom-node.selected {
   box-shadow:
-    0 0 0 3px rgba(100, 108, 255, 0.7),
+    0 0 0 3px var(--graph-card-focus),
     0 0 16px rgba(100, 108, 255, 0.3);
 }
 
@@ -112,7 +136,7 @@
 .graph-node-header {
   padding: 0.4rem 0.6rem;
   border-radius: 6px 6px 0 0;
-  color: white;
+  color: var(--graph-card-band-foreground);
   font-size: 0.75rem;
   font-weight: 600;
   text-align: center;
@@ -122,7 +146,7 @@
 
 .graph-node-content {
   padding: 0.75rem;
-  color: #ddd;
+  color: var(--graph-card-text-primary);
 }
 
 .graph-node-label {
@@ -134,7 +158,7 @@
 
 .graph-node-summary {
   font-size: 0.75rem;
-  color: #999;
+  color: var(--graph-card-text-secondary);
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -153,7 +177,7 @@
   border-radius: 50%;
   background-color: #646cff;
   color: white;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
   font-size: 1rem;
   font-weight: bold;
   cursor: pointer;
@@ -178,7 +202,7 @@
   border-radius: 50%;
   background-color: #10b981;
   color: white;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
   font-size: 0.8rem;
   cursor: pointer;
   display: flex;
@@ -267,37 +291,11 @@ body.graph-menu-open .graph-node-tooltip {
   width: 8px;
   height: 8px;
   background-color: #646cff;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
 }
 
 /* Light mode support */
 @media (prefers-color-scheme: light) {
-  .graph-custom-node {
-    background: white;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-
-  .graph-custom-node:hover {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  }
-
-  .graph-node-content {
-    color: #213547;
-  }
-
-  .graph-node-summary {
-    color: #666;
-  }
-
-  .graph-expand-button,
-  .graph-edit-button {
-    border-color: white;
-  }
-
-  .graph-custom-node .react-flow__handle {
-    border-color: white;
-  }
-
   .graph-node-tooltip {
     background-color: #fff;
     border-color: #ddd;
