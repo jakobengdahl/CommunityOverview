@@ -6,8 +6,8 @@
 implementation slices. Implemented so far, in `backend/functions/`: the broker
 and its protocol session (§6, §7, §9 attribution, the per-message and tool-call
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
-Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Not
-yet implemented: manifests, invocation and run records.
+Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Also implemented: manifest validation, manual REST and CLI invocation through a
+shared admission service, and function run records in the existing history store.
 **Scope:** Open-source core. This version covers manually invoked functions that
 read and write the graph through a broker. Every other trigger, tool and binding
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
