@@ -69,7 +69,11 @@ class ChatService:
     """
 
     def __init__(
-        self, graph_service: GraphService, *, assistant_attachment_access: str = "off"
+        self,
+        graph_service: GraphService,
+        *,
+        assistant_attachment_access: str = "off",
+        conversation_registry=None,
     ):
         """
         Initialize ChatService with a GraphService instance.
@@ -77,6 +81,7 @@ class ChatService:
         Args:
             graph_service: The GraphService instance to use for all graph operations
         """
+        self._conversation_registry = conversation_registry
         self._assistant_attachment_access = validate_attachment_setting(
             assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
         )
@@ -1002,7 +1007,9 @@ class ChatService:
                     tool_allowlist = ["__no_tools__"]
             if _confirmation is None:
                 conversation_id = conversation_states.bind_conversation_id(
-                    conversation_id
+                    conversation_id,
+                    registry=self._conversation_registry,
+                    actor=request_actor(),
                 )
             context = {
                 "conversation_id": conversation_id or secrets.token_urlsafe(32),
@@ -1042,7 +1049,11 @@ class ChatService:
                 )
                 started_at = time.time()
                 status = conversation_states.taint_status(
-                    received, conversation_state, context["actor"], conversation_id
+                    received,
+                    conversation_state,
+                    context["actor"],
+                    conversation_id,
+                    registry=self._conversation_registry,
                 )
                 inherited_taint = status != conversation_states.CLEAN
                 # Only attachment reads taint, so with attachments off for the
@@ -1084,6 +1095,7 @@ class ChatService:
                     reply=result["content"],
                     conversation_id=conversation_id,
                     started_at=started_at,
+                    registry=self._conversation_registry,
                 )
                 result["conversation_id"] = conversation_id
             return result

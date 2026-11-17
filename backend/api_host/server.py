@@ -48,6 +48,7 @@ from backend.core.session_auto_add import (
 from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.ui.conversation_state import FileTaintRegistry
 from backend.core.session_manager import SessionManager
 from backend.core.write_modes import WriteModes
 
@@ -477,7 +478,9 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         config.mcp_attachment_tools,
     )
     chat_service = ChatService(
-        graph_service, assistant_attachment_access=config.assistant_attachment_access
+        graph_service,
+        assistant_attachment_access=config.assistant_attachment_access,
+        conversation_registry=FileTaintRegistry(sessions_dir),
     )
     document_service = DocumentService()
 
