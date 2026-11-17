@@ -483,7 +483,26 @@ def register_mcp_tools(
         — the legacy queue via ``loop.call_soon``, the hub by passing the object
         to subscribers — so a later mutation of a shared ``result`` would still
         be visible to them. Do not remove that copy.
+
+        A read tool's push writes the session (membership, a loaded view's
+        layout and annotations), so it needs the same MUTATE grant as
+        ``add_nodes_to_session``; a caller without it still gets the read.
         """
+        if session_id and tool_name in _PUSHING_TOOLS:
+            denied = _authorize_session(GRAPH_ACTION_MUTATE, tool_name)
+            if denied:
+                delivery = {
+                    "requested": True,
+                    "delivered": False,
+                    "status": "not_delivered",
+                    "live_consumers": 0,
+                    "error_code": denied["error_code"],
+                    "warning": "Not pushed: this caller may not change the "
+                    "session. " + denied["message"],
+                }
+                if isinstance(result, dict):
+                    result["visualization_delivery"] = delivery
+                return delivery
         delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )

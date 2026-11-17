@@ -23,6 +23,10 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
 )
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    AUTHORIZATION_MODE_READ_ONLY,
+)
 from backend.service import GraphService, register_mcp_tools
 from backend.service.mcp_tools import _undelivered_push_warning
 
@@ -220,6 +224,44 @@ def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
         assert delivery["delivered"] is False, tool_name
         assert delivery["live_consumers"] == 0, tool_name
         assert delivery["warning"], tool_name
+
+
+def test_a_caller_without_mutate_reads_but_never_pushes_into_the_session(
+    wired, monkeypatch
+):
+    """A read tool's push writes the session, so it needs the MUTATE grant."""
+    tools, _registry, manager = wired
+    session_id = _new_session(tools)
+    tools["add_nodes_to_session"](session_id=session_id, node_ids=["beta"])
+    tools["save_view"](name="A view")
+    before = manager.get_session(session_id)
+    refs, seq = list(before.state["node_refs"]), before.seq
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    monkeypatch.setenv(AUTHORIZATION_MODE_ENV, AUTHORIZATION_MODE_READ_ONLY)
+    try:
+        for tool_name, call in {
+            "search_graph": lambda: tools["search_graph"](
+                query="Alpha", visualization_session_id=session_id
+            ),
+            "get_related_nodes": lambda: tools["get_related_nodes"](
+                node_id="alpha", visualization_session_id=session_id
+            ),
+            "get_saved_view": lambda: tools["get_saved_view"](
+                name="A view", visualization_session_id=session_id
+            ),
+        }.items():
+            result = call()
+            delivery = result["visualization_delivery"]
+            assert delivery["error_code"] == "access_denied", tool_name
+            assert delivery["delivered"] is False, tool_name
+            assert result.get("error_code") != "access_denied", tool_name
+
+        after = manager.get_session(session_id)
+        assert (after.state["node_refs"], after.seq) == (refs, seq)
+        commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
+        assert commands == []
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
 
 
 # ---------------------------------------------------------------------------
