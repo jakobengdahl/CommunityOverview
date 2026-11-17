@@ -1,10 +1,13 @@
 # Configurable node shapes
 
 The models, strict validation, resolution contract, schema transport and empty
-session maps, semantic appearance tokens and shared base geometry are implemented.
-Rendering, editing, shared appearance operations
-and library persistence remain future work. Unconfigured nodes continue to use
-the existing CustomNode renderer.
+session maps, semantic appearance tokens, shared base geometry and the canvas
+renderer with accessible text are implemented. A node whose type names a
+configured shape (or whose session selection resolves to a config or inline
+definition) renders that shape; saved library references resolve to the
+built-in card until library persistence exists. Editing, shared appearance
+operations and library persistence remain future work. Unconfigured nodes
+continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
 [Clickable editor](node-shapes/editor.html). Open either file directly; no server,
@@ -297,8 +300,9 @@ excluded from body hits and edge anchors.
 
 A canvas node can carry this descriptor as `geometry`; floating edges and Dagre
 consume it directly. Nodes without a descriptor retain legacy layout dimensions
-and measured rectangular edge bounds. The existing card renderer does not yet
-supply a descriptor. Zero-distance endpoint centres use opposite vertical
+and measured rectangular edge bounds. `GraphCanvas` attaches the descriptor to
+every node with a resolved shape; the built-in card supplies none. Marquee
+selection still uses React Flow's rectangular node bounds. Zero-distance endpoint centres use opposite vertical
 anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale

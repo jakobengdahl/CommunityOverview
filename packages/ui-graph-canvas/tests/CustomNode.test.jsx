@@ -1,20 +1,31 @@
-// covers: packages/ui-graph-canvas/src/components/CustomNode.jsx
+// covers: packages/ui-graph-canvas/src/components/CustomNode.jsx, packages/ui-graph-canvas/src/utils/nodeShapes.js
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { URL as NodeURL } from 'node:url';
+import ReactFlow, { ReactFlowProvider } from 'reactflow';
 
 const customNodeCss = readFileSync(
   new NodeURL('../src/components/CustomNode.css', import.meta.url),
   'utf8'
 );
 
-vi.mock('reactflow', () => ({
+vi.mock('reactflow', async (importOriginal) => ({
+  ...(await importOriginal()),
   Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
-  Position: { Top: 'top', Bottom: 'bottom' },
 }));
 
 import CustomNode from '../src/components/CustomNode';
+import {
+  BAND_TEXT_DARK,
+  BAND_TEXT_LIGHT,
+  bandTextStyle,
+  createNodeShapeResolver,
+  nodeShapeAccessibleName,
+  nodeShapeAreaValues,
+  nodeShapeGeometry,
+  nodeShapeTextBox,
+} from '../src/utils/nodeShapes';
 
 describe('CustomNode theme shadow cascade', () => {
   it.each(['selected', 'highlighted', 'selected highlighted'])(
@@ -250,5 +261,279 @@ describe('CustomNode staged marker', () => {
     const node = screen.getByText('Plain').closest('.graph-custom-node');
     expect(node.className).not.toContain('staged');
     expect(document.querySelector('.graph-node-staged-badge')).toBeNull();
+  });
+});
+
+const RISK = {
+  version: 1,
+  base: 'triangle-up',
+  scale: 1,
+  placement: 'centre',
+  areas: { first: 'name', second: 'risk_level', third: null },
+};
+const CARD = {
+  version: 1,
+  base: 'rectangle',
+  scale: 1,
+  placement: 'top-left',
+  areas: { first: 'type', second: 'name', third: 'summary' },
+};
+const graphNode = {
+  id: 'n1',
+  type: 'Risk',
+  name: 'Supply delay',
+  summary: 'Parts arrive late '.repeat(20),
+  risk_level: 'high',
+  owner: { name: 'object' },
+  hidden: 'undeclared',
+  metadata: 'private',
+};
+const FIELDS = ['risk_level', 'owner', 'metadata'];
+const flowNodeTypes = { custom: CustomNode };
+
+function shapedFlowNode(definition, data = {}, node = graphNode) {
+  const geometry = nodeShapeGeometry(definition.base, definition.scale);
+  const values = nodeShapeAreaValues(definition, node, FIELDS);
+  return {
+    id: node.id,
+    type: 'custom',
+    position: { x: 0, y: 0 },
+    geometry,
+    className: 'graph-shaped-flow-node',
+    ariaLabel: nodeShapeAccessibleName(definition, node, values),
+    data: {
+      label: node.name,
+      nodeType: node.type,
+      color: '#1e3a8a',
+      shapeRender: { definition, values, geometry },
+      ...data,
+    },
+  };
+}
+
+function renderFlow(nodes, { zoom = 1, onNodesChange = () => {} } = {}) {
+  return render(
+    <ReactFlowProvider>
+      <ReactFlow
+        nodes={nodes}
+        edges={[]}
+        nodeTypes={flowNodeTypes}
+        defaultViewport={{ x: 0, y: 0, zoom }}
+        minZoom={0.01}
+        onNodesChange={onNodesChange}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+function withStylesheet(run) {
+  const style = document.createElement('style');
+  style.textContent = customNodeCss;
+  document.head.appendChild(style);
+  try {
+    run();
+  } finally {
+    style.remove();
+  }
+}
+
+describe('CustomNode configured shapes', () => {
+  it('draws band, surface, shadow and outline for a configured base and keeps the card otherwise', () => {
+    renderFlow([
+      shapedFlowNode(CARD),
+      // A graph attribute that merely looks like a shape cannot opt in.
+      {
+        id: 'plain',
+        type: 'custom',
+        position: { x: 400, y: 0 },
+        data: { label: 'Plain', nodeType: 'Actor', shapeRender: { geometry: { anchor: 'x' } } },
+      },
+    ]);
+    const shaped = screen.getByTestId('rf__node-n1');
+    expect(shaped.querySelector('.graph-custom-node')).toBeNull();
+    const root = shaped.querySelector('.graph-shaped-node.graph-shape-rectangle');
+    for (const part of ['shadow', 'body', 'outline']) {
+      expect(root.querySelector(`.graph-shape-${part}`).getAttribute('d')).toBe(
+        nodeShapeGeometry('rectangle', 1).path
+      );
+    }
+    expect(root.querySelector('.graph-shape-band').style.fill).toBe('#1e3a8a');
+    expect(screen.getByTestId('rf__node-plain').querySelector('.graph-custom-node')).not.toBeNull();
+  });
+
+  it('binds areas to plain text of declared scalars only and keeps the band when text is None', () => {
+    expect(
+      nodeShapeAreaValues(
+        { areas: { first: 'type', second: 'risk_level', third: 'summary' } },
+        graphNode,
+        FIELDS
+      )
+    ).toEqual({ first: 'Risk', second: 'high', third: graphNode.summary });
+    expect(
+      nodeShapeAreaValues(
+        { areas: { first: 'owner', second: 'hidden', third: 'metadata' } },
+        graphNode,
+        FIELDS
+      )
+    ).toEqual({ first: '', second: '', third: '' });
+
+    const markup = { ...graphNode, name: '<b>bold</b>' };
+    const definition = { ...CARD, areas: { first: null, second: 'name', third: 'summary' } };
+    renderFlow([shapedFlowNode(definition, {}, markup)]);
+    const root = document.querySelector('.graph-shaped-node');
+    expect(root.querySelector('.graph-node-label').textContent).toBe('<b>bold</b>');
+    expect(root.querySelector('b')).toBeNull();
+    expect(root.querySelector('.graph-shape-band')).not.toBeNull();
+    expect(root.querySelector('.graph-shape-label-chip')).toBeNull();
+    const area = root.querySelector('.graph-shape-text');
+    const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
+    expect(parseFloat(area.style.width)).toBe(box.width);
+    expect(parseFloat(area.style.height)).toBe(box.height);
+    withStylesheet(() => expect(getComputedStyle(area).overflow).toBe('hidden'));
+  });
+
+  it('keeps every placement inside its base and the downward bottom stack off the tip', () => {
+    const placements = {
+      rectangle: ['top', 'middle', 'bottom'].flatMap((v) =>
+        ['left', 'centre', 'right'].map((h) => `${v}-${h}`)
+      ),
+      'triangle-up': ['centre', 'bottom'],
+      'triangle-down': ['centre', 'bottom'],
+    };
+    placements['rectangle-flat'] = placements.rectangle;
+    const resolve = (definition) =>
+      createNodeShapeResolver({
+        nodeTypes: { Risk: { shape: 'x' } },
+        nodeShapes: { x: definition },
+      })(graphNode);
+    for (const [base, allowed] of Object.entries(placements)) {
+      const geometry = nodeShapeGeometry(base, 2);
+      for (const placement of allowed) {
+        const { x, y, width, height } = nodeShapeTextBox(geometry, placement);
+        for (const corner of [
+          { x, y },
+          { x: x + width, y },
+          { x, y: y + height },
+          { x: x + width, y: y + height },
+        ]) {
+          expect(geometry.contains(corner)).toBe(true);
+        }
+        expect(resolve({ ...CARD, base, placement })?.definition.placement).toBe(placement);
+      }
+      const foreign = base.startsWith('triangle') ? 'top-left' : 'centre';
+      expect(resolve({ ...CARD, base, placement: foreign })).toBeNull();
+    }
+    const down = nodeShapeGeometry('triangle-down', 1);
+    const bottom = nodeShapeTextBox(down, 'bottom');
+    expect(bottom.y).toBeGreaterThan(nodeShapeTextBox(down, 'centre').y);
+    expect(bottom.y + bottom.height).toBeLessThan(down.height * 0.75);
+  });
+
+  it('names the node by type, name and mapped values once, hiding the SVG decoration', () => {
+    expect(
+      nodeShapeAccessibleName(RISK, graphNode, { first: 'Supply delay', second: 'high', third: '' })
+    ).toBe('Risk, Supply delay, high');
+    renderFlow([shapedFlowNode(CARD)]);
+    const wrapper = screen.getByTestId('rf__node-n1');
+    // jsdom leaves unmeasured wrappers hidden, so read the name the wrapper
+    // button carries; aria-label replaces its content as the spoken name.
+    expect(wrapper.getAttribute('role')).toBe('button');
+    // The clipped summary is still spoken in full; the type and name are not repeated.
+    expect(wrapper.getAttribute('aria-label')).toBe(`Risk, Supply delay, ${graphNode.summary}`);
+    expect(wrapper.querySelector('svg').getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('keeps state badges and non-colour cues on a configured shape', () => {
+    renderFlow([
+      {
+        ...shapedFlowNode(RISK, {
+          nodeType: 'Skill',
+          isDimmed: true,
+          markColor: '#ff0000',
+          markLabel: 'Watch',
+          pulse: { style: 'glow', seq: 1 },
+          remoteSelection: { color: '#00aa00', displayName: 'Ada' },
+          stagedState: 'created',
+          stagedLabel: 'Staged: new',
+        }),
+        selected: true,
+      },
+    ]);
+    const root = document.querySelector('.graph-shaped-node');
+    for (const state of [
+      'selected',
+      'marked',
+      'skill-node',
+      'remote-selected',
+      'dimmed',
+      'staged-created',
+    ]) {
+      expect(root.classList.contains(state)).toBe(true);
+    }
+    expect(screen.getByText('Ada').className).toContain('graph-node-remote-badge');
+    expect(screen.getByText('Staged: new').dataset.stagedState).toBe('created');
+    expect(screen.getByText('★')).toBeTruthy();
+    expect(root.querySelector('.graph-node-mark-badge')).not.toBeNull();
+    expect(root.querySelector('.graph-node-pulse-glow')).not.toBeNull();
+    expect(root.querySelector('.graph-shape-ring-focus')).not.toBeNull();
+    withStylesheet(() => {
+      const outline = getComputedStyle(root.querySelector('.graph-shape-outline'));
+      expect(outline.strokeDasharray || outline.getPropertyValue('stroke-dasharray')).not.toBe('');
+    });
+  });
+
+  it('passes the pointer through everything but the painted body, labels and a 24px target', () => {
+    renderFlow([shapedFlowNode({ ...RISK, scale: 0.1 })], { zoom: 0.5 });
+    const wrapper = screen.getByTestId('rf__node-n1');
+    withStylesheet(() => {
+      // React Flow sets pointer-events inline, which only an important rule
+      // overrides in a browser; jsdom does not apply that precedence itself.
+      const wrapperRule = [...document.styleSheets]
+        .flatMap((sheet) => [...sheet.cssRules])
+        .find((rule) => rule.selectorText && wrapper.matches(rule.selectorText));
+      expect(wrapperRule.style.getPropertyValue('pointer-events')).toBe('none');
+      expect(wrapperRule.style.getPropertyPriority('pointer-events')).toBe('important');
+      expect(getComputedStyle(wrapper.querySelector('.graph-shaped-node')).pointerEvents).toBe(
+        'none'
+      );
+      for (const hit of ['.graph-shape-body', '.graph-shape-label-chip', '.graph-shape-hit']) {
+        expect(getComputedStyle(wrapper.querySelector(hit)).pointerEvents).toBe('auto');
+      }
+    });
+    // 24 screen px at zoom 0.5 is 48 flow px.
+    expect(wrapper.querySelector('.graph-shape-hit').style.width).toBe('48px');
+  });
+
+  it('needs no extra target for a readable body', () => {
+    renderFlow([shapedFlowNode(RISK)]);
+    expect(document.querySelector('.graph-shape-hit')).toBeNull();
+  });
+
+  it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {
+    expect(bandTextStyle('#767676')).toEqual({ color: BAND_TEXT_LIGHT });
+    expect(bandTextStyle('#777777')).toEqual({ color: BAND_TEXT_DARK });
+    expect(bandTextStyle('#fde047')).toEqual({ color: BAND_TEXT_DARK });
+    expect(bandTextStyle('tomato').background).toBe('var(--graph-card-surface)');
+  });
+
+  it('selects by keyboard and then offers the related-node action without a pointer', () => {
+    const onNodesChange = vi.fn();
+    const onExpand = vi.fn();
+    const { rerender } = renderFlow([shapedFlowNode(CARD, { onExpand })], { onNodesChange });
+    const wrapper = screen.getByTestId('rf__node-n1');
+    wrapper.focus();
+    fireEvent.keyDown(wrapper, { key: 'Enter' });
+    expect(onNodesChange).toHaveBeenCalledWith([{ id: 'n1', type: 'select', selected: true }]);
+    rerender(
+      <ReactFlowProvider>
+        <ReactFlow
+          nodes={[{ ...shapedFlowNode(CARD, { onExpand }), selected: true }]}
+          edges={[]}
+          nodeTypes={flowNodeTypes}
+        />
+      </ReactFlowProvider>
+    );
+    fireEvent.click(screen.getByTitle('Show related nodes'));
+    expect(onExpand).toHaveBeenCalledTimes(1);
   });
 });

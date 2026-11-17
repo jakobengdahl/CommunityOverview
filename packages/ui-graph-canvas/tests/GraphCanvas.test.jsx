@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
@@ -12,6 +13,9 @@ vi.mock('reactflow', () => {
           <div
             key={node.id}
             data-testid={`node-${node.id}`}
+            className={node.className}
+            aria-label={node.ariaLabel}
+            data-shape-base={node.geometry?.base}
             onContextMenu={(event) => onNodeContextMenu?.(event, node)}
           >
             {node.data?.label}
@@ -143,6 +147,40 @@ describe('GraphCanvas', () => {
 
       expect(screen.getByRole('button', { name: /oppna i kallgrafen/i })).toBeTruthy();
     });
+  });
+
+  it('resolves a configured type shape onto its nodes and leaves other types on the card', () => {
+    const schema = {
+      node_shapes: {
+        risk: {
+          version: 1,
+          base: 'triangle-down',
+          scale: 1.5,
+          placement: 'bottom',
+          areas: { first: 'name', second: 'risk_level', third: null },
+        },
+      },
+      node_types: { Risk: { shape: 'risk', fields: ['risk_level'] }, Actor: { shape: 'risk' } },
+    };
+    render(
+      <GraphCanvas
+        nodes={[
+          { id: 'r1', name: 'Supply delay', type: 'Risk', risk_level: 'high' },
+          { id: 'a1', name: 'Agency', type: 'Actor' },
+        ]}
+        edges={[]}
+        schema={schema}
+        // A session type default outranks the configured one.
+        typeShapes={{ Actor: { builtin: true } }}
+      />
+    );
+    const risk = screen.getByTestId('node-r1');
+    expect(risk.dataset.shapeBase).toBe('triangle-down');
+    expect(risk.className).toBe('graph-shaped-flow-node');
+    expect(risk.getAttribute('aria-label')).toBe('Risk, Supply delay, high');
+    const actor = screen.getByTestId('node-a1');
+    expect(actor.dataset.shapeBase).toBeUndefined();
+    expect(actor.getAttribute('aria-label')).toBeNull();
   });
 
   it('renders graph container and react-flow', () => {
