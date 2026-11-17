@@ -87,10 +87,21 @@ def test_webhook_database_uses_private_state_and_rejects_import_collision(
     with pytest.raises(ValueError, match="must be separate"):
         config.get_webhook_tokens_db_path()
 
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    alias = tmp_path / "tenant-alias"
+    alias.symlink_to(tenant, target_is_directory=True)
+    monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant))
+    for state in (tenant, tenant / "nested", alias / "nested"):
+        monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(state))
+        with pytest.raises(ValueError, match="outside the tenant config directory"):
+            config.get_webhook_tokens_db_path()
+
     monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tenant))
     config.import_jobs_db = None
     first = config.get_webhook_tokens_db_path()
+    assert not first.resolve().is_relative_to(tenant.resolve())
     assert first == config.get_webhook_tokens_db_path()
     other = AppConfig(graph_file=str(tmp_path / "other" / "graph.json"))
     assert first != other.get_webhook_tokens_db_path()
