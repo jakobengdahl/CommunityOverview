@@ -1,6 +1,7 @@
 # covers: backend/functions/token_store.py, backend/functions/routes.py
 import json
 import hashlib
+import logging
 import sqlite3
 from types import SimpleNamespace
 
@@ -12,7 +13,10 @@ from backend.functions.token_store import WebhookTokenStore
 from backend.runtime.authorization import GraphAuthorizationDecision
 
 
-def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
+def test_token_lifecycle_and_bound_graph_authorization(
+    tmp_path, monkeypatch, caplog, capsys
+):
+    caplog.set_level(logging.DEBUG)
     monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "admin")
     store = WebhookTokenStore(tmp_path / "private" / "webhook_tokens.db")
     contexts = []
@@ -83,6 +87,13 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
     response = client.post(url, json={"graph_id": "graph-a", "label": "test"})
     assert response.status_code == 201
     first = response.json()["token"]
+    assert first not in caplog.text
+    captured = capsys.readouterr()
+    assert first not in captured.out and first not in captured.err
+    for label in (first, "", "-bad", "Upper", "a_b", "a" * 33, 123):
+        invalid = client.post(url, json={"graph_id": "graph-a", "label": label})
+        assert invalid.status_code == 400
+        assert "Label must be" in invalid.json()["detail"]
     row = store.resolve(first)
     assert (row["function_id"], row["graph_id"], row["label"]) == (
         "example",
@@ -106,7 +117,22 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
     assert client.delete(url).status_code == 403
     assert store.resolve(first) == row
     allowed.add("graph-a")
+    statements = []
+    connect = store._connect
+
+    def traced_connect():
+        db = connect()
+        db.set_trace_callback(statements.append)
+        return db
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
     rotated = client.post(url + "/rotate").json()["token"]
+    transaction = [
+        s.split()[0].upper()
+        for s in statements
+        if s.split()[0].upper() in {"BEGIN", "UPDATE", "COMMIT", "ROLLBACK"}
+    ]
+    assert transaction == ["BEGIN", "UPDATE", "COMMIT"]
     assert store.resolve(first) is None
     assert store.resolve(rotated)["id"] == row["id"]
     assert client.delete(url).status_code == 204

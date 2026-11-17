@@ -45,7 +45,7 @@ def register_function_routes(router, service):
 class TokenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     graph_id: str = Field(min_length=1, max_length=256)
-    label: str = Field(min_length=1, max_length=256)
+    label: Any
 
 
 def register_token_routes(router, service, store):
@@ -89,10 +89,16 @@ def register_token_routes(router, service, store):
     def mint(
         function_id: str, body: TokenRequest, request: Request, response: Response
     ):
+        if not isinstance(body.label, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9-]{0,31}", body.label
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Label must be a lowercase slug of 1 to 32 characters",
+            )
         if (
             not re.fullmatch(r"[a-z0-9-]{3,64}", function_id)
             or not body.graph_id.strip()
-            or not body.label.strip()
         ):
             raise HTTPException(status_code=422, detail="Invalid token binding")
         authorize(request, body.graph_id, "mint_webhook_token")
