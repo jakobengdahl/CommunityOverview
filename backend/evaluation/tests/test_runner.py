@@ -1,4 +1,3 @@
-# covers: backend/evaluation/runner.py, backend/ui/chat_logic.py
 """
 Tests for the runner: the shipped cases, end to end, against a scripted model.
 

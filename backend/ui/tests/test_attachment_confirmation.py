@@ -554,13 +554,9 @@ def test_attachment_read_blocks_delete_nodes_in_same_turn(chat_service, monkeypa
     """An attachment result cannot authorize deletion in its own turn."""
     service, llm = chat_service
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
-    delete = MagicMock()
-    service._processor.tools_map["search_node_attachments"] = lambda **_: {
-        "untrusted_content": True,
-        "passages": [],
-        "files": [],
-    }
-    service._processor.tools_map["delete_nodes"] = delete
+    tools, delete = service._processor.tools_map, MagicMock()
+    tools["search_node_attachments"] = lambda **_: {"untrusted_content": True}
+    tools["delete_nodes"] = delete
     service._assistant_attachment_access = "read"
     llm.mock_tool_call_sequence = [
         [call("search_node_attachments", node_ids=["policy"], query="AI")],
