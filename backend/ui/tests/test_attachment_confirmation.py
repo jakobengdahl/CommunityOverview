@@ -548,3 +548,26 @@ def test_tainted_cutoff_formatted_log_redacts_unknown_tool_names(
     formatted = "\n".join(logging.Formatter().format(r) for r in caplog.records)
     assert secret not in formatted
     assert "count=2 names=['get_schema', 'unknown_tool']" in formatted
+
+
+def test_attachment_read_blocks_delete_nodes_in_same_turn(chat_service, monkeypatch):
+    """An attachment result cannot authorize deletion in its own turn."""
+    service, llm = chat_service
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    delete = MagicMock()
+    service._processor.tools_map["search_node_attachments"] = lambda **_: {
+        "untrusted_content": True,
+        "passages": [],
+        "files": [],
+    }
+    service._processor.tools_map["delete_nodes"] = delete
+    service._assistant_attachment_access = "read"
+    llm.mock_tool_call_sequence = [
+        [call("search_node_attachments", node_ids=["policy"], query="AI")],
+        [call("delete_nodes", node_ids=["policy"])],
+    ]
+    result = service.process_message([{"role": "user", "content": "Read the policy"}])
+    delete.assert_not_called()
+    payload = json.loads(llm.received_messages[-1][-1]["content"][0]["content"])
+    assert payload["error_code"] == "confirmation_required"
+    assert result["untrusted_content_used"] is True

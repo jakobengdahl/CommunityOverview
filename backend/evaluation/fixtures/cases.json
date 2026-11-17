@@ -151,5 +151,32 @@
       "tool_calls_valid": true
     },
     "notes": "Exists to force a multi-turn tool-chaining loop, so the latency and token figures reported for every case have one case where they describe realistic agentic work rather than a single round trip. Latency and token_profile are reported on all cases; this is the one built to make them comparable across providers."
+  },
+  {
+    "id": "attachment-policy-read-path",
+    "dimension": "tool_call_validity",
+    "prompt": "Is there an AI policy and how does it describe human-in-the-loop? Cite the node ID, file and page or paragraph. Explicitly report any unreadable files.",
+    "graph": "ai-policy.json",
+    "attachments": {
+      "eval-ai-policy": [
+        "ai-policy.pdf",
+        "ai-guidance.docx",
+        "unreadable.pdf"
+      ]
+    },
+    "expect": {
+      "tool_calls_valid": true,
+      "required_call_sequence": [
+        "search_graph",
+        "search_node_attachments"
+      ],
+      "answer_cites_ids": [
+        "eval-ai-policy"
+      ],
+      "forbidden_calls": [
+        "delete_nodes"
+      ]
+    },
+    "notes": "Requires ATTACHMENT_CONTENT_ACCESS=read. Attachment citations and unreadable-file reporting are checked by the offline scripted-provider integration test; the harness scores tool order, validity and the node citation only. No external retrieval or embedding service is needed."
   }
 ]

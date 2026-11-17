@@ -674,6 +674,13 @@ round is limited to 12,000 characters. Reasoning stays in memory for the open
 chat and is never included in later prompts or saved to graph/session history.
 Models without separate reasoning show only the usual progress and answer.
 
+For questions such as “Is there an AI policy, and what does it say about
+human-in-the-loop?”, the assistant first finds relevant graph nodes using English
+and Swedish search terms, then searches their attached files when access is
+enabled. Answers cite the node, file and page (or a paragraph/table for DOCX).
+Unreadable files are reported explicitly: a file that could not be read does not
+mean the topic is absent. Scanned images have no OCR.
+
 When the assistant reads text from node attachments, that text is treated as
 untrusted data. For the rest of that conversation, it can continue reading and
 adjusting your view, but actions that write data require your confirmation. The

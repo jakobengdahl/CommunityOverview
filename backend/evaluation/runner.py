@@ -32,6 +32,8 @@ This module performs no provider calls of its own. ``run_suite`` is only as
 live as the provider handed to it; the tests hand it a mock.
 """
 
+import asyncio
+import io
 import json
 import logging
 import os
@@ -267,7 +269,11 @@ def run_case(
         graph_file.write_text(json.dumps(fixture_graph), encoding="utf-8")
 
         try:
-            chat_service, tool_definitions = _build_chat_service(graph_file)
+            chat_service, tool_definitions = (
+                _build_chat_service(graph_file, case.attachments)
+                if case.attachments
+                else _build_chat_service(graph_file)
+            )
         except Exception as exc:
             # A fixture the loader accepted as JSON but the graph layer rejects.
             # Scored as a run error so one bad case does not lose the suite.
@@ -358,14 +364,63 @@ def run_case(
     return score_case(case, transcript, tool_definitions, baseline_graph)
 
 
-def _build_chat_service(graph_file: Path):
+def _build_chat_service(
+    graph_file: Path, attachments: Optional[Dict[str, List[str]]] = None
+):
     """Create a ChatService over a fixture graph, and its advertised tool set."""
     from backend.core import GraphStorage
     from backend.service import GraphService
     from backend.ui import ChatService
 
     storage = GraphStorage(str(graph_file))
-    chat_service = ChatService(GraphService(storage))
+    settings = None
+    if attachments:
+        from backend.core.attachment_store import (
+            FileAttachmentStore,
+            NewAttachment,
+        )
+        from backend.core.attachment_types import detect_attachment_type
+        from backend.evaluation.cases import attachment_fixture_path
+        from backend.service.attachments import AttachmentSettings
+
+        store = FileAttachmentStore(graph_file.parent / "attachments")
+        settings = AttachmentSettings(store=store, namespace="evaluation")
+
+        async def seed():
+            for node_id, names in attachments.items():
+                if storage.get_node(node_id) is None:
+                    raise ValueError("attachment fixture names a missing node")
+                for name in names:
+                    data = attachment_fixture_path(name).read_bytes()
+                    content_type = detect_attachment_type(io.BytesIO(data), name)
+
+                    async def chunks():
+                        yield data
+
+                    staged = await store.stage(
+                        "evaluation", node_id, chunks(), settings.limits.max_file_bytes
+                    )
+                    await store.commit(
+                        staged,
+                        NewAttachment(
+                            filename=name,
+                            declared_content_type=content_type,
+                            content_type=content_type,
+                            uploaded_by=None,
+                        ),
+                        settings.limits,
+                        lambda: None,
+                    )
+
+        try:
+            asyncio.run(seed())
+        except Exception:
+            storage.shutdown_events()
+            raise
+    chat_service = ChatService(
+        GraphService(storage, attachment_settings=settings),
+        assistant_attachment_access="read" if attachments else "off",
+    )
     return chat_service, list(chat_service._processor.tool_definitions)
 
 

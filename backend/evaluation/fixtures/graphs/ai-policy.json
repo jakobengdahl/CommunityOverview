@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {
+      "id": "eval-ai-policy",
+      "type": "Resource",
+      "name": "AI policy",
+      "description": "Policy and guidance for artificial intelligence."
+    }
+  ],
+  "edges": []
+}
