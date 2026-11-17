@@ -694,7 +694,8 @@ scope being one — and an unscoped session is not shared with scoped
 instances the way an unscoped graph row is. To a scoped instance
 another scope's session is not there (`StagedSessionNotActive` on staging,
 discarding or merging), and it cannot take over its session id
-(`CrossScopeWriteRefused` on `record_staged` or `retire`) or reuse its merge
+(`CrossScopeWriteRefused` on `record_staged` or `retire`, or a PostgreSQL
+privilege error when row-level security rejects the conflicting row first) or reuse its merge
 id (`MergeIdTaken`). Every operation is one `READ COMMITTED` transaction, and
 every one that changes a layer locks the session's record row, so the
 changes to one session are serialised across instances. A merge first takes
