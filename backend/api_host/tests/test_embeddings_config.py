@@ -108,3 +108,18 @@ def test_webhook_database_uses_private_state_and_rejects_import_collision(
     )
     assert pg.get_webhook_tokens_db_path() != pg_other.get_webhook_tokens_db_path()
     assert "secret-dsn" not in str(pg.get_webhook_tokens_db_path())
+
+
+def test_webhook_database_default_outside_graph_when_home_is_inside(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", raising=False)
+    graph_dir = tmp_path / "graph"
+    monkeypatch.setenv("HOME", str(graph_dir / "home"))
+    config = AppConfig(graph_file=str(graph_dir / "graph.json"))
+
+    assert (
+        not config.get_webhook_tokens_db_path()
+        .resolve()
+        .is_relative_to(graph_dir.resolve())
+    )

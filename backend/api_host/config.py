@@ -8,6 +8,7 @@ or by passing a custom AppConfig to create_app().
 import os
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -340,7 +341,28 @@ class AppConfig:
                 else ["file", str(self.get_graph_path().resolve())]
             )
             namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-            state = Path.home() / ".local" / "state" / "communityoverview" / namespace
+            graph_dir = self.get_graph_path().parent.resolve()
+            roots = [Path.home() / ".local" / "state"]
+            # HOME can itself be beneath the graph directory (for example in
+            # pytest subprocesses). Use the account home or a separate system
+            # temporary directory if that happens.
+            try:
+                import pwd
+
+                roots.append(
+                    Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"
+                )
+            except (ImportError, KeyError, AttributeError):
+                pass
+            roots.extend(Path(p) for p in (tempfile.gettempdir(), "/var/tmp"))
+            state = next(
+                (
+                    root / "communityoverview" / namespace
+                    for root in roots
+                    if not root.resolve().is_relative_to(graph_dir)
+                ),
+                roots[0] / "communityoverview" / namespace,
+            )
         path = state / "webhook_tokens.db"
         if path.resolve().is_relative_to(self.get_graph_path().parent.resolve()):
             raise ValueError(
