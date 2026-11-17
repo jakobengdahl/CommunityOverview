@@ -330,8 +330,12 @@ class AppConfig:
             # PostgreSQL connection strings (which may contain passwords) are
             # never exposed in a path.
             identity = (
-                ["postgres", self.graph_postgres_dsn, self.graph_postgres_schema,
-                 self.graph_postgres_scope]
+                [
+                    "postgres",
+                    self.graph_postgres_dsn,
+                    self.graph_postgres_schema,
+                    self.graph_postgres_scope,
+                ]
                 if self.graph_backend == "postgres"
                 else ["file", str(self.get_graph_path().resolve())]
             )
