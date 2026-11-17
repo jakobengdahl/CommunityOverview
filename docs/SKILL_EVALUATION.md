@@ -157,7 +157,17 @@ ones worth measuring.
 
 ## The acceptance cases
 
-Nine cases in `backend/evaluation/fixtures/cases.json`, covering every
+The attachment policy case searches graph nodes before searching real PDF and
+DOCX files, including a deliberately unreadable PDF. Set
+`ATTACHMENT_CONTENT_ACCESS=read` to enable its read tools. The runner grants
+attachment reads only to cases declaring attachment fixtures, copies their files
+into a temporary store, and discards the store after the run. Its scripted-provider
+integration test runs offline with base dependencies. Harness scoring checks tool
+order, schemas and the node citation; file citations and unreadable-file reporting
+are exercised by that test, not independently graded for a live model.
+
+
+Ten cases in `backend/evaluation/fixtures/cases.json`, covering every
 pass/fail-scored dimension. `latency` and `token_profile` are measured on every
 case rather than by a case of their own, since neither has a pass condition;
 `token-profile-multi-step-traversal` carries `token_profile` as its nominal

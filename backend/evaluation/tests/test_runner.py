@@ -32,6 +32,15 @@ def _factory(turns):
 
 
 DECLARED_CONDITIONS_PER_CASE = [
+    (
+        "attachment-policy-read-path",
+        {
+            "tool_calls_valid",
+            "required_call_sequence",
+            "answer_cites_ids",
+            "forbidden_calls",
+        },
+    ),
     ("tool-call-validity-read-path", {"tool_calls_valid"}),
     (
         "id-resolution-before-write",
@@ -1017,3 +1026,83 @@ class TestSuiteAndReport:
         tokens = build_report(result)["cases"][0]["tokens"]
         assert tokens["reported"] is True
         assert tokens["total"] == 640  # two provider calls
+
+
+def test_attachment_policy_flow_cites_real_passages_and_reports_unreadable_files(
+    profile,
+    case_by_id,
+    monkeypatch,
+):
+    """Graph discovery and real PDF/DOCX extraction reach the provider offline."""
+    from backend.evaluation.tests.conftest import ScriptedProvider
+    from backend.llm.llm_providers import LLMResponse
+
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+
+    class EvidenceProvider(ScriptedProvider):
+        def create_completion(self, messages, system_prompt, tools, max_tokens=4096):
+            if self.call_count < 2:
+                return super().create_completion(
+                    messages, system_prompt, tools, max_tokens
+                )
+            results = [
+                json.loads(block["content"])
+                for block in messages[-1]["content"]
+                if block["type"] == "tool_result"
+            ]
+            evidence = results[0]
+            assert evidence["untrusted_content"] is True
+            passages = evidence["passages"]
+            assert {p["filename"] for p in passages} == {
+                "ai-policy.pdf",
+                "ai-guidance.docx",
+            }
+            assert all(
+                p["node_id"] == "eval-ai-policy" and p["attachment_id"]
+                for p in passages
+            )
+            assert {p["filename"]: p["locator"] for p in passages} == {
+                "ai-policy.pdf": {"page": 1},
+                "ai-guidance.docx": {"paragraph": 1},
+            }
+            assert evidence["files"][0]["filename"] == "unreadable.pdf"
+            assert evidence["files"][0]["status"] == "failed"
+            citations = [
+                f"{p['node_id']} / {p['attachment_id']} / "
+                f"{p['filename']} / {p['locator']}: {p['text']}"
+                for p in passages
+            ]
+            failures = [
+                f"{f['filename']}: unreadable ({f['status']})"
+                for f in evidence["files"]
+            ]
+            return LLMResponse(
+                content=[{"type": "text", "text": "\n".join(citations + failures)}],
+                stop_reason="end_turn",
+            )
+
+    provider = EvidenceProvider(
+        [
+            [
+                (
+                    "search_graph",
+                    {"query": "AI policy riktlinjer", "match_mode": "any_term"},
+                )
+            ],
+            [
+                (
+                    "search_node_attachments",
+                    {
+                        "node_ids": ["eval-ai-policy"],
+                        "query": "human-in-the-loop human review",
+                    },
+                )
+            ],
+        ]
+    )
+    score = run_case(
+        case_by_id["attachment-policy-read-path"],
+        profile,
+        provider_factory=lambda _: provider,
+    )
+    assert score.passed, [(c.name, c.detail) for c in score.conditions]
