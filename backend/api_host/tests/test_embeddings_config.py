@@ -74,7 +74,9 @@ def test_an_unset_environment_variable_means_derive(monkeypatch):
     assert config.get_embeddings_path() is None
 
 
-def test_webhook_database_uses_private_state_and_rejects_import_collision(tmp_path, monkeypatch):
+def test_webhook_database_uses_private_state_and_rejects_import_collision(
+    tmp_path, monkeypatch
+):
     import pytest
 
     private = tmp_path / "private"

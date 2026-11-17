@@ -319,11 +319,15 @@ class AppConfig:
 
     def get_webhook_tokens_db_path(self) -> Path:
         """Dedicated credential database in operator-controlled private state."""
-        state = Path(os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR") or
-                     Path.home() / ".local" / "state" / "communityoverview")
+        state = Path(
+            os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+            or Path.home() / ".local" / "state" / "communityoverview"
+        )
         path = state / "webhook_tokens.db"
         if path.resolve().is_relative_to(self.get_graph_path().parent.resolve()):
-            raise ValueError("Webhook token database must be outside the graph directory")
+            raise ValueError(
+                "Webhook token database must be outside the graph directory"
+            )
         if path.resolve() == self.get_import_jobs_db_path().resolve():
             raise ValueError("Webhook token and import job databases must be separate")
         return path

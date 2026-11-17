@@ -97,7 +97,10 @@ def register_token_routes(router, service, store):
         authorize(request, body.graph_id, "mint_webhook_token")
         from backend.functions.invocation import load_manifest
 
-        if getattr(service, "webhook_graph_bindings", {}).get(function_id) != body.graph_id:
+        if (
+            getattr(service, "webhook_graph_bindings", {}).get(function_id)
+            != body.graph_id
+        ):
             raise HTTPException(status_code=404, detail="Function not found")
         try:
             load_manifest(service.root, function_id)
