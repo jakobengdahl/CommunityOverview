@@ -58,6 +58,8 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 
 def agent_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
     """Map a stored ``ExecutionJob`` to the AgentRun view the API returns."""
+    if job.kind == ExecutionKind.FUNCTION:
+        return function_run_to_dict(job)
     payload = job.payload or {}
     event = payload.get("event") or {}
     return {
@@ -200,3 +202,30 @@ class AgentRunRecorder:
         ):
             return None
         return agent_run_to_dict(job)
+
+
+def function_run_to_dict(job: ExecutionJob) -> Dict[str, Any]:
+    """Expose function history using the contract's outcome vocabulary."""
+    import json
+
+    result = job.result or {}
+    if job.state == ExecutionState.DEAD_LETTER and job.last_error:
+        try:
+            result = json.loads(job.last_error.split(": ", 1)[1])
+        except (ValueError, IndexError):
+            result = {
+                "status": "failed",
+                "error": {"code": job.last_error.split(":", 1)[0]},
+            }
+    return {
+        **job.payload,
+        **result,
+        "actor": job.payload.get("attribution", {}).get("actor"),
+        "id": job.id,
+        "status": result.get("status") or _STATUS[job.state],
+        "correlation_id": job.correlation_id,
+        "origin": job.origin,
+        "created_at": _iso(job.created_at),
+        "started_at": _iso(job.started_at),
+        "finished_at": _iso(job.finished_at),
+    }

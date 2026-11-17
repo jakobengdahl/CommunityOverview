@@ -66,7 +66,7 @@ fields. All of them MUST survive a restart when persisted by a durable adapter;
 |---|---|
 | `id` | Stable unique job id (`job-<uuid>`). |
 | `agent_id` | The agent the job runs. |
-| `kind` | `scheduled` or `event` (`ExecutionKind`). |
+| `kind` | `scheduled`, `event`, `import` or `function` (`ExecutionKind`). Function jobs are one-attempt run history, enqueued running with no lease; they are never claimed or retried. |
 | `idempotency_key` | Deduplication key for `enqueue` (see §5). |
 | `payload` | The trigger payload handed to the worker (e.g. the event envelope). |
 | `state` | Lifecycle state (`ExecutionState`, see §4). |

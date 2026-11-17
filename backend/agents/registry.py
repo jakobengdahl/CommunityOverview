@@ -138,6 +138,11 @@ class AgentRegistry:
         self._scheduler = AgentScheduler()
 
     @property
+    def run_history_store(self):
+        """The shared one-attempt history store for agents and functions."""
+        return self._run_recorder.store
+
+    @property
     def is_enabled(self) -> bool:
         """Check if the agent system is enabled."""
         return self.settings.enabled
