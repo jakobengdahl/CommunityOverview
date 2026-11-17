@@ -165,6 +165,8 @@ class AcceptanceCase(BaseModel):
     prompt: str
     graph: str
     """Fixture graph filename under fixtures/graphs/."""
+    attachments: Dict[str, List[str]] = Field(default_factory=dict)
+    """Node IDs to filenames under fixtures/attachments; copied into each run."""
     skills: List[str] = Field(default_factory=list)
     """Fixture SKILL.md filenames under fixtures/skills/, injected in this order."""
     expect: ExpectedBehaviour
@@ -275,6 +277,12 @@ def load_cases(
         graph_path = case.graph_path(graphs_dir)
         if not graph_path.is_file():
             raise ValueError(f"case {case.id!r}: missing fixture graph {graph_path}")
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        for node_id, names in case.attachments.items():
+            if node_id not in {node["id"] for node in graph["nodes"]}:
+                raise ValueError("attachment fixture names a missing node")
+            for name in names:
+                attachment_fixture_path(name)
         for skill_path in case.skill_paths(skills_dir):
             if not skill_path.is_file():
                 raise ValueError(
@@ -282,3 +290,13 @@ def load_cases(
                 )
 
     return cases
+
+
+def attachment_fixture_path(name: str) -> Path:
+    """Resolve only plain filenames from the bundled attachment directory."""
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError("attachment fixture must be a plain filename")
+    path = FIXTURES_DIR / "attachments" / name
+    if not path.is_file():
+        raise ValueError("missing attachment fixture")
+    return path

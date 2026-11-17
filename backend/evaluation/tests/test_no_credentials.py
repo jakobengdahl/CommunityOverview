@@ -1523,7 +1523,7 @@ class TestReportsNeverCarryACredential:
         assert case.prompt not in payload, f"{site} leaked the case prompt"
         rendered = json.loads(payload)["cases"][0]["run_error"]
         assert rendered is None or len(rendered) <= 400, len(rendered)
-        assert len(load_cases()) == 9  # the shipped set is untouched by this probe
+        assert len(load_cases()) == 10  # the shipped set is untouched by this probe
 
     def test_the_transcript_never_holds_the_credential(self, monkeypatch, profile):
         from backend.evaluation.tests.conftest import ScriptedProvider

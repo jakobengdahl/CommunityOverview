@@ -1325,10 +1325,10 @@ generic mutation tools remain available for editing and legacy configurations.
 
 | Tool Name | Description |
 |-----------|-------------|
-| `search_graph` | Search nodes by query |
+| `search_graph` | Search nodes by query; the assistant discovers attachment candidates with `match_mode="any_term"` and distinctive English/Swedish synonyms |
 | `list_node_attachments` | List attachment metadata with an untrusted-content envelope; `node_id` required |
 | `read_node_attachment` | Read a located character window; `node_id`, `attachment_id`, optional `offset` and `max_chars` |
-| `search_node_attachments` | Rank cited passages from 1–20 `node_ids`; required `query`, optional `top_k`; report unreadable and budget-skipped files |
+| `search_node_attachments` | After graph discovery, rank cited passages from 1–20 returned `node_ids`; required `query`, optional `top_k`. Answers cite node, attachment, filename and locator and explicitly report unreadable and budget-skipped files; those files cannot establish absence of a topic |
 | `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
 | `get_related_nodes` | Get nodes connected through visible nodes only |
