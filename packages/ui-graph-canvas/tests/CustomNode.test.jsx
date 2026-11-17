@@ -1,9 +1,11 @@
+// covers: packages/ui-graph-canvas/src/components/CustomNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
+import { URL as NodeURL } from 'node:url';
 
 const customNodeCss = readFileSync(
-  new URL('../src/components/CustomNode.css', import.meta.url),
+  new NodeURL('../src/components/CustomNode.css', import.meta.url),
   'utf8'
 );
 
@@ -39,7 +41,11 @@ describe('CustomNode theme shadow cascade', () => {
             }
             const selector = rule.selectorText;
             const value = rule.style?.getPropertyValue('box-shadow');
-            if (!selector || !value || !node.matches(selector.replaceAll(':hover', '.test-hover'))) {
+            if (
+              !selector ||
+              !value ||
+              !node.matches(selector.replaceAll(':hover', '.test-hover'))
+            ) {
               continue;
             }
             const weight = (selector.match(/[.:][\w-]+/g) || []).length;
