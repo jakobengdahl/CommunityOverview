@@ -15,12 +15,13 @@ vi.mock('reactflow', async (importOriginal) => ({
   Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
 }));
 
-import CustomNode from '../src/components/CustomNode';
+import CustomNode, { resolveShapeHitTargets } from '../src/components/CustomNode';
 import {
   BAND_TEXT_DARK,
   BAND_TEXT_LIGHT,
   bandTextStyle,
   createNodeShapeResolver,
+  marqueeShapeChanges,
   nodeShapeAccessibleName,
   nodeShapeAreaValues,
   nodeShapeGeometry,
@@ -504,9 +505,73 @@ describe('CustomNode configured shapes', () => {
     expect(wrapper.querySelector('.graph-shape-hit').style.width).toBe('48px');
   });
 
-  it('needs no extra target for a readable body', () => {
-    renderFlow([shapedFlowNode(RISK)]);
-    expect(document.querySelector('.graph-shape-hit')).toBeNull();
+  // A 48x36 triangle holds only a ~20.6px square, under 24 despite its bounds.
+  it.each([
+    [1, null],
+    [0.2, '24px'],
+  ])('sizes the extra target by the largest square inside the body (scale %s)', (scale, width) => {
+    renderFlow([shapedFlowNode({ ...RISK, scale })]);
+    expect(document.querySelector('.graph-shape-hit')?.style.width ?? null).toBe(width);
+  });
+
+  it('gives a target point to a painted body first, then the nearest body', () => {
+    document.body.innerHTML = ['a', 'b', 'c']
+      .map(
+        (id) =>
+          `<div class="react-flow__node" id="${id}"><span class="graph-shape-hit"></span></div>`
+      )
+      .join('');
+    const [a, b, c] = document.querySelectorAll('.graph-shape-hit');
+    const centres = new Map([
+      [a, 0],
+      [b, 10],
+      [c, 0],
+    ]);
+    for (const [span, x] of centres) {
+      span.getBoundingClientRect = () => ({ left: x - 12, top: -12, width: 24, height: 24 });
+    }
+    const off = () => [a, b, c].map((span) => span.hasAttribute('data-hit-off'));
+    // Topmost first: b sits above a, yet a's body centre is nearer; c ties a below it.
+    document.elementsFromPoint = () => [b, a, c];
+    resolveShapeHitTargets(document, 2, 0);
+    expect(off()).toEqual([false, true, true]);
+    document.elementsFromPoint = () => [b, document.getElementById('c'), a];
+    resolveShapeHitTargets(document, 2, 0);
+    expect(off()).toEqual([true, true, false]);
+    delete document.elementsFromPoint;
+  });
+
+  const triangleAt = (selected) => ({
+    id: 't',
+    position: { x: 100, y: 100 },
+    selected,
+    geometry: nodeShapeGeometry('triangle-up', 1),
+  });
+  const cardAt = {
+    id: 'r',
+    position: { x: 100, y: 100 },
+    geometry: nodeShapeGeometry('rectangle', 1),
+  };
+  it.each([
+    [
+      'a transparent triangle corner',
+      triangleAt(false),
+      { x: 100, y: 130, width: 20, height: 20 },
+      [],
+    ],
+    ['the triangle body', triangleAt(false), { x: 200, y: 200, width: 20, height: 20 }, [true]],
+    ['the outside label', triangleAt(false), { x: 105, y: 80, width: 5, height: 5 }, [true]],
+    [
+      'a corner it had selected',
+      triangleAt(true),
+      { x: 100, y: 130, width: 20, height: 20 },
+      [false],
+    ],
+    ['a rounded rectangle corner', cardAt, { x: 99, y: 99, width: 2, height: 2 }, []],
+  ])('lets a marquee over %s select by polygon overlap', (_, node, rect, selected) => {
+    expect(marqueeShapeChanges([node, { id: 'card', position: { x: 0, y: 0 } }], rect)).toEqual(
+      selected.map((value) => ({ id: node.id, type: 'select', selected: value }))
+    );
   });
 
   it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {

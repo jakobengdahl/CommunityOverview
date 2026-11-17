@@ -604,3 +604,8 @@ body.graph-menu-open .graph-node-tooltip {
 .graph-shape-hit {
   position: absolute;
 }
+
+/* Another node's painted body or a nearer body owns this point. */
+.graph-shaped-node .graph-shape-hit[data-hit-off] {
+  pointer-events: none;
+}

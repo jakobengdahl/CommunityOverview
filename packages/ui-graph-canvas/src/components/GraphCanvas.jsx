@@ -51,6 +51,7 @@ import {
 } from '../utils/graphLayout';
 import {
   createNodeShapeResolver,
+  marqueeShapeChanges,
   nodeShapeAccessibleName,
   nodeShapeAreaValues,
   nodeShapeGeometry,
@@ -1627,6 +1628,60 @@ function GraphCanvasInner({
   // be initialised there: `nodes` does not exist yet at that point.
   latestNodesRef.current = nodes;
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
+
+  // React Flow's marquee selects by bounding box, which would catch a
+  // triangle's transparent corners; shaped nodes follow polygon overlap.
+  const marqueeStartRef = useRef(null);
+  const marqueeStopRef = useRef(null);
+  const getFlowNodesRef = useRef(getFlowNodes);
+  getFlowNodesRef.current = getFlowNodes;
+  const handleNodesChange = useCallback(
+    (changes) => {
+      let next = changes;
+      if (marqueeStartRef.current) {
+        const shaped = new Set(
+          getFlowNodesRef
+            .current()
+            .filter((n) => typeof n.geometry?.contains === 'function')
+            .map((n) => n.id)
+        );
+        next = changes.filter((c) => c.type !== 'select' || !c.selected || !shaped.has(c.id));
+      }
+      if (next.length) onNodesChange(next);
+    },
+    [onNodesChange]
+  );
+  const onSelectionStart = useCallback(
+    (event) => {
+      marqueeStopRef.current?.();
+      marqueeStartRef.current = { x: event.clientX, y: event.clientY };
+      const onMove = (move) => {
+        const toFlow = screenToFlowPositionRef.current;
+        const a = toFlow(marqueeStartRef.current);
+        const b = toFlow({ x: move.clientX, y: move.clientY });
+        const rect = {
+          x: Math.min(a.x, b.x),
+          y: Math.min(a.y, b.y),
+          width: Math.abs(a.x - b.x),
+          height: Math.abs(a.y - b.y),
+        };
+        const changes = marqueeShapeChanges(getFlowNodesRef.current(), rect);
+        if (changes.length) onNodesChange(changes);
+      };
+      const stop = () => {
+        marqueeStartRef.current = null;
+        marqueeStopRef.current = null;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', stop);
+      };
+      marqueeStopRef.current = stop;
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', stop);
+    },
+    [onNodesChange]
+  );
+  // The pane also ends a marquee when the pointer leaves it.
+  const onSelectionEnd = useCallback(() => marqueeStopRef.current?.(), []);
 
   const edgeContextRelationshipTypes = useMemo(() => {
     if (!edgeContextMenu?.edge) return relationshipTypes;
@@ -5391,7 +5446,9 @@ function GraphCanvasInner({
           <ReactFlow
             nodes={nodesWithAriaLabels}
             edges={edges}
-            onNodesChange={onNodesChange}
+            onNodesChange={handleNodesChange}
+            onSelectionStart={onSelectionStart}
+            onSelectionEnd={onSelectionEnd}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeDragStart={onNodeDragStart}

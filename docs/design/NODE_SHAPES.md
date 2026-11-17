@@ -301,8 +301,11 @@ excluded from body hits and edge anchors.
 A canvas node can carry this descriptor as `geometry`; floating edges and Dagre
 consume it directly. Nodes without a descriptor retain legacy layout dimensions
 and measured rectangular edge bounds. `GraphCanvas` attaches the descriptor to
-every node with a resolved shape; the built-in card supplies none. Marquee
-selection still uses React Flow's rectangular node bounds. Zero-distance endpoint centres use opposite vertical
+every node with a resolved shape; the built-in card supplies none. A marquee
+selects a shaped node only where it touches the polygon or the outside label;
+nodes without a descriptor keep React Flow's rectangular bounds. Minimum hit
+targets use the largest square inside the body, so a triangle gets one sooner
+than its bounds suggest. Zero-distance endpoint centres use opposite vertical
 anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale

@@ -1,4 +1,4 @@
-import { useState, memo, useRef } from 'react';
+import { useState, memo, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Handle, Position, useStore } from 'reactflow';
 import { bandTextStyle, nodeShapeBandPath, nodeShapeTextBox } from '../utils/nodeShapes';
@@ -6,14 +6,64 @@ import './CustomNode.css';
 
 const MIN_TARGET_PX = 24;
 
+/** The side of the largest axis-aligned square the painted body holds. */
+export function shapeInnerSpan(geometry) {
+  const { width: w, height: h } = geometry;
+  return geometry.vertices ? (w * h) / (w + h) : Math.min(w, h);
+}
+
+/**
+ * Give the pointer at (x, y) to at most one minimum-size target: none when any
+ * node's painted body or label is there, else the one whose body centre is
+ * nearest, ties going to the topmost. The others stop taking pointer events.
+ */
+export function resolveShapeHitTargets(doc, x, y) {
+  for (const span of doc.querySelectorAll('.graph-shape-hit[data-hit-off]')) {
+    span.removeAttribute('data-hit-off');
+  }
+  const elements = doc.elementsFromPoint(x, y);
+  const spans = elements.filter((el) => el.classList.contains('graph-shape-hit'));
+  if (!spans.length) return;
+  const painted = elements.some(
+    (el) => !el.classList.contains('graph-shape-hit') && el.closest('.react-flow__node')
+  );
+  const distance = (el) => {
+    const r = el.getBoundingClientRect();
+    return Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y);
+  };
+  // A stable sort keeps elementsFromPoint's topmost-first order on ties.
+  const winner = painted ? null : [...spans].sort((a, b) => distance(a) - distance(b))[0];
+  for (const span of spans) {
+    if (span !== winner) span.setAttribute('data-hit-off', '');
+  }
+}
+
+let hitTargetCount = 0;
+function resolveFromEvent(event) {
+  resolveShapeHitTargets(document, event.clientX, event.clientY);
+}
+
 // A tiny body still gets a 24px screen-space target, centred on the body.
 function ShapeHitTarget({ geometry }) {
   const size = useStore((s) => {
     const zoom = s.transform[2];
-    return Math.min(geometry.width, geometry.height) * zoom < MIN_TARGET_PX
-      ? MIN_TARGET_PX / zoom
-      : 0;
+    return shapeInnerSpan(geometry) * zoom < MIN_TARGET_PX ? MIN_TARGET_PX / zoom : 0;
   });
+  // Resolved before the press reaches any node: pointermove precedes a mouse
+  // press, and the eraser reads elementFromPoint after this capture listener.
+  useEffect(() => {
+    if (!size || typeof document.elementsFromPoint !== 'function') return undefined;
+    if (hitTargetCount++ === 0) {
+      document.addEventListener('pointermove', resolveFromEvent, true);
+      document.addEventListener('pointerdown', resolveFromEvent, true);
+    }
+    return () => {
+      if (--hitTargetCount === 0) {
+        document.removeEventListener('pointermove', resolveFromEvent, true);
+        document.removeEventListener('pointerdown', resolveFromEvent, true);
+      }
+    };
+  }, [size]);
   if (!size) return null;
   return (
     <span
