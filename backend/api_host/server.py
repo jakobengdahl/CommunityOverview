@@ -24,6 +24,8 @@ Usage:
 """
 
 import contextlib
+import json
+import os
 import logging
 import threading
 from dataclasses import dataclass
@@ -46,6 +48,7 @@ from backend.core.session_auto_add import (
 from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.ui.conversation_state import FileTaintRegistry
 from backend.core.session_manager import SessionManager
 from backend.core.write_modes import WriteModes
 
@@ -446,11 +449,25 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         target=_recover_import_jobs, name="import-startup-recovery", daemon=True
     ).start()
 
+    from backend.functions.invocation import FunctionInvocationService
+
+    function_invocation_service = FunctionInvocationService(
+        graph_service,
+        agent_registry.run_history_store,
+        root=os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_ROOT", "config/functions"),
+        enabled=json.loads(os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_ENABLED", "{}")),
+        isolation_minimum=os.getenv(
+            "COMMUNITYOVERVIEW_FUNCTIONS_ISOLATION_MINIMUM", "degraded"
+        ),
+    )
+    app.state.function_invocation_service = function_invocation_service
+
     # Create and mount REST API router
     rest_router = create_rest_router(
         graph_service,
         session_manager=session_manager,
         import_job_store=import_job_store,
+        function_invocation_service=function_invocation_service,
     )
     app.include_router(rest_router, prefix=config.api_prefix)
 
@@ -461,7 +478,9 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         config.mcp_attachment_tools,
     )
     chat_service = ChatService(
-        graph_service, assistant_attachment_access=config.assistant_attachment_access
+        graph_service,
+        assistant_attachment_access=config.assistant_attachment_access,
+        conversation_registry=FileTaintRegistry(sessions_dir),
     )
     document_service = DocumentService()
 

@@ -2631,6 +2631,7 @@ def create_rest_router(
     session_manager=None,
     rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
     import_job_store: Optional["ExecutionStore"] = None,
+    function_invocation_service=None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -2663,6 +2664,11 @@ def create_rest_router(
         from backend.agents.execution import InMemoryExecutionStore
 
         import_job_store = InMemoryExecutionStore()
+
+    if function_invocation_service is not None:
+        from backend.functions.routes import register_function_routes
+
+        register_function_routes(router, function_invocation_service)
 
     _register_search_endpoints(router, service)
     _register_similarity_endpoints(router, service)

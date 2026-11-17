@@ -27,6 +27,7 @@ def utcnow() -> datetime:
 class ExecutionKind(str, Enum):
     """What triggered a unit of agent work."""
 
+    FUNCTION = "function"  # manually invoked operator code
     SCHEDULED = "scheduled"  # time-based trigger (AgentScheduler)
     EVENT = "event"  # graph-mutation / subscription trigger
     IMPORT = "import"  # background embedding generation after a graph.json import

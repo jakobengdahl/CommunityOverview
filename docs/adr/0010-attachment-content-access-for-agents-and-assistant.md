@@ -1332,22 +1332,18 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
   has issued a tainted token for an actor's `conversation_id` treats every
   later request with that pair as tainted, so replaying a shorter history
   with an older clean token, or no history at all, does not clear it. That
-  record is in memory, per process and kept for
-  `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, at most 100,000
-  conversations, oldest dropped first; no clean token is issued while a
-  conversation is in it, so an entry dropped at TTL expiry has outlived any
-  older clean token, but one dropped to stay within the cap may not have.
-  Hence, and since the record is per process, a clean token verifies only in
-  the process that issued it and only if issued after that process last
-  evicted an entry. The record is complete because a process serves only a
-  `conversation_id` it minted: it replaces any other with a fresh one,
-  returned as the response's `conversation_id`, which `api.js` sends on that
-  conversation key's later requests and confirmations. So another worker
-  cannot taint a conversation behind the back of the process that vouches
-  for it clean. A restart, another worker or an eviction leaves a continued
-  conversation tainted, never clean (under a new id), and needs the same
-  sticky routing as pending actions; a shared
-  `ATTACHMENT_CONVERSATION_STATE_KEY` no longer changes that.
+  record is stored under `conversation-taint/` in the configured session
+  directory. Workers sharing that directory and
+  `ATTACHMENT_CONVERSATION_STATE_KEY` accept the same conversation ids and
+  consult the same monotonic record, including for truncated histories.
+  Missing, damaged or unavailable records fail closed. Only a new server-minted
+  id creates a clean record; an existing id never recreates one after loss.
+  Records contain no chat text or actor identifiers, only a clean/tainted flag
+  under a hash of the actor and conversation id. They are retained until removed;
+  operators may remove old records after the conversation-state token TTL to
+  reclaim space, with any subsequent continuation treated as tainted.
+  Pending-action confirmations still require sticky routing. Standalone callers
+  without a session registry retain the conservative per-process fallback.
   A continued conversation without a `conversation_id` never verifies clean.
 - **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
   sends nothing and the token then expires. The card's outcome (dismissed,
