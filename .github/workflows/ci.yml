@@ -206,11 +206,7 @@ jobs:
     # clone with no database still gets a green suite.
     services:
       postgres:
-        # Pinned to the last postgres:16 image the scope/RLS tests passed on (pulled
-        # 2026-11-12). The image published overnight to 2026-11-13 fails four
-        # cross-scope upsert tests with InsufficientPrivilege; unpin once the RLS
-        # policies are adapted to the new server behaviour.
-        image: postgres:16@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

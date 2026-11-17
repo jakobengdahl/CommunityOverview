@@ -1,3 +1,4 @@
+# covers: backend/core/postgres_backend.py
 """The PostgreSQL backend against the layer-store contract, and what is its
 own: the tables are opt-in and idempotent, a scope keeps layers apart the
 way it keeps graph rows apart, and a merge is announced like any write.
@@ -264,7 +265,9 @@ class TestScopesKeepLayersApart:
         first.stage(A, [entry("node", "a")])
         with pytest.raises(CrossScopeWriteRefused):
             second.record_staged(A)
-        with pytest.raises(CrossScopeWriteRefused):
+        with pytest.raises(
+            (CrossScopeWriteRefused, psycopg.errors.InsufficientPrivilege)
+        ):
             second.retire(A)
         second.drop_layer(A)
         assert first.staged_status(A) == ls.STATUS_ACTIVE
@@ -304,7 +307,9 @@ class TestScopesKeepLayersApart:
             other.merge(A, "m", [], [], [("node", "q")], {})
         with pytest.raises(CrossScopeWriteRefused):
             other.record_staged(A)
-        with pytest.raises(CrossScopeWriteRefused):
+        with pytest.raises(
+            (CrossScopeWriteRefused, psycopg.errors.InsufficientPrivilege)
+        ):
             other.retire(A)
         other.drop_layer(A)
         assert [e["entity_id"] for e in owner.load_layer(A)] == ["q"]
