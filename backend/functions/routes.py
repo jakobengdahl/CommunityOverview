@@ -35,6 +35,8 @@ def register_function_routes(router, service):
                 idempotency_key=request.headers.get("Idempotency-Key"),
                 correlation_id=body.correlation_id,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         except PermissionError:
             raise HTTPException(status_code=403, detail="Access denied")
         return function_run_to_dict(job)

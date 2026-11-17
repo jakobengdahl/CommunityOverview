@@ -18,7 +18,13 @@ from pathlib import Path
 from jsonschema import validators
 from jsonschema.exceptions import ValidationError
 
-from backend.agents.execution import ExecutionJob, ExecutionKind, ExecutionState, utcnow
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    SqliteExecutionStore,
+    utcnow,
+)
 from backend.functions.broker import BrokerContext, FunctionBroker, KNOWN_GRANTS
 from backend.functions.runner import (
     HardenedSubprocessRunner,
@@ -200,8 +206,49 @@ class FunctionInvocationService:
             for key, grants in self.enabled.items()
         ):
             raise ValueError("Invalid function enablement configuration")
+        if self.enabled:
+            self._require_durable_history()
         self.runner = runner or HardenedSubprocessRunner()
         self.isolation_minimum = isolation_minimum
+
+    def _require_durable_history(self):
+        # Enabled functions must share persistent history across host restarts
+        # and processes. The registry's default volatile adapter is insufficient.
+        if not isinstance(self.store, SqliteExecutionStore) or self.store.db_path in {
+            "",
+            ":memory:",
+        }:
+            raise ValueError(
+                "Function invocation requires file-backed SQLite run history; "
+                "configure run_history_db"
+            )
+
+    def _replay(self, existing, binding):
+        # Authentication transport is not identity. Redacted records have no
+        # attribution or content left; current graph access gates their replay.
+        if not binding.get("actor_id"):
+            raise PermissionError("Access denied")
+        if existing.redacted_at is None:
+            attribution = existing.payload.get("attribution") or {}
+            actor = attribution.get("actor") or {}
+            scope = attribution.get("scope") or {}
+            if (
+                actor.get("actor_id") != binding["actor_id"]
+                or actor.get("actor_type") != binding["actor_type"]
+                or any(
+                    scope.get(key) != binding[key]
+                    for key in ("workspace_id", "workspace_kind", "graph_id")
+                )
+            ):
+                raise PermissionError("Run belongs to another actor")
+        with use_request_authorization(**binding):
+            if not evaluate_graph_access(
+                self.graph_service.authorization_hook,
+                action="read",
+                target="invoke_function",
+            ).allowed:
+                raise PermissionError("Access denied")
+        return existing
 
     def invoke(
         self,
@@ -213,6 +260,9 @@ class FunctionInvocationService:
         idempotency_key=None,
         correlation_id=None,
     ) -> RunRecord:
+        if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
+            raise ValueError("Invalid function id")
+        self._require_durable_history()
         started = time.monotonic()
         # Only the trusted binding supplies identity and scope. In particular,
         # never carry its headers through the authorization helper.
@@ -261,19 +311,7 @@ class FunctionInvocationService:
             )
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
-                    if (
-                        existing.payload.get("attribution")
-                        != job.payload["attribution"]
-                    ):
-                        raise PermissionError("Run belongs to another actor")
-                    with use_request_authorization(**binding):
-                        if not evaluate_graph_access(
-                            self.graph_service.authorization_hook,
-                            action="read",
-                            target="invoke_function",
-                        ).allowed:
-                            raise PermissionError("Access denied")
-                    return existing
+                    return self._replay(existing, binding)
             try:
                 if function_id not in self.enabled:
                     code = "not_enabled"
@@ -341,7 +379,13 @@ class FunctionInvocationService:
                 job.started_at = utcnow()
             stored = self.store.enqueue(job)
             if stored.id != job.id:
-                return stored
+                if (
+                    stored.kind != ExecutionKind.FUNCTION
+                    or stored.agent_id != function_id
+                    or stored.idempotency_key != job.idempotency_key
+                ):
+                    raise PermissionError("Conflicting run identity")
+                return self._replay(stored, binding)
             if code:
                 self.store.cancel(
                     job.id,

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.agents.execution import (
     ExecutionKind,
+    InMemoryExecutionStore,
     ExecutionState,
     RetryPolicy,
     SqliteExecutionStore,
@@ -214,8 +215,32 @@ def test_cli_calls_manual_route(host, monkeypatch):
     monkeypatch.setattr(cli.httpx, "NetRCAuth", Mock())
     cli.main(["example", "--idempotency-key", "delivery"])
     assert client.post.call_args.args[0].endswith("/functions/example/invoke")
-    assert client.post.call_args.kwargs["headers"] == {"Idempotency-Key": "delivery"}
+    assert client.post.call_args.kwargs["headers"] == {
+        "Idempotency-Key": "delivery",
+        "X-Requested-With": "function-cli",
+    }
     assert client.post.call_args.kwargs["json"] == {"input": {}, "correlation_id": None}
+
+    # Exercise the host's real Basic-auth write guard with the CLI request.
+    from backend.api_host.config import AppConfig
+    from backend.api_host.middleware import add_auth_middleware
+
+    app = FastAPI()
+    router = APIRouter()
+    register_function_routes(router, host[0])
+    app.include_router(router, prefix="/api")
+    add_auth_middleware(
+        app, AppConfig(auth_enabled=True, auth_username="admin", auth_password="secret")
+    )
+    with TestClient(app) as http:
+        response = http.post(
+            "/api/functions/example/invoke",
+            auth=("admin", "secret"),
+            **client.post.call_args.kwargs,
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    host[1].assert_called_once()
 
 
 def test_crashed_run_is_never_claimed_or_executed_again(host):
@@ -227,6 +252,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         directory.parent / "history.db", retry_policy=RetryPolicy(max_attempts=1)
     )
     try:
+        service.store = reopened
         assert reopened.claim_next("worker") is None
         assert reopened.recover_stale() == []
         assert (
@@ -276,3 +302,129 @@ def test_invalid_output_fails_and_attribution_obeys_actor_erasure(host):
     assert (
         function_run_to_dict(service.store.get(job.id))["actor"]["actor_id"] == "erased"
     )
+
+
+@pytest.mark.parametrize("adapter", ["memory", "sqlite-memory"])
+def test_enabled_functions_require_persistent_shared_history(host, adapter):
+    service, execute, _, _ = host
+    store = (
+        InMemoryExecutionStore(retry_policy=RetryPolicy(max_attempts=1))
+        if adapter == "memory"
+        else SqliteExecutionStore(":memory:", retry_policy=RetryPolicy(max_attempts=1))
+    )
+    try:
+        with pytest.raises(ValueError, match="file-backed SQLite"):
+            invocation.FunctionInvocationService(
+                service.graph_service, store, enabled=service.enabled
+            )
+        disabled = invocation.FunctionInvocationService(service.graph_service, store)
+        disabled.enabled.update(service.enabled)
+        with pytest.raises(ValueError, match="file-backed SQLite"):
+            invoke(disabled)
+        assert store.list_jobs() == []
+        execute.assert_not_called()
+    finally:
+        if adapter == "sqlite-memory":
+            store.close()
+
+
+def test_independent_history_connections_share_busy_and_deduplication(host):
+    service, execute, _, directory = host
+    other_store = SqliteExecutionStore(
+        directory.parent / "history.db", retry_policy=RetryPolicy(max_attempts=1)
+    )
+    other = invocation.FunctionInvocationService(
+        service.graph_service,
+        other_store,
+        root=service.root,
+        enabled=service.enabled,
+        runner=service.runner,
+    )
+    entered, release = Event(), Event()
+
+    def run(*args):
+        entered.set()
+        assert release.wait(5)
+        return FunctionRunResult("succeeded", output={})
+
+    execute.side_effect = run
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(invoke, service, idempotency_key="shared")
+            try:
+                assert entered.wait(5)
+                replay = invoke(other, idempotency_key="shared")
+                assert replay.state == ExecutionState.RUNNING
+                assert invoke(other).result["error"]["code"] == "busy"
+            finally:
+                release.set()
+            assert future.result().id == replay.id
+        assert invoke(other, idempotency_key="shared").id == replay.id
+        assert execute.call_count == 1
+    finally:
+        other_store.close()
+
+
+def test_replay_survives_auth_transport_change_and_retention_redaction(host):
+    service, execute, _, _ = host
+    job = service.invoke(
+        "example",
+        {},
+        idempotency_key="delivery",
+        actor_binding={"actor_id": "operator", "auth_source": "basic"},
+    )
+    assert (
+        service.invoke(
+            "example",
+            {},
+            idempotency_key="delivery",
+            actor_binding={"actor_id": "operator", "auth_source": "session"},
+        ).id
+        == job.id
+    )
+    with pytest.raises(PermissionError):
+        service.invoke(
+            "example",
+            {},
+            idempotency_key="delivery",
+            actor_binding={"actor_id": "other"},
+        )
+    assert service.store.redact([job.id]) == 1
+    replay = invoke(service, idempotency_key="delivery")
+    assert replay.id == job.id and replay.redacted_at is not None
+    assert replay.result["output"] is None
+    service.graph_service.authorization_hook.evaluate.return_value = (
+        GraphAuthorizationDecision(allowed=False)
+    )
+    with pytest.raises(PermissionError):
+        invoke(service, idempotency_key="delivery")
+    assert execute.call_count == 1
+
+
+def test_invalid_function_id_cannot_alias_another_functions_delivery(host):
+    service, execute, _, _ = host
+    job = invoke(service, idempotency_key="def:ghi")
+    with pytest.raises(ValueError, match="Invalid function id"):
+        service.invoke(
+            "example:def",
+            {},
+            idempotency_key="ghi",
+            actor_binding={"actor_id": "other"},
+        )
+    assert service.store.list_jobs(kind=ExecutionKind.FUNCTION) == [job]
+    assert execute.call_count == 1
+
+
+def test_enqueue_conflict_cannot_expose_another_actors_run(host, monkeypatch):
+    service, execute, _, _ = host
+    job = invoke(service, idempotency_key="delivery")
+    monkeypatch.setattr(service.store, "list_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(service.store, "enqueue", lambda candidate: job)
+    with pytest.raises(PermissionError):
+        service.invoke(
+            "example",
+            {},
+            idempotency_key="delivery",
+            actor_binding={"actor_id": "other"},
+        )
+    assert execute.call_count == 1

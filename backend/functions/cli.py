@@ -23,9 +23,14 @@ def main(argv=None):
                 "input": json.loads(args.input),
                 "correlation_id": args.correlation_id,
             },
-            headers={"Idempotency-Key": args.idempotency_key}
-            if args.idempotency_key
-            else {},
+            headers={
+                "X-Requested-With": "function-cli",
+                **(
+                    {"Idempotency-Key": args.idempotency_key}
+                    if args.idempotency_key
+                    else {}
+                ),
+            },
         )
         response.raise_for_status()
         sys.stdout.write(json.dumps(response.json(), indent=2) + "\n")
