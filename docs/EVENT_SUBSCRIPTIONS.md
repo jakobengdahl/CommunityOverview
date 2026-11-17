@@ -470,6 +470,11 @@ Configure one through either surface (both back the same in-memory registry):
 | MCP tool | `remove_session_auto_add_agent(visualization_session_id, agent_id)` |
 | REST | `POST/GET /sessions/{id}/auto-add-agents`, `DELETE /sessions/{id}/auto-add-agents/{agent_id}` |
 
+The server adds each pushed node to the stored session itself before
+broadcasting, and records the addition in the session activity log under the
+actor `auto-add-agent:<agent_id>`, once per change however many browsers are
+open.
+
 Example: an agent with `node_types=["Actor"]` on the session you are viewing adds
 every newly created Actor node into that view as it appears, without disturbing
 the nodes already on the canvas.

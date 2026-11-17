@@ -1,4 +1,6 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, screen, waitFor, act } from '@testing-library/react';
 
 /**
@@ -84,6 +86,7 @@ class FakeEventSource {
     this.url = url;
     this.onmessage = null;
     this.onerror = null;
+    FakeEventSource.instances.push(this);
     setTimeout(
       () =>
         this.onmessage?.({
@@ -94,12 +97,9 @@ class FakeEventSource {
   }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';

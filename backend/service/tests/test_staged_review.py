@@ -41,6 +41,13 @@ def _stage(world, sid, *calls):
             assert result.get("success", True), result
 
 
+def _show(world, sid, node_ids):
+    session = world.manager.get_session(sid)
+    world.manager.store.apply_state_op(
+        session, {"op": "nodes_added", "node_ids": node_ids, "client_id": "c1"}
+    )
+
+
 def _graph_events(world):
     return [e for e in world.events if e.event_type.value.startswith(("node", "edge"))]
 
@@ -246,6 +253,7 @@ def test_a_clean_merge_applies_every_entry_removes_it_and_fires_direct_events(wo
         ("update_node", ("a",), {"updates": {"description": "merged"}}),
         ("delete_nodes", (["c"],), {"confirmed": True}),
     )
+    _show(world, sid, ["a", "c", "n"])
     before = len(world.events)
     revision = world.storage.get_node("a").revision
     result = svc.merge_staged_changes(sid, "merge-1")
@@ -276,7 +284,10 @@ def test_a_clean_merge_applies_every_entry_removes_it_and_fires_direct_events(wo
     op = world.published[-1][1]["op"]
     assert op["op"] == "graph_changes_merged" and op["merge_id"] == "merge-1"
     assert sorted(map(tuple, op["removals"])) == sorted(by_id)
-    assert set(op) == {"op", "merge_id", "removals", "seq"}
+    assert set(op) == {"op", "merge_id", "removals", "dropped_node_ids", "seq"}
+    # The merged delete leaves the session with the merge's own op.
+    assert op["dropped_node_ids"] == ["c"]
+    assert world.manager.get_session(sid).state["node_refs"] == ["a", "n"]
 
 
 def test_events_of_other_writes_carry_no_staged_by_key():
@@ -655,7 +666,9 @@ def test_discard_removes_entries_only_and_fans_out_keys(world):
         sid,
         ("update_node", ("a",), {"updates": {"description": "x"}}),
         ("update_node", ("b",), {"updates": {"description": "y"}}),
+        ("add_nodes", ([{"id": "n", "type": "Actor", "name": "N"}], []), {}),
     )
+    _show(world, sid, ["a", "b", "n"])
     main, events = world.main(), len(world.events)
     result = svc.discard_staged_changes(
         sid,
@@ -666,20 +679,30 @@ def test_discard_removes_entries_only_and_fans_out_keys(world):
     )
     assert result["success"] is True
     assert result["removed_entries"] == [["node", "a"]]
-    assert sorted(world.layer(sid)) == [("node", "b")]
+    assert sorted(world.layer(sid)) == [("node", "b"), ("node", "n")]
     assert world.main() == main and len(world.events) == events
     op = world.published[-1][1]["op"]
     assert op == {
         "op": "graph_changes_discarded",
         "removals": [["node", "a"]],
+        "dropped_node_ids": [],
         "seq": result["session_seq"],
     }
     activity = world.manager.get_session(sid).activity_log[-1]
     assert activity["op"] == "graph_changes_discarded"
     assert activity["inverse_op"] is None
+    records = len(world.manager.get_session(sid).activity_log)
     everything = svc.discard_staged_changes(sid)
-    assert everything["removed_entries"] == [["node", "b"]]
+    assert everything["removed_entries"] == [["node", "b"], ["node", "n"]]
     assert world.layer(sid) == {}
+    # The discarded create leaves the session in the discard's one op and
+    # record, so no browser has to remove it (and be named for doing so).
+    assert world.published[-1][1]["op"]["dropped_node_ids"] == ["n"]
+    session = world.manager.get_session(sid)
+    assert session.state["node_refs"] == ["a", "b"]
+    assert [r["op"] for r in session.activity_log[records:]] == [
+        "graph_changes_discarded"
+    ]
 
 
 # -- concurrent staging (§6.2 under races) ------------------------------------------------

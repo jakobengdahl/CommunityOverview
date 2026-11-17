@@ -5,7 +5,7 @@ import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
-import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
+import { savedViewLayout, savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
 import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
 function FloatingSearch({ variant = 'floating', onTeleport }) {
@@ -14,6 +14,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
     nodes: vizNodes,
     hiddenNodeIds,
     addNodesToVisualization,
+    publishMembership,
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
@@ -284,9 +285,10 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
               : [];
           if (selectionRef.current !== selectionId) return;
 
-          clearVisualization();
+          let loadedNodes = [];
+          let loadedEdges = [];
           if (nodeIds.length > 0) {
-            const loadedNodes = details
+            loadedNodes = details
               .filter((d) => d?.success)
               .map((d) => {
                 const n = d.node;
@@ -316,18 +318,31 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
                 }
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-              addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
+              loadedEdges = Array.from(edgeMap.values());
             }
           }
-
-          if (savedViewAnnotations.groups.length > 0) {
-            setPendingGroups({
-              groups: savedViewAnnotations.groups,
-              parentIds: savedViewAnnotations.parentIds,
-            });
-          }
-          if (savedViewAnnotations.annotations.length > 0) {
-            setPendingAnnotations(savedViewAnnotations.annotations);
+          // A session stores the view's layout with the replace's one record
+          // and every browser renders it from there, so none is saved back.
+          const sent = publishMembership(
+            'nodes_replaced',
+            loadedNodes.map((n) => n.id),
+            {
+              nodes: loadedNodes,
+              edges: loadedEdges,
+              view: savedViewLayout(node.metadata),
+            }
+          );
+          if (!sent) {
+            clearVisualization({ keepNodes: true });
+            if (savedViewAnnotations.groups.length > 0) {
+              setPendingGroups({
+                groups: savedViewAnnotations.groups,
+                parentIds: savedViewAnnotations.parentIds,
+              });
+            }
+            if (savedViewAnnotations.annotations.length > 0) {
+              setPendingAnnotations(savedViewAnnotations.annotations);
+            }
           }
         } catch (err) {
           if (selectionRef.current !== selectionId) return;
@@ -352,7 +367,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
         setTimeout(() => setFocusNodeId(node.id), 100);
       } else {
         // Add node and fetch edges connecting it to existing visualization nodes
-        addNodesToVisualization([node], []);
+        publishMembership('nodes_added', [node.id], { nodes: [node] });
         try {
           const related = await api.getRelatedNodes(node.id, { depth: 1 });
           if (selectionRef.current !== selectionId) return;
@@ -383,6 +398,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       vizNodes,
       hiddenNodeIds,
       addNodesToVisualization,
+      publishMembership,
       clearVisualization,
       setFocusNodeId,
       setPendingGroups,

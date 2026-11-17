@@ -47,7 +47,6 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_activity import MEMBERSHIP_OPS
 from .session_annotations import (
     IMAGE_TYPE,
     annotation_type_of,
@@ -447,6 +446,27 @@ def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
     return total
 
 
+def _pushed_view(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The layout a pushed result carries, as a ``nodes_replaced`` view.
+
+    Passed through unfiltered, so the store validates it exactly as it does a
+    browser's replace and refuses the whole load when any part is malformed.
+    Only a result in the session's annotation format (``annotation_document``)
+    replaces the annotations; a legacy-only view leaves them as they are.
+    """
+    view = {
+        key: result[key]
+        for key in ("positions", "hidden_node_ids")
+        if result.get(key) is not None
+    }
+    document = result.get("annotation_document")
+    if isinstance(document, dict):
+        document = document.get("annotations")
+    if document is not None:
+        view["annotations"] = document
+    return view
+
+
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
@@ -538,14 +558,33 @@ def _annotation_embedded_image_bytes(annotation: Any) -> int:
     return data_url_byte_length(url)
 
 
-def _op_embedded_image_bytes(op: Dict[str, Any]) -> int:
-    """``_annotation_embedded_image_bytes`` for an ops-batch entry: only
-    ``annotation_created``/``annotation_updated`` ops can carry an
-    annotation payload at all.
+def _check_op_image_sizes(op: Dict[str, Any]) -> int:
+    """Raise ``ImageBudgetExceeded`` if an embedded image *op* carries is over
+    the per-image limit; else return the JSON length of their data URLs.
+
+    ``annotation_created``/``annotation_updated`` carry one annotation and
+    ``nodes_replaced`` a loaded view's whole list, so a view load is held to
+    the per-image limit whether a browser batch or a push applies it.
     """
-    if op.get("op") not in ("annotation_created", "annotation_updated"):
+    if op.get("op") in ("annotation_created", "annotation_updated"):
+        annotations = [op.get("annotation")]
+    elif op.get("op") == "nodes_replaced" and isinstance(op.get("annotations"), list):
+        annotations = op["annotations"]
+    else:
         return 0
-    return _annotation_embedded_image_bytes(op.get("annotation"))
+    url_bytes = 0
+    for annotation in annotations:
+        image_bytes = _annotation_embedded_image_bytes(annotation)
+        if not image_bytes:
+            continue
+        if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
+            raise ImageBudgetExceeded(
+                f"embedded image is {image_bytes} bytes, exceeding "
+                f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
+                "per-image limit"
+            )
+        url_bytes += len(json.dumps(annotation["image"]["url"]))
+    return url_bytes
 
 
 def _check_image_budgets(
@@ -598,6 +637,49 @@ def _check_image_budgets(
             f"{projected_doc_bytes} bytes, over the "
             f"{max_session_document_bytes}-byte document limit"
         )
+
+
+def _check_session_totals(
+    session: "Session",
+    snapshot: Dict[str, Any],
+    *,
+    max_session_image_bytes: int,
+    max_session_document_bytes: int,
+) -> None:
+    """Raise ``ImageBudgetExceeded`` if the session, with its ops already
+    applied in memory (``snapshot`` from ``_detached_snapshot``), is over the
+    session image or document budget.
+
+    Shared by a browser batch (``apply_ops``) and a pushed result's membership
+    op, so the same view load is admitted or refused on both paths; both
+    check each image against the per-image limit first
+    (``_check_op_image_sizes``).
+    """
+    total_image_bytes = _session_image_bytes(session)
+    if total_image_bytes > max_session_image_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session's total "
+            f"embedded image data to {total_image_bytes} "
+            f"bytes, over the {max_session_image_bytes}-byte "
+            "session limit"
+        )
+    total_doc_bytes = _document_bytes(snapshot, session)
+    if total_doc_bytes > max_session_document_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session document to "
+            f"{total_doc_bytes} bytes, over the "
+            f"{max_session_document_bytes}-byte document limit"
+        )
+
+
+# Push actions whose nodes a browser renders as the whole view, and those it
+# merges into the view (``update_in_visualization`` appends unknown nodes).
+_REPLACING_ACTIONS = frozenset(
+    {"load_visualization", "replace_visualization", "clear_visualization"}
+)
+_ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"})
+# Activity actor for an auto-add agent's pushes: the prefix plus its agent id.
+AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
 
 
 class SessionManager:
@@ -665,6 +747,11 @@ class SessionManager:
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
         self._pending_pushes: set[asyncio.Task] = set()
+        # The app's loop, so a push from a worker thread is applied there.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -1437,21 +1524,16 @@ class SessionManager:
         # reference-only ops, not a multi-hundred-KB picture
         # (smallfix-embedded-image-over-op-batch-cap-immovable) — so it is
         # excluded from this sum rather than making every non-image op share a
-        # cap wide enough to admit one.
+        # cap wide enough to admit one. A `nodes_replaced` view load is
+        # charged for everything but its embedded images' data URLs.
         non_image_bytes = 0
         for op in ops:
             if not isinstance(op, dict):
                 continue
-            image_bytes = _op_embedded_image_bytes(op)
-            if image_bytes:
-                if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
-                    raise ImageBudgetExceeded(
-                        f"embedded image is {image_bytes} bytes, exceeding "
-                        f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
-                        "per-image limit"
-                    )
+            image_url_bytes = _check_op_image_sizes(op)
+            if image_url_bytes and op.get("op") != "nodes_replaced":
                 continue
-            non_image_bytes += len(json.dumps(op))
+            non_image_bytes += len(json.dumps(op)) - image_url_bytes
         if non_image_bytes > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
@@ -1562,12 +1644,14 @@ class SessionManager:
                             holder = working_leases.get(conflict_id)
                             if holder is not None and holder != client_id:
                                 raise LeaseConflict(conflict_id, holder)
+                        for target in self.store.replaced_annotation_targets(
+                            session, op
+                        ):
+                            holder = working_leases.get(target)
+                            if holder is not None and holder != client_id:
+                                raise LeaseConflict(target, holder)
                         result = self.store.apply_state_op(
-                            session,
-                            {**op, "client_id": client_id},
-                            # Browser membership ops report an already-applied
-                            # canvas diff; its originating action is unknown.
-                            record_activity=op_type not in MEMBERSHIP_OPS,
+                            session, {**op, "client_id": client_id}
                         )
                         if result is None:
                             continue  # legitimate no-op (e.g. update on deleted annotation)
@@ -1593,21 +1677,12 @@ class SessionManager:
                     # not just images — before that snapshot is persisted; the
                     # `except Exception` below rolls it back like any other
                     # mid-batch failure.
-                    total_image_bytes = _session_image_bytes(session)
-                    if total_image_bytes > max_session_image_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session's total "
-                            f"embedded image data to {total_image_bytes} "
-                            f"bytes, over the {max_session_image_bytes}-byte "
-                            "session limit"
-                        )
-                    total_doc_bytes = _document_bytes(snapshot, session)
-                    if total_doc_bytes > max_session_document_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session document to "
-                            f"{total_doc_bytes} bytes, over the "
-                            f"{max_session_document_bytes}-byte document limit"
-                        )
+                    _check_session_totals(
+                        session,
+                        snapshot,
+                        max_session_image_bytes=max_session_image_bytes,
+                        max_session_document_bytes=max_session_document_bytes,
+                    )
                     await asyncio.to_thread(self.store.persist_snapshot, snapshot)
             except Exception:
                 session.state = saved_state
@@ -1861,7 +1936,12 @@ class SessionManager:
         return self._add_node_refs(session, client_id, node_ids)
 
     def _add_node_refs(
-        self, session: Session, client_id: str, node_ids: List[str]
+        self,
+        session: Session,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        positions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Commit one membership change after the caller has serialized access.
 
@@ -1893,6 +1973,8 @@ class SessionManager:
             "node_ids": added,
             "client_id": client_id,
         }
+        if positions is not None:
+            op["positions"] = positions
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {
             "applied": applied,
@@ -2674,6 +2756,7 @@ class SessionManager:
         *,
         record_activity: bool = True,
         trusted_replay: bool = False,
+        enforce_session_budgets: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -2692,6 +2775,8 @@ class SessionManager:
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
         prior state is not re-judged as fresh caller input.
+        ``enforce_session_budgets`` applies apply_ops' session image/document
+        budgets to the result, for an op that can carry embedded images.
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
@@ -2711,6 +2796,13 @@ class SessionManager:
                 trusted_replay=trusted_replay,
             )
             if applied is not None:
+                if enforce_session_budgets:
+                    _check_session_totals(
+                        session,
+                        _detached_snapshot(session),
+                        max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                        max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                    )
                 self.store.persist(session)
         except Exception:
             session.state = saved_state
@@ -2840,16 +2932,37 @@ class SessionManager:
 
     # ---------------- MCP push ----------------
 
-    def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+    def push_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+    ) -> bool:
         """Apply server-owned membership once, then broadcast the command.
 
-        Additive results bypass MCP request caps and produce one membership op.
+        Pushed results bypass MCP request caps; see _apply_command_membership.
         During an in-flight batch, acceptance queues delivery behind its lock;
-        otherwise delivery completes inline. Returns ``False`` when the session
-        is unknown so callers can fall back to the legacy registry.
+        otherwise delivery completes inline. ``on_published`` runs only once
+        the membership is applied and the command broadcast, inline or queued.
+        Returns ``False`` when the session is unknown so callers can fall back
+        to the legacy registry.
         """
         if self.store.get(session_id) is None:
             return False
+        try:
+            running: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = self._loop
+        if loop is not None and loop.is_running() and running is not loop:
+            # A producer off the loop (a node-create listener in a worker
+            # thread) must not touch session state or the lock concurrently
+            # with apply_ops: the push is accepted and applied on the loop.
+            command = copy.deepcopy(command)
+            loop.call_soon_threadsafe(
+                self._push_command_on_loop, session_id, command, on_published
+            )
+            return True
         queue_name = f"session-push:{session_id}"
         if self._lock(session_id).locked() or any(
             task.get_name() == queue_name for task in self._pending_pushes
@@ -2859,47 +2972,112 @@ class SessionManager:
             # rolls back, preserving op/command order for every subscriber.
             command = copy.deepcopy(command)
             task = asyncio.get_running_loop().create_task(
-                self._push_command_after_batch(session_id, command), name=queue_name
+                self._push_command_after_batch(session_id, command, on_published),
+                name=queue_name,
             )
             self._pending_pushes.add(task)
             task.add_done_callback(self._pending_pushes.discard)
             return True
-        return self._publish_command(session_id, command)
+        return self._publish_command(session_id, command, on_published)
 
-    async def _push_command_after_batch(
-        self, session_id: str, command: Dict[str, Any]
+    def _push_command_on_loop(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]],
     ) -> None:
         try:
-            async with self._lock(session_id):
-                self._publish_command(session_id, command)
+            self.push_command(session_id, command, on_published)
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
-    def _publish_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+    async def _push_command_after_batch(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+    ) -> None:
+        try:
+            async with self._lock(session_id):
+                self._publish_command(session_id, command, on_published)
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    def _publish_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+    ) -> bool:
         session = self.store.get(session_id)
         if session is None:
             return False
-        result = command.get("result", {})
-        if result.get("action") == "add_to_visualization" and command.get(
-            "tool"
-        ) not in {"session_auto_add_agent", "load_visualization", "get_saved_view"}:
-            node_ids = [
-                node["id"]
-                for node in result.get("nodes", [])
-                if isinstance(node, dict)
-                and isinstance(node.get("id"), str)
-                and node.get("type") != "Community"
-                and (node.get("data") or {}).get("type") != "Community"
-            ]
-            if node_ids:
-                # Server-applied additive results are attributable to MCP.
-                self._add_node_refs(session, "mcp-agent", node_ids)
-        elif result.get("action") == "clear_visualization":
-            self._remove_node_refs(
-                session, "mcp-agent", list(session.state.get("node_refs", []))
-            )
+        self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
+        if on_published is not None:
+            on_published()
         return True
+
+    def _apply_command_membership(
+        self, session: Session, command: Dict[str, Any]
+    ) -> None:
+        """Apply a push's node membership here, so browsers only render it.
+
+        The server is the only writer of membership: the resulting op reaches
+        every subscriber before the command, and browsers never send
+        membership back for what they render. A change is one activity record,
+        attributed to the pusher.
+        """
+        result = command.get("result")
+        if not isinstance(result, dict):
+            return
+        action = result.get("action")
+        node_ids = [
+            node["id"]
+            for node in result.get("nodes") or []
+            if isinstance(node, dict)
+            and isinstance(node.get("id"), str)
+            and node.get("type") != "Community"
+            and (node.get("data") or {}).get("type") != "Community"
+        ]
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        if action == "clear_visualization" and not node_ids:
+            # A plain clear is recorded as what it removed, not as an empty
+            # replace; a clear carrying nodes is a replace.
+            self._remove_node_refs(
+                session, actor, list(session.state.get("node_refs", []))
+            )
+        elif action in _REPLACING_ACTIONS:
+            # Browsers swap the whole view for the result's nodes: one op,
+            # carrying a loaded view's layout, applied all-or-nothing.
+            op: Dict[str, Any] = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+            for target in self.store.replaced_annotation_targets(session, op):
+                holder = self.leases.snapshot(session.id).get(target)
+                if holder is not None and holder != actor:
+                    raise LeaseConflict(target, holder)
+            self._apply_op_sync(
+                session, session.id, actor, op, enforce_session_budgets=True
+            )
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            self._add_node_refs(
+                session,
+                actor,
+                node_ids,
+                positions=_pushed_view(result).get("positions") or {},
+            )
 
     # ---------------- summon to viewport ----------------
 

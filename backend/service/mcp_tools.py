@@ -20,6 +20,7 @@ from .attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS
 import functools
 import inspect
 import json
+import logging
 import math
 import secrets
 from typing import List, Optional, Dict, Any, Callable, Tuple
@@ -52,6 +53,8 @@ from backend.core.session_manager import (
     RevisionConflict,
     SessionLimitReached,
     SessionNotFound,
+    _ADDITIVE_ACTIONS,
+    _REPLACING_ACTIONS,
 )
 from backend.core.image_ingest import (
     ImageFetchError,
@@ -101,6 +104,8 @@ from . import access, graph_merge_plan
 from .service import GraphService
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
+logger = logging.getLogger(__name__)
+
 # Server-owned session state records node x/y but not rendered node dimensions
 # (design §3.8: the browser no longer uploads canvas geometry). Agents still need
 # a size to space nodes without overlap, so the layout tools advertise this
@@ -132,14 +137,14 @@ _INVALID_SESSION_ID_ERROR = (
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
-# Appended to every undelivered-push warning: a push writes no session state, so
-# an agent that simply retries it gets the same silence. It deliberately names
+# Appended to every undelivered-push warning: an agent that simply retries an
+# undelivered push gets the same silence. It deliberately names
 # this report, not connect_to_visualization_session, as the verdict: that tool
 # is read before the push, and a consumer present then can be gone by the time
 # the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
-    " A push is not stored in the session's state — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than a "
+    " To change what the session holds whether or not a canvas is open, use "
+    "add_nodes_to_session. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
@@ -327,6 +332,14 @@ def _session_aware(
     return wrapper
 
 
+_MEMBERSHIP_UNAPPLIED_WARNING = (
+    "Nothing received this push: the server could not store the session it "
+    "targets (the session id may be retired, or the server's session limit "
+    "reached), so its nodes were not added and it was sent to no browser."
+    + _UNDELIVERED_PUSH_REMEDY
+)
+
+
 def _undelivered_push_warning(
     *,
     registry_configured: bool,
@@ -338,6 +351,7 @@ def _undelivered_push_warning(
     hub_published: bool,
     hub_clients: int,
     outcome_unknown: bool,
+    legacy_withheld: bool = False,
 ) -> str:
     """Say why nothing received a push, reading the reason off the actual state.
 
@@ -357,6 +371,11 @@ def _undelivered_push_warning(
     """
     if not registry_configured:
         legacy_reason = "no legacy push channel is configured"
+    elif legacy_withheld:
+        legacy_reason = (
+            "it was not sent to the legacy push channel, since the server could "
+            "not confirm its nodes were added to the session"
+        )
     elif legacy_enqueued and legacy_consumers == 0:
         legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
@@ -455,8 +474,8 @@ def register_mcp_tools(
 
         The three read tools return the service payload verbatim, so without
         this an agent cannot tell a push that landed on a canvas from one that
-        went nowhere: a push writes no session state, so there is nothing to
-        read back either.
+        went nowhere: the session's stored state says what it holds, not
+        whether a canvas showed it.
 
         What keeps this report out of what the canvas receives is the copy
         ``_push_to_session`` takes (``command_result = dict(result)``), not the
@@ -464,7 +483,26 @@ def register_mcp_tools(
         — the legacy queue via ``loop.call_soon``, the hub by passing the object
         to subscribers — so a later mutation of a shared ``result`` would still
         be visible to them. Do not remove that copy.
+
+        A read tool's push writes the session (membership, a loaded view's
+        layout and annotations), so it needs the same MUTATE grant as
+        ``add_nodes_to_session``; a caller without it still gets the read.
         """
+        if session_id and tool_name in _PUSHING_TOOLS:
+            denied = _authorize_session(GRAPH_ACTION_MUTATE, tool_name)
+            if denied:
+                delivery = {
+                    "requested": True,
+                    "delivered": False,
+                    "status": "not_delivered",
+                    "live_consumers": 0,
+                    "error_code": denied["error_code"],
+                    "warning": "Not pushed: this caller may not change the "
+                    "session. " + denied["message"],
+                }
+                if isinstance(result, dict):
+                    result["visualization_delivery"] = delivery
+                return delivery
         delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )
@@ -801,12 +839,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -929,12 +968,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -1707,12 +1747,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             The nodes and edges to display in the visualization, with position
@@ -3167,10 +3208,10 @@ def register_mcp_tools(
         ``add_nodes_to_session`` writes the session's stored state whether or
         not anyone has it open. Passing the session id as
         ``visualization_session_id`` to the search/related tools is not a
-        substitute: a push writes no session state, so its nodes land only if a
-        canvas receives it and adds them. Check ``visualization_delivery``
-        (``delivered``, ``status``) on such a result before assuming the push
-        reached anything.
+        substitute: such a push stores its nodes only in a session the server
+        already holds or can create, and shows them only on a canvas that
+        receives it. Check ``visualization_delivery`` (``delivered``,
+        ``status``) on such a result before assuming the push reached anything.
 
         Args:
             name: Optional display name. Names are not required to be unique; when
@@ -6366,6 +6407,18 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
     return origins
 
 
+def _carries_membership(result: Dict[str, Any]) -> bool:
+    """Whether applying *result* gives a session that holds nothing nodes.
+
+    A clear or an empty replace changes nothing in a session never stored, so
+    it does not materialise one.
+    """
+    action = result.get("action")
+    return (action in _REPLACING_ACTIONS or action in _ADDITIVE_ACTIONS) and bool(
+        result.get("nodes")
+    )
+
+
 def _push_to_session(
     session_registry,
     session_id: Optional[str],
@@ -6375,9 +6428,9 @@ def _push_to_session(
 ) -> Dict[str, Any]:
     """Push *result* to a browser session if *session_id* is set.
 
-    When the result has nodes but no explicit *action*, defaults to
-    "add_to_visualization" so external AI tools add to the canvas rather
-    than silently replacing it.
+    When the result has nodes but no *action* the canvas knows (none, or a
+    free-form one), it is pushed as "add_to_visualization" so external AI
+    tools add to the canvas rather than silently replacing it.
 
     The command goes to the legacy single-consumer registry (current frontend)
     and, when a *session_manager* is supplied, is also broadcast to the new
@@ -6407,10 +6460,13 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    MCP additive pushes to a stored shared session apply node references on the
-    server before broadcasting, attributed to MCP. Saved-view and auto-add
-    agent pushes remain client-applied and produce no membership activity.
-    Legacy-only sessions still rely on the browser applying the command. An
+    Every push applies its node membership on the server before broadcasting
+    (``SessionManager._apply_command_membership``), materialising a session
+    a browser holds only client-side (a legacy registry entry), so browsers only render it and never
+    send it back. A push whose membership cannot be applied (the session cannot
+    be stored, or applying it raised) is sent to no browser and reported
+    undelivered; one queued behind an in-flight batch reaches a legacy browser
+    only after that apply succeeds. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6420,7 +6476,14 @@ def _push_to_session(
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}
     command_result = dict(result)
-    if "action" not in command_result and command_result.get("nodes"):
+    action = command_result.get("action")
+    if (
+        action not in _REPLACING_ACTIONS
+        and action not in _ADDITIVE_ACTIONS
+        and command_result.get("nodes")
+    ):
+        # search_graph passes its action through unchecked, and browsers draw
+        # any other node-carrying push as an add: the server applies it as one.
         command_result["action"] = "add_to_visualization"
     # A unique id lets the browser dedupe the legacy stream and the hub
     # broadcast delivering the same push during the handover between them
@@ -6432,16 +6495,6 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
-    legacy_enqueued = False
-    legacy_consumers = 0
-    if session_registry and session_registry.is_valid_session_id(session_id):
-        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
-        # A registry that cannot report its consumers cannot support a delivery
-        # claim, so the verdict falls back to the hub rather than assuming a
-        # reader that may not be there.
-        counter = getattr(session_registry, "consumer_count", None)
-        if callable(counter):
-            legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
     # The two hub calls fail independently and mean different things, so they are
@@ -6450,18 +6503,93 @@ def _push_to_session(
     # and the second of those must not be reported as a non-delivery.
     hub_publish_failed = False
     hub_presence_read = True
+    membership_unapplied = False
+    legacy_withheld = False
+    # A push carrying membership reaches a legacy browser only after the hub
+    # applied it: legacy browsers render without writing membership back, so a
+    # render ahead of a failed apply would show nodes the session never gains.
+    legacy_gated = session_manager is not None and _carries_membership(command_result)
+    legacy = {"sent": False, "enqueued": False, "consumers": 0}
+
+    def _send_legacy() -> None:
+        legacy["sent"] = True
+        if not (
+            session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and not membership_unapplied
+            and not legacy_withheld
+        ):
+            return
+        legacy["enqueued"] = bool(
+            session_registry.push_command_sync(session_id, command)
+        )
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+
+    def _send_legacy_after_apply() -> None:
+        try:
+            _send_legacy()
+        except Exception:
+            logger.exception("legacy push failed for session %s", session_id)
+
     if session_manager is not None:
+        if (
+            legacy_gated
+            and session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and session_registry.session_exists(session_id)
+        ):
+            try:
+                # The server is the only writer of pushed membership, so a
+                # session a browser holds but never stored is materialised here
+                # rather than by whichever browser renders the push first.
+                session_manager.get_or_create(session_id)
+            except Exception:
+                # Retired id, session limit: no browser writes membership back,
+                # so a legacy render alone would show nodes the session never
+                # gains. The push goes nowhere rather than half-applied.
+                membership_unapplied = True
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
             hub_clients = 0
             hub_presence_read = False
-        try:
-            hub_published = bool(session_manager.push_command(session_id, command))
-        except Exception:
-            # Best-effort mirror to the hub; never break the legacy push path.
-            hub_published = False
-            hub_publish_failed = True
+        if not membership_unapplied:
+            try:
+                if legacy_gated:
+                    hub_published = bool(
+                        session_manager.push_command(
+                            session_id, command, on_published=_send_legacy_after_apply
+                        )
+                    )
+                else:
+                    hub_published = bool(
+                        session_manager.push_command(session_id, command)
+                    )
+            except Exception:
+                # Best-effort mirror to the hub; never break the legacy push path.
+                hub_published = False
+                hub_publish_failed = True
+                # Applying the membership may be what failed (and rolled back),
+                # so a gated push is not sent to a legacy browser either.
+                legacy_withheld = legacy_gated and not legacy["sent"]
+    if hub_published and legacy_gated and not legacy["sent"]:
+        # Queued behind an in-flight batch: the legacy send follows the apply.
+        # Like the queued hub publish, acceptance stands in for delivery.
+        legacy["enqueued"] = bool(
+            session_registry and session_registry.is_valid_session_id(session_id)
+        )
+        counter = getattr(session_registry, "consumer_count", None)
+        if legacy["enqueued"] and callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+    elif not legacy["sent"]:
+        _send_legacy()
+    legacy_enqueued = legacy["enqueued"]
+    legacy_consumers = legacy["consumers"]
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (
@@ -6484,15 +6612,20 @@ def _push_to_session(
         "live_consumers": legacy_consumers + hub_clients,
     }
     if not delivered:
-        delivery["warning"] = _undelivered_push_warning(
-            registry_configured=bool(session_registry),
-            legacy_enqueued=legacy_enqueued,
-            legacy_consumers=legacy_consumers,
-            hub_configured=session_manager is not None,
-            hub_publish_failed=hub_publish_failed,
-            hub_presence_read=hub_presence_read,
-            hub_published=hub_published,
-            hub_clients=hub_clients,
-            outcome_unknown=outcome_unknown,
+        delivery["warning"] = (
+            _MEMBERSHIP_UNAPPLIED_WARNING
+            if membership_unapplied
+            else _undelivered_push_warning(
+                registry_configured=bool(session_registry),
+                legacy_enqueued=legacy_enqueued,
+                legacy_consumers=legacy_consumers,
+                hub_configured=session_manager is not None,
+                hub_publish_failed=hub_publish_failed,
+                hub_presence_read=hub_presence_read,
+                hub_published=hub_published,
+                hub_clients=hub_clients,
+                outcome_unknown=outcome_unknown,
+                legacy_withheld=legacy_withheld,
+            )
         )
     return delivery

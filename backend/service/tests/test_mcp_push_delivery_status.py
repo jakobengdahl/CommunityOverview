@@ -13,11 +13,19 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from backend.core import GraphStorage
-from backend.core.session_manager import SessionManager
+from backend.core.session_manager import (
+    SessionLimitReached,
+    SessionManager,
+    SessionNotFound,
+)
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
+)
+from backend.runtime.authorization import (
+    AUTHORIZATION_MODE_ENV,
+    AUTHORIZATION_MODE_READ_ONLY,
 )
 from backend.service import GraphService, register_mcp_tools
 from backend.service.mcp_tools import _undelivered_push_warning
@@ -33,8 +41,8 @@ UNDELIVERED_KEYS = DELIVERED_KEYS | {"warning"}
 # module's own constant would pass whatever that constant were rewritten to,
 # including advice that inverts this one.
 EXPECTED_REMEDY = (
-    " A push is not stored in the session's state — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than a "
+    " To change what the session holds whether or not a canvas is open, use "
+    "add_nodes_to_session. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
@@ -218,6 +226,44 @@ def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
         assert delivery["warning"], tool_name
 
 
+def test_a_caller_without_mutate_reads_but_never_pushes_into_the_session(
+    wired, monkeypatch
+):
+    """A read tool's push writes the session, so it needs the MUTATE grant."""
+    tools, _registry, manager = wired
+    session_id = _new_session(tools)
+    tools["add_nodes_to_session"](session_id=session_id, node_ids=["beta"])
+    tools["save_view"](name="A view")
+    before = manager.get_session(session_id)
+    refs, seq = list(before.state["node_refs"]), before.seq
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    monkeypatch.setenv(AUTHORIZATION_MODE_ENV, AUTHORIZATION_MODE_READ_ONLY)
+    try:
+        for tool_name, call in {
+            "search_graph": lambda: tools["search_graph"](
+                query="Alpha", visualization_session_id=session_id
+            ),
+            "get_related_nodes": lambda: tools["get_related_nodes"](
+                node_id="alpha", visualization_session_id=session_id
+            ),
+            "get_saved_view": lambda: tools["get_saved_view"](
+                name="A view", visualization_session_id=session_id
+            ),
+        }.items():
+            result = call()
+            delivery = result["visualization_delivery"]
+            assert delivery["error_code"] == "access_denied", tool_name
+            assert delivery["delivered"] is False, tool_name
+            assert result.get("error_code") != "access_denied", tool_name
+
+        after = manager.get_session(session_id)
+        assert (after.state["node_refs"], after.seq) == (refs, seq)
+        commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
+        assert commands == []
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+
 # ---------------------------------------------------------------------------
 # A registry entry is not a consumer — the false-positive the report must not make
 # ---------------------------------------------------------------------------
@@ -382,9 +428,12 @@ async def test_delivery_report_is_not_fed_back_into_the_canvas_payload(wired):
 
 
 @pytest.mark.asyncio
-async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path):
-    """A legacy-only browser on an id the hub never stored is still delivered to."""
-    tools, registry, _manager = _wire(tmp_path)
+async def test_legacy_only_session_is_delivered_and_its_membership_applied_by_the_server(
+    tmp_path,
+):
+    """A legacy-only browser on an id the hub never stored is delivered to, and
+    the server materialises it and applies the push once, attributed to MCP."""
+    tools, registry, manager = _wire(tmp_path)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
         delivery = _delivery(tools, UNKNOWN_SESSION_ID)
@@ -393,6 +442,64 @@ async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path)
         assert delivery["live_consumers"] == 1
         assert "warning" not in delivery
         assert await _settle(lambda: len(received) == 1)
+        session = manager.get_session(UNKNOWN_SESSION_ID)
+        assert session.state["node_refs"] == ["alpha"]
+        assert [(r["op"], r["actor"]) for r in session.activity_log] == [
+            ("nodes_added", "mcp-agent")
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", [SessionLimitReached, SessionNotFound])
+async def test_a_push_the_server_cannot_store_reaches_no_browser(
+    tmp_path, monkeypatch, refusal
+):
+    """When the server cannot store the session it would apply a push's
+    membership to, no browser renders that push and it is not delivered."""
+    tools, registry, manager = _wire(tmp_path)
+
+    def refuse(_session_id):
+        raise refusal()
+
+    monkeypatch.setattr(manager, "get_or_create", refuse)
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+
+        assert delivery["delivered"] is False
+        assert delivery["status"] == "not_delivered"
+        assert set(delivery) == UNDELIVERED_KEYS
+        await _settle(lambda: bool(received), turns=50)
+        assert received == []
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+        # A clear changes nothing in a session never stored, so it needs none.
+        cleared = tools["clear_visualization"](
+            visualization_session_id=UNKNOWN_SESSION_ID
+        )
+        assert cleared["success"] is True
+        assert await _settle(lambda: len(received) == 1)
+        assert received[0]["result"]["action"] == "clear_visualization"
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_a_push_under_an_unknown_action_is_stored_and_sent_as_an_add(wired):
+    """search_graph passes a free-form action through: the server stores its
+    nodes and every browser receives it as the add it draws."""
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id) as received:
+        tools["search_graph"](
+            query="Alpha", action="show_these", visualization_session_id=session_id
+        )
+        assert await _settle(lambda: len(received) == 1)
+        assert received[0]["result"]["action"] == "add_to_visualization"
+        session = manager.get_session(session_id)
+        assert session.state["node_refs"] == ["alpha"]
+        assert [(r["op"], r["actor"]) for r in session.activity_log] == [
+            ("nodes_added", "mcp-agent")
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +957,7 @@ def test_clear_visualization_accepts_op_stream_presence_without_registry(tmp_pat
 class _BrokenHub(SessionManager):
     """A hub whose publish raises, as a swapped-in bus can."""
 
-    def push_command(self, session_id, command):
+    def push_command(self, session_id, command, on_published=None):
         raise RuntimeError("hub unreachable")
 
 
@@ -874,18 +981,45 @@ class _PresenceBlindHub(SessionManager):
 
 
 @pytest.mark.asyncio
-async def test_a_broken_hub_is_reported_not_raised(tmp_path):
-    """A hub failure must not break the tool, nor be reported as delivery."""
+async def test_a_membership_push_the_hub_failed_to_apply_reaches_no_browser(tmp_path):
+    """A hub failure must not break the tool, nor be reported as delivery, and
+    a push whose membership may not have been applied is not rendered."""
     broken = _FullyBrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
-    tools, registry, _manager = _wire(tmp_path, session_manager=broken)
+    tools, registry, manager = _wire(tmp_path, session_manager=broken)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
         delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        # The legacy path is independent and still delivers.
-        assert delivery["delivered"] is True
-        assert delivery["live_consumers"] == 1
-        assert await _settle(lambda: len(received) == 1)
+        assert delivery["delivered"] is False
+        assert delivery["status"] == "not_delivered"
+        await _settle(lambda: bool(received), turns=50)
+        assert received == []
+        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_push_queued_behind_a_batch_reaches_legacy_only_once_applied(wired):
+    """A membership push queued behind an in-flight batch is sent to a legacy
+    browser after the hub applies it, and never when that apply fails."""
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+    apply = manager._apply_command_membership
+
+    def failing_apply(session, command):
+        raise RuntimeError("persistence down")
+
+    async with _legacy_consumer(registry, session_id) as received:
+        for applier, expected in ((failing_apply, []), (apply, [["alpha"]])):
+            manager._apply_command_membership = applier
+            async with manager._lock(session_id):
+                _search(tools, session_id)
+                await _settle(lambda: bool(received), turns=50)
+                assert received == []
+            await _settle(lambda: bool(received), turns=200)
+            assert [[n["id"] for n in c["result"]["nodes"]] for c in received] == (
+                expected
+            )
+    assert manager.get_session(session_id).state["node_refs"] == ["alpha"]
 
 
 def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):

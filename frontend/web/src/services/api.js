@@ -340,10 +340,11 @@ export async function resolveTeleport(nodeId, options = {}) {
 /**
  * Get details for a specific node
  * @param {string} nodeId - Node ID
+ * @param {Object} options - `signal` to abort the read
  * @returns {Promise<{node: Object, edges: Array}>}
  */
-export async function getNodeDetails(nodeId) {
-  return apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`);
+export async function getNodeDetails(nodeId, { signal } = {}) {
+  return apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`, signal ? { signal } : {});
 }
 
 /**

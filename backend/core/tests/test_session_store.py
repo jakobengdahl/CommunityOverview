@@ -181,6 +181,27 @@ class TestStateOps:
         assert s.state["node_refs"] == ["a", "b", "c"]
         assert s.seq == 2
 
+    def test_nodes_added_drops_view_layout_keys(self, tmp_path):
+        """Only a replace carries a view's layout; an add relays none of it."""
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store,
+            s,
+            {
+                "op": "nodes_added",
+                "node_ids": ["a"],
+                "hidden_node_ids": ["a"],
+                "annotations": [{"id": "x", "kind": "note"}],
+                "removed_annotation_ids": ["y"],
+            },
+        )
+        assert not {"hidden_node_ids", "annotations", "removed_annotation_ids"} & set(
+            applied
+        )
+        assert s.state["hidden_node_ids"] == []
+        assert s.state["annotations"] == []
+
     def test_nodes_removed_cleans_positions_and_membership(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()

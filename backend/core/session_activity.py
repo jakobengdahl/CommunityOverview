@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 DEFAULT_MAX_ACTIVITY_RECORDS = 500
 DEFAULT_MAX_MEMBERSHIP_RECORDS = 500
 MAX_ACTIVITY_NODE_IDS = 100
-MEMBERSHIP_OPS = frozenset({"nodes_added", "nodes_removed"})
+MEMBERSHIP_OPS = frozenset({"nodes_added", "nodes_removed", "nodes_replaced"})
 DEFAULT_ACTIVITY_MAX_AGE_DAYS = 7.0
 
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"

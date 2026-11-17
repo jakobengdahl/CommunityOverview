@@ -242,7 +242,6 @@ describe('confirmNodeDelete', () => {
     const s = useGraphStore.getState();
     return {
       deleteDialog: dialog,
-      removeNode: vi.fn(s.removeNode),
       setDeleteDialog: vi.fn(s.setDeleteDialog),
       showNotification: vi.fn(),
     };
@@ -259,7 +258,6 @@ describe('confirmNodeDelete', () => {
     });
 
     expect(applied).toBe(true);
-    expect(h.removeNode).toHaveBeenCalledWith('a');
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['b']);
     expect(h.setDeleteDialog).toHaveBeenCalledWith(null);
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Node deleted');
@@ -293,7 +291,6 @@ describe('confirmNodeDelete', () => {
     const applied = await inFlight;
 
     expect(applied).toBe(false);
-    expect(h.removeNode).not.toHaveBeenCalled();
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['x', 'y']);
     // Closing the confirmation is session-scoped too: this session's copy is
     // already closed, so a late close could only dismiss a fresh confirmation
@@ -318,7 +315,6 @@ describe('confirmNodeDelete', () => {
 
     expect(applied).toBe(false);
     expect(h.setDeleteDialog).not.toHaveBeenCalled();
-    expect(h.removeNode).not.toHaveBeenCalled();
     expect(h.showNotification).toHaveBeenCalledWith('error', 'Could not delete node(s)');
   });
 

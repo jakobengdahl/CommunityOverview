@@ -1,4 +1,6 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import { StrictMode } from 'react';
 
@@ -95,11 +97,7 @@ class FakeEventSource {
 }
 FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -123,6 +121,20 @@ function deferred() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+// Open each session stream that has not delivered its snapshot yet, and let
+// the server's membership broadcasts land: added nodes are drawn from them.
+async function settleBroadcasts() {
+  await act(async () => {
+    FakeEventSource.instances
+      .filter((s) => !s.opened)
+      .forEach((s) => {
+        s.opened = true;
+        s.onmessage?.({ data: JSON.stringify({ type: 'snapshot', seq: 0, session: {} }) });
+      });
+    await vi.advanceTimersByTimeAsync(1000);
+  });
 }
 
 async function renderApp({ strict = false } = {}) {
@@ -205,6 +217,7 @@ describe('App URL session bootstrap', () => {
       bootstrap.resolve(payload('session-node'));
     });
     expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+    await settleBroadcasts();
     expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
   });
@@ -219,6 +232,7 @@ describe('App URL session bootstrap', () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
     });
     expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+    await settleBroadcasts();
     expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
     await act(async () => {
@@ -241,6 +255,7 @@ describe('App URL session bootstrap', () => {
         await vi.advanceTimersByTimeAsync(1);
       });
       expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+      await settleBroadcasts();
       expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
       expect(store().focusNodeId).toBe('focus-node');
       const epoch = store().sessionEpoch;
@@ -275,6 +290,7 @@ describe('App URL session bootstrap', () => {
       await act(async () => {
         savedView.resolve(view);
       });
+      await settleBroadcasts();
       expect(store().nodes.map((n) => n.id)).toEqual(['session-node', 'focus-node']);
       expect(store().focusNodeId).toBe('focus-node');
     }
@@ -324,6 +340,8 @@ describe('App URL session bootstrap', () => {
   });
 
   it('connects the stream of a link settled direct by a late 404, so a later switch to staged is learnt', async () => {
+    // No view or node to add: either is a membership write that connects first.
+    window.history.replaceState({}, '', '/?session=1111-2222');
     api.getUiCapabilities.mockResolvedValue({ llm_available: false, staged_sessions: true });
     await renderApp();
     await act(async () => {

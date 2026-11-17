@@ -24,6 +24,8 @@ vi.mock('../store/graphStore', () => {
     addNodesToVisualization: vi.fn(),
     updateVisualization: vi.fn(),
     clearVisualization: vi.fn(),
+    publishMembership: vi.fn(),
+    setHiddenNodeIds: vi.fn(),
     pulseNode: vi.fn(),
   };
   return { default: { getState: vi.fn(() => state) } };
@@ -90,13 +92,18 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().clearVisualization).toHaveBeenCalledTimes(2);
   });
 
-  it('add_to_visualization positions new nodes and adds them, dropping Community nodes', () => {
-    const { result } = render();
+  it('add_to_visualization places only nodes the server has not, dropping Community nodes', () => {
+    const sync = {
+      isMember: () => true,
+      baselinePosition: (id) => (id === 'n0' ? { x: 5, y: 6 } : null),
+    };
+    const { result } = render({ syncRef: { current: sync } });
     act(() =>
       result.current.applyToolResultCommand(
         {
           action: 'add_to_visualization',
           nodes: [
+            { id: 'n0', type: 'Goal' },
             { id: 'n1', type: 'Goal' },
             { id: 'c1', type: 'Community' },
           ],
@@ -109,7 +116,10 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     const [filtered] = positionNewNodes.mock.calls[0];
     expect(filtered.map((n) => n.id)).toEqual(['n1']);
     expect(store().addNodesToVisualization).toHaveBeenCalledWith(
-      [{ id: 'n1', type: 'Goal', positioned: true }],
+      [
+        { id: 'n0', type: 'Goal', _savedPosition: { x: 5, y: 6 } },
+        { id: 'n1', type: 'Goal', positioned: true },
+      ],
       [{ id: 'e1' }]
     );
   });
@@ -130,16 +140,37 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     });
   });
 
-  it('load_visualization clears then replaces the canvas', () => {
-    const { result } = render();
+  it('load_visualization in a session swaps only the nodes, at the layout it stored', () => {
+    // The server stored the view's positions and hidden ids before the command.
+    const sync = {
+      isMember: (id) => id === 'n1' || id === 'n2',
+      baselinePosition: (id) => (id === 'n1' ? { x: 1, y: 2 } : null),
+      baselineHiddenNodeIds: () => ['n2', 'gone'],
+    };
+    const { result } = render({ syncRef: { current: sync } });
     act(() =>
       result.current.applyToolResultCommand(
-        { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }], edges: [] },
+        {
+          action: 'load_visualization',
+          nodes: [
+            { id: 'n1', type: 'Goal' },
+            { id: 'n2', type: 'Goal' },
+          ],
+          edges: [],
+        },
         'cmd-1'
       )
     );
-    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
-    expect(store().updateVisualization).toHaveBeenCalledWith([{ id: 'n1', type: 'Goal' }], []);
+    // Clearing would drop the overlays the session keeps (and save that back).
+    expect(store().clearVisualization).not.toHaveBeenCalled();
+    expect(store().updateVisualization).toHaveBeenCalledWith(
+      [
+        { id: 'n1', type: 'Goal', _savedPosition: { x: 1, y: 2 } },
+        { id: 'n2', type: 'Goal' },
+      ],
+      []
+    );
+    expect(store().setHiddenNodeIds).toHaveBeenCalledWith(['n2']);
   });
 
   it('clear_visualization with no nodes clears without a replace', () => {
@@ -164,16 +195,25 @@ describe('useToolResultCommands.applyToolResultCommand', () => {
     expect(store().addNodesToVisualization).not.toHaveBeenCalled();
   });
 
-  it('an empty replace_visualization clears the view and renders nothing', () => {
-    const { result } = render();
-    act(() =>
-      result.current.applyToolResultCommand(
-        { action: 'replace_visualization', nodes: [], edges: [] },
-        'cmd-1'
-      )
-    );
+  it('an empty replace_visualization clears all but a node added after it', () => {
+    // Added after the push, and applied by the time the deferred render runs.
+    const sync = {
+      isMember: (id) => id === 'existing',
+      baselinePosition: () => ({ x: 1, y: 2 }),
+      baselineHiddenNodeIds: () => [],
+    };
+    const syncRef = { current: null };
+    const { result } = render({ syncRef });
+    const clear = { action: 'replace_visualization', nodes: [], edges: [] };
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-1'));
     expect(store().clearVisualization).toHaveBeenCalledTimes(1);
     expect(store().updateVisualization).not.toHaveBeenCalled();
+    syncRef.current = sync;
+    act(() => result.current.applyToolResultCommand(clear, 'cmd-2'));
+    expect(store().updateVisualization).toHaveBeenCalledWith(
+      [{ id: 'existing', _savedPosition: { x: 1, y: 2 } }],
+      [{ id: 'e-existing', source: 'existing', target: 'existing' }]
+    );
   });
 
   it('no explicit action with nodes defaults to additive, not a full replace', () => {
@@ -284,19 +324,23 @@ describe('useToolResultCommands legacy SSE stream', () => {
     expect(es.closed).toBe(true);
   });
 
-  it('routes a tool_result message through applyToolResultCommand', () => {
-    render();
+  it('never sends a legacy push on as membership, and joins the session the server applied it to', () => {
+    const onServerMembership = vi.fn();
+    render({ onServerMembership });
     const es = FakeEventSource.instances[0];
-    act(() =>
-      es.onmessage({
-        data: JSON.stringify({
-          type: 'tool_result',
-          command_id: 'cmd-1',
-          result: { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] },
-        }),
-      })
-    );
-    expect(store().clearVisualization).toHaveBeenCalledTimes(1);
+    const push = (id, result) =>
+      act(() =>
+        es.onmessage({
+          data: JSON.stringify({ type: 'tool_result', command_id: id, result }),
+        })
+      );
+    push('cmd-0', { action: 'add_to_visualization', nodes: [] }); // changes no membership
+    expect(onServerMembership).not.toHaveBeenCalled();
+    push('cmd-1', { action: 'load_visualization', nodes: [{ id: 'n1', type: 'Goal' }] });
+    push('cmd-2', { action: 'clear_visualization', nodes: [] }); // materialises nothing
+    expect(store().clearVisualization).toHaveBeenCalledTimes(2);
+    expect(store().publishMembership).not.toHaveBeenCalled();
+    expect(onServerMembership).toHaveBeenCalledTimes(1);
   });
 
   it('routes a node_pulse message through applyPulseCommand', () => {
