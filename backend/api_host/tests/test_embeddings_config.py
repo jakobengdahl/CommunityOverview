@@ -1,3 +1,4 @@
+# covers: backend/api_host/config.py, backend/api_host/server.py
 """
 EMBEDDINGS_FILE selects where the embedding sidecar is written.
 
@@ -71,3 +72,15 @@ def test_an_unset_environment_variable_means_derive(monkeypatch):
 
     assert config.embeddings_file is None
     assert config.get_embeddings_path() is None
+
+
+def test_webhook_database_uses_private_state_and_rejects_import_collision(tmp_path, monkeypatch):
+    import pytest
+
+    private = tmp_path / "private"
+    monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
+    config = AppConfig(graph_file=str(tmp_path / "graph" / "graph.json"))
+    assert config.get_webhook_tokens_db_path() == private / "webhook_tokens.db"
+    config.import_jobs_db = str(private / "webhook_tokens.db")
+    with pytest.raises(ValueError, match="must be separate"):
+        config.get_webhook_tokens_db_path()

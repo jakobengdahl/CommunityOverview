@@ -460,11 +460,19 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             "COMMUNITYOVERVIEW_FUNCTIONS_ISOLATION_MINIMUM", "degraded"
         ),
     )
+    function_invocation_service.webhook_graph_bindings = json.loads(
+        os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_WEBHOOK_GRAPHS", "{}")
+    )
+    if not isinstance(function_invocation_service.webhook_graph_bindings, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in function_invocation_service.webhook_graph_bindings.items()
+    ):
+        raise ValueError("Invalid webhook graph bindings")
     app.state.function_invocation_service = function_invocation_service
     from backend.functions.token_store import WebhookTokenStore
 
     function_invocation_service.webhook_token_store = WebhookTokenStore(
-        config.get_import_jobs_db_path().parent / "webhook_tokens.db"
+        config.get_webhook_tokens_db_path()
     )
 
     # Create and mount REST API router

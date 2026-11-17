@@ -1,4 +1,5 @@
 # covers: backend/functions/token_store.py, backend/functions/routes.py
+import json
 import hashlib
 import sqlite3
 from types import SimpleNamespace
@@ -21,7 +22,16 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
             contexts.append(context)
             return GraphAuthorizationDecision(allowed=context.graph_id in allowed)
 
-    service = SimpleNamespace(graph_service=SimpleNamespace(authorization_hook=Hook()))
+    package = tmp_path / "example"
+    package.mkdir()
+    (package / "function.json").write_text(json.dumps({
+        "contract_version": "1", "id": "example", "version": "1.0.0",
+        "name": "Example", "runtime": "python", "entry_point": "main.py",
+        "triggers": [{"kind": "manual"}], "grants": [],
+    }))
+    (package / "main.py").write_text("pass")
+    service = SimpleNamespace(graph_service=SimpleNamespace(authorization_hook=Hook()),
+                              root=tmp_path, webhook_graph_bindings={"example": "graph-a", "missing": "graph-a"})
     app = FastAPI()
     router = APIRouter()
     register_token_routes(router, service, store)
@@ -32,6 +42,12 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
         client.post(url, json={"graph_id": "graph-b", "label": "test"}).status_code
         == 403
     )
+    allowed.add("graph-b")
+    assert client.post(url, json={"graph_id": "graph-b", "label": "test"}).status_code == 404
+    assert client.post("/functions/missing/webhook-token", json={"graph_id": "graph-a", "label": "test"}).status_code == 404
+    assert store.get("example") is None and store.get("missing") is None
+    allowed.remove("graph-b")
+    contexts.clear()
     response = client.post(url, json={"graph_id": "graph-a", "label": "test"})
     assert response.status_code == 201
     first = response.json()["token"]
@@ -62,7 +78,7 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
     assert client.delete(url).status_code == 204
     assert store.resolve(rotated) is None
     assert store.get("example") is None
-    assert all(c.action == "admin" and c.graph_id == "graph-a" for c in contexts[1:])
+    assert all(c.action == "admin" and c.graph_id == "graph-a" for c in contexts)
 
 
 def test_graph_export_excludes_private_token_store(tmp_path):

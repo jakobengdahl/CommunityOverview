@@ -12,7 +12,7 @@ from pathlib import Path
 class WebhookTokenStore:
     def __init__(self, path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
         with self._connect() as db:
