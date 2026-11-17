@@ -1608,3 +1608,7 @@ permissions. Repeating an idempotency key returns the same run record; use a new
 key for a new run. If the function is already running, another invocation is
 rejected as busy. Function records share agent run-history retention. Writes made
 before a failed or timed-out run remain in the graph.
+
+Webhook credentials can be minted, rotated and revoked through the function API.
+The token is shown only on mint or rotation; save it securely. A graph-admin
+authorization hook is required. Webhook invocation is not yet available.

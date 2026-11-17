@@ -565,6 +565,9 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/schema` | Get schema config |
 | GET | `/api/presentation` | Get presentation config (its `capabilities` field is the `/api/capabilities` manifest) |
 | GET | `/api/capabilities` | Get service capabilities |
+| POST | `/api/functions/{function_id}/webhook-token` | Mint a token for a graph (`graph_id` and `label`); the response shows it once. |
+| POST | `/api/functions/{function_id}/webhook-token/rotate` | Replace the token and return the new value once. |
+| DELETE | `/api/functions/{function_id}/webhook-token` | Revoke the token. All three operations require an explicit graph-admin authorization hook. |
 | GET | `/api/export` | Export graph data |
 | GET | `/api/export/archive` | Export the graph as a ZIP archive: `graph.json` (same content as `/api/export`), `embeddings.bin` (the live vector store's embeddings in the sidecar's own binary format, omitted when there are no vectors), and `manifest.json` (schema version, embedding model/dimension, per-member SHA-256 checksums, node/edge counts). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
 | POST | `/api/import` | Replace the ENTIRE active graph with the posted document (same shape as `/api/export`). Requests over 200 MiB return `413` before JSON parsing (declared length and streamed bytes are checked). Validates fully before writing (a `422 validation_failed` lists the first 1,000 problems; its message counts them all); on success normally returns a `job_id` for the background embedding job (`null` in the rare case that starting it itself failed — see `embeddings_status: "not_started"`). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-graph) and [ADR 0006](../docs/adr/0006-graph-import-replace-mode.md) |

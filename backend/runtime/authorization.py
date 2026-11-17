@@ -21,6 +21,7 @@ AUTHORIZATION_MODE_DENY_ALL = "deny-all"
 
 GRAPH_ACTION_READ = "read"
 GRAPH_ACTION_MUTATE = "mutate"
+GRAPH_ACTION_ADMIN = "admin"
 
 # What a `mutate` asked about a staged session does to the graph
 # (docs/SESSION_OVERLAY_CONTRACT.md §14). A hook that treats them like any
@@ -107,6 +108,9 @@ class DefaultGraphAuthorizationHook:
             _clean_string(os.getenv(AUTHORIZATION_MODE_ENV)).lower()
             or AUTHORIZATION_MODE_PERMISSIVE
         )
+
+        if context.action == GRAPH_ACTION_ADMIN:
+            return GraphAuthorizationDecision(allowed=False, source="default")
 
         if mode == AUTHORIZATION_MODE_DENY_ALL:
             return GraphAuthorizationDecision(
