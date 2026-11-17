@@ -1,4 +1,4 @@
-# covers: backend/functions/invocation.py, backend/functions/routes.py, backend/functions/cli.py, backend/agents/run_history.py
+# covers: backend/functions/invocation.py
 """Invocation admission, concurrency, durable outcomes and trusted identity."""
 
 import json
