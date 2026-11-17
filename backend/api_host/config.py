@@ -366,7 +366,8 @@ class AppConfig:
                     for root in roots
                     if not any(
                         (root / "communityoverview" / namespace / "webhook_tokens.db")
-                        .resolve().is_relative_to(directory)
+                        .resolve()
+                        .is_relative_to(directory)
                         for directory in excluded_dirs
                     )
                 ),
