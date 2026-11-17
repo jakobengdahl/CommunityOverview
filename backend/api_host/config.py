@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
 
-from backend.runtime.config_context import get_tenant_config_dir
-
 
 @dataclass
 class AppConfig:
@@ -322,12 +320,11 @@ class AppConfig:
             return Path(self.sessions_dir)
         return self.get_graph_path().parent / "sessions"
 
-    def get_webhook_tokens_db_path(self) -> Path:
+    def get_webhook_tokens_db_path(self, graph_path=None, excluded_dirs=()) -> Path:
         """Dedicated credential database in operator-controlled private state."""
-        tenant_config = get_tenant_config_dir()
-        excluded_dirs = [self.get_graph_path().parent.resolve()]
-        if tenant_config:
-            excluded_dirs.append(Path(tenant_config))
+        graph_path = (
+            Path(graph_path) if graph_path is not None else self.get_graph_path()
+        )
         configured_state = os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
         if configured_state:
             state = Path(configured_state)
@@ -344,7 +341,7 @@ class AppConfig:
                     self.graph_postgres_scope,
                 ]
                 if self.graph_backend == "postgres"
-                else ["file", str(self.get_graph_path().resolve())]
+                else ["file", str(graph_path.resolve())]
             )
             namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             roots = [Path.home() / ".local" / "state"]
@@ -374,14 +371,6 @@ class AppConfig:
                 roots[0] / "communityoverview" / namespace,
             )
         path = state / "webhook_tokens.db"
-        if path.resolve().is_relative_to(self.get_graph_path().parent.resolve()):
-            raise ValueError(
-                "Webhook token database must be outside the graph directory"
-            )
-        if tenant_config and path.resolve().is_relative_to(Path(tenant_config)):
-            raise ValueError(
-                "Webhook token database must be outside the tenant config directory"
-            )
         if path.resolve() == self.get_import_jobs_db_path().resolve():
             raise ValueError("Webhook token and import job databases must be separate")
         return path

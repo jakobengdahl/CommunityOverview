@@ -10,7 +10,11 @@ from fastapi.testclient import TestClient
 
 from backend.functions.routes import register_token_routes
 from backend.functions.token_store import WebhookTokenStore
-from backend.runtime.authorization import GraphAuthorizationDecision
+from backend.runtime.authorization import (
+    DefaultGraphAuthorizationHook,
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 
 
 def test_token_lifecycle_and_bound_graph_authorization(
@@ -84,6 +88,28 @@ def test_token_lifecycle_and_bound_graph_authorization(
         ).status_code
         == 403
     )
+    hook = service.graph_service.authorization_hook
+    service.graph_service.authorization_hook = DefaultGraphAuthorizationHook()
+    assert (
+        client.post(url, json={"graph_id": "graph-a", "label": "test"}).status_code
+        == 403
+    )
+
+    class NarrowedHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, include_graph_ids=("other",)
+                ),
+            )
+
+    service.graph_service.authorization_hook = NarrowedHook()
+    assert (
+        client.post(url, json={"graph_id": "graph-a", "label": "test"}).status_code
+        == 403
+    )
+    service.graph_service.authorization_hook = hook
     response = client.post(url, json={"graph_id": "graph-a", "label": "test"})
     assert response.status_code == 201
     first = response.json()["token"]
@@ -127,6 +153,9 @@ def test_token_lifecycle_and_bound_graph_authorization(
 
     monkeypatch.setattr(store, "_connect", traced_connect)
     rotated = client.post(url + "/rotate").json()["token"]
+    captured = capsys.readouterr()
+    assert rotated not in caplog.text
+    assert rotated not in captured.out and rotated not in captured.err
     transaction = [
         s.split()[0].upper()
         for s in statements
