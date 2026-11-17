@@ -246,18 +246,14 @@ def test_shared_registry_loss_fails_closed(tmp_path, monkeypatch, failure):
         path.write_bytes(b"\xff")
     else:
         monkeypatch.setattr(Path, "open", Mock(side_effect=OSError))
-    assert (
-        conversation_state.taint_status(
-            [{"role": "assistant", "content": "x"}], token, {}, cid, registry=registry
+    for messages, state in [
+        ([{"role": "assistant", "content": "x"}], token),
+        ([{"role": "user", "content": "hi"}], None),
+    ]:
+        assert (
+            conversation_state.taint_status(messages, state, {}, cid, registry=registry)
+            == conversation_state.TAINTED
         )
-        == conversation_state.TAINTED
-    )
-    assert (
-        conversation_state.taint_status(
-            [{"role": "user", "content": "hi"}], None, {}, cid, registry=registry
-        )
-        == conversation_state.TAINTED
-    )
 
     if failure == "unavailable":
         with pytest.raises(OSError):

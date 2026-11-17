@@ -1,12 +1,5 @@
 # covers: backend/ui/chat_service.py, backend/ui/chat_logic.py
-"""
-Tests for ChatService.
-
-Verifies that:
-- ChatService correctly routes tool calls to GraphService
-- LLM responses are properly formatted
-- Graph mutations go through GraphService (not direct storage access)
-"""
+"""Chat routing, tool execution, and graph mutations through GraphService."""
 
 import json
 import os
@@ -55,45 +48,19 @@ class TestChatServiceInit:
         with patch("backend.ui.chat_logic.create_provider"):
             service = ChatService(graph_service)
 
-        expected_tools = [
-            "search_graph",
-            "get_node_details",
-            "get_related_nodes",
-            "find_similar_nodes",
-            "find_similar_nodes_batch",
-            "add_nodes",
-            "update_node",
-            "delete_nodes",
-            "list_node_types",
-            "get_graph_stats",
-            "save_view",
-            "get_saved_view",
-            "list_saved_views",
-        ]
+        assert service._assistant_attachment_access == "off"
+        assert service._tools_map["search_graph"] == service._search_graph_tool
+        assert service._tools_map["add_nodes"] == graph_service.add_nodes
+        assert service._tools_map["update_node"] == graph_service.update_node
+
+        expected_tools = (
+            "search_graph get_node_details get_related_nodes find_similar_nodes "
+            "find_similar_nodes_batch add_nodes update_node delete_nodes "
+            "list_node_types get_graph_stats save_view get_saved_view list_saved_views"
+        ).split()
 
         for tool in expected_tools:
             assert tool in service._tools_map, f"Missing tool: {tool}"
-
-    def test_assistant_attachment_access_defaults_off(self, graph_service):
-        """Without an explicit setting the assistant gets no attachment tools."""
-        from backend.ui import ChatService
-
-        with patch("backend.ui.chat_logic.create_provider"):
-            service = ChatService(graph_service)
-        assert service._assistant_attachment_access == "off"
-
-    def test_tools_map_routes_to_graph_service(self, graph_service):
-        """All tools in the map should route to GraphService methods."""
-        from backend.ui import ChatService
-
-        with patch("backend.ui.chat_logic.create_provider"):
-            service = ChatService(graph_service)
-
-        # search_graph is wrapped in _search_graph_tool (adds federation_depth support)
-        assert service._tools_map["search_graph"] == service._search_graph_tool
-        # Mutation tools are bound directly to graph_service methods
-        assert service._tools_map["add_nodes"] == graph_service.add_nodes
-        assert service._tools_map["update_node"] == graph_service.update_node
 
 
 class TestChatServiceToolExecution:
@@ -486,95 +453,51 @@ class TestChatServiceConversation:
         create_from_profile.assert_called_once()
         assert create_from_profile.call_args.args[0].id == "extractor"
 
-    def test_an_explicit_llm_provider_is_used_verbatim(self, chat_service):
-        """
-        The evaluation harness hands in one exact provider and must get it.
-
-        See ChatProcessor.process_message's llm_provider parameter: the harness
-        measures one named model at one named endpoint, so provider resolution
-        has to be bypassed rather than merely influenced.
-        """
-        service, default_llm = chat_service
-        from backend.ui.tests.conftest import MockLLMProvider
-
-        injected = MockLLMProvider()
-        injected.mock_text_response = "answered by the injected provider"
-
-        result = service.process_message(
-            [{"role": "user", "content": "hello"}], llm_provider=injected
-        )
-
-        assert result["content"] == "answered by the injected provider"
-        assert injected.call_count == 1
-        assert default_llm.call_count == 0
-
-    def test_an_explicit_llm_provider_wins_over_configured_model_profiles(
-        self, chat_service
+    @pytest.mark.parametrize("configured", ["none", "profile", "api_key"])
+    def test_an_explicit_llm_provider_wins_over_resolution(
+        self, chat_service, configured
     ):
-        """
-        The hazard the parameter exists for.
-
-        Model profiles normally take precedence over everything, so on a host
-        that has them configured the harness would silently measure the host's
-        default model and report the result under the model it was asked to
-        test.
-        """
+        """An injected provider is used even when profiles or credentials are supplied."""
         from backend.config.model_profiles import ModelProfile
         from backend.ui.tests.conftest import MockLLMProvider
 
-        service, _ = chat_service
+        service, default_llm = chat_service
         injected = MockLLMProvider()
         injected.mock_text_response = "from the injected provider"
-
-        host_profile = ModelProfile(
-            id="host-default",
-            name="Host default",
-            provider="openai",
-            model="some-other-model",
-            default=True,
-            credential_ref="HOST_API_KEY",
+        profiles = (
+            [
+                ModelProfile(
+                    id="host-default",
+                    name="Host default",
+                    provider="openai",
+                    model="some-other-model",
+                    default=True,
+                    credential_ref="HOST_API_KEY",
+                )
+            ]
+            if configured == "profile"
+            else []
         )
-
+        kwargs = (
+            {"api_key": "not-the-key-that-should-be-used", "provider": "openai"}
+            if configured == "api_key"
+            else {}
+        )
         with (
             patch(
-                "backend.config.config_loader.get_model_profiles",
-                return_value=[host_profile],
+                "backend.config.config_loader.get_model_profiles", return_value=profiles
             ),
             patch(
                 "backend.ui.chat_logic.create_provider_from_profile"
             ) as create_from_profile,
         ):
             result = service.process_message(
-                [{"role": "user", "content": "hello"}], llm_provider=injected
+                [{"role": "user", "content": "hello"}], llm_provider=injected, **kwargs
             )
-
-        assert result["content"] == "from the injected provider"
-        create_from_profile.assert_not_called()
-
-    def test_an_explicit_llm_provider_wins_over_an_api_key_argument(self, chat_service):
-        """
-        api_key must not pull resolution back into play.
-
-        The harness pins one provider; a caller that also passed a key would
-        otherwise silently get a different one built from it, and the run would
-        be reported under the model it was asked to measure.
-        """
-        service, default_llm = chat_service
-        from backend.ui.tests.conftest import MockLLMProvider
-
-        injected = MockLLMProvider()
-        injected.mock_text_response = "from the injected provider"
-
-        result = service.process_message(
-            [{"role": "user", "content": "hello"}],
-            api_key="not-the-key-that-should-be-used",
-            provider="openai",
-            llm_provider=injected,
-        )
-
         assert result["content"] == "from the injected provider"
         assert injected.call_count == 1
         assert default_llm.call_count == 0
+        create_from_profile.assert_not_called()
 
     def test_omitting_llm_provider_leaves_resolution_unchanged(self, chat_service):
         """The default path must behave exactly as before the parameter existed."""
@@ -2766,17 +2689,27 @@ class TestEmptyFinalReplyAfterToolChain:
         )
         return result, calls, history
 
+    @pytest.mark.parametrize("malformed_text", [False, True])
     def test_empty_final_reply_is_retried_once_without_tools(
-        self, chat_service, sample_nodes
+        self, chat_service, sample_nodes, malformed_text
     ):
+        reply = (
+            LLMResponse(
+                content=[{"type": "text", "text": [{"type": "text", "text": "x"}]}],
+                stop_reason="end_turn",
+            )
+            if malformed_text
+            else self._empty_reply()
+        )
         result, calls, history = self._run(
-            chat_service, self._empty_reply(), self._text_reply("Two nodes found.")
+            chat_service, reply, self._text_reply("Two nodes found.")
         )
 
         assert result["content"] == "Two nodes found."
         assert len(calls) == 3
         assert calls[-1]["tools"] == []
         assert calls[-1]["messages"][-1]["content"] == _EMPTY_REPLY_RETRY_INSTRUCTION
+        assert result["toolResult"]["nodes"]
         assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
 
     @pytest.mark.parametrize(
@@ -2839,20 +2772,6 @@ class TestEmptyFinalReplyAfterToolChain:
             ("tool chain", "max_tokens", None, 4096, len(self.REASONING))
         ]
 
-    def test_non_string_text_in_final_reply_counts_as_empty_and_keeps_tool_results(
-        self, chat_service, sample_nodes
-    ):
-        reply = LLMResponse(
-            content=[{"type": "text", "text": [{"type": "text", "text": "x"}]}],
-            stop_reason="end_turn",
-        )
-
-        result, calls, _ = self._run(chat_service, reply, self._text_reply("Done."))
-
-        assert result["content"] == "Done."
-        assert len(calls) == 3
-        assert result["toolResult"]["nodes"]
-
     @pytest.mark.parametrize("first_stop_reason", ["max_tokens", "tool_use"])
     @pytest.mark.parametrize(
         "retry_text, expected", [("Hello.", "Hello."), ("", _NO_ANSWER_MESSAGE)]
@@ -2873,26 +2792,31 @@ class TestEmptyFinalReplyAfterToolChain:
         assert self._logged(caplog)[0][0] == "first turn"
 
     @pytest.mark.parametrize(
-        "content, expected",
+        "first_turn, content, expected",
         [
             (
+                True,
                 [{"type": "tool_use", "id": "c1", "name": "x", "input": {}}],
                 _NO_TEXT_WITH_TOOL_CALLS_MESSAGE,
             ),
-            ([{"type": "text", "text": "Hello."}], "Hello."),
+            (True, [{"type": "text", "text": "Hello."}], "Hello."),
+            (False, [{"type": "text", "text": "Done."}], "Done."),
         ],
     )
-    def test_first_reply_with_text_or_tool_calls_makes_no_extra_call(
-        self, chat_service, content, expected
+    def test_reply_with_text_or_tool_calls_makes_no_extra_call(
+        self, chat_service, sample_nodes, content, expected, first_turn
     ):
-        result, calls, _ = self._run(
+        result, calls, history = self._run(
             chat_service,
             LLMResponse(content=content, stop_reason="end_turn"),
-            first_turn=True,
+            first_turn=first_turn,
         )
 
         assert result["content"] == expected
-        assert len(calls) == 1
+        assert len(calls) == (1 if first_turn else 2)
+        assert [m["role"] for m in history] == (
+            ["user"] if first_turn else self.ROLES_AFTER_TOOL_TURN
+        )
 
     @pytest.mark.parametrize(
         "first_turn, call_count, tool_used, roles",
@@ -2931,15 +2855,6 @@ class TestEmptyFinalReplyAfterToolChain:
         assert bool((result["toolResult"] or {}).get("nodes")) is not first_turn
         assert [m["role"] for m in history] == roles
         assert self._logged(caplog) == [(["add_nodes"],)]
-
-    def test_final_reply_with_text_makes_no_extra_call(
-        self, chat_service, sample_nodes
-    ):
-        result, calls, history = self._run(chat_service, self._text_reply("Done."))
-
-        assert result["content"] == "Done."
-        assert len(calls) == 2
-        assert [m["role"] for m in history] == self.ROLES_AFTER_TOOL_TURN
 
 
 @pytest.mark.parametrize(
