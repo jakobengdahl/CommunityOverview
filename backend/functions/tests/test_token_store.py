@@ -12,7 +12,8 @@ from backend.functions.token_store import WebhookTokenStore
 from backend.runtime.authorization import GraphAuthorizationDecision
 
 
-def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
+def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMMUNITYOVERVIEW_ACTOR_ID", "admin")
     store = WebhookTokenStore(tmp_path / "private" / "webhook_tokens.db")
     contexts = []
     allowed = {"graph-a"}
@@ -20,7 +21,9 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
     class Hook:
         def evaluate(self, context):
             contexts.append(context)
-            return GraphAuthorizationDecision(allowed=context.graph_id in allowed)
+            return GraphAuthorizationDecision(
+                allowed=context.graph_id in allowed and context.actor["actor_id"] == "admin"
+            )
 
     package = tmp_path / "example"
     package.mkdir()
@@ -69,6 +72,11 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
     assert store.get("example") is None and store.get("missing") is None
     allowed.remove("graph-b")
     contexts.clear()
+    reader = {"x-communityoverview-actor-id": "reader"}
+    assert (
+        client.post(url, json={"graph_id": "graph-a", "label": "test"}, headers=reader).status_code
+        == 403
+    )
     response = client.post(url, json={"graph_id": "graph-a", "label": "test"})
     assert response.status_code == 201
     first = response.json()["token"]
@@ -88,6 +96,8 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path):
         client.post(url, json={"graph_id": "graph-a", "label": "other"}).status_code
         == 409
     )
+    assert client.post(url + "/rotate", headers=reader).status_code == 403
+    assert client.delete(url, headers=reader).status_code == 403
     allowed.clear()
     assert client.post(url + "/rotate").status_code == 403
     assert client.delete(url).status_code == 403

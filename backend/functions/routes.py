@@ -69,6 +69,7 @@ def register_token_routes(router, service, store):
             AUTHENTICATED_PRINCIPAL_SCOPE_KEY
         )
         binding["graph_id"] = graph_id
+        binding["headers"] = request.headers
         with use_request_authorization(**binding):
             decision = evaluate_graph_access(
                 service.graph_service.authorization_hook,
