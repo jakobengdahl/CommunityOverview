@@ -22,7 +22,8 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
         def evaluate(self, context):
             contexts.append(context)
             return GraphAuthorizationDecision(
-                allowed=context.graph_id in allowed and context.actor["actor_id"] == "admin"
+                allowed=context.graph_id in allowed
+                and context.actor["actor_id"] == "admin"
             )
 
     package = tmp_path / "example"
@@ -74,7 +75,9 @@ def test_token_lifecycle_and_bound_graph_authorization(tmp_path, monkeypatch):
     contexts.clear()
     reader = {"x-communityoverview-actor-id": "reader"}
     assert (
-        client.post(url, json={"graph_id": "graph-a", "label": "test"}, headers=reader).status_code
+        client.post(
+            url, json={"graph_id": "graph-a", "label": "test"}, headers=reader
+        ).status_code
         == 403
     )
     response = client.post(url, json={"graph_id": "graph-a", "label": "test"})
