@@ -269,6 +269,9 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
     [
         ("runtime", "node"),
         ("version", "1.0.0-01"),
+        ("version", "1٢.0.0"),
+        ("version", "1.1٢.0"),
+        ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
         ("contract_version", "2"),
         ("limits", {"timeout_seconds": 121}),
@@ -287,6 +290,7 @@ def test_invalid_manifest_is_rejected_and_its_delivery_key_is_retained(
     rejected = invoke(service, idempotency_key="delivery")
     assert rejected.result["error"]["code"] == "invalid_manifest"
     execute.assert_not_called()
+    service.runner.probe.assert_not_called()
     (directory / "function.json").write_text(json.dumps(manifest))
     assert invoke(service, idempotency_key="delivery").id == rejected.id
     assert invoke(service, idempotency_key="fixed").state == ExecutionState.SUCCEEDED
