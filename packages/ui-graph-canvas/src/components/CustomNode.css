@@ -296,6 +296,11 @@ body.graph-menu-open .graph-node-tooltip {
 
 /* Light mode support */
 @media (prefers-color-scheme: light) {
+  /* Preserve the legacy light-theme hover precedence over state shadows. */
+  .graph-custom-node:hover {
+    box-shadow: var(--graph-card-shadow-hover);
+  }
+
   .graph-node-tooltip {
     background-color: #fff;
     border-color: #ddd;
