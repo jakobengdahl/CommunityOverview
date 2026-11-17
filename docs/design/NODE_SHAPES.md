@@ -5,9 +5,9 @@ session maps, semantic appearance tokens, shared base geometry and the canvas
 renderer with accessible text are implemented. A node whose type names a
 configured shape (or whose session selection resolves to a config or inline
 definition) renders that shape; saved library references resolve to the
-built-in card until library persistence exists. Editing, shared appearance
-operations and library persistence remain future work. Unconfigured nodes
-continue to use the existing CustomNode renderer.
+built-in card until library persistence exists. Minimum hit targets, editing,
+shared appearance operations and library persistence remain future work.
+Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
 [Clickable editor](node-shapes/editor.html). Open either file directly; no server,
@@ -303,10 +303,10 @@ consume it directly. Nodes without a descriptor retain legacy layout dimensions
 and measured rectangular edge bounds. `GraphCanvas` attaches the descriptor to
 every node with a resolved shape; the built-in card supplies none. A marquee
 selects a shaped node only where it touches the polygon or the outside label;
-nodes without a descriptor keep React Flow's rectangular bounds. Minimum hit
-targets use the largest square inside the body, so a triangle gets one sooner
-than its bounds suggest. Zero-distance endpoint centres use opposite vertical
-anchors to keep edge coordinates finite.
+nodes without a descriptor keep React Flow's rectangular bounds. A shaped node
+is hit only where its body or labels are painted; the minimum screen-space hit
+target is not implemented yet. Zero-distance endpoint centres use opposite
+vertical anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale
 

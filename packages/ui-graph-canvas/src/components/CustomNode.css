@@ -469,7 +469,6 @@ body.graph-menu-open .graph-node-tooltip {
 .graph-shape-band,
 .graph-shape-band-text .graph-shape-label-chip,
 .graph-shape-text > *,
-.graph-shape-hit,
 .graph-shaped-node .react-flow__handle,
 .graph-shaped-node button,
 .graph-shaped-node .graph-node-mark-badge,
@@ -599,13 +598,4 @@ body.graph-menu-open .graph-node-tooltip {
   -webkit-box-orient: vertical;
   text-overflow: ellipsis;
   margin-bottom: 0.3em;
-}
-
-.graph-shape-hit {
-  position: absolute;
-}
-
-/* Another node's painted body or a nearer body owns this point. */
-.graph-shaped-node .graph-shape-hit[data-hit-off] {
-  pointer-events: none;
 }

@@ -15,7 +15,7 @@ vi.mock('reactflow', async (importOriginal) => ({
   Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
 }));
 
-import CustomNode, { resolveShapeHitTargets, shapeHitGeometry } from '../src/components/CustomNode';
+import CustomNode from '../src/components/CustomNode';
 import {
   BAND_TEXT_DARK,
   BAND_TEXT_LIGHT,
@@ -312,14 +312,14 @@ function shapedFlowNode(definition, data = {}, node = graphNode) {
   };
 }
 
-function renderFlow(nodes, { zoom = 1, onNodesChange = () => {} } = {}) {
+function renderFlow(nodes, { onNodesChange = () => {} } = {}) {
   return render(
     <ReactFlowProvider>
       <ReactFlow
         nodes={nodes}
         edges={[]}
         nodeTypes={flowNodeTypes}
-        defaultViewport={{ x: 0, y: 0, zoom }}
+        defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         minZoom={0.01}
         onNodesChange={onNodesChange}
       />
@@ -483,8 +483,8 @@ describe('CustomNode configured shapes', () => {
     });
   });
 
-  it('passes the pointer through everything but the painted body, labels and a 24px target', () => {
-    renderFlow([shapedFlowNode({ ...RISK, scale: 0.1 })], { zoom: 0.5 });
+  it('passes the pointer through everything but the painted body and labels', () => {
+    renderFlow([shapedFlowNode(RISK)]);
     const wrapper = screen.getByTestId('rf__node-n1');
     withStylesheet(() => {
       // React Flow sets pointer-events inline, which only an important rule
@@ -497,113 +497,10 @@ describe('CustomNode configured shapes', () => {
       expect(getComputedStyle(wrapper.querySelector('.graph-shaped-node')).pointerEvents).toBe(
         'none'
       );
-      for (const hit of ['.graph-shape-body', '.graph-shape-label-chip', '.graph-shape-hit']) {
+      for (const hit of ['.graph-shape-body', '.graph-shape-label-chip']) {
         expect(getComputedStyle(wrapper.querySelector(hit)).pointerEvents).toBe('auto');
       }
     });
-    // 24 screen px at zoom 0.5 is 48 flow px.
-    expect(wrapper.querySelector('.graph-shape-hit').style.width).toBe('48px');
-  });
-
-  // A 48x36 triangle holds only a ~20.6px square, under 24 despite its bounds.
-  it.each([
-    [1, null],
-    [0.2, '24px'],
-  ])('sizes the extra target by the largest square inside the body (scale %s)', (scale, width) => {
-    renderFlow([shapedFlowNode({ ...RISK, scale })]);
-    expect(document.querySelector('.graph-shape-hit')?.style.width ?? null).toBe(width);
-  });
-
-  it('gives a target point to a painted body first, then the nearest painted body', () => {
-    document.body.innerHTML = ['a', 'b', 'c']
-      .map(
-        (id) =>
-          `<div class="react-flow__node" id="${id}"><span class="graph-shape-hit"></span></div>`
-      )
-      .join('');
-    const [a, b, c] = document.querySelectorAll('.graph-shape-hit');
-    // a and c: the same 20px upward triangle at the origin; b: a 10px square
-    // whose box centre is farther from (2, 2) than a's but whose body is nearer.
-    const tri = {
-      width: 20,
-      height: 20,
-      radius: 0,
-      vertices: [
-        { x: 10, y: 0 },
-        { x: 20, y: 20 },
-        { x: 0, y: 20 },
-      ],
-    };
-    const square = { width: 10, height: 10, radius: 0, vertices: null };
-    for (const [span, geometry, ox, oy] of [
-      [a, tri, 0, 0],
-      [b, square, -12, 4],
-      [c, tri, 0, 0],
-    ]) {
-      const left = geometry.width / 2 - 12;
-      const top = geometry.height / 2 - 12;
-      Object.assign(span.style, { width: '24px', left: `${left}px`, top: `${top}px` });
-      span.getBoundingClientRect = () => ({
-        left: ox + left,
-        top: oy + top,
-        width: 24,
-        height: 24,
-      });
-      shapeHitGeometry.set(span, geometry);
-    }
-    const off = () => [a, b, c].map((span) => span.hasAttribute('data-hit-off'));
-    document.elementsFromPoint = () => [a, b, c];
-    resolveShapeHitTargets(document, 2, 2);
-    expect(off()).toEqual([true, false, true]);
-    // Equal bodies: the topmost wins.
-    document.elementsFromPoint = () => [c, a];
-    resolveShapeHitTargets(document, 2, 2);
-    expect(off()).toEqual([true, false, false]);
-    document.elementsFromPoint = () => [b, document.getElementById('c'), a];
-    resolveShapeHitTargets(document, 2, 2);
-    expect(off()).toEqual([true, true, false]);
-    delete document.elementsFromPoint;
-  });
-
-  it('never lets a stale target take a press from a painted body', async () => {
-    const other = document.createElement('div');
-    other.className = 'react-flow__node';
-    other.innerHTML = '<i></i>';
-    let underPointer = [];
-    document.elementsFromPoint = () => underPointer;
-    const node = shapedFlowNode({ ...RISK, scale: 0.1 });
-    const { rerender } = renderFlow([node]);
-    document.body.appendChild(other);
-    const span = document.querySelector('.graph-shape-hit');
-    const pressed = vi.fn();
-    for (const type of ['mousedown', 'touchstart'])
-      span.parentElement.addEventListener(type, pressed);
-    underPointer = [span];
-    fireEvent.pointerMove(document, { clientX: 5, clientY: 5, pointerType: 'mouse' });
-    expect(span.hasAttribute('data-hit-off')).toBe(false);
-    // A zoom or layout change moves another body under the still mouse.
-    underPointer = [span, other.firstChild];
-    rerender(
-      <ReactFlowProvider>
-        <ReactFlow
-          nodes={[{ ...node, position: { x: 1, y: 0 } }]}
-          edges={[]}
-          nodeTypes={flowNodeTypes}
-          defaultViewport={{ x: 0, y: 0, zoom: 1 }}
-          minZoom={0.01}
-        />
-      </ReactFlowProvider>
-    );
-    await new Promise((done) => requestAnimationFrame(done));
-    expect(span.hasAttribute('data-hit-off')).toBe(true);
-    // A touch is hit-tested before any listener runs: the press is swallowed.
-    span.removeAttribute('data-hit-off');
-    fireEvent.pointerDown(span, { clientX: 9, clientY: 9, pointerType: 'touch' });
-    fireEvent.touchStart(span);
-    fireEvent.mouseDown(span);
-    expect(pressed).not.toHaveBeenCalled();
-    other.remove();
-    delete document.elementsFromPoint;
   });
 
   const triangleAt = (selected) => ({

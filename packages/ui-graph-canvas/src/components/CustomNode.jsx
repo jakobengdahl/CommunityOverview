@@ -1,148 +1,8 @@
-import { useState, memo, useRef, useEffect } from 'react';
+import { useState, memo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Handle, Position, useStore, useStoreApi } from 'reactflow';
+import { Handle, Position } from 'reactflow';
 import { bandTextStyle, nodeShapeBandPath, nodeShapeTextBox } from '../utils/nodeShapes';
 import './CustomNode.css';
-
-const MIN_TARGET_PX = 24;
-
-/** The side of the largest axis-aligned square the painted body holds. */
-export function shapeInnerSpan(geometry) {
-  const { width: w, height: h } = geometry;
-  return geometry.vertices ? (w * h) / (w + h) : Math.min(w, h);
-}
-
-// The body geometry behind each mounted minimum-size target.
-export const shapeHitGeometry = new WeakMap();
-
-/** Screen-px distance from (x, y) to the painted body behind a target span. */
-function bodyDistance(span, x, y) {
-  const geometry = shapeHitGeometry.get(span);
-  const r = span.getBoundingClientRect();
-  if (!geometry) return Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y);
-  const zoom = r.width / parseFloat(span.style.width);
-  const px = (x - r.left) / zoom + parseFloat(span.style.left);
-  const py = (y - r.top) / zoom + parseFloat(span.style.top);
-  const { width: w, height: h, radius, vertices } = geometry;
-  if (!vertices) {
-    // A rounded box is its core grown by the radius.
-    const dx = Math.max(0, radius - px, px - (w - radius));
-    const dy = Math.max(0, radius - py, py - (h - radius));
-    return Math.max(0, Math.hypot(dx, dy) - radius) * zoom;
-  }
-  // Outside the body (a painted hit wins before ranking), so the nearest edge.
-  const edges = vertices.map((a, i) => {
-    const b = vertices[(i + 1) % vertices.length];
-    const ex = b.x - a.x;
-    const ey = b.y - a.y;
-    const t = Math.max(0, Math.min(1, ((px - a.x) * ex + (py - a.y) * ey) / (ex * ex + ey * ey)));
-    return Math.hypot(a.x + t * ex - px, a.y + t * ey - py);
-  });
-  return Math.min(...edges) * zoom;
-}
-
-/**
- * Give the pointer at (x, y) to at most one minimum-size target: none when any
- * node's painted body or label is there, else the one whose painted body is
- * nearest, ties going to the topmost. The others stop taking pointer events.
- */
-export function resolveShapeHitTargets(doc, x, y) {
-  for (const span of doc.querySelectorAll('.graph-shape-hit[data-hit-off]')) {
-    span.removeAttribute('data-hit-off');
-  }
-  const elements = doc.elementsFromPoint(x, y);
-  const spans = elements.filter((el) => el.classList.contains('graph-shape-hit'));
-  if (!spans.length) return;
-  const painted = elements.some(
-    (el) => !el.classList.contains('graph-shape-hit') && el.closest('.react-flow__node')
-  );
-  const ranked = spans.map((span) => [bodyDistance(span, x, y), span]);
-  // A stable sort keeps elementsFromPoint's topmost-first order on ties.
-  const winner = painted ? null : ranked.sort((a, b) => a[0] - b[0])[0][1];
-  for (const span of spans) {
-    if (span !== winner) span.setAttribute('data-hit-off', '');
-  }
-}
-
-let hitTargetCount = 0;
-let hoverPoint = null;
-let resolveFrame = 0;
-function resolveFromEvent(event) {
-  if (event.type === 'pointermove' && event.pointerType !== 'touch') {
-    hoverPoint = { x: event.clientX, y: event.clientY };
-  }
-  resolveShapeHitTargets(document, event.clientX, event.clientY);
-}
-
-// Zoom, pan, layout or a newly mounted target move bodies under a still mouse;
-// re-resolve after React commits, so the next press already sees fresh state.
-function resolveAtHover() {
-  if (!hoverPoint || resolveFrame) return;
-  resolveFrame = requestAnimationFrame(() => {
-    resolveFrame = 0;
-    if (hitTargetCount && hoverPoint) resolveShapeHitTargets(document, hoverPoint.x, hoverPoint.y);
-  });
-}
-
-// The browser hit-tests a press before the capture listener resolves it, so a
-// touch, or a press racing a frame, can land on a target that just lost the
-// point. Swallow it rather than drag or select the wrong node; the follow-up
-// click and context menu are hit-tested afresh and reach the right one.
-function blockLosingTarget(event) {
-  if (event.target?.matches?.('.graph-shape-hit[data-hit-off]')) {
-    event.stopImmediatePropagation();
-  }
-}
-
-const HIT_LISTENERS = [
-  ['pointermove', resolveFromEvent],
-  ['pointerdown', resolveFromEvent],
-  ['mousedown', blockLosingTarget],
-  ['touchstart', blockLosingTarget],
-];
-
-// A tiny body still gets a 24px screen-space target, centred on the body.
-function ShapeHitTarget({ geometry }) {
-  const store = useStoreApi();
-  const size = useStore((s) => {
-    const zoom = s.transform[2];
-    return shapeInnerSpan(geometry) * zoom < MIN_TARGET_PX ? MIN_TARGET_PX / zoom : 0;
-  });
-  // Resolved before the press reaches any node: pointermove precedes a mouse
-  // press, and the eraser reads elementFromPoint after this capture listener.
-  useEffect(() => {
-    if (!size || typeof document.elementsFromPoint !== 'function') return undefined;
-    if (hitTargetCount++ === 0) {
-      for (const [type, listener] of HIT_LISTENERS) {
-        document.addEventListener(type, listener, true);
-      }
-    }
-    resolveAtHover();
-    const unsubscribe = store.subscribe(resolveAtHover);
-    return () => {
-      unsubscribe();
-      if (--hitTargetCount === 0) {
-        for (const [type, listener] of HIT_LISTENERS) {
-          document.removeEventListener(type, listener, true);
-        }
-      }
-    };
-  }, [size, store]);
-  if (!size) return null;
-  return (
-    <span
-      ref={(el) => el && shapeHitGeometry.set(el, geometry)}
-      className="graph-shape-hit"
-      aria-hidden="true"
-      style={{
-        width: size,
-        height: size,
-        left: geometry.width / 2 - size / 2,
-        top: geometry.height / 2 - size / 2,
-      }}
-    />
-  );
-}
 
 /**
  * CustomNode - A graph node component for displaying entities
@@ -425,7 +285,9 @@ function CustomNode({ data, id, selected }) {
           )}
         </div>
 
-        <ShapeHitTarget geometry={geometry} />
+        {/* TODO(node-shape-phase3b-min-hit-target): a tiny body gets its minimum
+            hit target from the central resolver here; until then it is hit
+            only where it is painted. */}
 
         {/* Also shown while selected, so a keyboard user can Tab to them. */}
         {actionButtons(
