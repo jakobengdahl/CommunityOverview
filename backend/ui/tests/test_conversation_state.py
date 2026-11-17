@@ -55,7 +55,7 @@ def test_turn2_fixture_with_issued_token_starts_clean(fastapi_test_client):
 
 
 CLEAN_CHANGES = (
-    "none surrogate_message empty_reply other_process_attachments_off read_elsewhere"
+    "none shared_registry surrogate_message empty_reply other_process_attachments_off read_elsewhere"
 ).split()
 TAINTING_CHANGES = (
     "shared_key dropped forged non_ascii_signature surrogate_body expired edited "
@@ -67,9 +67,11 @@ TAINTING_CHANGES = (
 
 @pytest.mark.parametrize("change", CLEAN_CHANGES + TAINTING_CHANGES)
 def test_continued_conversation_is_clean_only_with_valid_clean_state(
-    chat_service, monkeypatch, change
+    chat_service, monkeypatch, tmp_path, change
 ):
     service, llm = chat_service
+    if change == "shared_registry":
+        service._conversation_registry = conversation_state.FileTaintRegistry(tmp_path)
     tainted = change in TAINTING_CHANGES
     # Inherited taint applies only where the instance enables attachments.
     if change != "other_process_attachments_off":
@@ -147,7 +149,9 @@ def test_continued_conversation_is_clean_only_with_valid_clean_state(
             clock = SimpleNamespace(time=lambda: start + 100)
             monkeypatch.setattr(conversation_state, "time", clock)
             with monkeypatch.context() as race:
-                race.setattr(conversation_state, "taint_status", lambda *a: "clean")
+                race.setattr(
+                    conversation_state, "taint_status", lambda *a, **kw: "clean"
+                )
                 late = turn(service, llm, messages, state, cid=cid)
             clock.time = lambda: start + 86400 + 50
             messages += followed_by(late, "write")
@@ -188,3 +192,73 @@ def test_turn_started_before_a_dropped_mark_is_issued_tainted(monkeypatch, drop)
     replay = [{"role": "assistant", "content": "x"}]
     status = conversation_state.taint_status(replay, token, {}, "c")
     assert status == conversation_state.TAINTED
+
+
+def test_shared_registry_remembers_taint_across_processes(tmp_path, monkeypatch):
+    """Independent workers share clean state and reject rollback after a mark."""
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("ATTACHMENT_CONVERSATION_STATE_KEY", "test-shared-key")
+    script = """
+import json, sys
+from backend.ui import conversation_state as state
+registry = state.FileTaintRegistry(sys.argv[1])
+request = json.loads(sys.argv[2])
+actor = request.get("actor", {})
+cid = state.bind_conversation_id(request.get("cid"), registry=registry, actor=actor)
+messages = [{"role": "assistant", "content": "x"}]
+if request.get("mark"):
+    state.issue(tainted=True, actor=actor, messages=[], reply="x", conversation_id=cid, registry=registry)
+token = request.get("token") or state.issue(tainted=False, actor=actor, messages=[], reply="x", conversation_id=cid, registry=registry)
+print(json.dumps({"cid": cid, "token": token, "status": state.taint_status(messages, token, actor, cid, registry=registry)}))
+"""
+
+    def worker(**request):
+        return json.loads(
+            subprocess.check_output(
+                [sys.executable, "-c", script, str(tmp_path), json.dumps(request)],
+                text=True,
+            )
+        )
+
+    clean = worker()
+    assert clean["status"] == conversation_state.CLEAN
+    assert worker(**clean)["status"] == conversation_state.CLEAN
+    worker(**{**clean, "actor": {"id": "other"}}, mark=True)
+    assert worker(**clean)["status"] == conversation_state.CLEAN
+    worker(**clean, mark=True)
+    assert worker(**clean)["status"] == conversation_state.TAINTED
+    assert worker()["status"] == conversation_state.CLEAN
+    assert worker(actor={"id": "other"})["status"] == conversation_state.CLEAN
+
+
+@pytest.mark.parametrize("failure", ["lost", "damaged", "unavailable"])
+def test_shared_registry_loss_fails_closed(tmp_path, monkeypatch, failure):
+    """A clean token cannot vouch for a lost or unreadable registry record."""
+    registry = conversation_state.FileTaintRegistry(tmp_path)
+    cid = conversation_state.bind_conversation_id(None, registry=registry, actor={})
+    token = ISSUE(tainted=False, conversation_id=cid, registry=registry)
+    path = registry._path({}, cid)
+    if failure == "lost":
+        path.unlink()
+    elif failure == "damaged":
+        path.write_bytes(b"\xff")
+    else:
+        monkeypatch.setattr(Path, "open", Mock(side_effect=OSError))
+    assert (
+        conversation_state.taint_status(
+            [{"role": "assistant", "content": "x"}], token, {}, cid, registry=registry
+        )
+        == conversation_state.TAINTED
+    )
+    assert (
+        conversation_state.taint_status(
+            [{"role": "user", "content": "hi"}], None, {}, cid, registry=registry
+        )
+        == conversation_state.TAINTED
+    )
+
+    if failure == "unavailable":
+        with pytest.raises(OSError):
+            ISSUE(tainted=True, conversation_id=cid, registry=registry)
