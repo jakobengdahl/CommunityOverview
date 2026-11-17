@@ -149,6 +149,18 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     return nodeList.filter((n) => n.type !== 'Community' && n.data?.type !== 'Community');
   };
 
+  // Keep a pending action's outcome in the stored message: the sheet variant
+  // unmounts with the panel, and a remounted card must not offer Confirm again.
+  const settlePendingAction = (messageId, token, settled) => {
+    const message = useGraphStore.getState().chatMessages.find((m) => m.id === messageId);
+    if (!message) return;
+    updateChatMessage(messageId, {
+      pendingActions: message.pendingActions.map((a) =>
+        a.token === token ? { ...a, settled } : a
+      ),
+    });
+  };
+
   // Apply the visualization side-effects a chat response's toolResult implies
   // (save view, clear, add/replace/update nodes, marks, guides). Shared by the
   // typed-message path (handleSend) and the form-submit path (handleSubmitForm)
@@ -999,6 +1011,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                     conversationId={chatConversationId}
                     disabled={isProcessing}
                     onConfirmed={applyToolResultSideEffects}
+                    onSettled={(settled) => settlePendingAction(msg.id, action.token, settled)}
                   />
                 ))}
 

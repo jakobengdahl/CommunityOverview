@@ -13,30 +13,41 @@ import './PendingActionCard.css';
  * onConfirmed, so the caller applies its side effects (e.g. confirmed nodes
  * join the view). conversationId is the key of the conversation whose turn
  * recorded the action; the server refuses a confirmation from any other.
+ * Dismissing sends nothing; the token expires. The outcome (dismissed, done,
+ * failed) goes to onSettled so the owner stores it as action.settled: a card
+ * remounted from the stored message (e.g. a reopened mobile sheet) then shows
+ * that outcome instead of offering Confirm again. A confirm in flight is stored
+ * as a running outcome, so a card remounted before it answers offers neither
+ * Confirm (a second run) nor Dismiss (overwriting the real outcome); the stored
+ * outcome, when the owner keeps one, wins over this instance's own.
  */
-function PendingActionCard({ action, conversationId, disabled = false, onConfirmed }) {
+function PendingActionCard({ action, conversationId, disabled = false, onConfirmed, onSettled }) {
   const { t } = useI18n();
-  const [status, setStatus] = useState(null);
-  const [reply, setReply] = useState(null);
+  const [localSettled, setSettled] = useState(null);
   const [busy, setBusy] = useState(false);
+  const settled = action.settled ?? localSettled;
+
+  const settle = (key, params, reply = null) => {
+    const outcome = { key, params, reply };
+    setSettled(outcome);
+    onSettled?.(outcome);
+  };
 
   const confirm = async () => {
     setBusy(true);
+    onSettled?.({ key: 'chat.pending_action_running' });
     try {
       const response = await api.confirmChatAction(action.token, conversationId);
-      if (response?.error_code === 'confirmation_unknown')
-        setStatus(t('chat.pending_action_unknown'));
-      else if (response?.error_code === 'access_denied') setStatus(t('chat.pending_action_denied'));
+      if (response?.error_code === 'confirmation_unknown') settle('chat.pending_action_unknown');
+      else if (response?.error_code === 'access_denied') settle('chat.pending_action_denied');
       // Anything but an explicit ok is a failure.
       else if (response?.outcome !== 'ok')
-        setStatus(
-          response?.message
-            ? t('chat.pending_action_failed', { message: response.message })
-            : t('chat.pending_action_failed_no_reason')
+        settle(
+          response?.message ? 'chat.pending_action_failed' : 'chat.pending_action_failed_no_reason',
+          response?.message ? { message: response.message } : undefined
         );
       else {
-        setStatus(t('chat.pending_action_done'));
-        setReply(response.message || null);
+        settle('chat.pending_action_done', undefined, response.message || null);
         // The action already ran; a failing view update must not report it as failed.
         try {
           await onConfirmed?.(response.result);
@@ -45,7 +56,7 @@ function PendingActionCard({ action, conversationId, disabled = false, onConfirm
         }
       }
     } catch (err) {
-      setStatus(t('chat.pending_action_failed', { message: err.message }));
+      settle('chat.pending_action_failed', { message: err.message });
     } finally {
       setBusy(false);
     }
@@ -59,15 +70,24 @@ function PendingActionCard({ action, conversationId, disabled = false, onConfirm
         <strong>{t('chat.pending_action_tool')}</strong> <code>{action.tool}</code>
       </p>
       <pre className="pending-action-arguments">{JSON.stringify(action.arguments, null, 2)}</pre>
-      {status ? (
+      {settled ? (
         <div className="pending-action-status" role="status">
-          <p>{status}</p>
-          {reply && <MarkdownMessage>{reply}</MarkdownMessage>}
+          <p>{t(settled.key, settled.params)}</p>
+          {settled.reply && <MarkdownMessage>{settled.reply}</MarkdownMessage>}
         </div>
       ) : (
-        <button type="button" onClick={confirm} disabled={disabled || busy}>
-          {t('chat.pending_action_confirm')}
-        </button>
+        <div className="pending-action-buttons">
+          <button type="button" onClick={confirm} disabled={disabled || busy}>
+            {t('chat.pending_action_confirm')}
+          </button>
+          <button
+            type="button"
+            onClick={() => settle('chat.pending_action_dismissed')}
+            disabled={busy}
+          >
+            {t('chat.pending_action_dismiss')}
+          </button>
+        </div>
       )}
     </div>
   );

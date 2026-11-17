@@ -224,7 +224,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `ATTACHMENT_CONFIRMATION_TTL_SECONDS` | `600` | Lifetime in seconds of a single-use chat confirmation token |
 | `ATTACHMENT_PENDING_ACTIONS_PER_TURN` | `5` | Maximum pending actions recorded by one chat turn |
 | `ATTACHMENT_PENDING_ACTIONS_MAX` | `1000` | Process-local pending action limit; oldest entries are evicted first |
-| `ATTACHMENT_CONVERSATION_STATE_KEY` | random per process | HMAC-SHA-256 key signing chat `conversation_state`. Unset, a token from another process or from before a restart fails verification, and while `ATTACHMENT_CONTENT_ACCESS` is not `off` the conversation counts as tainted. Set one shared value on every process to keep conversations clean across restarts and workers |
+| `ATTACHMENT_CONVERSATION_STATE_KEY` | random per process | HMAC-SHA-256 key signing chat `conversation_state`. A process serves only `conversation_id`s it minted, so whatever this key, a conversation moving process or outliving a restart gets a new id and, while `ATTACHMENT_CONTENT_ACCESS` is not `off`, counts as tainted (use one worker or sticky routing) |
 | `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS` | `86400` | Age after which a `conversation_state` no longer vouches for a clean conversation |
 | `ASSISTANT_ATTACHMENT_ACCESS` | `off` | Attachment tool grant for interactive chat: `off`, `read`, `read_write`. Unknown values fail at boot; an API key override grants no attachment tools |
 | `MCP_ATTACHMENT_TOOLS` | `off` | Attachment tools registered in both MCP and `/execute_tool`: `off`, `read`, `read_write`. Unknown values fail at boot. Enabling requires active authentication with no `MCP_AUTH_ENABLED` bypass |
@@ -2038,19 +2038,30 @@ settings above accept positive integers; invalid values use their defaults.
 
 The taint outlives the turn. Every chat response carries `conversation_state`,
 a signed token over whether the conversation is tainted, the request actor, the
-issue time and a SHA-256 of the conversation as the server saw it (role and
+request's `conversation_id`, the issue time and a SHA-256 of the conversation as the server saw it (role and
 content of every message received, plus the returned reply), and
 `untrusted_content_used` when the turn was tainted. `/ui/chat` and
-`/ui/chat/stream` accept it back as `conversation_state`. A request whose
+`/ui/chat/stream` accept it back as `conversation_state`. The response also
+carries the `conversation_id` the turn was served under: a process serves only
+ids it minted and replaces any other (another process's, a client-made one, or
+none) with a fresh one, so no other process can taint a conversation this one
+vouches for clean; pending actions bind to it. A request whose
 `messages` hold no assistant message starts clean; a token that verifies and
 says tainted starts it tainted; any other starts tainted, when
 `ATTACHMENT_CONTENT_ACCESS` is not `off` for the instance (whatever the caller's
-own grant), unless its token verifies, names the same actor, is younger than
+own grant), unless its token verifies, names the same actor and
+`conversation_id`, is younger than
 `ATTACHMENT_CONVERSATION_STATE_TTL_SECONDS`, hashes equal to its messages up to
-the last assistant message, and says untainted. A reply with no text is
+the last assistant message, says untainted, was issued by this process and
+after the process last evicted a taint record entry; a request without
+`conversation_id` never verifies clean. Once a process has issued a tainted
+token for an actor's `conversation_id`, it treats every later request with that
+pair as tainted and issues no clean token for it, also for one replaying a
+shorter history with an older clean token or no history at all (in memory, per
+process, kept for the TTL, at most 100,000 conversations). A reply with no text is
 returned, and hashed, as a fixed non-empty text. The web client keeps the latest
-token per conversation key in `api.sendChatMessage` (`options.conversationId` is
-required) and replays exactly the messages it sent and received; client-made
+token and `conversation_id` per conversation key in `api.sendChatMessage`
+(`options.conversationId` is required; `confirmChatAction` sends the stored id) and replays exactly the messages it sent and received; client-made
 notices stay out. `docs/fixtures/chat_turn2_request.json` is the turn-2 request
 both the client and server tests drive.
 
