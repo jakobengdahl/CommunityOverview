@@ -48,6 +48,7 @@ is a historical archive.
 
 | Document | Covers |
 |---|---|
+| [COMMAND_BOX_DESIGN.md](COMMAND_BOX_DESIGN.md) | Unified command box placement, suggestions, keyboard and accessibility interaction design for owner review |
 | [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) | Public-core enablement plan for standalone/embedded/extensible runtime modes |
 | [CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md](CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md) | Concrete implementation slices for the runtime/extension enablement above |
 | [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](PLUGIN_RUNTIME_CORE_ENABLEMENT.md) | Generic core work to load, discover, and manage plugins at runtime |
