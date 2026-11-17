@@ -86,3 +86,17 @@ def test_webhook_database_uses_private_state_and_rejects_import_collision(
     config.import_jobs_db = str(private / "webhook_tokens.db")
     with pytest.raises(ValueError, match="must be separate"):
         config.get_webhook_tokens_db_path()
+
+    monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config.import_jobs_db = None
+    first = config.get_webhook_tokens_db_path()
+    assert first == config.get_webhook_tokens_db_path()
+    other = AppConfig(graph_file=str(tmp_path / "other" / "graph.json"))
+    assert first != other.get_webhook_tokens_db_path()
+    pg = AppConfig(graph_backend="postgres", graph_postgres_dsn="secret-dsn",
+                   graph_postgres_schema="one", graph_postgres_scope=None)
+    pg_other = AppConfig(graph_backend="postgres", graph_postgres_dsn="secret-dsn",
+                         graph_postgres_schema="two", graph_postgres_scope=None)
+    assert pg.get_webhook_tokens_db_path() != pg_other.get_webhook_tokens_db_path()
+    assert "secret-dsn" not in str(pg.get_webhook_tokens_db_path())

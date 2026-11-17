@@ -6,6 +6,8 @@ or by passing a custom AppConfig to create_app().
 """
 
 import os
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -319,10 +321,22 @@ class AppConfig:
 
     def get_webhook_tokens_db_path(self) -> Path:
         """Dedicated credential database in operator-controlled private state."""
-        state = Path(
-            os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
-            or Path.home() / ".local" / "state" / "communityoverview"
-        )
+        configured_state = os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+        if configured_state:
+            state = Path(configured_state)
+        else:
+            # Keep the location stable across restarts, but separate independent
+            # graph stores owned by the same OS user. Hash the whole identity so
+            # PostgreSQL connection strings (which may contain passwords) are
+            # never exposed in a path.
+            identity = (
+                ["postgres", self.graph_postgres_dsn, self.graph_postgres_schema,
+                 self.graph_postgres_scope]
+                if self.graph_backend == "postgres"
+                else ["file", str(self.get_graph_path().resolve())]
+            )
+            namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            state = Path.home() / ".local" / "state" / "communityoverview" / namespace
         path = state / "webhook_tokens.db"
         if path.resolve().is_relative_to(self.get_graph_path().parent.resolve()):
             raise ValueError(
