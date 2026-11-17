@@ -2,12 +2,13 @@
 
 ## Recommendation
 
-Keep the current extractor. This is a partial, offline evaluation, not approval
-for a switch. Anydoc is not installed in the evaluation environment; installing
-or checking upstream artifacts needs network access and was skipped. No candidate
+Keep the current extractor. This is a partial evaluation, not approval
+for a switch. Anydoc is not installed in the evaluation environment. Public
+release metadata and a native wheel archive were inspected over the network
+for the supply-chain assessment below; no attachment content was transmitted. No candidate
 conversion, hosted OCR, external service, or private document access was attempted.
 A switch requires an explicit owner decision after the missing measurements and
-supply-chain checks below. There is no runtime, dependency, configuration, or
+integration checks below. There is no runtime, dependency, configuration, or
 rollout change in this evaluation.
 
 ## Evidence and sample boundaries
@@ -56,7 +57,7 @@ compressed to about 20 KiB. It is a rejection probe, not a valid Office document
 The candidate brief describes a local Rust converter with Python bindings,
 Markdown output, PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV support, and
 `NeedsOcr` for scans. These are supplied claims, not independently verified
-upstream facts in this offline evaluation.
+conversion behavior in this evaluation.
 
 | Dimension | Current extractor evidence | Anydoc evidence / missing work |
 | --- | --- | --- |
@@ -98,25 +99,48 @@ The current empty environment and process/resource limits do not themselves
 isolate networking. Verify attempted egress is blocked and scans never trigger
 remote conversion before considering integration.
 
-| Supply-chain item | Finding and adoption requirement |
-| --- | --- |
-| License | MIT is claimed in the candidate brief; package license, native core and bundled dependency licenses were not inspected |
-| Maintainers | Candidate is identified as firecrawl/anydoc in the brief; publisher identity, maintainer history and continuity were not verified |
-| Release provenance | No release, source revision, artifact hash, build attestation, dependency inventory or vulnerability audit was obtained; require source-to-wheel traceability and review native/transitive code before adoption |
-| Wheels and platforms | CI uses `ubuntu-latest` with Python 3.11; runtime uses `python:3.11-slim`. Actual wheel tags, architecture/glibc compatibility and installation inside the runtime image were not verified; local Python 3.12 results do not establish that compatibility |
+Public supply-chain review on 2026-11-17 scoped the compiled Python distribution
+`firecrawl-anydoc==0.2.4` (import name `anydoc`), rather than an unrelated package
+named `anydoc`. Only public source, registry metadata and wheel bytes were fetched;
+the wheel was read as a ZIP in memory, never installed, imported or executed.
 
-Supply-chain approval is blocked, not passed. Do not add anydoc to runtime
-requirements on the strength of this document. Network-dependent artifact review
-and candidate benchmarks were skipped; no release or checksum is guessed here.
+| Supply-chain item | Checked evidence and assessment |
+| --- | --- |
+| License | Tagged core LICENSE and Python Cargo manifest declare MIT; wheel METADATA declares `License-Expression: MIT`. The wheel's CycloneDX SBOM lists 113 components with permissive expressions, including Apache-2.0, BSD-3-Clause, Unicode-3.0, Zlib and the LLVM exception. No separate LICENSE file is present in this wheel: notice redistribution needs resolution before adoption. SBOM declarations are not an independent audit of bundled code. |
+| Maintainers | Repository is owned by Firecrawl; tagged LICENSE names Sideguide Technologies Inc. The public contributor list is dominated by `tomsideguide` (118 contributions), followed by `nickscamara` (6) and `abimaelmartell` (4), indicating concentrated maintenance. PyPI author/maintainer fields are empty; its provenance identifies the Firecrawl repository's release workflow as publisher. This establishes project/publication identity, not a support commitment or independently verified human identities. |
+| Release provenance | GitHub tag `v0.2.4` resolves to `42bf1c5ecdde9eb0d96d6bd75a9e6698cf93b14c`. The inspected wheel's downloaded SHA-256 matches PyPI and the attestation subject (below). PyPI provides a GitHub publisher attestation for `firecrawl/anydoc`, `release.yml`; the certificate records that tag and commit. The tagged workflow builds with maturin and `--locked`. This supports publication traceability; attestation signatures/transparency proofs were not independently cryptographically verified, nor was a reproducible rebuild or vulnerability audit performed. |
+| Wheels and platforms | Registry files include `cp310-abi3` wheels for manylinux glibc 2.17+ x86_64/aarch64, musllinux 1.2 x86_64/aarch64, macOS x86_64/arm64 and Windows amd64. The Linux x86_64 stable-ABI wheel covers CPython 3.11 on CI's `ubuntu-latest` and the `python:3.11-slim` Linux/amd64 image built by CI. Compatibility is established by published tags, not an installation or native-load test in those environments. |
+
+The inspected artifact is
+`firecrawl_anydoc-0.2.4-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl`,
+SHA-256 `0e5aed01bf6d4e5c588d3363888293f2ceeb9feb00449a32e0ba993797cf0bd3`.
+
+Sources: [versioned registry metadata and artifact hashes](https://pypi.org/pypi/firecrawl-anydoc/0.2.4/json),
+[wheel publication provenance](https://pypi.org/integrity/firecrawl-anydoc/0.2.4/firecrawl_anydoc-0.2.4-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl/provenance),
+[tagged license](https://github.com/firecrawl/anydoc/blob/v0.2.4/LICENSE),
+[Python manifest](https://github.com/firecrawl/anydoc/blob/v0.2.4/python/Cargo.toml),
+[release workflow](https://github.com/firecrawl/anydoc/blob/v0.2.4/.github/workflows/release.yml),
+[tag reference](https://api.github.com/repos/firecrawl/anydoc/git/ref/tags/v0.2.4),
+and [contributors](https://api.github.com/repos/firecrawl/anydoc/contributors).
+Local platform evidence: [CI workflow](../../.github/workflows/ci.yml) and
+[runtime image](../../backend/Dockerfile).
+
+Supply-chain assessment: identifiable publisher, permissive declared licensing,
+publication provenance and compatible wheel availability support further local
+benchmarking. They do not yet justify adoption: resolve licence notices, verify
+attestation trust and audit dependencies before integration. Do not add anydoc to
+runtime requirements on the strength of this document. Candidate conversion and
+sandbox measurements remain unmeasured; the owner's switch decision remains pending.
 
 ## Verification and remaining decision evidence
 
 The existing extraction tests were run with a targeted selection covering format
 output, page locators, no-text PDFs, ZIP ratios, address-space isolation and
-CPU/file-size limits: 17 passed. No tests were added for this documentation-only
-change, and production extraction and requirements files are unchanged.
+CPU/file-size limits: 17 passed. A regression test in the existing extraction test module checks that this
+evaluation retains concrete supply-chain evidence and adoption boundaries.
+Production extraction and requirements files are unchanged.
 
-Before an owner can assess a switch, the missing evidence is an audited candidate
+Before an owner can assess a switch, the missing evidence is a fully audited candidate
 artifact, valid generated examples for every claimed format (including a real
 EPUB), side-by-side quality and peak-memory measurements, and verified citation
 and sandbox compatibility. Real private-document evaluation was deliberately
