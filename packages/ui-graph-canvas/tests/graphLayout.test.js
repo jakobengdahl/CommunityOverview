@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/utils/graphLayout.js, packages/ui-graph-canvas/src/utils/nodeShapeGeometry.js
 import { describe, it, expect } from 'vitest';
 import {
   arrangeNodes,
@@ -8,7 +9,10 @@ import {
   distributeNodes,
   getLayoutedElements,
   applyLayout,
+  getEdgeParams,
 } from '../src/utils/graphLayout';
+
+import { createNodeShapeGeometry } from '../src/utils/nodeShapeGeometry';
 
 // These call dagre directly rather than through arrangeNodes, so a dagre (or its
 // lodash dependency) upgrade that changes or breaks the layout fails here with a
@@ -649,5 +653,123 @@ describe('sort by date', () => {
     }));
     expect(order(arrangeNodes(nodes, [], 'horizontal'), 'x')).toEqual(['n0', 'n1', 'n2']);
     expect(order(arrangeNodes(nodes, [], 'vertical'), 'y')).toEqual(['n0', 'n1', 'n2']);
+  });
+});
+
+describe('shared node shape geometry', () => {
+  const bases = ['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down'];
+  const node = (geometry, position = { x: 0, y: 0 }) => ({ geometry, position });
+
+  it('anchors rounded boxes on straight segments and corner arcs with outward normals', () => {
+    for (const base of bases.slice(0, 2)) {
+      const g = createNodeShapeGeometry(base);
+      expect(g.anchor({ x: 1, y: 0 })).toEqual({
+        x: g.width,
+        y: g.height / 2,
+        normal: { x: 1, y: 0 },
+      });
+      const direction = {
+        x: g.width / 2 - 8 + 8 / Math.sqrt(2),
+        y: g.height / 2 - 8 + 8 / Math.sqrt(2),
+      };
+      const corner = g.anchor(direction);
+      expect(corner.x).toBeCloseTo(g.width / 2 + direction.x);
+      expect(corner.y).toBeCloseTo(g.height / 2 + direction.y);
+      expect(corner.normal.x).toBeCloseTo(1 / Math.sqrt(2));
+      expect(corner.normal.y).toBeCloseTo(1 / Math.sqrt(2));
+      expect(g.contains(corner)).toBe(true);
+      expect(g.contains({ x: g.width, y: g.height })).toBe(false);
+    }
+  });
+
+  it('anchors triangle edges using their outward normal and absolute nested positions', () => {
+    for (const base of bases.slice(2)) {
+      const g = createNodeShapeGeometry(base);
+      const up = base === 'triangle-up';
+      const hit = g.anchor({ x: 1, y: 0 });
+      expect(hit.x).toBeCloseTo(180);
+      expect(hit.y).toBeCloseTo(90);
+      expect(hit.normal.x).toBeGreaterThan(Math.abs(hit.normal.y));
+      expect(Math.sign(hit.normal.y)).toBe(up ? -1 : 1);
+      const source = { ...node(g, { x: 10, y: 20 }), parentId: 'group' };
+      const target = node(g, { x: 610, y: 220 });
+      const params = getEdgeParams(
+        source,
+        target,
+        new Map([['group', { position: { x: 100, y: 200 } }]])
+      );
+      expect(params.sx).toBeCloseTo(290);
+      expect(params.sy).toBeCloseTo(310);
+      expect(params.sourcePos).toBe('right');
+      expect(params.targetPos).toBe('left');
+    }
+  });
+
+  it('uses stable opposite vertical anchors for coincident centres, including unsized legacy nodes', () => {
+    for (const g of [undefined, ...bases.map((base) => createNodeShapeGeometry(base))]) {
+      const source = node(g);
+      const first = getEdgeParams(source, source);
+      expect(getEdgeParams(source, source)).toEqual(first);
+      expect([first.sx, first.sy, first.tx, first.ty].every(Number.isFinite)).toBe(true);
+      expect(first.sy).toBe(g?.height || 100);
+      expect(first.ty).toBe(0);
+      expect(first.sourcePos).toBe('bottom');
+      expect(first.targetPos).toBe('top');
+    }
+  });
+
+  it('excludes transparent triangle corners while including polygon boundaries', () => {
+    for (const base of bases.slice(2)) {
+      const g = createNodeShapeGeometry(base);
+      const y = base === 'triangle-up' ? 0 : g.height;
+      expect(g.contains({ x: 0, y })).toBe(false);
+      expect(g.contains({ x: g.width, y })).toBe(false);
+      expect(g.contains({ x: g.width / 2, y })).toBe(true);
+      expect(g.contains({ x: g.width / 2, y: g.height / 2 })).toBe(true);
+      expect(g.contains({ x: -1, y: g.height / 2 })).toBe(false);
+      expect(g.vertices).toEqual(
+        base === 'triangle-up'
+          ? [
+              { x: 120, y: 0 },
+              { x: 240, y: 180 },
+              { x: 0, y: 180 },
+            ]
+          : [
+              { x: 0, y: 0 },
+              { x: 240, y: 0 },
+              { x: 120, y: 180 },
+            ]
+      );
+    }
+  });
+
+  it('scales body, band and text together and reserves outside labels only in layout bounds', () => {
+    for (const base of bases) {
+      const nominal = createNodeShapeGeometry(base);
+      for (const scale of [0.1, 1, 10]) {
+        const g = createNodeShapeGeometry(base, scale);
+        expect(g.width).toBeCloseTo(nominal.width * scale);
+        expect(g.height).toBeCloseTo(nominal.height * scale);
+        expect(g.bandHeight).toBeCloseTo(28 * scale);
+        expect(g.padding).toBeCloseTo(12 * scale);
+        expect(g.text).toEqual({ type: 0.75 * scale, title: 0.9 * scale, summary: 0.75 * scale });
+        expect(g.radius).toBe(nominal.radius * scale);
+        const label = base.startsWith('triangle') ? 28 * scale : 0;
+        expect(g.layoutBounds).toEqual({
+          x: 0,
+          y: -label,
+          width: g.width,
+          height: g.height + label,
+        });
+        expect(g.bodyBounds).toEqual({ x: 0, y: 0, width: g.width, height: g.height });
+        const [placed] = getLayoutedElements([{ id: 'shape', ...node(g) }], []);
+        expect(placed.position.y + g.layoutBounds.y).toBeCloseTo(50);
+        expect(g.anchor({ x: 0, y: -1 }).y).toBeCloseTo(0);
+      }
+    }
+    for (const scale of [0, 0.09, 10.1, Infinity, NaN]) {
+      expect(() => createNodeShapeGeometry('rectangle', scale)).toThrow(RangeError);
+    }
+    expect(() => createNodeShapeGeometry('circle')).toThrow(RangeError);
   });
 });

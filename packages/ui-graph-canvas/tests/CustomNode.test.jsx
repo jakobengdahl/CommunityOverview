@@ -1,5 +1,13 @@
+// covers: packages/ui-graph-canvas/src/components/CustomNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { URL as NodeURL } from 'node:url';
+
+const customNodeCss = readFileSync(
+  new NodeURL('../src/components/CustomNode.css', import.meta.url),
+  'utf8'
+);
 
 vi.mock('reactflow', () => ({
   Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
@@ -7,6 +15,64 @@ vi.mock('reactflow', () => ({
 }));
 
 import CustomNode from '../src/components/CustomNode';
+
+describe('CustomNode theme shadow cascade', () => {
+  it.each(['selected', 'highlighted', 'selected highlighted'])(
+    'preserves light hover and dark state shadows for %s nodes',
+    (state) => {
+      // Parse the actual stylesheet: jsdom does not evaluate media queries or :hover.
+      const style = document.createElement('style');
+      style.textContent = customNodeCss;
+      document.head.appendChild(style);
+      const node = document.createElement('div');
+      node.className = `graph-custom-node ${state} test-hover`;
+
+      const shadowFor = (light, hovered) => {
+        node.classList.toggle('test-hover', hovered);
+        let shadow;
+        let specificity = -1;
+        const visit = (rules) => {
+          for (const rule of rules) {
+            if (rule.media) {
+              if (light && rule.conditionText === '(prefers-color-scheme: light)') {
+                visit(rule.cssRules);
+              }
+              continue;
+            }
+            const selector = rule.selectorText;
+            const value = rule.style?.getPropertyValue('box-shadow');
+            if (
+              !selector ||
+              !value ||
+              !node.matches(selector.replaceAll(':hover', '.test-hover'))
+            ) {
+              continue;
+            }
+            const weight = (selector.match(/[.:][\w-]+/g) || []).length;
+            if (weight >= specificity) {
+              specificity = weight;
+              shadow = value.replace(/\s+/g, ' ').trim();
+            }
+          }
+        };
+        visit(style.sheet.cssRules);
+        return shadow;
+      };
+
+      try {
+        const stateShadow = state.includes('selected')
+          ? '0 0 0 3px var(--graph-card-focus), 0 0 16px rgba(100, 108, 255, 0.3)'
+          : '0 0 12px rgba(100, 108, 255, 0.4)';
+        expect(shadowFor(true, true)).toBe('var(--graph-card-shadow-hover)');
+        expect(shadowFor(false, true)).toBe(stateShadow);
+        expect(shadowFor(true, false)).toBe(stateShadow);
+        expect(shadowFor(false, false)).toBe(stateShadow);
+      } finally {
+        style.remove();
+      }
+    }
+  );
+});
 
 describe('CustomNode tooltip', () => {
   beforeEach(() => {

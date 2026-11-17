@@ -1,7 +1,8 @@
 # Configurable node shapes
 
 The models, strict validation, resolution contract, schema transport and empty
-session maps are implemented. Rendering, editing, shared appearance operations
+session maps, semantic appearance tokens and shared base geometry are implemented.
+Rendering, editing, shared appearance operations
 and library persistence remain future work. Unconfigured nodes continue to use
 the existing CustomNode renderer.
 
@@ -22,8 +23,8 @@ The following existing code is the integration baseline:
   selected and remote-selection states must survive the new renderer.
 - [`CustomNode.css`](../../packages/ui-graph-canvas/src/components/CustomNode.css)
   uses dark surfaces `#1a1a1a`, text `#ddd` / `#999`, and a light media-query
-  variant with white surfaces and `#213547` / `#666` text. There is no shared
-  shape-token system today; extract equivalent semantic tokens before reuse.
+  variant with white surfaces and `#213547` / `#666` text. Shared `--graph-card-*` semantic tokens preserve these values and the
+  existing media-query theme behaviour.
 - [`MetamodelExplorerDialog.jsx`](../../frontend/web/src/components/MetamodelExplorerDialog.jsx)
   and its CSS provide the above-canvas overlay (z-index 2100), 920px / 95vw
   dialog, header, tabs, initial focus and Escape handling. It is read-only;
@@ -44,7 +45,8 @@ The following existing code is the integration baseline:
   echoes, and uses sequenced SSE catch-up/resync. Shapes require additions to
   both mirror/diff and server validation, not just canvas props.
 - [`graphLayout.js`](../../packages/ui-graph-canvas/src/utils/graphLayout.js)
-  intersects centre rays with rectangles and chooses cardinal Bezier directions.
+  intersects centre rays with body geometry and chooses cardinal Bezier
+  directions from outward normals.
   [`SimpleFloatingEdge.jsx`](../../packages/ui-graph-canvas/src/components/SimpleFloatingEdge.jsx)
   consumes these results. [`GraphCanvas.jsx`](../../packages/ui-graph-canvas/src/components/GraphCanvas.jsx)
   also uses DOM `elementFromPoint` for erasing; transparent wrapper corners
@@ -284,6 +286,20 @@ Marquee selection uses polygon/selection-rectangle overlap (including outside
 label bounds). Broad-phase bounding boxes remain useful for spatial indexing.
 Minimum screen-space hit targets must resolve overlap by nearest painted body,
 then z-order. Controls/badges stay outside clipped bodies and remain operable.
+
+The canvas package exports `createNodeShapeGeometry(base, scale)`. Its immutable
+result supplies `path` for SVG drawing, `contains(point)` for body hits,
+`anchor(direction)` for centre rays and outward normals, and `bodyBounds` /
+`layoutBounds`. Coordinates, radius, band height and padding use scaled CSS
+pixels; text metrics use scaled rem values. Triangle layout bounds reserve one
+28px band-height above the body for the outside label. The label reservation is
+excluded from body hits and edge anchors.
+
+A canvas node can carry this descriptor as `geometry`; floating edges and Dagre
+consume it directly. Nodes without a descriptor retain legacy layout dimensions
+and measured rectangular edge bounds. The existing card renderer does not yet
+supply a descriptor. Zero-distance endpoint centres use opposite vertical
+anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale
 

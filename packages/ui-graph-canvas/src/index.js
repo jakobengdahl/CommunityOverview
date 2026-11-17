@@ -77,3 +77,6 @@ export {
 // Node provenance (which graph owns a node) — shared with the host app so the
 // search result list and the canvas context menu agree on what is federated.
 export { originGraphId, isFederatedNode, originGraphName } from './utils/nodeProvenance';
+
+// Shared body geometry for custom renderers and layout consumers.
+export { createNodeShapeGeometry } from './utils/nodeShapeGeometry';

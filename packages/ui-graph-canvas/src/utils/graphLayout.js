@@ -2,6 +2,7 @@
  * Graph layout utilities using dagre for automatic node positioning
  */
 import dagre from 'dagre';
+import { createBoxGeometry } from './nodeShapeGeometry';
 
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 100;
@@ -29,7 +30,9 @@ export function getLayoutedElements(nodes, edges, direction = 'TB') {
   });
 
   nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
+    dagreGraph.setNode(node.id, {
+      ...(node.geometry?.layoutBounds || { width: NODE_WIDTH, height: NODE_HEIGHT }),
+    });
   });
 
   edges.forEach((edge) => {
@@ -43,8 +46,11 @@ export function getLayoutedElements(nodes, edges, direction = 'TB') {
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - NODE_WIDTH / 2,
-        y: nodeWithPosition.y - NODE_HEIGHT / 2,
+        x: nodeWithPosition.x - (node.geometry?.layoutBounds.width || NODE_WIDTH) / 2,
+        y:
+          nodeWithPosition.y -
+          (node.geometry?.layoutBounds.height || NODE_HEIGHT) / 2 -
+          (node.geometry?.layoutBounds.y || 0),
       },
     };
   });
@@ -206,75 +212,49 @@ function getAbsolutePosition(node, nodeInternals) {
   };
 }
 
-// Helper function to get intersection point between line and rectangle
-function getNodeIntersection(intersectionNode, targetNode, nodeInternals) {
-  const { width: intersectionNodeWidth, height: intersectionNodeHeight } = intersectionNode;
-
-  // Use absolute positions
-  const intersectionNodePosition = getAbsolutePosition(intersectionNode, nodeInternals);
-  const targetPosition = getAbsolutePosition(targetNode, nodeInternals);
-
-  const w = intersectionNodeWidth / 2;
-  const h = intersectionNodeHeight / 2;
-
-  const x2 = intersectionNodePosition.x + w;
-  const y2 = intersectionNodePosition.y + h;
-  const x1 = targetPosition.x + (targetNode.width || NODE_WIDTH) / 2;
-  const y1 = targetPosition.y + (targetNode.height || NODE_HEIGHT) / 2;
-
-  const xx1 = (x1 - x2) / (2 * w) - (y1 - y2) / (2 * h);
-  const yy1 = (x1 - x2) / (2 * w) + (y1 - y2) / (2 * h);
-  const a = 1 / (Math.abs(xx1) + Math.abs(yy1));
-  const xx3 = a * xx1;
-  const yy3 = a * yy1;
-  const x = w * (xx3 + yy3) + x2;
-  const y = h * (-xx3 + yy3) + y2;
-
-  return { x, y };
+// A renderer can supply the same descriptor used for its drawing and hit surface.
+// Legacy content-sized cards keep their measured rectangular bounds.
+function nodeGeometry(node) {
+  return node.geometry || createBoxGeometry(node.width || NODE_WIDTH, node.height || NODE_HEIGHT);
 }
 
-// Helper to determine Handle position based on intersection
-function getEdgePosition(node, intersectionPoint, nodeInternals) {
-  const absPos = getAbsolutePosition(node, nodeInternals);
-  const n = { ...absPos, ...node };
-  const nx = Math.round(n.x);
-  const ny = Math.round(n.y);
-  const px = Math.round(intersectionPoint.x);
-  const py = Math.round(intersectionPoint.y);
-
-  if (px <= nx + 1) {
-    return Position.Left;
-  }
-  if (px >= nx + (n.width || NODE_WIDTH) - 1) {
-    return Position.Right;
-  }
-  if (py <= ny + 1) {
-    return Position.Top;
-  }
-  if (py >= ny + (n.height || NODE_HEIGHT) - 1) {
-    return Position.Bottom;
-  }
-
-  return Position.Top;
-}
-
-/**
- * Calculate parameters for floating edge
- */
-export function getEdgeParams(source, target, nodeInternals) {
-  const sourceIntersectionPoint = getNodeIntersection(source, target, nodeInternals);
-  const targetIntersectionPoint = getNodeIntersection(target, source, nodeInternals);
-
-  const sourcePos = getEdgePosition(source, sourceIntersectionPoint, nodeInternals);
-  const targetPos = getEdgePosition(target, targetIntersectionPoint, nodeInternals);
-
+function edgeAnchor(node, other, nodeInternals, fallback) {
+  const geometry = nodeGeometry(node);
+  const otherGeometry = nodeGeometry(other);
+  const position = getAbsolutePosition(node, nodeInternals);
+  const otherPosition = getAbsolutePosition(other, nodeInternals);
+  const dx = otherPosition.x + otherGeometry.width / 2 - position.x - geometry.width / 2;
+  let dy = otherPosition.y + otherGeometry.height / 2 - position.y - geometry.height / 2;
+  const coincident = dx === 0 && dy === 0;
+  if (coincident) dy = fallback;
+  const point = geometry.anchor({ x: dx, y: dy });
+  const { normal } = point;
+  const side =
+    Math.abs(normal.x) > Math.abs(normal.y)
+      ? normal.x < 0
+        ? Position.Left
+        : Position.Right
+      : normal.y < 0
+        ? Position.Top
+        : Position.Bottom;
   return {
-    sx: sourceIntersectionPoint.x,
-    sy: sourceIntersectionPoint.y,
-    tx: targetIntersectionPoint.x,
-    ty: targetIntersectionPoint.y,
-    sourcePos,
-    targetPos,
+    x: position.x + point.x,
+    y: position.y + point.y,
+    side: coincident ? (fallback < 0 ? Position.Top : Position.Bottom) : side,
+  };
+}
+
+/** Calculate floating edges against body boundaries, excluding outside labels. */
+export function getEdgeParams(source, target, nodeInternals) {
+  const from = edgeAnchor(source, target, nodeInternals, 1);
+  const to = edgeAnchor(target, source, nodeInternals, -1);
+  return {
+    sx: from.x,
+    sy: from.y,
+    tx: to.x,
+    ty: to.y,
+    sourcePos: from.side,
+    targetPos: to.side,
   };
 }
 
