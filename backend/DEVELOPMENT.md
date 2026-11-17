@@ -539,6 +539,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/search` | Search nodes |
+| POST | `/api/functions/{function_id}/invoke` | Manually run an enabled operator function; accepts `input`, optional `correlation_id`, and `Idempotency-Key`; returns a run record (see *Manual user functions*) |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
 | POST | `/api/nodes` | Add nodes and edges (`expect_absent` optional; see *Entity revisions*) |
@@ -2256,3 +2257,47 @@ The `/schema` response includes `node_shapes` (validated configuration definitio
 optional `shape` references on node types, and structured `shape_diagnostics` for
 isolated malformed external definitions or missing references. Shape selections
 are opt-in; no renderer or appearance mutation endpoint is enabled yet.
+
+### Manual user functions
+
+`POST /functions/{function_id}/invoke` (under the configured API prefix) runs an
+operator-enabled function synchronously and returns its durable run record.
+The JSON body accepts `input` (an object, default `{}`) and an optional
+`correlation_id`. Send `Idempotency-Key` when retrying a delivery: the same key
+returns the existing record, including a rejected record. A new key allows a
+new invocation. Concurrent invocations of the same function return a rejected
+record with error code `busy`; there is no execution queue.
+
+The route takes identity from the server's authenticated actor binding. Actor
+headers and body fields cannot supply identity. A request without an authenticated
+actor is rejected. The shared invocation service checks graph read access and,
+for functions declaring `graph:write`, mutate access before starting code.
+
+Configure `COMMUNITYOVERVIEW_FUNCTIONS_ROOT` (default `config/functions`) and
+`COMMUNITYOVERVIEW_FUNCTIONS_ENABLED`, a JSON object mapping function ids to
+explicitly enabled grant lists, for example `{"example": ["graph:read"]}`.
+The default is `{}`: no functions are enabled. Packages follow
+[the function contract](../docs/USER_FUNCTION_CONTRACT.md#4-package-and-manifest).
+Only Python and manual triggers are supported. External schema references and
+package symlinks are rejected. Set `COMMUNITYOVERVIEW_FUNCTIONS_ISOLATION_MINIMUM`
+to `full` when function authors are not fully trusted; the default is `degraded`.
+
+The CLI uses the same route and authentication boundary:
+
+```bash
+python -m backend.functions.cli example --url http://localhost:8000/api \
+  --input '{}' --idempotency-key delivery-1
+```
+
+HTTP authentication comes from the operator's `.netrc`; no actor override is
+accepted. Set `--correlation-id` to forward an existing correlation id. The client
+waits up to 150 seconds for the bounded run to finish.
+
+Function runs use the agents' shared one-attempt run-history store and retention
+settings. Set `AGENTS_RUN_HISTORY_DB` for durable history across restarts, as for
+agent runs. Records include outcome, duration, attribution, isolation, usage and
+tool-call metadata; tool arguments and results are excluded. A crash leaves a
+running record that is never retried and blocks further runs of that function
+until the history retention sweep abandons it. Admission is serialized across
+threads and local processes sharing the configured package directory; distributed
+execution across hosts is outside the local store's supported topology.
