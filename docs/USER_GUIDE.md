@@ -1597,3 +1597,14 @@ before enabling these tools for an assistant or Agent.
 Assistant and kiosk Markdown replies load only inline `data:image/` images.
 Other images show their alt text and URL without loading them. Link targets
 are visible, with links to another origin marked as external.
+
+### Operator-written graph functions
+
+Operators can enable short Python functions that read and update the graph through
+restricted tools. Invoke an enabled function with the manual REST endpoint or
+`python -m backend.functions.cli`; see [the development guide](../backend/DEVELOPMENT.md#manual-user-functions)
+for configuration and request examples. Calls use the authenticated actor's graph
+permissions. Repeating an idempotency key returns the same run record; use a new
+key for a new run. If the function is already running, another invocation is
+rejected as busy. Function records share agent run-history retention. Writes made
+before a failed or timed-out run remain in the graph.
