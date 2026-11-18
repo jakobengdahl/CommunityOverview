@@ -268,7 +268,10 @@ sessions unless they can preserve the new fields and operations.
 
 Remote removals and appearance operations enter the same ordered canvas queue.
 Their baseline changes are folded at the point the queued canvas operation runs,
-with autosave held from receipt until drawing finishes. Resync waits for the
+with autosave held from receipt until drawing finishes. Appearance
+acknowledgments also enter this queue as baseline-only work, so an
+earlier queued removal cannot overwrite a later acknowledged revision.
+Resync waits for the
 queue and any registered asynchronous local edit before replacing state; it
 rechecks local edits after the queue drains and repeats if either work source
 changed while waiting. Each target of a combined type-default and node-clear

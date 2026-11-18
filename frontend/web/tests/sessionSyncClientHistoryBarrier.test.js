@@ -101,10 +101,15 @@ describe('history synchronization barrier', () => {
 });
 
 describe('appearance ordering', () => {
-  it('folds removal and appearance only when the canvas queue reaches them', () => {
+  it('folds removal, acknowledgment and remote appearance in canvas queue order', async () => {
     const deliveries = [];
+    const acknowledged = {
+      op: 'node_shape_set', node_id: 'a', selection: { builtin: 'ack' },
+      revisions: { 'node:a': 2 },
+    };
     const { client } = makeClient({
       deferRemoteOps: true,
+      fetchImpl: makeFetch([{ ok: true, json: async () => ({ seq: 2, applied: [acknowledged] }) }]),
       handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
     });
     client.setBaseline({ node_refs: ['a'], shape_overrides: { a: { builtin: true } } });
@@ -114,9 +119,11 @@ describe('appearance ordering', () => {
       client_id: 'other',
       op: { op: 'nodes_removed', node_ids: ['a'] },
     });
+    client.sendOps([acknowledged]);
+    await client.flush();
     client._handleEvent({
       type: 'op',
-      seq: 2,
+      seq: 3,
       client_id: 'other',
       op: {
         op: 'type_shape_set',
@@ -126,15 +133,23 @@ describe('appearance ordering', () => {
       },
     });
     expect(client.isMember('a')).toBe(true);
-    expect(deliveries.map((entry) => entry.op.op)).toEqual(['nodes_removed', 'type_shape_set']);
+    expect(deliveries.map((entry) => entry.op.op)).toEqual(['nodes_removed', 'node_shape_set', 'type_shape_set']);
     expect(deliveries[0].applyBaseline()).toBe(true);
     expect(client.isMember('a')).toBe(false);
-    expect(deliveries[1].applyBaseline()).toBe(true);
+    expect(deliveries[1].applyBaseline()).toBe(false);
+    expect(client._baseline.shape_overrides).toEqual({ a: { builtin: 'ack' } });
+    expect(deliveries[2].applyBaseline()).toBe(true);
     expect(client._baseline).toMatchObject({
-      shape_overrides: {},
+      shape_overrides: { a: { builtin: 'ack' } },
       type_shapes: { Thing: { builtin: true } },
-      shape_revisions: { 'node:a': 1, 'type:Thing': 1 },
+      shape_revisions: { 'node:a': 2, 'type:Thing': 1 },
     });
+    client._handleEvent({
+      type: 'op', seq: 4, client_id: 'other',
+      op: { op: 'node_shape_set', node_id: 'a', selection: { builtin: 'new' }, revisions: { 'node:a': 3 } },
+    });
+    expect(deliveries[3].applyBaseline()).toBe(true);
+    expect(client._baseline.shape_overrides.a).toEqual({ builtin: 'new' });
     client.close();
   });
 

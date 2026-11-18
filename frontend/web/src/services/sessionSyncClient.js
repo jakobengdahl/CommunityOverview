@@ -1993,8 +1993,20 @@ export class SessionSyncClient {
         // that later op's own ack round-trips.
         for (const entry of body.applied || []) {
           if (entry?.op === 'node_shape_set' || entry?.op === 'type_shape_set') {
-            const current = currentAppearanceOp(this._baseline, entry);
-            if (current) this._baseline = applyOpToMirror(this._baseline, current);
+            const applyBaseline = () => {
+              const current = currentAppearanceOp(this._baseline, entry);
+              if (current) this._baseline = applyOpToMirror(this._baseline, current);
+              return false; // The local edit is already on the canvas.
+            };
+            if (this._deferRemoteOps && this.handlers.onRemoteOps) {
+              this.handlers.onRemoteOps([entry], {
+                clientId: this.clientId,
+                sessionId: this.sessionId,
+                applyBaseline,
+              });
+            } else {
+              applyBaseline();
+            }
           }
         }
         const appliedAnnotations = [];
