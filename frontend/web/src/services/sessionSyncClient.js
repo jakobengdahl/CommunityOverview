@@ -933,6 +933,7 @@ export class SessionSyncClient {
     // this means ops landed between that load and the stream subscribe.
     this._loadedSeq = null;
     this._source = null;
+    this._lastSource = null;
     this._flushTimer = null;
     this._retryTimer = null;
     this._reconnectTimer = null;
@@ -1459,8 +1460,11 @@ export class SessionSyncClient {
     if (this._appliedSeq > 0) params.set('since_seq', String(this._appliedSeq));
     const url = `${this.streamUrl}?${params.toString()}`;
     const source = new this._EventSource(url);
+    this._lastSource = source;
     source.onmessage = (e) => {
-      if (this._closed || this._source !== source || !e || !e.data) return;
+      // A message already queued by the last source can arrive after its error
+      // clears _source. Ignore it only once another source has replaced it.
+      if (this._closed || this._lastSource !== source || !e || !e.data) return;
       let data;
       try {
         data = JSON.parse(e.data);
