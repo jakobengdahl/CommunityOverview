@@ -1,17 +1,29 @@
-# covers: backend/functions/webhook.py
-"""Webhook admission and bound identity."""
+# covers: backend/functions/webhook.py, backend/functions/run_files.py
+"""Webhook admission, bound identity and run-scoped webhook files."""
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from backend.agents.execution import ExecutionJob, ExecutionKind, ExecutionState
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    RetryPolicy,
+    SqliteExecutionStore,
+)
+from backend.functions import invocation, run_files, webhook
+from backend.functions.runner import FunctionRunResult, RunnerProbe
 from backend.functions.token_store import WebhookTokenStore
 from backend.functions.webhook import register_webhook_routes
+from backend.runtime.authorization import GraphAuthorizationDecision
 
 
 @pytest.fixture
@@ -161,12 +173,12 @@ async def test_rejections_do_not_receive_body(endpoint, monkeypatch):
         "path": "/functions/example/webhook",
         "raw_path": b"/functions/example/webhook",
         "query_string": b"",
-        "headers": [],
+        "headers": [(b"content-type", b"multipart/form-data; boundary=x")],
         "client": ("test", 1),
         "server": ("test", 80),
     }
     await app(scope.copy(), receive, send)
-    scope["headers"] = [(b"authorization", f"Bearer {token}".encode())]
+    scope["headers"].append((b"authorization", f"Bearer {token}".encode()))
     service.replay_webhook.return_value = ExecutionJob(
         agent_id="example",
         idempotency_key="busy",
@@ -207,3 +219,215 @@ def test_rate_limit_is_shared_by_policy_instances(endpoint, monkeypatch):
     assert not first.admit("example")
     now[0] += 59
     assert first.admit("example")
+
+
+@pytest.fixture
+def files_host(tmp_path, monkeypatch):
+    package = tmp_path / "example"
+    package.mkdir()
+    (package / "main.py").write_text("pass")
+    (package / "function.json").write_text(
+        json.dumps(
+            {
+                "contract_version": "3",
+                "id": "example",
+                "version": "1.0.0",
+                "name": "Example",
+                "runtime": "python",
+                "entry_point": "main.py",
+                "triggers": [{"kind": "webhook"}],
+                "grants": ["graph:write"],
+                "input_schema": {"type": "object", "required": ["value"]},
+            }
+        )
+    )
+    tokens = WebhookTokenStore(tmp_path / "private.db")
+    token = tokens.mint("example", "graph-a", "test")
+    hook = Mock()
+    hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
+    graph = SimpleNamespace(
+        authorization_hook=hook,
+        attachment_settings=None,
+        add_node_attachment=AsyncMock(return_value={"success": True}),
+    )
+    runner = Mock()
+    runner.probe.return_value = RunnerProbe("full", (), ("python",))
+    history = SqliteExecutionStore(
+        tmp_path / "history.db", retry_policy=RetryPolicy(max_attempts=1)
+    )
+    service = invocation.FunctionInvocationService(
+        graph,
+        history,
+        root=tmp_path,
+        enabled={"example": ["graph:write"]},
+        runner=runner,
+    )
+    created = []
+
+    class Recorded(run_files.RunFiles):
+        def __init__(self):
+            super().__init__()
+            created.append(self._directory)
+
+    monkeypatch.setattr(webhook, "RunFiles", Recorded)
+    execute = Mock(return_value=FunctionRunResult("succeeded", output={}))
+    monkeypatch.setattr(invocation, "run_function", execute)
+    monkeypatch.setenv("FUNCTION_WEBHOOKS_ENABLED", "true")
+    app = FastAPI()
+    router = APIRouter()
+    register_webhook_routes(router, service, tokens, Mock(), tokens.get)
+    app.include_router(router)
+    service.webhook_policy.set(
+        "example",
+        "graph-a",
+        tokens.get("example")["id"],
+        SimpleNamespace(enabled=True, allow_write=False),
+    )
+
+    def post(key=None, files=None, value=None):
+        headers = {"Authorization": f"Bearer {token}"}
+        if key:
+            headers["Idempotency-Key"] = key
+        return client.post(
+            "/functions/example/webhook",
+            data={"input": value or json.dumps({"value": 1})},
+            files=files or {"a": ("notes.txt", b"hello webhook", "text/plain")},
+            headers=headers,
+        )
+
+    with TestClient(app) as client:
+        yield SimpleNamespace(
+            service=service, graph=graph, execute=execute, created=created, post=post
+        )
+    history.close()
+
+
+def _tool(broker, name, **arguments):
+    response = broker.handle_request(
+        {"id": 1, "params": {"name": name, "arguments": arguments}}
+    )
+    return response.get("result") or response["error"]["data"]["code"]
+
+
+@pytest.mark.parametrize("allow_write", [False, True])
+def test_files_are_run_inputs_read_through_broker_and_deleted(files_host, allow_write):
+    host = files_host
+    host.service.webhook_policy.set(
+        "example",
+        "graph-a",
+        host.service.webhook_policy.store.get("example")["id"],
+        SimpleNamespace(enabled=True, allow_write=allow_write),
+    )
+    seen = {}
+
+    def run(runner, spec, broker, envelope):
+        seen["input"] = envelope["invocation"]["input"]
+        seen["package"] = set(spec.files)
+        seen["present"] = os.path.isdir(host.created[0])
+        listed = _tool(broker, "run_files.list")
+        seen["listed"] = listed
+        seen["text"] = _tool(broker, "run_files.read", file_id="file-1")
+        seen["binary"] = _tool(broker, "run_files.read", file_id="file-2")
+        seen["foreign"] = _tool(broker, "run_files.read", file_id="../file-1")
+        seen["attach"] = _tool(
+            broker, "graph.attach_run_file", node_id="n1", file_id="file-1"
+        )
+        if allow_write:
+            raise RuntimeError("the run fails after attaching")
+        return FunctionRunResult("succeeded", output={})
+
+    host.execute.side_effect = run
+    response = host.post(
+        files={
+            "a": ("notes.txt", b"hello webhook", "text/plain"),
+            "b": ("blob.bin", b"\x00\x01\x02", "application/octet-stream"),
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == ("failed" if allow_write else "succeeded")
+    # G4: bytes and paths stay out of the envelope and the package.
+    assert seen["input"] == {"value": 1} and seen["package"] == {
+        "main.py",
+        "function.json",
+    }
+    assert seen["present"] and not os.path.exists(host.created[0])
+    assert seen["listed"]["untrusted_content"] is True
+    assert [(f["file_id"], f["size"]) for f in seen["listed"]["files"]] == [
+        ("file-1", 13),
+        ("file-2", 3),
+    ]
+    assert seen["text"]["untrusted_content"] is True
+    assert seen["text"]["segments"][0]["text"] == "hello webhook"
+    assert seen["binary"]["extraction_status"] == "unsupported_type"
+    assert seen["binary"]["segments"] == []
+    assert seen["foreign"] == "invalid_arguments"
+    if allow_write:
+        assert seen["attach"] == {"success": True}
+        call = host.graph.add_node_attachment.call_args
+        assert call.args == ("n1",) and call.kwargs["content"] == b"hello webhook"
+    else:
+        assert seen["attach"] == "grant_denied"
+        host.graph.add_node_attachment.assert_not_called()
+
+
+def test_concurrent_replays_claim_once_and_refusals_store_nothing(
+    files_host, monkeypatch
+):
+    host = files_host
+    entered, release = Event(), Event()
+
+    def run(*args):
+        entered.set()
+        assert release.wait(5)
+        return FunctionRunResult("succeeded", output={})
+
+    host.execute.side_effect = run
+    # Every replay passes the idempotency lookup before any of them claims.
+    barrier = Barrier(3)
+    lookup = host.service.replay_webhook
+
+    def racing_lookup(*args):
+        barrier.wait(5)
+        return lookup(*args)
+
+    monkeypatch.setattr(host.service, "replay_webhook", racing_lookup)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        calls = [pool.submit(host.post, "delivery") for _ in range(3)]
+        assert entered.wait(5)
+        monkeypatch.setattr(host.service, "replay_webhook", lookup)
+        assert host.post("other").status_code == 409
+        release.set()
+        responses = [call.result() for call in calls]
+    assert len({r.json()["id"] for r in responses}) == 1
+    assert len(host.created) == 1 and not os.path.exists(host.created[0])
+    host.execute.assert_called_once()
+    assert host.post("delivery").json()["status"] == "succeeded"
+    host.graph.authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
+        allowed=False
+    )
+    assert host.post("denied").json()["error"]["code"] == "access_denied"
+    assert len(host.created) == 1
+
+
+@pytest.mark.parametrize(
+    "body,status,code",
+    [
+        (
+            {"files": {"a": ("big.txt", b"x" * 14, "text/plain")}},
+            413,
+            "input_too_large",
+        ),
+        ({"value": "[1]"}, 422, "invalid_input"),
+        ({"value": "{"}, 422, "invalid_input"),
+    ],
+)
+def test_refused_body_rejects_claimed_run_and_deletes_files(
+    files_host, monkeypatch, body, status, code
+):
+    host = files_host
+    monkeypatch.setattr(run_files, "MAX_RUN_FILE_BYTES", 13)
+    assert host.post("key", **body).status_code == status
+    assert host.created and not any(os.path.exists(d) for d in host.created)
+    host.execute.assert_not_called()
+    replay = host.post("key").json()
+    assert replay["status"] == "rejected" and replay["error"]["code"] == code

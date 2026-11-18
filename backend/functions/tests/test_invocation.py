@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "3"),
+        ("contract_version", "4"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),

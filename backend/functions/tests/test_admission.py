@@ -1,6 +1,8 @@
+# covers: backend/functions/runner.py, backend/runtime/extensions.py
 """Function admission uses host context and starts no process on refusal."""
 
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -22,6 +24,7 @@ def test_function_refusal_precedes_runner_and_uses_fixed_context(outcome, status
         correlation_id="corr",
         authorization_inputs={"actor_id": "invoker", "graph_id": "trusted"},
         grant_enabled=lambda grant: True,
+        run_files=SimpleNamespace(total_bytes=42),
     )
     hook = Mock()
     hook.admit.return_value = AdmissionDecision(
@@ -42,6 +45,7 @@ def test_function_refusal_precedes_runner_and_uses_fixed_context(outcome, status
         context.run_id == "run"
         and context.correlation_id == "corr"
         and context.attempt == 2
+        and context.input_bytes == 42
     )
     assert (
         context.actor["actor_id"] == "invoker"

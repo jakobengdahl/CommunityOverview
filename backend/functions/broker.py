@@ -23,19 +23,31 @@ standard streams.
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, FrozenSet, List, Mapping
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional
 
+from backend.core import attachment_extract as extraction
+from backend.core.attachment_types import (
+    UnsupportedAttachmentType,
+    check_allowed,
+    detect_attachment_type,
+    parse_allowed_types,
+)
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
     use_request_authorization,
 )
 from backend.service import access
+from backend.service.attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS, ENVELOPE
 from backend.service.attachments import FEDERATED_NODE_PREFIX
 from backend.service.mutations import _FEDERATION_BOOKKEEPING_METADATA_KEYS
 
@@ -81,7 +93,7 @@ _MAX_ERROR_MESSAGE_CHARS = 500
 @dataclass(frozen=True)
 class ToolSpec:
     method: str  # GraphService method, also the authorization target
-    grant: str
+    grant: Optional[str]  # None: needs no grant (the run's own inputs)
     action: str  # GRAPH_ACTION_READ or GRAPH_ACTION_MUTATE
     required: FrozenSet[str]
     optional: FrozenSet[str] = frozenset()
@@ -138,6 +150,21 @@ TOOLS: Dict[str, ToolSpec] = {
         required=frozenset({"nodes"}),
         optional=frozenset({"edges", "expect_absent"}),
     ),
+    # Run-file tools exist only in runs that received webhook files.
+    "run_files.list": ToolSpec("", None, GRAPH_ACTION_READ, required=frozenset()),
+    "run_files.read": ToolSpec(
+        "",
+        None,
+        GRAPH_ACTION_READ,
+        required=frozenset({"file_id"}),
+        optional=frozenset({"offset", "max_chars"}),
+    ),
+    "graph.attach_run_file": ToolSpec(
+        "add_node_attachment",
+        GRANT_GRAPH_WRITE,
+        GRAPH_ACTION_MUTATE,
+        required=frozenset({"node_id", "file_id"}),
+    ),
     "graph.update_node": ToolSpec(
         "update_node",
         GRANT_GRAPH_WRITE,
@@ -173,6 +200,8 @@ class BrokerContext:
     grant_enabled: Callable[[str], bool]
     max_tool_calls: int = MAX_TOOL_CALLS
     max_message_bytes: int = MAX_MESSAGE_BYTES
+    # backend.functions.run_files.RunFiles of a webhook call with files.
+    run_files: Any = None
 
 
 @dataclass
@@ -299,15 +328,39 @@ class FunctionBroker:
             )
 
         spec = TOOLS.get(name)
-        if spec is None:
+        if spec is None or (
+            ctx.run_files is None
+            and name in ("run_files.list", "run_files.read", "graph.attach_run_file")
+        ):
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
 
-        if spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant):
+        if spec.grant is not None and (
+            spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant)
+        ):
             raise BrokerError(
                 ERR_GRANT_DENIED, f"The function's grants do not cover {name}."
             )
 
         self._validate_arguments(spec, arguments)
+        if name == "run_files.list":
+            return {
+                **ENVELOPE,
+                "files": [
+                    {
+                        "file_id": f.file_id,
+                        "filename": f.filename,
+                        "declared_content_type": f.declared_content_type,
+                        "size": f.size,
+                    }
+                    for f in ctx.run_files.list()
+                ],
+            }
+        if name == "run_files.read":
+            return self._read_run_file(arguments)
+        if name == "graph.attach_run_file":
+            found = ctx.run_files.get(arguments["file_id"])
+            if found is None:
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "Unknown file_id.")
         call_args = dict(arguments)
         if spec.action == GRAPH_ACTION_MUTATE:
             call_args["event_origin"] = function_origin(
@@ -360,7 +413,10 @@ class FunctionBroker:
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
             try:
-                result = getattr(self._service, spec.method)(**call_args)
+                if name == "graph.attach_run_file":
+                    result = self._attach(arguments["node_id"], *found)
+                else:
+                    result = getattr(self._service, spec.method)(**call_args)
             except Exception:
                 # Never forward internal exception text to function code.
                 logger.exception("Function run %s: tool %s raised", ctx.run_id, name)
@@ -383,6 +439,63 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
+
+    def _read_run_file(self, arguments: Mapping[str, Any]) -> Dict[str, Any]:
+        found = self._context.run_files.get(arguments["file_id"])
+        if found is None:
+            raise BrokerError(ERR_INVALID_ARGUMENTS, "Unknown file_id.")
+        record, data = found
+        offset = arguments.get("offset", 0)
+        max_chars = arguments.get("max_chars", ATTACHMENT_READ_DEFAULT_CHARS)
+        settings = getattr(self._service, "attachment_settings", None)
+        # The attachment type policy and ADR 0010 extraction bounds, as for a
+        # stored attachment.
+        try:
+            content_type = detect_attachment_type(io.BytesIO(data), record.filename)
+            check_allowed(
+                content_type,
+                settings.allowed_types if settings else parse_allowed_types(None),
+            )
+        except UnsupportedAttachmentType:
+            result = extraction.ExtractionResult(extraction.STATUS_UNSUPPORTED_TYPE)
+            content_type = None
+        else:
+            tools = getattr(self._service, "_attachment_read_tools", None)
+            limits = tools.extraction_limits if tools else extraction.ExtractionLimits()
+            result = extraction.extract(data, content_type, limits)
+        segments, position = [], 0
+        end = offset + max_chars
+        for segment in result.segments if result.status == "ok" else ():
+            text = segment.text[max(0, offset - position) : max(0, end - position)]
+            if text:
+                segments.append({"locator": segment.locator, "text": text})
+            position += len(segment.text)
+        count = sum(len(s["text"]) for s in segments)
+        return {
+            **ENVELOPE,
+            "file_id": record.file_id,
+            "filename": record.filename,
+            "content_type": content_type,
+            "extraction_status": result.status,
+            "truncated": result.truncated,
+            "total_chars": position,
+            "offset": offset,
+            "returned_chars": count,
+            "next_offset": offset + count if offset + count < position else None,
+            "segments": segments,
+        }
+
+    def _attach(self, node_id: str, record: Any, data: bytes) -> Any:
+        # The service's upload is async and does its own node, type and cap
+        # checks; run it on a private loop carrying this call's context.
+        upload = self._service.add_node_attachment(
+            node_id,
+            filename=record.filename,
+            declared_content_type=record.declared_content_type,
+            content=data,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(copy_context().run, asyncio.run, upload).result()
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
@@ -422,6 +535,10 @@ class FunctionBroker:
                 _refuse_graph_scope(edge)
                 for end in ("source", "target"):
                     _refuse_reserved_id(edge[end])
+        if spec.method in ("", "add_node_attachment"):
+            if "file_id" in arguments and not isinstance(arguments["file_id"], str):
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "file_id must be a string.")
+            _refuse_reserved_id(arguments.get("node_id"))
         if spec.method == "update_node":
             _refuse_reserved_id(arguments.get("node_id"))
             updates = arguments.get("updates")
@@ -463,7 +580,7 @@ class FunctionBroker:
 
 # Bounds on work a single call can ask of the host (the session cannot be
 # interrupted while a service call runs).
-_ARGUMENT_CAPS = {"limit": 500, "depth": 3}
+_ARGUMENT_CAPS = {"limit": 500, "depth": 3, "offset": 10**9, "max_chars": 50_000}
 
 # Keys through which the storage and federation layers record a node's or
 # edge's graph scope and provenance. A function may neither set nor clear them,

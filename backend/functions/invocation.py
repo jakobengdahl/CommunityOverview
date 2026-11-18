@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -108,6 +108,38 @@ def _schema(schema):
     return validator(schema)
 
 
+# Passed to ``admit`` when the input arrives after the run is claimed.
+DEFERRED_INPUT = object()
+
+
+@dataclass
+class Admission:
+    """A claimed RUNNING record and what its run needs."""
+
+    job: ExecutionJob
+    started: float
+    binding: dict = None
+    trigger: str = "manual"
+    idempotency_key: str = None
+    manifest: dict = None
+    package: dict = None
+    probe: object = None
+    input_deferred: bool = False
+
+
+def _valid_input(manifest, input):
+    try:
+        if not isinstance(input, dict):
+            raise ValueError("Input must be an object")
+        if "input_schema" in manifest:
+            _schema(manifest["input_schema"]).validate(input)
+        elif input:
+            raise ValueError("Input must be empty")
+    except (ValidationError, ValueError):
+        return False
+    return True
+
+
 def _valid_triggers(manifest):
     triggers = manifest.get("triggers")
     if manifest.get("contract_version") == "1":
@@ -155,7 +187,7 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2"}
+        manifest["contract_version"] not in {"1", "2", "3"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
@@ -370,6 +402,34 @@ class FunctionInvocationService:
         idempotency_key=None,
         correlation_id=None,
     ) -> RunRecord:
+        admitted = self.admit(
+            function_id,
+            input,
+            trigger=trigger,
+            actor_binding=actor_binding,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+        )
+        if not isinstance(admitted, Admission):
+            return admitted
+        return self.execute(admitted, input)
+
+    def admit(
+        self,
+        function_id,
+        input,
+        *,
+        trigger="manual",
+        actor_binding,
+        idempotency_key=None,
+        correlation_id=None,
+    ):
+        """Claim the run record, or return the replayed or rejected record.
+
+        With ``DEFERRED_INPUT`` the input is validated by ``execute``, so a
+        caller can read a request body only after its idempotency key is held.
+        An ``Admission`` must end in ``execute`` or ``reject``.
+        """
         if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
             raise ValueError("Invalid function id")
         self._require_durable_history()
@@ -414,6 +474,7 @@ class FunctionInvocationService:
         manifest = None
         code = None
         probe = None
+        package = None
         with _admission(self.root):
             # Enqueue's UNIQUE constraint is the authority for delivery deduplication.
             previous = self.store.list_jobs(
@@ -426,7 +487,7 @@ class FunctionInvocationService:
                 if function_id not in self.enabled:
                     code = "not_enabled"
                 else:
-                    manifest, files = load_manifest(self.root, function_id)
+                    manifest, package = load_manifest(self.root, function_id)
                     job.payload["function_version"] = manifest["version"]
                     job.origin = f"function:{function_id}@{manifest['version']}"
                     if not set(manifest["grants"]).issubset(self.enabled[function_id]):
@@ -462,16 +523,12 @@ class FunctionInvocationService:
                                 ):
                                     code = "access_denied"
                                     break
-                        if code is None:
-                            try:
-                                if not isinstance(input, dict):
-                                    raise ValueError("Input must be an object")
-                                if "input_schema" in manifest:
-                                    _schema(manifest["input_schema"]).validate(input)
-                                elif input:
-                                    raise ValueError("Input must be empty")
-                            except (ValidationError, ValueError):
-                                code = "invalid_input"
+                        if (
+                            code is None
+                            and input is not DEFERRED_INPUT
+                            and not _valid_input(manifest, input)
+                        ):
+                            code = "invalid_input"
                 if code is None and any(
                     j.state == ExecutionState.RUNNING for j in previous
                 ):
@@ -508,22 +565,57 @@ class FunctionInvocationService:
                     raise PermissionError("Conflicting run identity")
                 return self._replay(stored, binding)
             if code:
-                self.store.cancel(
-                    job.id,
-                    result={
-                        "status": "rejected",
-                        "error": {"code": code, "message": "Invocation rejected."},
-                        "duration_ms": int((time.monotonic() - started) * 1000),
-                    },
-                )
-                return self.store.get(job.id)
+                return self.reject(Admission(job, started), code)
+        return Admission(
+            job,
+            started,
+            binding,
+            trigger,
+            idempotency_key,
+            manifest,
+            package,
+            probe,
+            input is DEFERRED_INPUT,
+        )
+
+    def reject(self, admission, code):
+        """Record a claimed run as rejected; it never started."""
+        self.store.cancel(
+            admission.job.id,
+            result={
+                "status": "rejected",
+                "error": {"code": code, "message": "Invocation rejected."},
+                "duration_ms": int((time.monotonic() - admission.started) * 1000),
+            },
+        )
+        return self.store.get(admission.job.id)
+
+    def execute(self, admission, input, run_files=None) -> RunRecord:
+        """Run an admitted invocation; run files are deleted when it ends."""
+        try:
+            if admission.input_deferred and not _valid_input(admission.manifest, input):
+                return self.reject(admission, "invalid_input")
+            return self._execute(admission, input, run_files)
+        finally:
+            if run_files is not None:
+                run_files.close()
+
+    def _execute(self, admission, input, run_files):
+        job, started, binding, trigger = (
+            admission.job,
+            admission.started,
+            admission.binding,
+            admission.trigger,
+        )
+        function_id, manifest, probe = job.agent_id, admission.manifest, admission.probe
+        idempotency_key = admission.idempotency_key
         try:
             limits = manifest.get("limits", {})
             spec = RunSpec(
                 job.id,
                 manifest["runtime"],
                 manifest["entry_point"],
-                files,
+                admission.package,
                 timeout_seconds=limits.get("timeout_seconds", 120),
                 memory_mib=limits.get("memory_mib", 256),
             )
@@ -551,6 +643,7 @@ class FunctionInvocationService:
                     )
                 ),
                 max_tool_calls=limits.get("max_tool_calls", 200),
+                run_files=run_files,
             )
             envelope = {
                 "schema_version": "1.0",

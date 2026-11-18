@@ -679,6 +679,7 @@ def run_function(
             run_id=broker.context.run_id,
             correlation_id=broker.context.correlation_id,
             attempt=attempt,
+            input_bytes=getattr(broker.context.run_files, "total_bytes", 0),
         )
     try:
         with bind_runtime_extensions(extensions):
