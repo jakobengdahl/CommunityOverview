@@ -1,3 +1,4 @@
+# covers: backend/functions/runner.py, backend/functions/runtime/python/communityoverview_function/__init__.py
 """Invariants of the hardened-subprocess runner (ADR 0012, USER_FUNCTION_CONTRACT §3, §8).
 
 Tests that need a control are skipped where the host cannot enforce it, so the
@@ -795,3 +796,31 @@ def test_a_failed_disk_monitor_fails_the_run_without_claiming_control_was_lost(
         "disk_check_failed",
         None,
     )
+
+
+def test_handler_reads_current_run_files_with_helper(runner, storage, tmp_path):
+    from dataclasses import replace
+    from backend.functions.run_files import RunFiles
+
+    files = RunFiles(tmp_path)
+    file_id = files.add("notes.txt", "text/plain")
+    files.append(file_id, b"hello")
+    broker = make_broker(storage)
+    broker._context = replace(broker.context, run_files=files)
+    spec = RunSpec(
+        run_id="job-runner",
+        runtime="python",
+        entry_point="main.py",
+        files={
+            "main.py": handler(
+                'out["files"] = tools.run_files.list(); out["read"] = tools.run_files.read(file_id=out["files"]["files"][0]["file_id"])'
+            ).encode()
+        },
+    )
+    try:
+        result = run_function(runner, spec, broker, ENVELOPE)
+        assert result.status == "succeeded"
+        assert result.output["read"]["segments"][0]["text"] == "hello"
+        assert result.output["files"]["files"][0]["file_id"] == file_id
+    finally:
+        files.close()

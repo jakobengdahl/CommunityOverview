@@ -14,6 +14,7 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, fields, replace
 import functools
 import inspect
+import io
 import json
 import logging
 import os
@@ -23,6 +24,13 @@ from types import SimpleNamespace
 
 from backend.core import attachment_extract as extraction
 from backend.core.attachment_retrieval import Segment, rank_passages
+from backend.core.attachment_types import (
+    UnsupportedAttachmentType,
+    check_allowed,
+    detect_attachment_type,
+    parse_allowed_types,
+)
+from backend.core.attachment_store import AttachmentLimits
 from backend.core.attachment_store import (
     AttachmentIndexCorrupt,
     AttachmentNotFound,
@@ -377,6 +385,85 @@ class AttachmentReadTools:
         finally:
             self.slots.release()
 
+    def list_run_files(self, run_files):
+        return {
+            **ENVELOPE,
+            "files": [
+                {
+                    "file_id": f.file_id,
+                    "filename": attachments.sanitize_filename(f.filename),
+                    "size": f.size,
+                }
+                for f in (run_files.list() if run_files is not None else [])
+            ],
+        }
+
+    def read_run_file(
+        self, run_files, file_id, offset=0, max_chars=ATTACHMENT_READ_DEFAULT_CHARS
+    ):
+        if (
+            not isinstance(file_id, str)
+            or type(offset) is not int
+            or offset < 0
+            or type(max_chars) is not int
+            or max_chars < 1
+        ):
+            return error("invalid_arguments")
+        found = run_files.get(file_id) if run_files is not None else None
+        if found is None:
+            return error("not_found")
+        record, data = found
+        settings = self.service.attachment_settings
+        limits = settings.limits if settings else AttachmentLimits()
+        allowed = (
+            settings.allowed_types
+            if settings
+            else parse_allowed_types(os.getenv("ATTACHMENT_ALLOWED_TYPES"))
+        )
+        if len(data) > limits.max_file_bytes:
+            return error("attachment_too_large")
+        try:
+            content_type = detect_attachment_type(io.BytesIO(data), record.filename)
+            check_allowed(content_type, allowed)
+        except UnsupportedAttachmentType:
+            return error("unsupported_attachment_type")
+        if not self.slots.acquire(timeout=self.limits.extract_timeout_seconds):
+            return error("busy")
+        try:
+            result = extraction.extract(
+                data,
+                content_type,
+                replace(self.extraction_limits, max_input_bytes=limits.max_file_bytes),
+            )
+        finally:
+            self.slots.release()
+        return {
+            **ENVELOPE,
+            "file_id": record.file_id,
+            "filename": attachments.sanitize_filename(record.filename),
+            "content_type": content_type,
+            **self._read_result(result, offset, max_chars),
+        }
+
+    def _read_result(self, result, offset, max_chars):
+        segments, position = [], 0
+        end = offset + min(max_chars, self.limits.read_max_chars)
+        for segment in result.segments if result.status == "ok" else ():
+            text = segment.text[max(0, offset - position) : max(0, end - position)]
+            if text:
+                segments.append({"locator": segment.locator, "text": text})
+            position += len(segment.text)
+        count = sum(len(s["text"]) for s in segments)
+        return {
+            "extraction_status": result.status,
+            "truncated": result.truncated,
+            "total_chars": position,
+            "offset": offset,
+            "returned_chars": count,
+            "next_offset": offset + count if offset + count < position else None,
+            "segments": segments,
+        }
+
     @guarded
     def list(self, node_id):
         if not isinstance(node_id, str):
@@ -423,15 +510,8 @@ class AttachmentReadTools:
         if found is None:
             return error("busy")
         result, _ = found
-        segments, position = [], 0
-        end = offset + min(max_chars, self.limits.read_max_chars)
-        for segment in result.segments if result.status == "ok" else ():
-            text = segment.text[max(0, offset - position) : max(0, end - position)]
-            if text:
-                segments.append({"locator": segment.locator, "text": text})
-            position += len(segment.text)
-        count = sum(len(s["text"]) for s in segments)
-        self.audit("read", node_id, record, count, result.status)
+        content = self._read_result(result, offset, max_chars)
+        self.audit("read", node_id, record, content["returned_chars"], result.status)
         return {
             **ENVELOPE,
             "node_id": node_id,
@@ -439,13 +519,7 @@ class AttachmentReadTools:
             "filename": record.filename,
             "content_type": record.content_type,
             "sha256": record.sha256,
-            "extraction_status": result.status,
-            "truncated": result.truncated,
-            "total_chars": position,
-            "offset": offset,
-            "returned_chars": count,
-            "next_offset": offset + count if offset + count < position else None,
-            "segments": segments,
+            **content,
         }
 
     @guarded

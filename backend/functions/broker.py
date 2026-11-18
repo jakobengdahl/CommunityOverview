@@ -81,7 +81,7 @@ _MAX_ERROR_MESSAGE_CHARS = 500
 @dataclass(frozen=True)
 class ToolSpec:
     method: str  # GraphService method, also the authorization target
-    grant: str
+    grant: str | None
     action: str  # GRAPH_ACTION_READ or GRAPH_ACTION_MUTATE
     required: FrozenSet[str]
     optional: FrozenSet[str] = frozenset()
@@ -92,6 +92,14 @@ class ToolSpec:
 
 
 TOOLS: Dict[str, ToolSpec] = {
+    "run_files.list": ToolSpec("list_run_files", None, GRAPH_ACTION_READ, frozenset()),
+    "run_files.read": ToolSpec(
+        "read_run_file",
+        None,
+        GRAPH_ACTION_READ,
+        frozenset({"file_id"}),
+        frozenset({"offset", "max_chars"}),
+    ),
     "graph.search": ToolSpec(
         "search_graph",
         GRANT_GRAPH_READ,
@@ -304,13 +312,27 @@ class FunctionBroker:
         if spec is None:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
 
-        if spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant):
+        if spec.grant is not None and (
+            spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant)
+        ):
             raise BrokerError(
                 ERR_GRANT_DENIED, f"The function's grants do not cover {name}."
             )
 
         self._validate_arguments(spec, arguments)
         call_args = dict(arguments)
+        if spec.grant is None:
+            result = getattr(self._service._attachment_read_tools, spec.method)(
+                ctx.run_files, **call_args
+            )
+            if result.get("success") is False:
+                code = (
+                    ERR_INVALID_ARGUMENTS
+                    if result.get("error_code") == "invalid_arguments"
+                    else ERR_TOOL_FAILED
+                )
+                raise BrokerError(code, "The operation failed.")
+            return result
         if spec.action == GRAPH_ACTION_MUTATE:
             call_args["event_origin"] = function_origin(
                 ctx.function_id, ctx.function_version

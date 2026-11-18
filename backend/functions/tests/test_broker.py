@@ -1,3 +1,4 @@
+# covers: backend/functions/broker.py, backend/functions/run_files.py, backend/service/attachment_tools.py
 """Invariants of the user-function tool broker (USER_FUNCTION_CONTRACT §6.3–§7, §9)."""
 
 import json
@@ -1062,3 +1063,87 @@ def test_malformed_nodes_and_edges_are_refused(service, arguments):
     response = call(make_broker(service), "graph.add", arguments)
     assert error_code(response) == "invalid_arguments"
     assert service.calls == []
+
+
+def test_run_file_tools_are_scoped_and_return_bounded_untrusted_text(service, tmp_path):
+    from backend.functions.run_files import RunFiles
+
+    first, second = RunFiles(tmp_path), RunFiles(tmp_path)
+    file_id = first.add("../notes.txt", "application/octet-stream")
+    first.append(file_id, b"abcdef")
+    second.add("other.txt", "text/plain")
+    other_id = second.add("secret.txt", "text/plain")
+    second.append(other_id, b"secret")
+    broker = make_broker(service, grants=(), run_files=first)
+    try:
+        listing = call(broker, "run_files.list")["result"]
+        assert listing["untrusted_content"] is True
+        assert listing["files"] == [
+            {
+                "file_id": file_id,
+                "filename": "notes.txt",
+                "size": 6,
+            }
+        ]
+        result = call(
+            broker, "run_files.read", {"file_id": file_id, "offset": 1, "max_chars": 2}
+        )["result"]
+        assert result["untrusted_content"] is True
+        assert result["content_type"] == "text/plain"
+        assert result["segments"][0]["text"] == "bc"
+        assert result["next_offset"] == 3
+        for args in (
+            {"file_id": other_id},
+            {"file_id": "../notes.txt"},
+            {"file_id": file_id, "path": "/tmp/x"},
+            {"file_id": file_id, "offset": True},
+        ):
+            assert "error" in call(broker, "run_files.read", args)
+        assert (
+            call(make_broker(service, run_files=None), "run_files.list")["result"][
+                "files"
+            ]
+            == []
+        )
+    finally:
+        first.close()
+        second.close()
+
+
+def test_run_file_read_applies_type_policy_and_extraction_limits(
+    service, tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from backend.functions.run_files import RunFiles
+    from backend.core import attachment_extract
+
+    files = RunFiles(tmp_path)
+    text_id = files.add("note.txt", "text/plain")
+    files.append(text_id, b"abcdef")
+    bad_id = files.add("bad.txt", "text/plain")
+    files.append(bad_id, b"<html>")
+    broker = make_broker(service, run_files=files)
+    tools = service._attachment_read_tools
+    try:
+        assert "error" in call(broker, "run_files.read", {"file_id": bad_id})
+        monkeypatch.setenv("ATTACHMENT_ALLOWED_TYPES", "application/pdf")
+        assert "error" in call(broker, "run_files.read", {"file_id": text_id})
+        monkeypatch.delenv("ATTACHMENT_ALLOWED_TYPES")
+        monkeypatch.setattr(tools, "limits", replace(tools.limits, read_max_chars=2))
+        observed = []
+        original = attachment_extract.extract
+
+        def extract(data, content_type, limits):
+            observed.append(limits)
+            return original(data, content_type, limits)
+
+        monkeypatch.setattr(attachment_extract, "extract", extract)
+        result = call(broker, "run_files.read", {"file_id": text_id, "max_chars": 100})[
+            "result"
+        ]
+        assert result["returned_chars"] == 2
+        assert observed == [
+            replace(tools.extraction_limits, max_input_bytes=25 * 1024 * 1024)
+        ]
+    finally:
+        files.close()
