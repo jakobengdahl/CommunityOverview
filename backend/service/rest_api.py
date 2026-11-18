@@ -558,6 +558,7 @@ class SessionOpsRequest(BaseModel):
     base_seq: Optional[int] = Field(
         None, description="Client's last-known seq (informational)"
     )
+    appearance_version: Optional[int] = Field(None, strict=True)
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
@@ -581,6 +582,7 @@ class UndoSessionActionRequest(BaseModel):
     client_id: str = Field(
         ..., min_length=1, max_length=100, description="Requesting actor's client id"
     )
+    appearance_version: Optional[int] = Field(None, strict=True)
     expected_revision: Optional[int] = Field(
         None, description="Client's last-known seq; conflicts if the session moved on"
     )
@@ -1318,6 +1320,8 @@ def _register_session_endpoints(
         UndoConflict,
     )
     from backend.core.session_store import (
+        AppearanceVersionRequired,
+        ShapeRevisionConflict,
         AnnotationFieldConflict,
         OpError,
         is_valid_session_id,
@@ -1617,7 +1621,14 @@ def _register_session_endpoints(
         request = _parse_body_or_422(SessionOpsRequest, body)
         try:
             return await session_manager.apply_ops(
-                session_id, request.client_id, request.base_seq, request.ops
+                session_id,
+                request.client_id,
+                request.base_seq,
+                request.ops,
+                appearance_version=request.appearance_version,
+                authorize_appearance=lambda: _authorize_session_change(
+                    http_request, "apply_session_ops", session_id
+                ),
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
@@ -1627,6 +1638,19 @@ def _register_session_endpoints(
             raise HTTPException(status_code=413, detail="op batch too large")
         except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except AppearanceVersionRequired:
+            raise HTTPException(
+                status_code=409, detail={"error": "appearance_version_required"}
+            )
+        except ShapeRevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "shape_revision_conflict",
+                    "target": exc.target,
+                    "revision": exc.revision,
+                },
+            )
         except AnnotationFieldConflict as exc:
             # Same 409 status as LeaseConflict (both mean "this write raced a
             # concurrent edit, don't retry it as-is" — sessionSyncClient.js's
@@ -1902,6 +1926,21 @@ def _register_session_endpoints(
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        session = session_manager.get_session(session_id)
+        if session and (
+            session.state.get("shape_overrides")
+            or session.state.get("type_shapes")
+            or session.state.get("shape_operation_ids")
+            or any(
+                r.get("op") in {"node_shape_set", "type_shape_set"}
+                for r in session.activity_log
+            )
+        ):
+            if request.appearance_version != 1:
+                raise HTTPException(
+                    status_code=409, detail={"error": "appearance_version_required"}
+                )
+            _authorize_session_change(http_request, "apply_session_ops", session_id)
         try:
             replay = (
                 session_manager.redo_last_action
@@ -1930,6 +1969,8 @@ def _register_session_endpoints(
             raise HTTPException(status_code=409, detail="session busy, retry")
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except ImageBudgetExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 

@@ -35,6 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
 
+from backend.config.node_shapes import ShapeSelection
+from pydantic import ValidationError
+
 from .actor_attribution import replace_attribution, validate_erasure
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
@@ -94,6 +97,8 @@ _ANNOTATION_META_FIELDS = frozenset(
 
 # State-mutating ops that are persisted, sequenced and mirrored to catch-up.
 STATE_OPS = {
+    "node_shape_set",
+    "type_shape_set",
     "nodes_added",
     "nodes_removed",
     "nodes_replaced",
@@ -152,6 +157,8 @@ def _empty_state() -> Dict[str, Any]:
     return {
         "shape_overrides": {},
         "type_shapes": {},
+        "shape_revisions": {},
+        "shape_operation_ids": {},
         "node_refs": [],
         "positions": {},
         "hidden_node_ids": [],
@@ -173,6 +180,18 @@ def _empty_state() -> Dict[str, Any]:
 
 class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
+
+
+class AppearanceVersionRequired(OpError):
+    """The writer has not declared support for appearance state."""
+
+
+class ShapeRevisionConflict(Exception):
+    """An appearance target changed since the caller read it."""
+
+    def __init__(self, target, revision):
+        self.target, self.revision = target, revision
+        super().__init__("appearance revision conflict")
 
 
 class SessionRetired(OpError):
@@ -621,6 +640,12 @@ def _remove_all(existing: List[str], removals: List[str]) -> List[str]:
 def _drop_node_refs(state: Dict[str, Any], removals: List[str]) -> None:
     """Remove nodes from ``state`` with their position, flags and group slots."""
     drop = set(removals)
+    for node_id in drop & set(state["node_refs"]):
+        key = "node:" + node_id
+        state["shape_revisions"][key] = state["shape_revisions"].get(key, 0) + 1
+    state["shape_overrides"] = {
+        k: v for k, v in state.get("shape_overrides", {}).items() if k not in drop
+    }
     state["node_refs"] = _remove_all(state["node_refs"], removals)
     state["positions"] = {k: v for k, v in state["positions"].items() if k not in drop}
     state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
@@ -1069,7 +1094,136 @@ class SessionStore:
         membership_before = (
             set(state["node_refs"]) if op_type in MEMBERSHIP_OPS else set()
         )
-        if op_type == "nodes_added":
+        if op_type in {"node_shape_set", "type_shape_set"}:
+            allowed = {
+                "op",
+                "version",
+                "selection",
+                "operation_id",
+                "base_revision",
+                "client_id",
+            }
+            node = op_type == "node_shape_set"
+            allowed.update(
+                {"node_id"}
+                if node
+                else {"type", "clear_node_id", "clear_base_revision"}
+            )
+            if trusted_replay:
+                allowed.update({"restore_selection", "seq", "revisions"})
+            if set(op) - allowed:
+                raise OpError("unknown appearance operation fields")
+            key = "node_id" if node else "type"
+            target = op.get(key)
+            if not isinstance(target, str) or not target or len(target) > 256:
+                raise OpError("appearance target must be a nonempty string")
+            if type(op.get("version")) is not int or op["version"] != 1:
+                raise OpError("unsupported appearance operation version")
+            if "selection" not in op:
+                raise OpError("selection is required")
+            selection = op["selection"]
+            if selection is not None:
+                try:
+                    selection = ShapeSelection.model_validate(selection).model_dump(
+                        exclude_unset=True
+                    )
+                except (ValidationError, TypeError, ValueError) as exc:
+                    raise OpError("invalid appearance selection") from exc
+            operation_id = op.get("operation_id")
+            if not trusted_replay and (
+                not isinstance(operation_id, str)
+                or not operation_id
+                or len(operation_id) > 100
+            ):
+                raise OpError("appearance operation_id is required")
+            receipts = state["shape_operation_ids"]
+            receipt = json.dumps([operation_id])
+            # Older sessions stored receipts as [client_id, operation_id].
+            legacy_suffix = ", " + json.dumps(operation_id) + "]"
+            if not trusted_replay and (
+                receipt in receipts or any(k.endswith(legacy_suffix) for k in receipts)
+            ):
+                return None
+            if node and target not in state["node_refs"]:
+                raise OpError("appearance node must belong to the session")
+            clear = op.get("clear_node_id") if not node else None
+            if clear is not None and (
+                not isinstance(clear, str) or clear not in state["node_refs"]
+            ):
+                raise OpError("cleared node must belong to the session")
+            revisions = state["shape_revisions"]
+            revision_key = ("node:" if node else "type:") + target
+            targets = [revision_key] + (["node:" + clear] if clear is not None else [])
+            for rev_key, base in zip(
+                targets, [op.get("base_revision"), op.get("clear_base_revision")]
+            ):
+                if not trusted_replay:
+                    if type(base) is not int or base < 0:
+                        raise OpError("base revision must be a nonnegative integer")
+                    if base != revisions.get(rev_key, 0):
+                        raise ShapeRevisionConflict(rev_key, revisions.get(rev_key, 0))
+            mapping = state["shape_overrides" if node else "type_shapes"]
+            before = {
+                "selection": copy.deepcopy(mapping.get(target)),
+                "revisions": {k: revisions.get(k, 0) for k in targets},
+            }
+            if clear is not None:
+                before["cleared_selection"] = copy.deepcopy(
+                    state["shape_overrides"].get(clear)
+                )
+            if selection is None:
+                mapping.pop(target, None)
+            else:
+                mapping[target] = copy.deepcopy(selection)
+            if clear is not None:
+                state["shape_overrides"].pop(clear, None)
+                if trusted_replay and op.get("restore_selection") is not None:
+                    state["shape_overrides"][clear] = copy.deepcopy(
+                        op["restore_selection"]
+                    )
+            for rev_key in targets:
+                revisions[rev_key] = revisions.get(rev_key, 0) + 1
+            if not trusted_replay:
+                receipts[receipt] = {
+                    "seq": session.seq + 1,
+                    "client_id": op.get("client_id"),
+                }
+            applied.update(
+                selection=selection, revisions={k: revisions[k] for k in targets}
+            )
+            after = {
+                "selection": copy.deepcopy(mapping.get(target)),
+                "revisions": {k: revisions[k] for k in targets},
+            }
+            if clear is not None:
+                after["cleared_selection"] = copy.deepcopy(
+                    state["shape_overrides"].get(clear)
+                )
+            activity_kwargs = {
+                "affected": {
+                    "kind": "appearance",
+                    "map": "shape_overrides" if node else "type_shapes",
+                    "id": target,
+                    "clear_node_id": clear,
+                },
+                "before": before,
+                "after": after,
+                "inverse_op": {
+                    "op": op_type,
+                    "version": 1,
+                    key: target,
+                    "selection": before["selection"],
+                    **(
+                        {
+                            "clear_node_id": clear,
+                            "restore_selection": before.get("cleared_selection"),
+                        }
+                        if clear is not None
+                        else {}
+                    ),
+                },
+            }
+        elif op_type == "nodes_added":
             node_ids = _require_id_list(op, "node_ids")
             added = [n for n in _union([], node_ids) if n not in membership_before]
             given = _given_positions(op, added)

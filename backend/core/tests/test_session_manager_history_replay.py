@@ -2,6 +2,7 @@
 """Annotation history replay and actor-scoped redo regression tests."""
 
 import copy
+import json
 
 import pytest
 
@@ -133,3 +134,53 @@ class TestHistoryReplay:
         assert s.state["positions"]["n1"] == {"x": 1.0, "y": 2.0}
         mgr.redo_last_action(s.id, "mcp-agent")
         assert s.state["positions"]["n1"] == {"x": 9.0, "y": 9.0}
+
+
+@pytest.mark.parametrize("action", ["undo", "redo", "remove"])
+async def test_appearance_writes_respect_document_budget(action, monkeypatch):
+    from backend.core import session_manager
+    from backend.core.session_manager import (
+        ImageBudgetExceeded,
+        _detached_snapshot,
+        _document_bytes,
+    )
+
+    mgr = _manager()
+    session = mgr.create_session()
+    await mgr.apply_ops(
+        session.id, "c1", None, [{"op": "nodes_added", "node_ids": ["a"]}]
+    )
+    await mgr.apply_ops(
+        session.id,
+        "c1",
+        None,
+        [
+            {
+                "op": "node_shape_set",
+                "node_id": "a",
+                "selection": {"builtin": True},
+                "version": 1,
+                "base_revision": 0,
+                "operation_id": "shape",
+            }
+        ],
+        appearance_version=1,
+    )
+    if action == "redo":
+        mgr.undo_last_action(session.id, "c1")
+    _document_bytes(_detached_snapshot(session), session)  # warm the history cache
+    before = copy.deepcopy(session.to_dict())
+    ring = list(mgr.store.ring(session.id))
+    monkeypatch.setattr(session_manager, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 0)
+    with pytest.raises(ImageBudgetExceeded):
+        if action == "remove":
+            mgr._remove_node_refs(session, "c1", ["a"])
+        elif action == "undo":
+            mgr.undo_last_action(session.id, "c1")
+        else:
+            mgr.redo_last_action(session.id, "c1")
+    assert session.to_dict() == before
+    assert list(mgr.store.ring(session.id)) == ring
+    assert _document_bytes(_detached_snapshot(session), session) == len(
+        json.dumps(_detached_snapshot(session))
+    )
