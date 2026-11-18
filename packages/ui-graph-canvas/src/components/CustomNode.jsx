@@ -231,6 +231,8 @@ function CustomNode({ data, id, selected }) {
           height={geometry.height}
           viewBox={`0 0 ${geometry.width} ${geometry.height}`}
         >
+          {/* Widest first: each ring shows a band beyond the next one in. */}
+          <path className="graph-shape-ring graph-shape-ring-keyboard" d={geometry.path} />
           {remote && (
             <path
               className="graph-shape-ring graph-shape-ring-remote"

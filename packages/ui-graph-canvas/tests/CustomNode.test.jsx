@@ -12,7 +12,9 @@ const customNodeCss = readFileSync(
 
 vi.mock('reactflow', async (importOriginal) => ({
   ...(await importOriginal()),
-  Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
+  Handle: ({ type }) => (
+    <div data-testid={`handle-${type}`} className="react-flow__handle connectionindicator" />
+  ),
 }));
 
 import CustomNode from '../src/components/CustomNode';
@@ -488,6 +490,32 @@ describe('CustomNode configured shapes', () => {
     withStylesheet(() => {
       const outline = getComputedStyle(root.querySelector('.graph-shape-outline'));
       expect(outline.strokeDasharray || outline.getPropertyValue('stroke-dasharray')).not.toBe('');
+      // Stacked rings, drawn widest first, each keep a band past the next one in.
+      const rings = [...root.querySelectorAll('.graph-shape-ring')];
+      const widths = rings.map((ring) => parseFloat(getComputedStyle(ring).strokeWidth));
+      expect(rings.map((ring) => ring.classList[1])).toEqual([
+        'graph-shape-ring-keyboard',
+        'graph-shape-ring-remote',
+        'graph-shape-ring-mark',
+        'graph-shape-ring-focus',
+      ]);
+      const inward = [widths[0], widths[1], widths[3], widths[2]];
+      for (let i = 1; i < inward.length; i += 1) {
+        expect(inward[i - 1] - inward[i]).toBeGreaterThanOrEqual(4);
+      }
+      // A keyboard-focused node shows its ring even when it is not selected.
+      const keyboard = rings[0];
+      const wrapper = screen.getByTestId('rf__node-n1');
+      // jsdom matches :focus-visible but does not cascade it, so read the rules.
+      const strokes = () =>
+        [...document.styleSheets]
+          .flatMap((sheet) => [...sheet.cssRules])
+          .filter((rule) => rule.selectorText && keyboard.matches(rule.selectorText))
+          .map((rule) => rule.style.getPropertyValue('stroke'))
+          .filter(Boolean);
+      expect(strokes()).toEqual(['transparent']);
+      wrapper.focus();
+      expect(strokes().at(-1)).not.toBe('transparent');
     });
   });
 
@@ -519,6 +547,8 @@ describe('CustomNode configured shapes', () => {
         '.graph-node-mark-badge',
         '.graph-node-remote-badge',
         '.graph-node-staged-badge',
+        // Handles sit at a triangle's apex and tip, off the body.
+        '.react-flow__handle.connectionindicator',
       ]) {
         expect(events(wrapper, outside)).toBe('none');
       }

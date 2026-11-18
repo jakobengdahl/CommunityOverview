@@ -475,6 +475,13 @@ body.graph-menu-open .graph-node-tooltip {
   pointer-events: auto;
 }
 
+/* The connection handles sit at the bbox top and bottom centre, outside a
+   triangle's apex or tip; they keep anchoring edges but take no pointer. */
+.graph-shaped-node .react-flow__handle,
+.graph-shaped-node .react-flow__handle.connectionindicator {
+  pointer-events: none !important;
+}
+
 /* Sized and placed inline inside the text box; a hover transform or
    overflowing glyph would reach past the body. */
 .graph-shaped-node .graph-expand-button,
@@ -502,30 +509,43 @@ body.graph-menu-open .graph-node-tooltip {
   stroke-width: 2;
 }
 
-/* State rings sit under the body, so half their stroke shows outside it. */
+/* State rings sit under the body, so half their stroke shows outside it.
+   Each ring is 6px wider than the next one in, so stacked states each keep
+   a visible 3px band. */
 .graph-shape-ring {
   fill: none;
   stroke-linejoin: round;
 }
 
 .graph-shape-ring-mark {
-  stroke-width: 8;
+  stroke-width: 6;
 }
 
 .graph-shape-ring-focus {
   stroke: rgba(100, 108, 255, 0.4);
-  stroke-width: 8;
+  stroke-width: 12;
 }
 
 /* Selection is a wider ring than highlight, not only another colour. */
 .graph-shaped-node.selected .graph-shape-ring-focus {
   stroke: var(--graph-card-focus);
-  stroke-width: 12;
+  stroke-width: 18;
 }
 
 .graph-shape-ring-remote {
-  stroke-width: 14;
+  stroke-width: 24;
   stroke-dasharray: 6 3;
+}
+
+/* React Flow drops the wrapper outline on keyboard focus; this ring, solid
+   #646cff (at least 3:1 on both canvas backgrounds), replaces it. */
+.graph-shape-ring-keyboard {
+  stroke: transparent;
+  stroke-width: 30;
+}
+
+.react-flow__node:focus-visible .graph-shape-ring-keyboard {
+  stroke: #646cff;
 }
 
 .graph-shaped-node.skill-node .graph-shape-outline {
