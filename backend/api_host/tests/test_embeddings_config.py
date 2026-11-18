@@ -1,3 +1,4 @@
+# covers: backend/api_host/config.py, backend/api_host/server.py
 """
 EMBEDDINGS_FILE selects where the embedding sidecar is written.
 
@@ -71,3 +72,123 @@ def test_an_unset_environment_variable_means_derive(monkeypatch):
 
     assert config.embeddings_file is None
     assert config.get_embeddings_path() is None
+
+
+def test_webhook_database_uses_private_state_and_rejects_import_collision(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    private = tmp_path / "private"
+    monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
+    config = AppConfig(graph_file=str(tmp_path / "graph" / "graph.json"))
+    assert config.get_webhook_tokens_db_path() == private / "webhook_tokens.db"
+    config.import_jobs_db = str(private / "webhook_tokens.db")
+    with pytest.raises(ValueError, match="must be separate"):
+        config.get_webhook_tokens_db_path()
+
+    config.import_jobs_db = None
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    alias = tmp_path / "tenant-alias"
+    alias.symlink_to(tenant, target_is_directory=True)
+    monkeypatch.setenv("COMMUNITYOVERVIEW_TENANT_CONFIG_DIR", str(tenant))
+    for state in (tenant, tenant / "nested", alias / "nested"):
+        monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(state))
+        with pytest.raises(ValueError, match="outside the tenant config directory"):
+            create_app(config)
+
+    monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+    monkeypatch.setenv("HOME", str(tenant))
+    config.import_jobs_db = None
+    first = config.get_webhook_tokens_db_path(excluded_dirs=[tenant])
+    assert not first.resolve().is_relative_to(tenant.resolve())
+    assert first == config.get_webhook_tokens_db_path(excluded_dirs=[tenant])
+    other = AppConfig(graph_file=str(tmp_path / "other" / "graph.json"))
+    assert first != other.get_webhook_tokens_db_path()
+    pg = AppConfig(
+        graph_backend="postgres",
+        graph_postgres_dsn="secret-dsn",
+        graph_postgres_schema="one",
+        graph_postgres_scope=None,
+    )
+    pg_other = AppConfig(
+        graph_backend="postgres",
+        graph_postgres_dsn="secret-dsn",
+        graph_postgres_schema="two",
+        graph_postgres_scope=None,
+    )
+    assert pg.get_webhook_tokens_db_path() != pg_other.get_webhook_tokens_db_path()
+    assert "secret-dsn" not in str(pg.get_webhook_tokens_db_path())
+
+
+def test_webhook_database_default_outside_graph_when_home_is_inside(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", raising=False)
+    graph_dir = tmp_path / "graph"
+    monkeypatch.setenv("HOME", str(graph_dir / "home"))
+    config = AppConfig(graph_file=str(graph_dir / "graph.json"))
+
+    assert (
+        not config.get_webhook_tokens_db_path(excluded_dirs=[graph_dir])
+        .resolve()
+        .is_relative_to(graph_dir.resolve())
+    )
+
+    import pwd
+    from types import SimpleNamespace
+
+    import pytest
+
+    monkeypatch.setattr(
+        pwd, "getpwuid", lambda _: SimpleNamespace(pw_dir=str(graph_dir))
+    )
+    with pytest.raises(ValueError, match="No private state directory"):
+        config.get_webhook_tokens_db_path(excluded_dirs=[graph_dir])
+
+
+def test_webhook_database_rejects_actual_graph_and_config_directories(
+    tmp_path, monkeypatch
+):
+    import pytest
+    from backend.core import GraphStorage
+
+    graph_dir = tmp_path / "actual-graph"
+    graph_dir.mkdir()
+    storage = GraphStorage(str(graph_dir / "graph.json"))
+    config = AppConfig(graph_file=str(tmp_path / "other" / "graph.json"))
+    for name, env in (
+        ("graph", None),
+        ("tenant config", "COMMUNITYOVERVIEW_TENANT_CONFIG_DIR"),
+        ("schema config", "SCHEMA_FILE"),
+        ("federation config", "FEDERATION_FILE"),
+    ):
+        directory = graph_dir if env is None else tmp_path / name.replace(" ", "-")
+        directory.mkdir(exist_ok=True)
+        alias = tmp_path / (name.replace(" ", "-") + "-alias")
+        alias.symlink_to(directory, target_is_directory=True)
+        if env:
+            monkeypatch.setenv(
+                env,
+                str(
+                    directory if name == "tenant config" else directory / "config.json"
+                ),
+            )
+        monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(alias / "nested"))
+        with pytest.raises(ValueError, match=f"outside the {name} directory"):
+            create_app(config, graph_storage=storage)
+        if env:
+            monkeypatch.delenv(env)
+    monkeypatch.delenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+    (tmp_path / "other").mkdir(exist_ok=True)
+    app = create_app(config, graph_storage=storage)
+    actual_path = app.state.function_invocation_service.webhook_token_store.path
+    other_storage = GraphStorage(str(tmp_path / "second-graph" / "graph.json"))
+    other_app = create_app(config, graph_storage=other_storage)
+    assert (
+        actual_path
+        != other_app.state.function_invocation_service.webhook_token_store.path
+    )
+    other_storage.shutdown_events()
+    storage.shutdown_events()

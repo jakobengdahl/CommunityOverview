@@ -112,14 +112,25 @@ def load_manifest(root, function_id):
     """Read and validate a package without following paths outside its directory."""
     if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
         raise ValueError("Invalid function id")
-    root = Path(root).resolve()
-    directory = (root / function_id).resolve()
-    if directory.parent != root or directory.name != function_id:
+    root_real = os.path.realpath(root)
+    root_prefix = root_real.rstrip(os.sep)
+    root = Path(root_real)
+    directory_real = os.path.realpath(os.path.join(root_real, function_id))
+    directory = Path(directory_real)
+    if (
+        not directory_real.startswith(root_prefix + os.sep)
+        or not directory.is_relative_to(root)
+        or directory.parent != root
+        or directory.name != function_id
+    ):
         raise ValueError("Invalid function directory")
-    manifest_path = (directory / "function.json").resolve()
-    if not manifest_path.is_relative_to(directory):
+    manifest_real = os.path.realpath(os.path.join(directory_real, "function.json"))
+    manifest_path = Path(manifest_real)
+    if not manifest_real.startswith(
+        directory_real + os.sep
+    ) or not manifest_path.is_relative_to(directory):
         raise ValueError("Invalid manifest path")
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(Path(manifest_real).read_text())
     if not isinstance(manifest, dict):
         raise ValueError("Manifest must be an object")
     for key in ("contract_version", "id", "version", "name", "runtime", "entry_point"):
@@ -156,15 +167,37 @@ def load_manifest(root, function_id):
     for key in ("input_schema", "output_schema"):
         if key in manifest:
             _schema(manifest[key])
-    entry = directory / safe_relative_path(manifest["entry_point"])
-    if not entry.resolve().is_relative_to(directory) or not entry.is_file():
+    entry_real = os.path.realpath(
+        os.path.join(directory_real, safe_relative_path(manifest["entry_point"]))
+    )
+    entry = Path(entry_real)
+    if (
+        not entry_real.startswith(directory_real + os.sep)
+        or not entry.is_relative_to(directory)
+        or not Path(entry_real).is_file()
+    ):
         raise ValueError("Invalid entry point")
     files = {}
-    for path in directory.rglob("*"):
+    if not directory_real.startswith(root_prefix + os.sep):
+        raise ValueError("Invalid function directory")
+    for path in Path(directory_real).rglob("*"):
+        resolved_real = os.path.realpath(
+            os.path.join(directory_real, path.relative_to(directory))
+        )
+        resolved_path = Path(resolved_real)
+        if not resolved_real.startswith(
+            directory_real + os.sep
+        ) or not resolved_path.is_relative_to(directory):
+            raise ValueError("Invalid package path")
         if path.is_symlink():
             raise ValueError("Package symlinks are unsupported")
-        if path.is_file():
-            files[path.relative_to(directory).as_posix()] = path.read_bytes()
+        if not resolved_real.startswith(directory_real + os.sep):
+            raise ValueError("Invalid package path")
+        if Path(resolved_real).is_file():
+            if not resolved_real.startswith(directory_real + os.sep):
+                raise ValueError("Invalid package path")
+            with open(resolved_real, "rb") as package_file:
+                files[path.relative_to(directory).as_posix()] = package_file.read()
     return manifest, files
 
 
