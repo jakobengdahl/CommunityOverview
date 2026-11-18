@@ -1,3 +1,4 @@
+// covers: frontend/web/src/services/api.js
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 describe('apiFetch error handling', () => {
@@ -274,5 +275,24 @@ describe('browser write authorization header', () => {
     }
     expect(global.fetch.mock.calls[1][1].headers['Content-Type']).toBeUndefined();
     expect(global.fetch.mock.calls[2][1].headers['Content-Type']).toBe('text/plain');
+  });
+});
+
+describe('session history appearance support', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['undo', 'redo'])('sends the appearance version on %s', async (action) => {
+    const fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    vi.stubGlobal('fetch', fetch);
+    const api = await import('../src/services/api.js');
+    await api[action === 'undo' ? 'undoSessionAction' : 'redoSessionAction'](
+      'session/id',
+      'client'
+    );
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, options] = fetch.mock.calls[0];
+    expect(url).toContain(`/sessions/session%2Fid/${action}`);
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ client_id: 'client', appearance_version: 1 });
   });
 });
