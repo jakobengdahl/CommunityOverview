@@ -124,7 +124,7 @@ def register_webhook_routes(router, service, store, authorize, existing):
             if len(data) > 65536:
                 raise HTTPException(413)
         binding = {
-            "actor_id": function_id,
+            "actor_id": f"function_webhook:{function_id}",
             "actor_type": "function_webhook",
             "auth_source": "webhook",
             "graph_id": row["graph_id"],

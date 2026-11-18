@@ -100,17 +100,21 @@ def test_auth_limits_input_and_bound_actor(endpoint, monkeypatch):
     assert client.post(path, json={}, headers=auth).status_code == 422
     service.invoke.assert_not_called()
     response = client.post(
-        path, json={"value": 1}, headers={**auth, "Idempotency-Key": "key"}
+        path,
+        json={"value": 1, "graph_id": "graph-b"},
+        headers={**auth, "Idempotency-Key": "key"},
     )
     assert response.status_code == 200
     args = service.invoke.call_args
     assert args.kwargs["actor_binding"] == {
-        "actor_id": "example",
+        "actor_id": "function_webhook:example",
         "actor_type": "function_webhook",
         "auth_source": "webhook",
         "graph_id": "graph-a",
     }
     assert args.kwargs["idempotency_key"] == "key"
+    assert args.args[1]["graph_id"] == "graph-b"
+    assert service.replay_webhook.call_args.args[2] == args.kwargs["actor_binding"]
     service.replay_webhook.return_value = service.invoke.return_value
     manifest_path = service.root / "example" / "function.json"
     manifest = json.loads(manifest_path.read_text())
@@ -121,6 +125,11 @@ def test_auth_limits_input_and_bound_actor(endpoint, monkeypatch):
     )
     assert replay.status_code == 200 and replay.json()["id"] == response.json()["id"]
     service.invoke.assert_called_once()
+    service.replay_webhook.return_value = None
+    service.invoke.return_value.result = {"status": "failed", "error": {"code": "busy"}}
+    busy = client.post(path, json={"new_field": 1}, headers=auth)
+    assert busy.status_code == 409
+    assert busy.json()["error"]["code"] == "busy"
     monkeypatch.setattr(service.webhook_policy, "admit", lambda _: False)
     assert client.post(path, content=b"invalid", headers=auth).status_code == 429
     monkeypatch.setenv("FUNCTION_WEBHOOKS_ENABLED", "false")

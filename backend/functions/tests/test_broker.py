@@ -709,8 +709,10 @@ def test_webhook_broker_intersects_every_service_decision_with_bound_graph(stora
         ],
         [],
     )
+    enabled = {GRANT_GRAPH_READ, GRANT_GRAPH_WRITE}
     broker = make_broker(
         service,
+        grant_enabled=lambda grant: grant in enabled,
         authorization_inputs={
             "actor_id": "fn",
             "actor_type": "function_webhook",
@@ -728,9 +730,11 @@ def test_webhook_broker_intersects_every_service_decision_with_bound_graph(stora
     assert "result" in call(
         broker, "graph.update_node", {"node_id": "one", "updates": {"name": "Changed"}}
     )
-    assert "error" in call(
+    assert "result" in call(
         broker, "graph.add", {"nodes": [{"name": "New", "type": "Actor"}]}
     )
+    enabled.remove(GRANT_GRAPH_WRITE)
+    assert error_code(call(broker, "graph.add", {"nodes": []})) == "grant_denied"
 
 
 def test_grant_enablement_has_no_default():

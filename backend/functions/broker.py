@@ -315,10 +315,6 @@ class FunctionBroker:
             )
             call_args["event_correlation_id"] = ctx.correlation_id
         if spec.method == "add_nodes":
-            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
-                raise BrokerError(
-                    ERR_ACCESS_DENIED, "Cannot add nodes outside the bound graph."
-                )
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
 
