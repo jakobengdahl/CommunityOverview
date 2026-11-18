@@ -1,5 +1,8 @@
-/* Shared appearance values retain the legacy card palette in both themes. */
-:root {
+/* Shared appearance values retain the legacy card palette in both themes.
+   The graph-card-theme-* classes pin one theme for a subtree (an editor
+   preview); the light class repeats the media-query block below. */
+:root,
+.graph-card-theme-dark {
   --graph-card-surface: #1a1a1a;
   --graph-card-text-primary: #ddd;
   --graph-card-text-secondary: #999;
@@ -22,6 +25,22 @@
     --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
     --graph-card-control-border: white;
   }
+}
+
+.graph-card-theme-light {
+  --graph-card-surface: white;
+  --graph-card-text-primary: #213547;
+  --graph-card-text-secondary: #666;
+  --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
+  --graph-card-control-border: white;
+}
+
+/* A preview node sits in normal flow, as wide as the canvas would draw it. */
+.graph-node-preview {
+  display: flex;
+  justify-content: center;
 }
 
 .graph-custom-node {

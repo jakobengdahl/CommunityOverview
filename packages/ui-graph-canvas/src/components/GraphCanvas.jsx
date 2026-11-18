@@ -55,6 +55,7 @@ import {
   nodeShapeAreaValues,
   nodeShapeGeometry,
 } from '../utils/nodeShapes';
+import { nodeCardData } from '../utils/nodeCardData';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
@@ -1586,11 +1587,7 @@ function GraphCanvasInner({
         type: 'custom',
         ...shaped?.node,
         data: {
-          ...node,
-          label: node.name,
-          summary: node.summary || node.description?.slice(0, 100),
-          nodeType: node.type,
-          color: (nodeColorResolver || getNodeColor)(node.type),
+          ...nodeCardData(node, (nodeColorResolver || getNodeColor)(node.type)),
           isHighlighted: highlightedNodeIds.includes(node.id),
           isDimmed: dimmedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,

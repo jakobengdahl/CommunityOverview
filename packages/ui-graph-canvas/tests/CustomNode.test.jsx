@@ -88,6 +88,33 @@ describe('CustomNode theme shadow cascade', () => {
   );
 });
 
+describe('CustomNode preview theme tokens', () => {
+  it('pins the same card tokens in a preview subtree as each page theme', () => {
+    const style = document.createElement('style');
+    style.textContent = customNodeCss;
+    document.head.appendChild(style);
+    try {
+      const rules = [...style.sheet.cssRules];
+      const tokens = (rule) =>
+        Object.fromEntries(
+          Array.from({ length: rule.style.length }, (_, i) => rule.style[i]).map((name) => [
+            name,
+            rule.style.getPropertyValue(name),
+          ])
+        );
+      const ruleFor = (list, selector) =>
+        list.find((rule) => rule.selectorText?.split(/\s*,\s*/).includes(selector));
+      const media = rules.find((rule) => rule.conditionText === '(prefers-color-scheme: light)');
+      expect(tokens(ruleFor(rules, '.graph-card-theme-light'))).toEqual(
+        tokens(ruleFor([...media.cssRules], ':root'))
+      );
+      expect(ruleFor(rules, '.graph-card-theme-dark')).toBe(ruleFor(rules, ':root'));
+    } finally {
+      style.remove();
+    }
+  });
+});
+
 describe('CustomNode tooltip', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
