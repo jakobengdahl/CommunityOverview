@@ -581,16 +581,16 @@ describe('Server-backed session lifecycle', () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    // The replace has not started, yet its layout is in the baseline.
+    // Both operations hold autosave from receipt, including the queued replace.
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
-    expect(holds).toHaveBeenCalledTimes(1);
+    expect(holds).toHaveBeenCalledTimes(2);
     await act(async () => {
       openGate();
     });
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
-    expect(holds).toHaveBeenCalledTimes(1);
+    expect(holds).toHaveBeenCalledTimes(2);
   });
 
   it('a node read that never settles holds later ops only until its timeout, then is aborted', async () => {
@@ -778,6 +778,32 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
+  });
+
+  it('waits for a local edit started while resync drains remote work', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    let releaseRead;
+    api.getNodeDetails.mockImplementation(() => new Promise((resolve) => { releaseRead = () => resolve({ node: NODE_B, edges: [] }); }));
+    const source = FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/')).at(-1);
+    act(() => source.onmessage({ data: JSON.stringify({ type: 'op', seq: 1, client_id: 'other', op: { op: 'nodes_added', node_ids: ['node-b'] } }) }));
+    await waitFor(() => expect(releaseRead).toBeTruthy());
+    const readsBefore = api.getSession.mock.calls.length;
+    act(() => source.onmessage({ data: JSON.stringify({ type: 'catch_up', seq: 2, ops: [{ op: 'nodes_hidden', node_ids: [] }] }) }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const releaseEdit = client.holdLocalEdit();
+    await act(async () => { releaseRead(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(api.getSession.mock.calls.length).toBe(readsBefore);
+    await act(async () => { releaseEdit(); });
+    await waitFor(() => expect(api.getSession.mock.calls.length).toBeGreaterThan(readsBefore));
   });
 
   // task fbd32fc9: a reconnect used to reload the canvas wholesale from

@@ -366,6 +366,34 @@ function withGroupTextColor(ann) {
  * the baseline, the next local snapshot no longer looks like it added it.
  * Pure — exported for unit testing. Returns a new mirror.
  */
+// A type change and its optional node override change have separate revisions.
+function currentAppearanceOp(baseline, op) {
+  const revisions = op.revisions || {};
+  const isCurrent = (key) =>
+    revisions[key] == null || revisions[key] >= (baseline.shape_revisions[key] || 0);
+  const target = op.op === 'node_shape_set' ? `node:${op.node_id}` : `type:${op.type}`;
+  const targetCurrent = isCurrent(target);
+  const nodeKey =
+    op.op === 'type_shape_set' && op.clear_node_id != null ? `node:${op.clear_node_id}` : null;
+  const nodeCurrent = nodeKey && isCurrent(nodeKey);
+  if (!targetCurrent && !nodeCurrent) return null;
+  if (!targetCurrent) {
+    return {
+      op: 'node_shape_set',
+      node_id: op.clear_node_id,
+      selection: op.restore_selection ?? null,
+      revisions: revisions[nodeKey] == null ? {} : { [nodeKey]: revisions[nodeKey] },
+    };
+  }
+  const current = { ...op, revisions: { ...revisions } };
+  if (nodeKey && !nodeCurrent) {
+    delete current.clear_node_id;
+    delete current.restore_selection;
+    delete current.revisions[nodeKey];
+  }
+  return current;
+}
+
 export function applyOpToMirror(mirrorState, op) {
   const m = normalizeMirror(mirrorState);
   const type = op && op.op;
@@ -1518,6 +1546,10 @@ export class SessionSyncClient {
     return new Promise((resolve) => this._localEditWaiters.push(resolve));
   }
 
+  hasLocalEdits() {
+    return this._localEditHolds > 0;
+  }
+
   /** Nodes this browser's user moved: their positions are saved even unplaced. */
   noteUserMoved(nodeIds) {
     for (const id of nodeIds || []) this._userMoved.add(id);
@@ -1961,10 +1993,8 @@ export class SessionSyncClient {
         // that later op's own ack round-trips.
         for (const entry of body.applied || []) {
           if (entry?.op === 'node_shape_set' || entry?.op === 'type_shape_set') {
-            const newer = Object.entries(entry.revisions || {}).some(
-              ([key, revision]) => revision < (this._baseline.shape_revisions[key] || 0)
-            );
-            if (!newer) this._baseline = applyOpToMirror(this._baseline, entry);
+            const current = currentAppearanceOp(this._baseline, entry);
+            if (current) this._baseline = applyOpToMirror(this._baseline, current);
           }
         }
         const appliedAnnotations = [];
@@ -2264,14 +2294,13 @@ export class SessionSyncClient {
         // ingest), and its own delivery must still reach the canvas the same
         // way it always has (see foldLocalOp's docstring).
         const applyBaseline = () => {
-          const revisions = Object.entries(op.revisions || {});
-          if (
-            (op.op === 'node_shape_set' || op.op === 'type_shape_set') &&
-            revisions.some(
-              ([key, revision]) => revision < (this._baseline.shape_revisions[key] || 0)
-            )
-          )
-            return false;
+          if (op.op === 'node_shape_set' || op.op === 'type_shape_set') {
+            const current = currentAppearanceOp(this._baseline, op);
+            if (!current) return false;
+            // The queued canvas consumer holds this same object.
+            for (const key of Object.keys(op)) delete op[key];
+            Object.assign(op, current);
+          }
           const foldedId = op?.annotation?.id;
           let stale = false;
           if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {

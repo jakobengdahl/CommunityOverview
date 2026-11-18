@@ -1043,8 +1043,14 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
-        await client.waitForLocalEdits();
-        await remoteOpsChainRef.current;
+        // An edit or another remote operation can arrive while either await
+        // is pending. Recheck synchronously after the queue drains.
+        let drainedChain;
+        do {
+          await client.waitForLocalEdits();
+          drainedChain = remoteOpsChainRef.current;
+          await drainedChain;
+        } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
         if (syncRef.current !== client || resyncGuardTokenRef.current !== myToken) return 0;
         // Stream ops keep arriving while the GET is in flight, and each one
         // is applied to the canvas and advances the client's appliedSeq (so
@@ -1061,8 +1067,11 @@ function App() {
             return 0;
           }
           adoptSessionPayload(targetId, payload);
-          await client.waitForLocalEdits();
-          await remoteOpsChainRef.current;
+          do {
+            await client.waitForLocalEdits();
+            drainedChain = remoteOpsChainRef.current;
+            await drainedChain;
+          } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
