@@ -2088,6 +2088,8 @@ function App() {
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
+        shape_overrides: state.shapeOverrides,
+        type_shapes: state.typeShapes,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
         dimmed_node_ids: state.dimmedNodeIds || [],
