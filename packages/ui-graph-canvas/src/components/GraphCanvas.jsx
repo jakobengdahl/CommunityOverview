@@ -1666,12 +1666,18 @@ function GraphCanvasInner({
           height: Math.abs(end.y - start.y),
         };
         const labelBounds = new Map();
-        reactFlowWrapper.current?.querySelectorAll('.react-flow__node[data-id]').forEach((element) => {
-          const label = element.querySelector('.graph-shape-outside-label .graph-shape-label-chip');
-          if (label) labelBounds.set(element.dataset.id, label.getBoundingClientRect());
-        });
-        const left = Math.min(event.clientX, e.clientX), right = Math.max(event.clientX, e.clientX);
-        const top = Math.min(event.clientY, e.clientY), bottom = Math.max(event.clientY, e.clientY);
+        reactFlowWrapper.current
+          ?.querySelectorAll('.react-flow__node[data-id]')
+          .forEach((element) => {
+            const label = element.querySelector(
+              '.graph-shape-outside-label .graph-shape-label-chip'
+            );
+            if (label) labelBounds.set(element.dataset.id, label.getBoundingClientRect());
+          });
+        const left = Math.min(event.clientX, e.clientX),
+          right = Math.max(event.clientX, e.clientX);
+        const top = Math.min(event.clientY, e.clientY),
+          bottom = Math.max(event.clientY, e.clientY);
         setNodes((current) => {
           const byId = new Map(current.map((node) => [node.id, node]));
           return current.map((node) => {
@@ -1687,13 +1693,21 @@ function GraphCanvasInner({
               parent = byId.get(parent.parentNode || parent.parentId);
             }
             const label = labelBounds.get(node.id);
-            const hitsLabel = label && label.width > 0 && label.height > 0 &&
-              left <= label.right && right >= label.left && top <= label.bottom && bottom >= label.top;
-            const selected = hitsLabel || shapeOverlapsMarquee(node.geometry, {
-              ...rect,
-              x: rect.x - x,
-              y: rect.y - y,
-            });
+            const hitsLabel =
+              label &&
+              label.width > 0 &&
+              label.height > 0 &&
+              left <= label.right &&
+              right >= label.left &&
+              top <= label.bottom &&
+              bottom >= label.top;
+            const selected =
+              hitsLabel ||
+              shapeOverlapsMarquee(node.geometry, {
+                ...rect,
+                x: rect.x - x,
+                y: rect.y - y,
+              });
             return Boolean(node.selected) === selected ? node : { ...node, selected };
           });
         });
