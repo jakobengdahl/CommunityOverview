@@ -108,6 +108,18 @@ def _schema(schema):
     return validator(schema)
 
 
+def _valid_triggers(manifest):
+    triggers = manifest.get("triggers")
+    if manifest.get("contract_version") == "1":
+        return triggers == [{"kind": "manual"}]
+    return (
+        isinstance(triggers, list)
+        and bool(triggers)
+        and all(item in ({"kind": "manual"}, {"kind": "webhook"}) for item in triggers)
+        and len({item["kind"] for item in triggers}) == len(triggers)
+    )
+
+
 def load_manifest(root, function_id):
     """Read and validate a package without following paths outside its directory."""
     if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
@@ -143,11 +155,11 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] != "1"
+        manifest["contract_version"] not in {"1", "2"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
-        or manifest.get("triggers") != [{"kind": "manual"}]
+        or not _valid_triggers(manifest)
         or manifest.get("write_target", "graph") != "graph"
         or any(key in manifest for key in ("retry", "secrets", "egress"))
         or ("description" in manifest and not isinstance(manifest["description"], str))
@@ -275,11 +287,14 @@ class FunctionInvocationService:
             ):
                 raise PermissionError("Run belongs to another actor")
         with use_request_authorization(**binding):
-            if not evaluate_graph_access(
+            decision = evaluate_graph_access(
                 self.graph_service.authorization_hook,
                 action="read",
                 target="invoke_function",
-            ).allowed:
+            )
+            if not decision.allowed or not decision.graph_access.matches(
+                graph_id=binding["graph_id"]
+            ):
                 raise PermissionError("Access denied")
         return existing
 
@@ -354,7 +369,7 @@ class FunctionInvocationService:
                     job.origin = f"function:{function_id}@{manifest['version']}"
                     if not set(manifest["grants"]).issubset(self.enabled[function_id]):
                         code = "not_enabled"
-                    elif trigger != "manual":
+                    elif {"kind": trigger} not in manifest["triggers"]:
                         code = "invalid_manifest"
                     elif not binding.get("actor_id"):
                         code = "access_denied"
@@ -363,17 +378,28 @@ class FunctionInvocationService:
                             actions = ["read"] + (
                                 ["mutate"]
                                 if "graph:write" in manifest["grants"]
+                                and (
+                                    trigger != "webhook"
+                                    or self.webhook_policy.get(
+                                        function_id, binding["graph_id"]
+                                    )[1]
+                                )
                                 else []
                             )
-                            if any(
-                                not evaluate_graph_access(
+                            for action in actions:
+                                decision = evaluate_graph_access(
                                     self.graph_service.authorization_hook,
                                     action=action,
                                     target="invoke_function",
-                                ).allowed
-                                for action in actions
-                            ):
-                                code = "access_denied"
+                                )
+                                if (
+                                    not decision.allowed
+                                    or not decision.graph_access.matches(
+                                        graph_id=binding["graph_id"]
+                                    )
+                                ):
+                                    code = "access_denied"
+                                    break
                         if code is None:
                             try:
                                 if not isinstance(input, dict):
@@ -447,7 +473,20 @@ class FunctionInvocationService:
                 job.correlation_id,
                 binding,
                 lambda grant: (
-                    function_id in self.enabled and grant in self.enabled[function_id]
+                    function_id in self.enabled
+                    and grant in self.enabled[function_id]
+                    and (
+                        trigger != "webhook"
+                        or (
+                            self.webhook_policy.get(function_id, binding["graph_id"])[0]
+                            and (
+                                grant != "graph:write"
+                                or self.webhook_policy.get(
+                                    function_id, binding["graph_id"]
+                                )[1]
+                            )
+                        )
+                    )
                 ),
                 max_tool_calls=limits.get("max_tool_calls", 200),
             )
@@ -464,7 +503,7 @@ class FunctionInvocationService:
                     "attribution": job.payload["attribution"],
                 },
                 "invocation": {
-                    "contract_version": "1",
+                    "contract_version": manifest["contract_version"],
                     "run_id": job.id,
                     "function_id": function_id,
                     "function_version": manifest["version"],
