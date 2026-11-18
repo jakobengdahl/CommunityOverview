@@ -496,12 +496,11 @@ describe('CustomNode configured shapes', () => {
       expect(rings.map((ring) => ring.classList[1])).toEqual([
         'graph-shape-ring-keyboard',
         'graph-shape-ring-remote',
-        'graph-shape-ring-mark',
         'graph-shape-ring-focus',
+        'graph-shape-ring-mark',
       ]);
-      const inward = [widths[0], widths[1], widths[3], widths[2]];
-      for (let i = 1; i < inward.length; i += 1) {
-        expect(inward[i - 1] - inward[i]).toBeGreaterThanOrEqual(4);
+      for (let i = 1; i < widths.length; i += 1) {
+        expect(widths[i - 1] - widths[i]).toBeGreaterThanOrEqual(4);
       }
       // A keyboard-focused node shows its ring even when it is not selected.
       const keyboard = rings[0];
@@ -519,7 +518,7 @@ describe('CustomNode configured shapes', () => {
     });
   });
 
-  it('passes the pointer through everything but the painted body and what lies inside it', () => {
+  it('passes the pointer through everything but the painted body and its visible labels', () => {
     renderFlow([
       shapedFlowNode(RISK, {
         markColor: '#ff0000',
@@ -541,9 +540,10 @@ describe('CustomNode configured shapes', () => {
         getComputedStyle(root.querySelector(selector)).pointerEvents;
       expect(events(wrapper, '.graph-shaped-node')).toBe('none');
       expect(events(wrapper, '.graph-shape-body')).toBe('auto');
-      // Badges and a triangle's outside label lie beyond the body.
+      // A triangle's outside label is a visible label, so it is hit too.
+      expect(events(wrapper, '.graph-shape-outside-label .graph-shape-label-chip')).toBe('auto');
+      // Badges lie beyond the body.
       for (const outside of [
-        '.graph-shape-label-chip',
         '.graph-node-mark-badge',
         '.graph-node-remote-badge',
         '.graph-node-staged-badge',

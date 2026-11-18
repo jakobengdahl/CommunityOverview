@@ -240,15 +240,15 @@ function CustomNode({ data, id, selected }) {
               style={{ stroke: remote.color }}
             />
           )}
+          {(selected || data.isHighlighted) && (
+            <path className="graph-shape-ring graph-shape-ring-focus" d={geometry.path} />
+          )}
           {data.markColor && (
             <path
               className="graph-shape-ring graph-shape-ring-mark"
               d={geometry.path}
               style={{ stroke: `${data.markColor}66` }}
             />
-          )}
-          {(selected || data.isHighlighted) && (
-            <path className="graph-shape-ring graph-shape-ring-focus" d={geometry.path} />
           )}
           <path className="graph-shape-shadow" d={geometry.path} />
           <path className="graph-shape-body" d={geometry.path} />

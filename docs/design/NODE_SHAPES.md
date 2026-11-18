@@ -304,9 +304,9 @@ consume it directly. Nodes without a descriptor retain legacy layout dimensions
 and measured rectangular edge bounds. `GraphCanvas` attaches the descriptor to
 every node with a resolved shape; the built-in card supplies none. Clicks,
 drag, the context menu and erase hit a shaped node only where its body is
-painted, including the text and the action buttons inside it; a triangle's
-outside label and the state badges, which lie beyond the body, pass the pointer
-through. The action buttons stack at the trailing edge of the text box, which
+painted, including the text and the action buttons inside it, and on a
+triangle's outside label; the state badges, which lie beyond the body, pass
+the pointer through. The action buttons stack at the trailing edge of the text box, which
 keeps its text clear of them, sized to fit at every base and scale. The minimum
 screen-space hit target is not implemented yet. A marquee still selects every node by React Flow's rectangular bounds;
 polygon-precise marquee selection is future work. Zero-distance endpoint centres use opposite

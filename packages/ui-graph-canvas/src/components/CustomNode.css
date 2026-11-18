@@ -465,11 +465,11 @@ body.graph-menu-open .graph-node-tooltip {
   overflow: visible;
 }
 
-/* Only what lies inside the painted body is hit. The state badges and a
-   triangle's outside label sit beyond it, so they pass the pointer through. */
+/* Only the painted body and the visible text labels are hit, including a
+   triangle's outside label; the state badges pass the pointer through. */
 .graph-shape-body,
 .graph-shape-band,
-.graph-shape-band-text:not(.graph-shape-outside-label) .graph-shape-label-chip,
+.graph-shape-label-chip,
 .graph-shape-text > *,
 .graph-shaped-node button {
   pointer-events: auto;
