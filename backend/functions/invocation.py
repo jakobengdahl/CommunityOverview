@@ -108,8 +108,23 @@ def _schema(schema):
     return validator(schema)
 
 
-# Passed to ``admit`` when the input arrives after the run is claimed.
-DEFERRED_INPUT = object()
+# ``precheck`` validates everything but the input, which is not read yet.
+_UNCHECKED = object()
+
+
+def _bind(actor_binding):
+    return {
+        key: actor_binding.get(key)
+        for key in (
+            "actor_id",
+            "actor_type",
+            "auth_source",
+            "workspace_id",
+            "workspace_kind",
+            "graph_id",
+            "authenticated_principal",
+        )
+    }
 
 
 @dataclass
@@ -124,7 +139,6 @@ class Admission:
     manifest: dict = None
     package: dict = None
     probe: object = None
-    input_deferred: bool = False
 
 
 def _valid_input(manifest, input):
@@ -332,18 +346,7 @@ class FunctionInvocationService:
         return existing
 
     def replay_webhook(self, function_id, idempotency_key, actor_binding):
-        binding = {
-            key: actor_binding.get(key)
-            for key in (
-                "actor_id",
-                "actor_type",
-                "auth_source",
-                "workspace_id",
-                "workspace_kind",
-                "graph_id",
-                "authenticated_principal",
-            )
-        }
+        binding = _bind(actor_binding)
         with _admission(self.root):
             previous = self.store.list_jobs(
                 agent_id=function_id, kind=ExecutionKind.FUNCTION
@@ -356,41 +359,101 @@ class FunctionInvocationService:
                 ):
                     return self._replay(existing, binding)
             if any(job.state == ExecutionState.RUNNING for job in previous):
-                job = ExecutionJob(
-                    agent_id=function_id,
-                    kind=ExecutionKind.FUNCTION,
-                    idempotency_key=f"fn:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
-                    state=ExecutionState.RUNNING,
-                    payload={
-                        "function_id": function_id,
-                        "trigger": "webhook",
-                        "attribution": {
-                            "actor": {
-                                key: binding[key]
-                                for key in ("actor_id", "actor_type", "auth_source")
-                            },
-                            "scope": {
-                                key: binding[key]
-                                for key in (
-                                    "workspace_id",
-                                    "workspace_kind",
-                                    "graph_id",
-                                )
-                            },
-                        },
-                    },
-                )
-                self.store.enqueue(job)
-                self.store.cancel(
-                    job.id,
-                    result={
-                        "status": "rejected",
-                        "error": {"code": "busy", "message": "Invocation rejected."},
-                        "duration_ms": 0,
-                    },
-                )
-                return self.store.get(job.id)
+                return self._rejected(function_id, binding, idempotency_key, "busy")
         return None
+
+    def precheck(self, function_id, *, trigger, actor_binding):
+        """The rejection code ``admit`` would record before validating input."""
+        return self._refusal(function_id, _bind(actor_binding), trigger, _UNCHECKED)[0]
+
+    def refuse(self, function_id, code, *, actor_binding, idempotency_key=None):
+        """Record a webhook call refused before admission, or replay its key."""
+        binding = _bind(actor_binding)
+        with _admission(self.root):
+            for existing in self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            ):
+                if (
+                    idempotency_key is not None
+                    and existing.idempotency_key
+                    == f"fn:{function_id}:{idempotency_key}"
+                ):
+                    return self._replay(existing, binding)
+            return self._rejected(function_id, binding, idempotency_key, code)
+
+    def _rejected(self, function_id, binding, idempotency_key, code):
+        job = ExecutionJob(
+            agent_id=function_id,
+            kind=ExecutionKind.FUNCTION,
+            idempotency_key=f"fn:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
+            state=ExecutionState.RUNNING,
+            payload={
+                "function_id": function_id,
+                "trigger": "webhook",
+                "attribution": {
+                    "actor": {
+                        key: binding[key]
+                        for key in ("actor_id", "actor_type", "auth_source")
+                    },
+                    "scope": {
+                        key: binding[key]
+                        for key in ("workspace_id", "workspace_kind", "graph_id")
+                    },
+                },
+            },
+        )
+        self.store.enqueue(job)
+        self.store.cancel(
+            job.id,
+            result={
+                "status": "rejected",
+                "error": {"code": code, "message": "Invocation rejected."},
+                "duration_ms": 0,
+            },
+        )
+        return self.store.get(job.id)
+
+    def _refusal(self, function_id, binding, trigger, input):
+        """A rejection code, or None, with the manifest and package it loaded."""
+        manifest = package = None
+        try:
+            if function_id not in self.enabled:
+                return "not_enabled", manifest, package
+            manifest, package = load_manifest(self.root, function_id)
+            if not set(manifest["grants"]).issubset(self.enabled[function_id]):
+                return "not_enabled", manifest, package
+            if {"kind": trigger} not in manifest["triggers"]:
+                return "invalid_manifest", manifest, package
+            if not binding.get("actor_id"):
+                return "access_denied", manifest, package
+            with use_request_authorization(**binding):
+                actions = ["read"] + (
+                    ["mutate"]
+                    if "graph:write" in manifest["grants"]
+                    and (
+                        trigger != "webhook"
+                        or self.webhook_policy.get(function_id, binding["graph_id"])[1]
+                    )
+                    else []
+                )
+                for action in actions:
+                    decision = evaluate_graph_access(
+                        self.graph_service.authorization_hook,
+                        action=action,
+                        target="invoke_function",
+                    )
+                    if not decision.allowed or (
+                        trigger == "webhook"
+                        and not decision.graph_access.matches(
+                            graph_id=binding["graph_id"]
+                        )
+                    ):
+                        return "access_denied", manifest, package
+            if input is not _UNCHECKED and not _valid_input(manifest, input):
+                return "invalid_input", manifest, package
+        except Exception:  # Fail closed, including unresolvable schema references.
+            return "invalid_manifest", manifest, package
+        return None, manifest, package
 
     def invoke(
         self,
@@ -426,9 +489,7 @@ class FunctionInvocationService:
     ):
         """Claim the run record, or return the replayed or rejected record.
 
-        With ``DEFERRED_INPUT`` the input is validated by ``execute``, so a
-        caller can read a request body only after its idempotency key is held.
-        An ``Admission`` must end in ``execute`` or ``reject``.
+        An ``Admission`` must end in ``execute``.
         """
         if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
             raise ValueError("Invalid function id")
@@ -436,18 +497,7 @@ class FunctionInvocationService:
         started = time.monotonic()
         # Only the trusted binding supplies identity and scope. In particular,
         # never carry its headers through the authorization helper.
-        binding = {
-            key: actor_binding.get(key)
-            for key in (
-                "actor_id",
-                "actor_type",
-                "auth_source",
-                "workspace_id",
-                "workspace_kind",
-                "graph_id",
-                "authenticated_principal",
-            )
-        }
+        binding = _bind(actor_binding)
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
@@ -471,10 +521,7 @@ class FunctionInvocationService:
             },
         )
         job.started_at = utcnow()
-        manifest = None
-        code = None
         probe = None
-        package = None
         with _admission(self.root):
             # Enqueue's UNIQUE constraint is the authority for delivery deduplication.
             previous = self.store.list_jobs(
@@ -483,52 +530,13 @@ class FunctionInvocationService:
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
                     return self._replay(existing, binding)
+            code, manifest, package = self._refusal(
+                function_id, binding, trigger, input
+            )
+            if manifest is not None:
+                job.payload["function_version"] = manifest["version"]
+                job.origin = f"function:{function_id}@{manifest['version']}"
             try:
-                if function_id not in self.enabled:
-                    code = "not_enabled"
-                else:
-                    manifest, package = load_manifest(self.root, function_id)
-                    job.payload["function_version"] = manifest["version"]
-                    job.origin = f"function:{function_id}@{manifest['version']}"
-                    if not set(manifest["grants"]).issubset(self.enabled[function_id]):
-                        code = "not_enabled"
-                    elif {"kind": trigger} not in manifest["triggers"]:
-                        code = "invalid_manifest"
-                    elif not binding.get("actor_id"):
-                        code = "access_denied"
-                    else:
-                        with use_request_authorization(**binding):
-                            actions = ["read"] + (
-                                ["mutate"]
-                                if "graph:write" in manifest["grants"]
-                                and (
-                                    trigger != "webhook"
-                                    or self.webhook_policy.get(
-                                        function_id, binding["graph_id"]
-                                    )[1]
-                                )
-                                else []
-                            )
-                            for action in actions:
-                                decision = evaluate_graph_access(
-                                    self.graph_service.authorization_hook,
-                                    action=action,
-                                    target="invoke_function",
-                                )
-                                if not decision.allowed or (
-                                    trigger == "webhook"
-                                    and not decision.graph_access.matches(
-                                        graph_id=binding["graph_id"]
-                                    )
-                                ):
-                                    code = "access_denied"
-                                    break
-                        if (
-                            code is None
-                            and input is not DEFERRED_INPUT
-                            and not _valid_input(manifest, input)
-                        ):
-                            code = "invalid_input"
                 if code is None and any(
                     j.state == ExecutionState.RUNNING for j in previous
                 ):
@@ -549,7 +557,7 @@ class FunctionInvocationService:
                         and probe.level != "full"
                     ):
                         code = "isolation_below_minimum"
-            except Exception:  # Fail closed, including unresolvable schema references.
+            except Exception:  # Fail closed.
                 code = "invalid_manifest"
             if code:
                 job.started_at = None
@@ -567,15 +575,7 @@ class FunctionInvocationService:
             if code:
                 return self.reject(Admission(job, started), code)
         return Admission(
-            job,
-            started,
-            binding,
-            trigger,
-            idempotency_key,
-            manifest,
-            package,
-            probe,
-            input is DEFERRED_INPUT,
+            job, started, binding, trigger, idempotency_key, manifest, package, probe
         )
 
     def reject(self, admission, code):
@@ -593,8 +593,6 @@ class FunctionInvocationService:
     def execute(self, admission, input, run_files=None) -> RunRecord:
         """Run an admitted invocation; run files are deleted when it ends."""
         try:
-            if admission.input_deferred and not _valid_input(admission.manifest, input):
-                return self.reject(admission, "invalid_input")
             return self._execute(admission, input, run_files)
         finally:
             if run_files is not None:

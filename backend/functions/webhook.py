@@ -2,8 +2,11 @@
 
 import json
 import os
+import threading
 import time
+from pathlib import Path
 
+import anyio
 from anyio import CancelScope
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -14,7 +17,6 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.agents.run_history import function_run_to_dict
 from backend.functions.invocation import (
-    DEFERRED_INPUT,
     Admission,
     _schema,
     _valid_input,
@@ -25,6 +27,7 @@ from backend.functions.run_files import (
     MAX_RUN_FILES,
     RunFiles,
     RunFilesTooLarge,
+    remove_leftovers,
 )
 
 MAX_INPUT_BYTES = 65536
@@ -35,6 +38,13 @@ MAX_MULTIPART_BYTES = (
     + MAX_INPUT_BYTES
     + (MAX_RUN_FILES + 1) * 2 * MAX_PART_HEADER_BYTES
 )
+# A multipart body must arrive within this time; the run is claimed after it.
+READ_DEADLINE_SECONDS = 60
+
+# Idempotency keys whose multipart body this process is reading. The host is
+# one process (see invocation._admission), so this is every reader of a key.
+_receiving = {}
+_receiving_lock = threading.Lock()
 
 
 class WebhookSettings(BaseModel):
@@ -115,6 +125,10 @@ class WebhookPolicy:
 def register_webhook_routes(router, service, store, authorize, existing):
     policy = WebhookPolicy(store)
     service.webhook_policy = policy
+    # Private state beside the credentials, outside graph data and exports.
+    files_root = Path(store.path).parent / "function-run-files"
+    # Routes are registered once at startup, before any run holds files.
+    remove_leftovers(files_root)
 
     @router.put("/functions/{function_id}/webhook-settings")
     def set_settings(function_id: str, settings: WebhookSettings, request: Request):
@@ -179,6 +193,7 @@ def register_webhook_routes(router, service, store, authorize, existing):
                 options.get(b"boundary"),
                 binding,
                 idempotency_key,
+                files_root,
             )
         data = bytearray()
         async for chunk in request.stream():
@@ -220,55 +235,104 @@ def _response(job):
 
 
 async def _invoke_with_files(
-    service, function_id, request, boundary, binding, idempotency_key
+    service, function_id, request, boundary, binding, idempotency_key, files_root
 ):
-    """Claim the run before reading the body, so only a claimed run stores files."""
+    """Read the body before claiming the run, so an upload never holds it busy.
+
+    The idempotency key is held in-process while the body is read, so only one
+    delivery of a key stores files; the others then replay its record.
+    """
     try:
         manifest, _ = load_manifest(service.root, function_id)
     except (ValueError, OSError):
         raise HTTPException(422)
     if manifest["contract_version"] != "3" or not boundary:
         raise HTTPException(422)
-    # A claimed record must be finished even if the client goes away, or it
-    # would hold the function busy; shield every step that owns it.
-    with CancelScope(shield=True):
+    key = (function_id, idempotency_key)
+    while True:
+        with _receiving_lock:
+            held = _receiving.get(key) if idempotency_key is not None else None
+            if held is None:
+                done = threading.Event()
+                if idempotency_key is not None:
+                    _receiving[key] = done
+                break
+        while not held.is_set():
+            await anyio.sleep(0.05)
         try:
+            existing = await run_in_threadpool(
+                service.replay_webhook, function_id, idempotency_key, binding
+            )
+        except PermissionError:
+            raise HTTPException(403)
+        if existing is not None:
+            return _response(existing)
+
+    def release():
+        with _receiving_lock:
+            if _receiving.get(key) is done:
+                del _receiving[key]
+        done.set()
+
+    def refuse(code):
+        return service.refuse(
+            function_id,
+            code,
+            actor_binding=binding,
+            idempotency_key=idempotency_key,
+        )
+
+    files = None
+    try:
+        code = await run_in_threadpool(
+            service.precheck, function_id, trigger="webhook", actor_binding=binding
+        )
+        if code is not None:
+            return _response(await run_in_threadpool(refuse, code))
+        files = RunFiles(files_root)
+        status = None
+        try:
+            with anyio.fail_after(READ_DEADLINE_SECONDS):
+                value = await _read_multipart(request, boundary, files)
+        except TimeoutError:
+            # The deadline is not a property of the body: a retry may succeed.
+            raise HTTPException(408)
+        except RunFilesTooLarge:
+            code, status = "input_too_large", 413
+        except ValueError:
+            code, status = "invalid_input", 422
+        else:
+            if not _valid_input(manifest, value):
+                code, status = "invalid_input", 422
+        if code is not None:
+            # Like a refused JSON input, a refused body is final for its key.
+            with CancelScope(shield=True):
+                await run_in_threadpool(refuse, code)
+            raise HTTPException(status)
+        # Once the run is claimed it must be finished even if the client goes
+        # away, or it would hold the function busy.
+        with CancelScope(shield=True):
             admitted = await run_in_threadpool(
                 service.admit,
                 function_id,
-                DEFERRED_INPUT,
+                value,
                 trigger="webhook",
                 actor_binding=binding,
                 idempotency_key=idempotency_key,
             )
-        except PermissionError:
-            raise HTTPException(403)
-    if not isinstance(admitted, Admission):
-        return _response(admitted)
-    files = None
-    try:
-        files = RunFiles()
-        value = await _read_multipart(request, boundary, files)
-        if not _valid_input(admitted.manifest, value):
-            raise ValueError("Invalid input")
-    except BaseException as exc:
+            release()
+            if not isinstance(admitted, Admission):
+                return _response(admitted)
+            owned, files = files, None
+            return _response(
+                await run_in_threadpool(service.execute, admitted, value, owned)
+            )
+    except PermissionError:
+        raise HTTPException(403)
+    finally:
         if files is not None:
             files.close()
-        too_large = isinstance(exc, RunFilesTooLarge)
-        with CancelScope(shield=True):
-            await run_in_threadpool(
-                service.reject,
-                admitted,
-                "input_too_large" if too_large else "invalid_input",
-            )
-        if too_large:
-            raise HTTPException(413)
-        if isinstance(exc, ValueError):
-            raise HTTPException(422)
-        raise
-    with CancelScope(shield=True):
-        job = await run_in_threadpool(service.execute, admitted, value, files)
-    return _response(job)
+        release()
 
 
 async def _read_multipart(request, boundary, files):

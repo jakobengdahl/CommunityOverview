@@ -191,7 +191,7 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12); version 3 accepts the same triggers. |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Version 1 accepts only `"graph"`, the default (§13). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
@@ -564,8 +564,7 @@ Run-level error codes are a closed set:
 | `rejected` | `invalid_manifest` | The manifest failed validation (§4.3). |
 | `rejected` | `not_enabled` | The function or one of its declared grants is not enabled (§4.4). |
 | `rejected` | `access_denied` | The invoking actor lacks the access §5.1 requires. |
-| `rejected` | `invalid_input` | `input` failed `input_schema`, or a version 3 multipart webhook body was malformed. |
-| `rejected` | `input_too_large` | A version 3 webhook call exceeded the per-call file count or size cap. |
+| `rejected` | `invalid_input` | `input` failed `input_schema`. |
 | `rejected` | `chain_depth_exceeded` | The chain-depth limit was reached (§9). |
 | `rejected` | `busy` | Another run of the same function is in progress (§8). |
 | `rejected` | `isolation_below_minimum` | The runner's isolation level is below the instance's `isolation_minimum` (§3.1). |
@@ -624,39 +623,6 @@ still apply. A function accepts at most 60 webhook requests per minute. The rout
 uses `Idempotency-Key` and the normal single-run and timeout limits. Uploaded
 attachment references in input do not grant access to attachments. Multipart
 upload and HMAC authentication are not supported by this version.
-
-### Version 3: webhook files
-
-Version 3 adds files to version 2 webhook calls; its manifests accept the same
-fields. A webhook call to a version 3 function may be `multipart/form-data`
-with exactly one part named `input` holding the JSON input object (at most
-64 KiB) and up to 10 file parts (parts with a filename) totalling at most
-20 MiB. These caps are fixed; a hosted layer adds per-plan quotas through the
-execution admission hook, whose context carries the run's `input_bytes`.
-
-The host claims the run record for the `Idempotency-Key` before it reads the
-body: a replayed, busy or rejected call receives its record and stores
-nothing. Files are then held in private run-scoped temporary storage, never in
-graph data or exports, and deleted when the run ends, including when the body
-is refused (`input_too_large` with HTTP 413, `invalid_input` with HTTP 422) or
-the run fails. File bytes and paths never enter the envelope. Version 1 and 2
-functions refuse multipart calls with HTTP 422 before anything is claimed.
-
-A run that received files has three more tools; in other runs they return
-`unknown_tool`:
-
-| Tool | Grant | Does |
-|---|---|---|
-| `run_files.list` | none | Lists the run's files: opaque `file_id`, `filename`, `declared_content_type`, `size`. |
-| `run_files.read` | none | `file_id`, optional `offset` and `max_chars` (at most 50,000): text extracted under the attachment type policy and ADR 0010 extraction bounds, as `read_node_attachment` returns it. |
-| `graph.attach_run_file` | `graph:write` | `node_id`, `file_id`: stores the file as an attachment of the node through the attachment upload path (type checks, node rules and caps). |
-
-A `file_id` the run does not own returns `invalid_arguments`. Results that
-carry file names or text have `"untrusted_content": true` and the ADR 0010
-notice. Accepting files needs no write access, but attaching one is a graph
-write: it needs `graph:write` and, for webhook runs, the write switch. An
-attached file is an ordinary attachment, read back through the attachment
-tools as untrusted content.
 
 ## 13. Reserved for later versions
 

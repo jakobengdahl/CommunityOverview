@@ -6,7 +6,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
+
+import anyio
 
 import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -19,8 +21,6 @@ from backend.agents.execution import (
     RetryPolicy,
     SqliteExecutionStore,
 )
-from backend.core.attachment_extract import ExtractionLimits
-from backend.core.attachment_types import parse_allowed_types
 from backend.functions import invocation, run_files, webhook
 from backend.functions.runner import FunctionRunResult, RunnerProbe
 from backend.functions.token_store import WebhookTokenStore
@@ -247,11 +247,7 @@ def files_host(tmp_path, monkeypatch):
     token = tokens.mint("example", "graph-a", "test")
     hook = Mock()
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
-    graph = SimpleNamespace(
-        authorization_hook=hook,
-        attachment_settings=None,
-        add_node_attachment=AsyncMock(return_value={"success": True}),
-    )
+    graph = SimpleNamespace(authorization_hook=hook)
     runner = Mock()
     runner.probe.return_value = RunnerProbe("full", (), ("python",))
     history = SqliteExecutionStore(
@@ -267,8 +263,8 @@ def files_host(tmp_path, monkeypatch):
     created = []
 
     class Recorded(run_files.RunFiles):
-        def __init__(self):
-            super().__init__()
+        def __init__(self, parent):
+            super().__init__(parent)
             created.append(self._directory)
 
     monkeypatch.setattr(webhook, "RunFiles", Recorded)
@@ -297,117 +293,57 @@ def files_host(tmp_path, monkeypatch):
             headers=headers,
         )
 
+    def running():
+        return [
+            job
+            for job in history.list_jobs(agent_id="example")
+            if job.state == ExecutionState.RUNNING
+        ]
+
     with TestClient(app) as client:
         yield SimpleNamespace(
-            service=service, graph=graph, execute=execute, created=created, post=post
+            service=service,
+            graph=graph,
+            tokens=tokens,
+            root=tmp_path / "function-run-files",
+            execute=execute,
+            created=created,
+            post=post,
+            running=running,
         )
     history.close()
 
 
-def _tool(broker, name, **arguments):
-    response = broker.handle_request(
-        {"id": 1, "params": {"name": name, "arguments": arguments}}
-    )
-    return response.get("result") or response["error"]["data"]["code"]
-
-
-@pytest.mark.parametrize(
-    "allow_write,content_access,attached",
-    [
-        (False, "read_write", "grant_denied"),
-        (True, "read_write", "ok"),
-        (True, "read", "access_denied"),
-    ],
-)
-def test_files_are_run_inputs_read_through_broker_and_deleted(
-    files_host, monkeypatch, caplog, allow_write, content_access, attached
-):
+@pytest.mark.parametrize("fails", [False, True])
+def test_files_are_run_inputs_outside_envelope_and_deleted(files_host, fails):
     host = files_host
-    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", content_access)
-    attachment = {"id": "att-1", "sha256": "0" * 64, "size": 13}
-    host.graph.add_node_attachment.return_value = {
-        "success": True,
-        "attachment": attachment,
-    }
-    # The configured file cap bounds extraction, under the process-wide slots.
-    host.graph.attachment_settings = SimpleNamespace(
-        allowed_types=parse_allowed_types(None),
-        limits=SimpleNamespace(max_file_bytes=13),
-    )
-    slots = Mock()
-    slots.acquire.return_value = True
-    host.graph._attachment_read_tools = SimpleNamespace(
-        extraction_limits=ExtractionLimits(),
-        limits=SimpleNamespace(extract_timeout_seconds=5),
-        slots=slots,
-    )
-    host.service.webhook_policy.set(
-        "example",
-        "graph-a",
-        host.service.webhook_policy.store.get("example")["id"],
-        SimpleNamespace(enabled=True, allow_write=allow_write),
-    )
     seen = {}
 
     def run(runner, spec, broker, envelope):
         seen["input"] = envelope["invocation"]["input"]
         seen["package"] = set(spec.files)
         seen["present"] = os.path.isdir(host.created[0])
-        listed = _tool(broker, "run_files.list")
-        seen["listed"] = listed
-        seen["text"] = _tool(broker, "run_files.read", file_id="file-1")
-        seen["binary"] = _tool(broker, "run_files.read", file_id="file-2")
-        seen["big"] = _tool(broker, "run_files.read", file_id="file-3")
-        seen["foreign"] = _tool(broker, "run_files.read", file_id="../file-1")
-        seen["attach"] = _tool(
-            broker, "graph.attach_run_file", node_id="n1", file_id="file-1"
-        )
-        if allow_write:
-            raise RuntimeError("the run fails after attaching")
+        seen["files"] = [(f.filename, f.size) for f in broker.context.run_files.list()]
+        if fails:
+            raise RuntimeError("the run fails")
         return FunctionRunResult("succeeded", output={})
 
     host.execute.side_effect = run
-    with caplog.at_level("INFO", logger="attachments.audit"):
-        response = host.post(
-            files={
-                "a": ("notes.txt", b"hello webhook", "text/plain"),
-                "b": ("blob.bin", b"\x00\x01\x02", "application/octet-stream"),
-                "c": ("big.txt", b"x" * 14, "text/plain"),
-            }
-        )
+    response = host.post(
+        files={
+            "a": ("notes.txt", b"hello webhook", "text/plain"),
+            "b": ("blob.bin", b"\x00\x01\x02", "application/octet-stream"),
+        }
+    )
     assert response.status_code == 200
-    assert response.json()["status"] == ("failed" if allow_write else "succeeded")
-    # G4: bytes and paths stay out of the envelope and the package.
+    assert response.json()["status"] == ("failed" if fails else "succeeded")
+    # Bytes and paths stay out of the envelope and the package.
     assert seen["input"] == {"value": 1} and seen["package"] == {
         "main.py",
         "function.json",
     }
+    assert seen["files"] == [("notes.txt", 13), ("blob.bin", 3)]
     assert seen["present"] and not os.path.exists(host.created[0])
-    assert seen["listed"]["untrusted_content"] is True
-    assert [(f["file_id"], f["size"]) for f in seen["listed"]["files"]] == [
-        ("file-1", 13),
-        ("file-2", 3),
-        ("file-3", 14),
-    ]
-    assert seen["text"]["untrusted_content"] is True
-    assert seen["text"]["segments"][0]["text"] == "hello webhook"
-    assert seen["binary"]["extraction_status"] == "unsupported_type"
-    assert seen["binary"]["segments"] == []
-    assert seen["big"]["extraction_status"] == "too_large"
-    assert slots.acquire.call_count == slots.release.call_count == 2
-    assert seen["foreign"] == "invalid_arguments"
-    audits = [r for r in caplog.records if r.name == "attachments.audit"]
-    if attached == "ok":
-        assert seen["attach"]["attachment"] == attachment
-        call = host.graph.add_node_attachment.call_args
-        assert call.args == ("n1",) and call.kwargs["content"] == b"hello webhook"
-    else:
-        assert seen["attach"] == attached
-        host.graph.add_node_attachment.assert_not_called()
-    # Every attachment write the broker attempts is audited (ADR 0010 §6).
-    assert [(r.event, r.outcome) for r in audits] == (
-        [] if attached == "grant_denied" else [("attachment_added", attached)]
-    )
 
 
 def test_concurrent_replays_claim_once_and_refusals_store_nothing(
@@ -422,22 +358,24 @@ def test_concurrent_replays_claim_once_and_refusals_store_nothing(
         return FunctionRunResult("succeeded", output={})
 
     host.execute.side_effect = run
-    # Every replay passes the idempotency lookup before any of them claims.
+    # Every replay passes the first idempotency lookup before any of them claims.
     barrier = Barrier(3)
     lookup = host.service.replay_webhook
+    calls = []
 
     def racing_lookup(*args):
-        barrier.wait(5)
+        calls.append(args)
+        if len(calls) <= 3:
+            barrier.wait(5)
         return lookup(*args)
 
     monkeypatch.setattr(host.service, "replay_webhook", racing_lookup)
     with ThreadPoolExecutor(max_workers=3) as pool:
-        calls = [pool.submit(host.post, "delivery") for _ in range(3)]
+        posts = [pool.submit(host.post, "delivery") for _ in range(3)]
         assert entered.wait(5)
-        monkeypatch.setattr(host.service, "replay_webhook", lookup)
         assert host.post("other").status_code == 409
         release.set()
-        responses = [call.result() for call in calls]
+        responses = [post.result() for post in posts]
     assert len({r.json()["id"] for r in responses}) == 1
     assert len(host.created) == 1 and not os.path.exists(host.created[0])
     host.execute.assert_called_once()
@@ -457,11 +395,21 @@ def test_concurrent_replays_claim_once_and_refusals_store_nothing(
             413,
             "input_too_large",
         ),
+        (
+            {
+                "files": [
+                    ("f", (f"{i}.txt", b"x", "text/plain"))
+                    for i in range(run_files.MAX_RUN_FILES + 1)
+                ]
+            },
+            413,
+            "input_too_large",
+        ),
         ({"value": "[1]"}, 422, "invalid_input"),
         ({"value": "{"}, 422, "invalid_input"),
     ],
 )
-def test_refused_body_rejects_claimed_run_and_deletes_files(
+def test_refused_body_records_rejection_and_deletes_files(
     files_host, monkeypatch, body, status, code
 ):
     host = files_host
@@ -473,10 +421,45 @@ def test_refused_body_rejects_claimed_run_and_deletes_files(
     assert replay["status"] == "rejected" and replay["error"]["code"] == code
 
 
-def test_file_store_failure_rejects_claimed_run(files_host, monkeypatch):
+def test_slow_body_holds_no_run_and_retry_succeeds(files_host, monkeypatch):
     host = files_host
+    read = webhook._read_multipart
+    seen = {}
+
+    async def slow(request, boundary, files):
+        value = await read(request, boundary, files)
+        seen["running"] = host.running()
+        await anyio.sleep(5)
+        return value
+
+    monkeypatch.setattr(webhook, "READ_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(webhook, "_read_multipart", slow)
+    assert host.post("key").status_code == 408
+    # The busy flag is claimed only after the body arrived.
+    assert seen["running"] == [] and host.running() == []
+    assert not os.path.exists(host.created[0])
+    monkeypatch.setattr(webhook, "_read_multipart", read)
+    assert host.post("key").json()["status"] == "succeeded"
+
+
+def test_file_store_failure_claims_nothing(files_host, monkeypatch):
+    host = files_host
+    recorded = webhook.RunFiles
     monkeypatch.setattr(webhook, "RunFiles", Mock(side_effect=OSError))
     with pytest.raises(OSError):
         host.post("key")
     host.execute.assert_not_called()
-    assert host.post("key").json()["status"] == "rejected"
+    assert host.running() == [] and webhook._receiving == {}
+    monkeypatch.setattr(webhook, "RunFiles", recorded)
+    assert host.post("key").json()["status"] == "succeeded"
+
+
+def test_startup_removes_leftover_run_files(files_host):
+    host = files_host
+    leftover = host.root / "function-run-crashed"
+    leftover.mkdir(parents=True)
+    (leftover / "file-1").write_bytes(b"left behind")
+    register_webhook_routes(
+        APIRouter(), host.service, host.tokens, Mock(), host.tokens.get
+    )
+    assert host.root.is_dir() and list(host.root.iterdir()) == []

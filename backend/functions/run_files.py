@@ -1,8 +1,9 @@
 """Run-scoped webhook files: private temporary inputs of exactly one run.
 
-Files live in a private temporary directory, outside graph data and exports,
-named by opaque ids so no caller-chosen text becomes a path. The directory is
-removed when the run ends, whatever the outcome.
+Files live in a private directory beside the webhook credential database,
+outside graph data and exports, named by opaque ids so no caller-chosen text
+becomes a path. A run's directory is removed when the run ends, whatever the
+outcome; ``remove_leftovers`` clears what a crashed process left behind.
 """
 
 import os
@@ -28,10 +29,24 @@ class RunFile:
     size: int
 
 
+def remove_leftovers(parent):
+    """Delete every run directory under ``parent``; call only at startup."""
+    try:
+        entries = list(os.scandir(parent))
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path, ignore_errors=True)
+        else:
+            os.unlink(entry.path)
+
+
 class RunFiles:
-    def __init__(self):
+    def __init__(self, parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
         # mkdtemp creates the directory readable by this user only.
-        self._directory = tempfile.mkdtemp(prefix="function-run-")
+        self._directory = tempfile.mkdtemp(prefix="function-run-", dir=parent)
         self._files = {}
         self.total_bytes = 0
 
