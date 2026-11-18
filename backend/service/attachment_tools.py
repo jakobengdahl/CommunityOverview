@@ -26,6 +26,7 @@ from backend.core import attachment_extract as extraction
 from backend.core.attachment_retrieval import Segment, rank_passages
 from backend.core.attachment_types import (
     UnsupportedAttachmentType,
+    _central_directory_is_bounded,
     check_allowed,
     detect_attachment_type,
     parse_allowed_types,
@@ -423,6 +424,16 @@ class AttachmentReadTools:
         if len(data) > limits.max_file_bytes:
             return error("attachment_too_large")
         try:
+            if data.startswith(b"PK\x03\x04"):
+                # Type sniffing may read an ODF member, so apply the same ZIP
+                # checks as the extractor before any member is decompressed.
+                if not _central_directory_is_bounded(io.BytesIO(data)):
+                    raise UnsupportedAttachmentType("unreadable ZIP directory")
+                try:
+                    with extraction._open_zip(data, self.extraction_limits):
+                        pass
+                except Exception as exc:
+                    raise UnsupportedAttachmentType("ZIP preflight failed") from exc
             content_type = detect_attachment_type(io.BytesIO(data), record.filename)
             check_allowed(content_type, allowed)
         except UnsupportedAttachmentType:
