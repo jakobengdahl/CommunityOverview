@@ -38,7 +38,8 @@ MAX_MULTIPART_BYTES = (
     + MAX_INPUT_BYTES
     + (MAX_RUN_FILES + 1) * 2 * MAX_PART_HEADER_BYTES
 )
-# A multipart body must arrive within this time; the run is claimed after it.
+# A multipart body must arrive within this time; the run is claimed after it,
+# and the function is reserved in-process until then.
 READ_DEADLINE_SECONDS = 60
 
 # Idempotency keys whose multipart body this process is reading. The host is
@@ -237,10 +238,12 @@ def _response(job):
 async def _invoke_with_files(
     service, function_id, request, boundary, binding, idempotency_key, files_root
 ):
-    """Read the body before claiming the run, so an upload never holds it busy.
+    """Read the body before claiming the run, so a slow upload records nothing.
 
     The idempotency key is held in-process while the body is read, so only one
-    delivery of a key stores files; the others then replay its record.
+    delivery of a key stores files; the others then replay its record. The
+    function is reserved in-process for the read, so no other call can claim
+    it and make this one busy after its files were stored.
     """
     try:
         manifest, _ = load_manifest(service.root, function_id)
@@ -274,7 +277,7 @@ async def _invoke_with_files(
             idempotency_key=idempotency_key,
         )
 
-    files = None
+    files = reservation = None
     try:
         if idempotency_key is not None:
             # A delivery of this key may have finished since the route checked.
@@ -288,6 +291,9 @@ async def _invoke_with_files(
         )
         if code is not None:
             return _response(await run_in_threadpool(refuse, code))
+        reservation = await run_in_threadpool(service.reserve, function_id)
+        if reservation is None:
+            return _response(await run_in_threadpool(refuse, "busy"))
         files = RunFiles(files_root)
         status = None
         try:
@@ -318,8 +324,10 @@ async def _invoke_with_files(
                 trigger="webhook",
                 actor_binding=binding,
                 idempotency_key=idempotency_key,
+                reservation=reservation,
             )
             release()
+            service.release(function_id, reservation)
             if not isinstance(admitted, Admission):
                 return _response(admitted)
             owned, files = files, None
@@ -331,6 +339,8 @@ async def _invoke_with_files(
     finally:
         if files is not None:
             files.close()
+        if reservation is not None:
+            service.release(function_id, reservation)
         release()
 
 

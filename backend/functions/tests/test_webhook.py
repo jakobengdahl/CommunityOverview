@@ -448,25 +448,44 @@ def test_refused_body_records_rejection_and_deletes_files(
     assert replay["status"] == "rejected" and replay["error"]["code"] == code
 
 
-def test_slow_body_holds_no_run_and_retry_succeeds(files_host, monkeypatch):
+@pytest.mark.parametrize("slow_read", [True, False])
+def test_reading_body_records_no_run_but_no_other_call_claims_it(
+    files_host, monkeypatch, slow_read
+):
     host = files_host
     read = webhook._read_multipart
     seen = {}
 
-    async def slow(request, boundary, files):
+    async def reading(request, boundary, files):
         value = await read(request, boundary, files)
         seen["running"] = host.running()
-        await anyio.sleep(5)
+        # Another call arrives after this one stored its files.
+        seen["other"] = host.service.admit(
+            "example",
+            {"value": 2},
+            trigger="webhook",
+            actor_binding={
+                "actor_id": "function_webhook:example",
+                "actor_type": "function_webhook",
+                "auth_source": "webhook",
+                "graph_id": "graph-a",
+            },
+        )
+        if slow_read:
+            await anyio.sleep(5)
         return value
 
     monkeypatch.setattr(webhook, "READ_DEADLINE_SECONDS", 0.2)
-    monkeypatch.setattr(webhook, "_read_multipart", slow)
-    assert host.post("key").status_code == 408
-    # The busy flag is claimed only after the body arrived.
+    monkeypatch.setattr(webhook, "_read_multipart", reading)
+    response = host.post("key")
     assert seen["running"] == [] and host.running() == []
+    assert seen["other"].result["error"]["code"] == "busy"
     assert not os.path.exists(host.created[0])
-    monkeypatch.setattr(webhook, "_read_multipart", read)
-    assert host.post("key").json()["status"] == "succeeded"
+    if slow_read:
+        assert response.status_code == 408
+        monkeypatch.setattr(webhook, "_read_multipart", read)
+        response = host.post("key")
+    assert response.json()["status"] == "succeeded"
 
 
 def test_file_store_failure_claims_nothing(files_host, monkeypatch):

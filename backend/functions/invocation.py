@@ -301,6 +301,32 @@ class FunctionInvocationService:
             self._require_durable_history()
         self.runner = runner or HardenedSubprocessRunner()
         self.isolation_minimum = isolation_minimum
+        # Functions held by an unclaimed webhook upload, by function id.
+        self._reserved = {}
+
+    def _busy(self, function_id, previous, reservation=None):
+        return any(job.state == ExecutionState.RUNNING for job in previous) or (
+            self._reserved.get(function_id, reservation) is not reservation
+        )
+
+    def reserve(self, function_id):
+        """Hold an idle function for a call that stores files before admit.
+
+        Other admissions see it as busy until ``release``; None if it is busy.
+        """
+        with _admission(self.root):
+            previous = self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            )
+            if self._busy(function_id, previous):
+                return None
+            reservation = self._reserved[function_id] = object()
+        return reservation
+
+    def release(self, function_id, reservation):
+        with _admission(self.root):
+            if self._reserved.get(function_id) is reservation:
+                del self._reserved[function_id]
 
     def _require_durable_history(self):
         # Enabled functions must share persistent history across host restarts
@@ -358,7 +384,7 @@ class FunctionInvocationService:
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
                     return self._replay(existing, binding)
-            if any(job.state == ExecutionState.RUNNING for job in previous):
+            if self._busy(function_id, previous):
                 return self._rejected(function_id, binding, idempotency_key, "busy")
         return None
 
@@ -502,10 +528,12 @@ class FunctionInvocationService:
         actor_binding,
         idempotency_key=None,
         correlation_id=None,
+        reservation=None,
     ):
         """Claim the run record, or return the replayed or rejected record.
 
-        An ``Admission`` must end in ``execute``.
+        An ``Admission`` must end in ``execute``. ``reservation`` is the
+        caller's own ``reserve`` hold, which does not make it busy.
         """
         if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
             raise ValueError("Invalid function id")
@@ -553,9 +581,7 @@ class FunctionInvocationService:
                 job.payload["function_version"] = manifest["version"]
                 job.origin = f"function:{function_id}@{manifest['version']}"
             try:
-                if code is None and any(
-                    j.state == ExecutionState.RUNNING for j in previous
-                ):
+                if code is None and self._busy(function_id, previous, reservation):
                     code = "busy"
                 if code is None:
                     code, probe = self._isolation()
