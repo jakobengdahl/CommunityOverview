@@ -866,13 +866,18 @@ class TestAppearanceOperations:
         restored = restored_store.get(session.id)
         assert restored.to_dict() == session.to_dict()
         assert restored_store.apply_state_op(restored, op) is None
-        current_retry = {**op, "client_id": "second", "base_revision": 1,
-                         "clear_base_revision": 2, "selection": {"builtin": True}}
+        current_retry = {
+            **op,
+            "client_id": "second",
+            "base_revision": 1,
+            "clear_base_revision": 2,
+            "selection": {"builtin": True},
+        }
         assert restored_store.apply_state_op(restored, current_retry) is None
         receipt = json.dumps([op["operation_id"]])
-        restored.state["shape_operation_ids"][json.dumps(["first", op["operation_id"]])] = (
-            restored.state["shape_operation_ids"].pop(receipt)
-        )
+        restored.state["shape_operation_ids"][
+            json.dumps(["first", op["operation_id"]])
+        ] = restored.state["shape_operation_ids"].pop(receipt)
         assert restored_store.apply_state_op(restored, current_retry) is None
         with pytest.raises(ShapeRevisionConflict):
             restored_store.apply_state_op(restored, {**op, "operation_id": "new"})

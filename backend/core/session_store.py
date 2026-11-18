@@ -1143,6 +1143,14 @@ class SessionStore:
             if not trusted_replay and (
                 receipt in receipts or any(k.endswith(legacy_suffix) for k in receipts)
             ):
+                previous = receipts.get(receipt)
+                if isinstance(previous, dict) and previous.get("client_id") != op.get(
+                    "client_id"
+                ):
+                    key = ("node:" if node else "type:") + target
+                    revision = state["shape_revisions"].get(key, 0)
+                    if op.get("base_revision") != revision:
+                        raise ShapeRevisionConflict(key, revision)
                 return None
             if node and target not in state["node_refs"]:
                 raise OpError("appearance node must belong to the session")
@@ -1184,7 +1192,10 @@ class SessionStore:
             for rev_key in targets:
                 revisions[rev_key] = revisions.get(rev_key, 0) + 1
             if not trusted_replay:
-                receipts[receipt] = session.seq + 1
+                receipts[receipt] = {
+                    "seq": session.seq + 1,
+                    "client_id": op.get("client_id"),
+                }
             applied.update(
                 selection=selection, revisions={k: revisions[k] for k in targets}
             )
