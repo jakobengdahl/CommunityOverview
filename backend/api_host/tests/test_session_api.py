@@ -1708,7 +1708,13 @@ def test_appearance_writes_require_current_permission_and_capability(
     applied = test_app.post(url, json=body)
     assert applied.status_code == 200
     assert test_app.post(url, json=body).json()["seq"] == applied.json()["seq"]
-    conflict = test_app.post(url, json={**body, "client_id": "second"})
+    retry = test_app.post(url, json={**body, "client_id": "second"})
+    assert retry.status_code == 200
+    assert retry.json()["seq"] == applied.json()["seq"]
+    conflict = test_app.post(
+        url,
+        json={**body, "client_id": "second", "ops": [{**op, "operation_id": "new"}]},
+    )
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error"] == "shape_revision_conflict"
     legacy = dict(client_id="old", ops=[dict(op="nodes_hidden", node_ids=["a"])])

@@ -874,11 +874,18 @@ class TestAppearanceOperations:
             "selection": {"builtin": True},
         }
         assert restored_store.apply_state_op(restored, current_retry) is None
+        reconnect_retry = {**op, "client_id": "second"}
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
         receipt = json.dumps([op["operation_id"]])
         restored.state["shape_operation_ids"][
             json.dumps(["first", op["operation_id"]])
         ] = restored.state["shape_operation_ids"].pop(receipt)
         assert restored_store.apply_state_op(restored, current_retry) is None
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
         with pytest.raises(ShapeRevisionConflict):
             restored_store.apply_state_op(restored, {**op, "operation_id": "new"})
         assert restored.seq == seq + 1
