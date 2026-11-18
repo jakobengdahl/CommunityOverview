@@ -1722,6 +1722,12 @@ def test_appearance_writes_require_current_permission_and_capability(
     assert test_app.post(undo_url, json={"client_id": "first"}).status_code == 409
     assert test_app.post(undo_url, json=replay).status_code == 200
     assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {}
+    session = manager.get_session(sid)
+    saved_activity = session.activity_log[:]
+    session.activity_log.clear()
+    assert test_app.post(url, json=legacy).status_code == 409
+    assert test_app.post(undo_url, json={"client_id": "first"}).status_code == 409
+    session.activity_log[:] = saved_activity
     assert test_app.post(f"/api/sessions/{sid}/redo", json=replay).status_code == 200
     assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {
         "Thing": {"builtin": True}

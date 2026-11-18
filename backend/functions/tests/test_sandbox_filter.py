@@ -162,7 +162,6 @@ def test_work_files_can_be_managed_but_not_executed(storage):
         handler(
             ATTEMPT,
             """
-            import shutil, sys
             os.makedirs("a/b")
             open("a/b/f.txt", "w").write("x")
             attempt("rename across directories", lambda: os.rename(
@@ -170,7 +169,7 @@ def test_work_files_can_be_managed_but_not_executed(storage):
             attempt("read", lambda: open("a/f.txt").read())
             attempt("unlink", lambda: os.unlink("a/f.txt"))
             attempt("rmdir", lambda: os.rmdir("a/b"))
-            shutil.copy(sys.executable, "runtime-copy")
+            open("runtime-copy", "w").write("#!/bin/sh\\nexit 0\\n")
             os.chmod("runtime-copy", 0o700)
             attempt("execute a work file", lambda: os.execv(
                 "runtime-copy", ["runtime-copy", "-c", "pass"]))

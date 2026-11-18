@@ -731,6 +731,35 @@ class TestRestoreRing:
 
 
 class TestAppearanceOperations:
+    def test_special_dictionary_keys_survive_persistence_and_removal(self, tmp_path):
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["__proto__"]})
+        for op in (
+            dict(op="node_shape_set", node_id="__proto__"),
+            dict(op="type_shape_set", type="__proto__"),
+        ):
+            store.apply_state_op(
+                session,
+                {
+                    **op,
+                    "version": 1,
+                    "selection": {"builtin": True},
+                    "base_revision": 0,
+                    "operation_id": op["op"],
+                    "client_id": "c",
+                },
+            )
+        store.persist(session)
+        restored = _store(tmp_path).get(session.id)
+        assert restored.state["shape_overrides"]["__proto__"] == {"builtin": True}
+        assert restored.state["type_shapes"]["__proto__"] == {"builtin": True}
+        store.apply_state_op(
+            session, {"op": "nodes_removed", "node_ids": ["__proto__"]}
+        )
+        assert "__proto__" not in session.state["shape_overrides"]
+        assert session.state["shape_revisions"]["node:__proto__"] == 2
+
     def test_validated_selections_reject_malformed_payloads(self, tmp_path):
         """Only complete supported selections can enter session state."""
         store = _store(tmp_path)

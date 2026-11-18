@@ -1930,6 +1930,7 @@ def _register_session_endpoints(
         if session and (
             session.state.get("shape_overrides")
             or session.state.get("type_shapes")
+            or session.state.get("shape_operation_ids")
             or any(
                 r.get("op") in {"node_shape_set", "type_shape_set"}
                 for r in session.activity_log
@@ -2707,6 +2708,14 @@ def create_rest_router(
         from backend.functions.routes import register_function_routes
 
         register_function_routes(router, function_invocation_service)
+        if hasattr(function_invocation_service, "webhook_token_store"):
+            from backend.functions.routes import register_token_routes
+
+            register_token_routes(
+                router,
+                function_invocation_service,
+                function_invocation_service.webhook_token_store,
+            )
 
     _register_search_endpoints(router, service)
     _register_similarity_endpoints(router, service)
