@@ -173,6 +173,8 @@ class BrokerContext:
     grant_enabled: Callable[[str], bool]
     max_tool_calls: int = MAX_TOOL_CALLS
     max_message_bytes: int = MAX_MESSAGE_BYTES
+    # backend.functions.run_files.RunFiles of a webhook call with files.
+    run_files: Any = None
 
 
 @dataclass
