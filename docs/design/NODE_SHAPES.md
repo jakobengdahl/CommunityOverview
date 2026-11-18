@@ -273,7 +273,9 @@ queue and any registered asynchronous local edit before replacing state; it
 rechecks local edits after the queue drains and repeats if either work source
 changed while waiting. Each target of a combined type-default and node-clear
 operation is applied independently when its revision is current, preserving a
-newer value for either target. Local
+newer value for either target. Resync also compares each captured appearance
+write with the reloaded baseline before folding or replaying it; an older
+acknowledged write cannot replace a newer collaborator value. Local
 editors hold autosave until their changes are ready for a fresh snapshot. A
 rejected stale appearance write is not retried
 as a fresh overwrite: its current revision is incorporated during resync, and

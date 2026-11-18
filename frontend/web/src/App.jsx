@@ -1089,12 +1089,8 @@ function App() {
         // `payload` either, and without this second read it would be
         // silently wiped by the reload with nothing to bring it back (review
         // round 6). An op present only in the first read (delivered and
-        // confirmed by the server while we waited) is harmless to keep too —
-        // replaying an already-confirmed op is redundant, never wrong, under
-        // the same idempotent-op contract this whole function already relies
-        // on (see this function's opening comment), so the union below errs
-        // on the side of including rather than trying to guess which read is
-        // more current.
+        // confirmed by the server while we waited) must also be considered;
+        // appearance revisions below prevent replay over a newer value.
         const pendingOpsAfter = capturePendingOps();
         const seenBefore = new Set(pendingOpsBefore);
         const unionedOps = pendingOpsBefore.concat(
@@ -1150,9 +1146,9 @@ function App() {
         // for its original caller (handleImageIngest), whose op is broadcast
         // under a shared, non-personal client id specifically so its own
         // echo is *not* filtered there.
-        for (const op of pendingOps) {
-          client.foldOpIntoBaseline(op);
-        }
+        const replayOps = pendingOps
+          .map((op) => client.foldOpIntoBaseline(op))
+          .filter(Boolean);
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
         // Re-checked every iteration, not just once before the loop (review
@@ -1168,7 +1164,7 @@ function App() {
         // resync's own return value is the one the caller should act on.
         // A pending membership op is not drawn here: its broadcast draws it.
         let appliedCount = 0;
-        for (const op of pendingOps) {
+        for (const op of replayOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (syncRef.current !== client) break;
           if (MEMBERSHIP_OPS.has(op?.op)) continue;

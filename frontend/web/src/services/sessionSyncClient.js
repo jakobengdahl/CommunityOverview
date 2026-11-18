@@ -1605,8 +1605,23 @@ export class SessionSyncClient {
    * A membership op is not folded: membership follows its broadcast.
    */
   foldOpIntoBaseline(op) {
-    if (MEMBERSHIP_OPS.has(op?.op)) return;
+    if (MEMBERSHIP_OPS.has(op?.op)) return op;
+    if (op?.op === 'node_shape_set' || op?.op === 'type_shape_set') {
+      // Captured outgoing writes carry base revisions, whereas applied ops
+      // carry their resulting revisions. Compare both forms against the reload.
+      const target = op.op === 'node_shape_set' ? `node:${op.node_id}` : `type:${op.type}`;
+      const revisions = { ...op.revisions };
+      if (revisions[target] == null && Number.isInteger(op.base_revision))
+        revisions[target] = op.base_revision + 1;
+      if (op.clear_node_id != null && Number.isInteger(op.clear_base_revision)) {
+        const nodeKey = `node:${op.clear_node_id}`;
+        if (revisions[nodeKey] == null) revisions[nodeKey] = op.clear_base_revision + 1;
+      }
+      op = currentAppearanceOp(this._baseline, { ...op, revisions });
+      if (!op) return null;
+    }
     this._baseline = applyOpToMirror(this._baseline, op);
+    return op;
   }
 
   /**

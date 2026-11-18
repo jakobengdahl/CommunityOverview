@@ -1222,6 +1222,53 @@ describe('Server-backed session lifecycle', () => {
     foldLocalOpSpy.mockRestore();
   });
 
+  it.each([
+    [3, 3, { builtin: 'later' }, { builtin: 'later' }],
+    [3, 1, { builtin: 'old' }, { builtin: 'later' }],
+    [1, 3, { builtin: 'later' }, undefined],
+    [1, 1, { builtin: 'old' }, undefined],
+  ])('rebases captured appearance targets on resync (node %s, type %s)', async (nodeRev, typeRev, expectedType, expectedNode) => {
+    const pendingOp = {
+      op: 'type_shape_set', type: 'Actor', selection: { builtin: 'old' },
+      base_revision: 1, clear_node_id: 'node-a', clear_base_revision: 1,
+    };
+    const pending = vi.spyOn(SessionSyncClient.prototype, 'getPendingOps').mockReturnValue([pendingOp]);
+    const fold = vi.spyOn(SessionSyncClient.prototype, 'foldOpIntoBaseline');
+    const { container } = renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    const buttons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+    const source = await waitFor(() => {
+      const found = FakeEventSource.instances.find((es) => es.url.includes('/api/sessions/') && es.url.includes('/stream'));
+      expect(found).toBeTruthy();
+      return found;
+    });
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: {
+        node_refs: ['node-a'],
+        shape_overrides: { 'node-a': { builtin: 'later' } },
+        type_shapes: { Actor: { builtin: 'later' } },
+        shape_revisions: { 'node:node-a': nodeRev, 'type:Actor': typeRev },
+      },
+      resolved: { nodes: [NODE_A], edges: [] }, roster: [],
+    }));
+    act(() => source.onmessage({ data: JSON.stringify({ type: 'catch_up', seq: 5, ops: [{ op: 'nodes_hidden', node_ids: [] }], roster: [], claims: {} }) }));
+    await waitFor(() => expect(fold).toHaveBeenCalledWith(pendingOp));
+    await waitFor(() => {
+      const state = useGraphStore.getState();
+      expect(state.typeShapes.Actor).toEqual(expectedType);
+      expect(state.shapeOverrides['node-a']).toEqual(expectedNode);
+    });
+    const baseline = fold.mock.instances[0]._baseline;
+    expect(baseline.type_shapes.Actor).toEqual(expectedType);
+    expect(baseline.shape_overrides['node-a']).toEqual(expectedNode);
+    expect(baseline.shape_revisions).toEqual({ 'node:node-a': Math.max(nodeRev, 2), 'type:Actor': Math.max(typeRev, 2) });
+    pending.mockRestore();
+    fold.mockRestore();
+  });
+
   // Review round 1 regression: a bare local selection (no offline edits at
   // all) re-queues a selection_claimed op on every reconnect
   // (_readvertiseSelection). applyRemoteOp has no case for it — replaying it
