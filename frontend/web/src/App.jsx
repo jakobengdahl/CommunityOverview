@@ -805,20 +805,24 @@ function App() {
         }
         case 'node_shape_set':
         case 'type_shape_set': {
-          const mirror = applyOpToMirror(
-            {
-              shape_overrides: store.shapeOverrides,
-              type_shapes: store.typeShapes,
-              shape_revisions: store.shapeRevisions,
-            },
-            op
-          );
-          useGraphStore.setState({
-            shapeOverrides: mirror.shape_overrides,
-            typeShapes: mirror.type_shapes,
-            shapeRevisions: mirror.shape_revisions,
-          });
-          return true;
+          try {
+            const mirror = applyOpToMirror(
+              {
+                shape_overrides: store.shapeOverrides,
+                type_shapes: store.typeShapes,
+                shape_revisions: store.shapeRevisions,
+              },
+              op
+            );
+            useGraphStore.setState({
+              shapeOverrides: mirror.shape_overrides,
+              typeShapes: mirror.type_shapes,
+              shapeRevisions: mirror.shape_revisions,
+            });
+            return true;
+          } finally {
+            heldLayoutRelease?.();
+          }
         }
         case 'edge_intensity_set':
           if (typeof op.value !== 'number') return false;
@@ -2072,7 +2076,8 @@ function App() {
       // the session server-side lazily, preserving the "no empty session files"
       // behaviour of step 4 (an empty, never-edited session never connects).
       const sync = ensureSyncConnected(targetId);
-      sync?.syncState(nextState);
+      if (sync?.syncState(nextState))
+        state.consumeTypeShapeClearNodes(nextState.type_shape_clear_nodes);
       sessionStore.touchSession(targetId);
       setSessionsVersion((v) => v + 1);
     },
@@ -2919,7 +2924,10 @@ function App() {
             // The sync baseline already holds this op's layout: autosave
             // waits from now, not from when the ops ahead of it are done.
             const release =
-              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
+              op?.op === 'nodes_added' ||
+              op?.op === 'nodes_replaced' ||
+              op?.op === 'node_shape_set' ||
+              op?.op === 'type_shape_set'
                 ? syncRef.current?.holdLayoutSave() || null
                 : null;
             remoteOpsChainRef.current = remoteOpsChainRef.current

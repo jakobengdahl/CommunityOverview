@@ -1,4 +1,4 @@
-// covers: frontend/web/src/store/graphStore.js
+// covers: frontend/web/src/store/graphStore.js, frontend/web/src/services/sessionSyncClient.js
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 import { computeOps, applyOpToMirror, normalizeMirror } from '../src/services/sessionSyncClient';
@@ -68,6 +68,17 @@ describe('graphStore', () => {
       { op: 'type_shape_set', type: '__proto__', clear_node_id: 'b', base_revision: 1 },
     ]);
     expect(computeOps(ops.reduce(applyOpToMirror, before), after)).toEqual([]);
+    state.consumeTypeShapeClearNodes(state.typeShapeClearNodes);
+    expect(useGraphStore.getState().typeShapeClearNodes).toEqual({});
+    const restored = { ...after, shape_overrides: { a: { builtin: true } } };
+    expect(
+      computeOps(restored, after, useGraphStore.getState().typeShapeClearNodes)[0]
+    ).toMatchObject({ op: 'node_shape_set', node_id: 'a', selection: null });
+    useGraphStore.getState().setTypeShape('Thing', null, 'a');
+    const oldIntent = useGraphStore.getState().typeShapeClearNodes;
+    useGraphStore.getState().setTypeShape('Thing', null, 'b');
+    useGraphStore.getState().consumeTypeShapeClearNodes(oldIntent);
+    expect(useGraphStore.getState().typeShapeClearNodes.Thing).toEqual(['a', 'b']);
   });
 
   describe('AI assistant collapsed preference', () => {

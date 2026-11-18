@@ -741,6 +741,12 @@ const useGraphStore = create((set, get) => ({
   shapeOverrides: {},
   typeShapes: {},
   typeShapeClearNodes: {},
+  consumeTypeShapeClearNodes: (snapshot) =>
+    set((state) =>
+      state.typeShapeClearNodes === snapshot && Object.keys(snapshot).length
+        ? { typeShapeClearNodes: {} }
+        : state
+    ),
   setTypeShape: (type, selection, nodeId) =>
     set((state) => {
       const typeShapes = { ...state.typeShapes };

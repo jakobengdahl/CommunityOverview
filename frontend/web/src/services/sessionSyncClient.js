@@ -1695,6 +1695,7 @@ export class SessionSyncClient {
     }
     this._baseline = sent;
     if (ops.length) this._enqueue(ops);
+    return true;
   }
 
   /**

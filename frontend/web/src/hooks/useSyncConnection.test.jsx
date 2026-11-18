@@ -181,6 +181,23 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(appOnRemoteOps).not.toHaveBeenCalled();
   });
 
+  it('forwards appearance acknowledgements only from the active session', () => {
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    const onLocalAppearanceRevisions = vi.fn();
+    result.current.syncHandlersRef.current = { onLocalAppearanceRevisions };
+    let client;
+    act(() => {
+      client = result.current.ensureSyncConnected('1111-2222');
+    });
+    client.handlers.onLocalAppearanceRevisions({ 'node:a': 2 });
+    expect(onLocalAppearanceRevisions).toHaveBeenCalledWith({ 'node:a': 2 });
+    act(() => {
+      result.current.ensureSyncConnected('3333-4444');
+    });
+    client.handlers.onLocalAppearanceRevisions({ 'node:a': 3 });
+    expect(onLocalAppearanceRevisions).toHaveBeenCalledTimes(1);
+  });
+
   it('drops tagged remote ops for a different active session even when the client is still current', () => {
     const { result } = renderHook(() => useSyncConnection('3333-4444'));
     const appOnRemoteOps = vi.fn();

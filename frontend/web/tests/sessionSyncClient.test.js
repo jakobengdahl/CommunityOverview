@@ -3811,3 +3811,33 @@ it('keeps predicted appearance revisions through unchanged stale canvas snapshot
   expect(handlers.onRemoteOps).not.toHaveBeenCalled();
   client.close();
 });
+
+it('holds autosave until a queued remote appearance has reached the canvas', () => {
+  const onHeldSaveReleased = vi.fn();
+  const { client } = makeClient({ handlers: { onHeldSaveReleased } });
+  let release;
+  client.handlers.onRemoteOps = () => {
+    release = client.holdLayoutSave();
+  };
+  client.connect();
+  const canvas = { node_refs: ['a'], shape_overrides: {} };
+  client.setBaseline(canvas);
+  FakeEventSource.instances[0].emit({
+    type: 'op',
+    seq: 1,
+    client_id: 'other',
+    op: {
+      op: 'node_shape_set',
+      node_id: 'a',
+      selection: { builtin: true },
+      revisions: { 'node:a': 1 },
+    },
+  });
+  expect(client.syncState(canvas)).toBeUndefined();
+  expect(client.getPendingOps()).toEqual([]);
+  release();
+  expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
+  client.syncState({ ...canvas, shape_overrides: { a: { builtin: true } } });
+  expect(client.getPendingOps()).toEqual([]);
+  client.close();
+});

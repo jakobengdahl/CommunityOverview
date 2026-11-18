@@ -91,6 +91,10 @@ export function useSyncConnection(sessionId) {
           },
           onResync: (...a) => callIfCurrent('onResync', ...a),
           onRemoteOps: (...a) => callRemoteOpsIfCurrentSession(...a),
+          onLocalAppearanceRevisions: (...a) => {
+            if (targetId === activeSessionIdRef.current)
+              callIfCurrent('onLocalAppearanceRevisions', ...a);
+          },
           onPresence: (...a) => callIfCurrent('onPresence', ...a),
           onSelections: (...a) => callIfCurrent('onSelections', ...a),
           onLeases: (...a) => callIfCurrent('onLeases', ...a),
