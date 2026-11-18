@@ -135,20 +135,37 @@ class TestHistoryReplay:
         mgr.redo_last_action(s.id, "mcp-agent")
         assert s.state["positions"]["n1"] == {"x": 9.0, "y": 9.0}
 
+
 @pytest.mark.parametrize("action", ["undo", "redo", "remove"])
 async def test_appearance_writes_respect_document_budget(action, monkeypatch):
     from backend.core import session_manager
     from backend.core.session_manager import (
-        ImageBudgetExceeded, _detached_snapshot, _document_bytes,
+        ImageBudgetExceeded,
+        _detached_snapshot,
+        _document_bytes,
     )
 
     mgr = _manager()
     session = mgr.create_session()
-    await mgr.apply_ops(session.id, "c1", None, [{"op": "nodes_added", "node_ids": ["a"]}])
-    await mgr.apply_ops(session.id, "c1", None, [{
-        "op": "node_shape_set", "node_id": "a", "selection": {"builtin": True},
-        "version": 1, "base_revision": 0, "operation_id": "shape",
-    }], appearance_version=1)
+    await mgr.apply_ops(
+        session.id, "c1", None, [{"op": "nodes_added", "node_ids": ["a"]}]
+    )
+    await mgr.apply_ops(
+        session.id,
+        "c1",
+        None,
+        [
+            {
+                "op": "node_shape_set",
+                "node_id": "a",
+                "selection": {"builtin": True},
+                "version": 1,
+                "base_revision": 0,
+                "operation_id": "shape",
+            }
+        ],
+        appearance_version=1,
+    )
     if action == "redo":
         mgr.undo_last_action(session.id, "c1")
     _document_bytes(_detached_snapshot(session), session)  # warm the history cache
