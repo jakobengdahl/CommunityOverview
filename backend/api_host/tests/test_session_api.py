@@ -513,7 +513,9 @@ class TestSessionActivityAndUndo:
         url = f"/api/sessions/{sid}/{endpoint}"
         body = {"client_id": "c1"}
         if endpoint == "redo":
-            assert test_app.post(f"/api/sessions/{sid}/undo", json=body).status_code == 200
+            assert (
+                test_app.post(f"/api/sessions/{sid}/undo", json=body).status_code == 200
+            )
         before = test_app.get(f"/api/sessions/{sid}").json()["state"]
         with monkeypatch.context() as patch:
             patch.setattr(manager_module, "_document_bytes", lambda *args: 10**12)
