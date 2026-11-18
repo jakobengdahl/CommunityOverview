@@ -400,6 +400,7 @@ describe('CustomNode configured shapes', () => {
     const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
     expect(parseFloat(area.style.width)).toBe(box.width);
     expect(parseFloat(area.style.height)).toBe(box.height);
+    expect(parseFloat(area.style.minHeight)).toBeCloseTo(nodeShapeGeometry('rectangle', 1).text.title * 1.2);
     withStylesheet(() => {
       expect(getComputedStyle(area).overflow).toBe('hidden');
       // Only the summary shrinks in the fixed-height column; the name keeps its lines.
@@ -446,6 +447,19 @@ describe('CustomNode configured shapes', () => {
     expect(bottom.y).toBeGreaterThan(nodeShapeTextBox(down, 'centre').y);
     expect(bottom.y + bottom.height).toBeLessThan(down.height * 0.75);
   });
+
+  it.each([['rectangle-flat', 'bottom-left'], ['triangle-down', 'bottom']])(
+    'reserves a full title line at enlarged root font sizes for %s',
+    (base, placement) => {
+      renderFlow([shapedFlowNode({ ...CARD, base, placement, scale: 1 })]);
+      const area = document.querySelector('.graph-shape-text');
+      const title = area.querySelector('.graph-node-label');
+      const lineHeight = nodeShapeGeometry(base, 1).text.title * 1.2;
+      expect(parseFloat(area.style.minHeight)).toBeCloseTo(lineHeight);
+      expect(area.style.minHeight).toMatch(/rem$/);
+      withStylesheet(() => expect(getComputedStyle(title).lineHeight).toBe('1.2'));
+    }
+  );
 
   it('names the node by type, name and mapped values once, hiding the SVG decoration', () => {
     expect(
