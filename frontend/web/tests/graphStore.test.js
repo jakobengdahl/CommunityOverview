@@ -1,6 +1,7 @@
 // covers: frontend/web/src/store/graphStore.js
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
+import { computeOps, applyOpToMirror, normalizeMirror } from '../src/services/sessionSyncClient';
 
 describe('graphStore', () => {
   beforeEach(() => {
@@ -35,6 +36,38 @@ describe('graphStore', () => {
     useGraphStore.getState().removeNode('a', { preserveAppearance: true });
     useGraphStore.getState().removeNode('b');
     expect(useGraphStore.getState().shapeOverrides).toEqual({ a: { builtin: true } });
+    const before = normalizeMirror({
+      node_refs: ['a', 'b'],
+      shape_overrides: { a: { builtin: true }, b: { builtin: true } },
+    });
+    useGraphStore.setState({
+      typeShapes: {},
+      typeShapeClearNodes: {},
+      shapeOverrides: before.shape_overrides,
+    });
+    useGraphStore.getState().setTypeShape('__proto__', { builtin: true }, 'a');
+    useGraphStore.getState().setTypeShape('__proto__', { ref: 'config:card' }, 'b');
+    const state = useGraphStore.getState();
+    expect(Object.hasOwn(state.typeShapeClearNodes, '__proto__')).toBe(true);
+    expect(state.typeShapeClearNodes.__proto__).toEqual(['a', 'b']);
+    const after = {
+      ...before,
+      type_shapes: state.typeShapes,
+      shape_overrides: state.shapeOverrides,
+    };
+    const ops = computeOps(before, after, state.typeShapeClearNodes);
+    expect(
+      ops.map(({ op, type, clear_node_id, base_revision }) => ({
+        op,
+        type,
+        clear_node_id,
+        base_revision,
+      }))
+    ).toEqual([
+      { op: 'type_shape_set', type: '__proto__', clear_node_id: 'a', base_revision: 0 },
+      { op: 'type_shape_set', type: '__proto__', clear_node_id: 'b', base_revision: 1 },
+    ]);
+    expect(computeOps(ops.reduce(applyOpToMirror, before), after)).toEqual([]);
   });
 
   describe('AI assistant collapsed preference', () => {

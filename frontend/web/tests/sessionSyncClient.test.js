@@ -3695,8 +3695,11 @@ describe('appearance operations', () => {
       const inheritedOps = computeOps(before, initial, { [nodeId]: nodeId });
       expect(inheritedOps).toHaveLength(1);
       expect(inheritedOps[0]).toMatchObject({
-        op: 'type_shape_set', type: nodeId, selection: null,
-        clear_node_id: nodeId, clear_base_revision: 1,
+        op: 'type_shape_set',
+        type: nodeId,
+        selection: null,
+        clear_node_id: nodeId,
+        clear_base_revision: 1,
       });
       expect(computeOps(applyOpToMirror(before, inheritedOps[0]), initial)).toEqual([]);
 

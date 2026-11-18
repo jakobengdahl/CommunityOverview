@@ -259,29 +259,34 @@ export function computeOps(prevState, nextState, typeShapeClearNodes = {}) {
         map === 'type_shapes' && Object.hasOwn(typeShapeClearNodes, id)
           ? typeShapeClearNodes[id]
           : undefined;
-      const clearing =
-        typeof clear === 'string' &&
-        next.node_refs.includes(clear) &&
-        Object.hasOwn(prev.shape_overrides, clear) &&
-        !Object.hasOwn(next.shape_overrides, clear) &&
-        !clearedNodes.has(clear);
-      if (!clearing && JSON.stringify(canonical(before)) === JSON.stringify(canonical(after)))
+      const clears = (Array.isArray(clear) ? clear : [clear]).filter(
+        (nodeId) =>
+          typeof nodeId === 'string' &&
+          next.node_refs.includes(nodeId) &&
+          Object.hasOwn(prev.shape_overrides, nodeId) &&
+          !Object.hasOwn(next.shape_overrides, nodeId) &&
+          !clearedNodes.has(nodeId)
+      );
+      if (!clears.length && JSON.stringify(canonical(before)) === JSON.stringify(canonical(after)))
         continue;
-      const change = {
-        op,
-        [key]: id,
-        selection: after ?? null,
-        version: 1,
-        base_revision: prev.shape_revisions[prefix + id] || 0,
-        operation_id: globalThis.crypto.randomUUID(),
-      };
-      if (clearing) {
-        change.clear_node_id = clear;
-        change.clear_base_revision = prev.shape_revisions['node:' + clear] || 0;
-        clearedNodes.add(clear);
-      }
       if (map === 'shape_overrides' && clearedNodes.has(id)) continue;
-      ops.push(change);
+      const uniqueClears = [...new Set(clears)];
+      for (const [index, nodeId] of (uniqueClears.length ? uniqueClears : [undefined]).entries()) {
+        const change = {
+          op,
+          [key]: id,
+          selection: after ?? null,
+          version: 1,
+          base_revision: (prev.shape_revisions[prefix + id] || 0) + index,
+          operation_id: globalThis.crypto.randomUUID(),
+        };
+        if (nodeId !== undefined) {
+          change.clear_node_id = nodeId;
+          change.clear_base_revision = prev.shape_revisions['node:' + nodeId] || 0;
+          clearedNodes.add(nodeId);
+        }
+        ops.push(change);
+      }
     }
   }
 

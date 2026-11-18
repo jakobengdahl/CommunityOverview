@@ -754,10 +754,20 @@ const useGraphStore = create((set, get) => ({
           writable: true,
         });
       if (nodeId != null) delete shapeOverrides[nodeId];
+      const typeShapeClearNodes = { ...state.typeShapeClearNodes };
+      Object.defineProperty(typeShapeClearNodes, type, {
+        value: [
+          ...(Object.hasOwn(typeShapeClearNodes, type) ? typeShapeClearNodes[type] : []),
+          ...(nodeId != null ? [nodeId] : []),
+        ],
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
       return {
         typeShapes,
         shapeOverrides,
-        typeShapeClearNodes: { ...state.typeShapeClearNodes, [type]: nodeId },
+        typeShapeClearNodes,
       };
     }),
 
