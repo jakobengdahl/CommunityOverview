@@ -1,10 +1,13 @@
 # Configurable node shapes
 
 The models, strict validation, resolution contract, schema transport and empty
-session maps, semantic appearance tokens and shared base geometry are implemented.
-Rendering, editing, shared appearance operations
-and library persistence remain future work. Unconfigured nodes continue to use
-the existing CustomNode renderer.
+session maps, semantic appearance tokens, shared base geometry and the canvas
+renderer with accessible text are implemented. A node whose type names a
+configured shape (or whose session selection resolves to a config or inline
+definition) renders that shape; saved library references resolve to the
+built-in card until library persistence exists. Minimum hit targets, editing,
+shared appearance operations and library persistence remain future work.
+Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
 [Clickable editor](node-shapes/editor.html). Open either file directly; no server,
@@ -285,7 +288,8 @@ clipping a child while the React Flow wrapper catches events is insufficient.
 Marquee selection uses polygon/selection-rectangle overlap (including outside
 label bounds). Broad-phase bounding boxes remain useful for spatial indexing.
 Minimum screen-space hit targets must resolve overlap by nearest painted body,
-then z-order. Controls/badges stay outside clipped bodies and remain operable.
+then z-order. Action buttons sit inside the painted body, so reaching them
+never needs a hover path or hit area beyond it.
 
 The canvas package exports `createNodeShapeGeometry(base, scale)`. Its immutable
 result supplies `path` for SVG drawing, `contains(point)` for body hits,
@@ -297,9 +301,16 @@ excluded from body hits and edge anchors.
 
 A canvas node can carry this descriptor as `geometry`; floating edges and Dagre
 consume it directly. Nodes without a descriptor retain legacy layout dimensions
-and measured rectangular edge bounds. The existing card renderer does not yet
-supply a descriptor. Zero-distance endpoint centres use opposite vertical
-anchors to keep edge coordinates finite.
+and measured rectangular edge bounds. `GraphCanvas` attaches the descriptor to
+every node with a resolved shape; the built-in card supplies none. Clicks,
+drag, the context menu and erase hit a shaped node only where its body is
+painted, including the text and the action buttons inside it, and on a
+triangle's outside label; the state badges, which lie beyond the body, pass
+the pointer through. The action buttons stack at the trailing edge of the text box, which
+keeps its text clear of them, sized to fit at every base and scale. The minimum
+screen-space hit target is not implemented yet. A marquee still selects every node by React Flow's rectangular bounds;
+polygon-precise marquee selection is future work. Zero-distance endpoint centres use opposite
+vertical anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale
 
