@@ -58,6 +58,10 @@ it('selects triangle bodies and cards through pane selection and node changes', 
   );
   const pane = container.querySelector('.react-flow__pane');
   pane.classList.add('nopan');
+  const label = container.querySelector('.graph-shape-outside-label .graph-shape-label-chip');
+  vi.spyOn(label, 'getBoundingClientRect').mockReturnValue({
+    left: 190, right: 220, top: 75, bottom: 90, width: 30, height: 15,
+  });
   await waitFor(() => expect(container.querySelector('[data-id="triangle"]')).toBeTruthy());
   fireEvent.mouseDown(pane, { button: 0, shiftKey: true, clientX: 102, clientY: 102 });
   fireEvent.mouseMove(pane, { clientX: 110, clientY: 110 });
@@ -65,6 +69,14 @@ it('selects triangle bodies and cards through pane selection and node changes', 
   expect(container.querySelector('[data-id="triangle"]').classList.contains('selected')).toBe(
     false
   );
+  fireEvent.mouseDown(pane, { button: 0, clientX: 105, clientY: 76 });
+  fireEvent.mouseMove(pane, { clientX: 115, clientY: 85 });
+  fireEvent.mouseUp(pane, { button: 0 });
+  expect(container.querySelector('[data-id="triangle"]').classList.contains('selected')).toBe(false);
+  fireEvent.mouseDown(pane, { button: 0, clientX: 195, clientY: 76 });
+  fireEvent.mouseMove(pane, { clientX: 205, clientY: 85 });
+  fireEvent.mouseUp(pane, { button: 0 });
+  expect(container.querySelector('[data-id="triangle"]').classList.contains('selected')).toBe(true);
   fireEvent.mouseDown(pane, { button: 0, clientX: 200, clientY: 220 });
   fireEvent.mouseMove(pane, { clientX: 230, clientY: 250 });
   fireEvent.mouseUp(pane, { button: 0 });

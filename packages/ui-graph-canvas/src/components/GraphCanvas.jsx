@@ -377,8 +377,6 @@ function shapeOverlapsMarquee(geometry, rect) {
   const { width: w, height: h, vertices, radius } = geometry;
   const right = rect.x + rect.width,
     bottom = rect.y + rect.height;
-  if (vertices && rect.x <= w && right >= 0 && rect.y <= 0 && bottom >= -geometry.bandHeight)
-    return true;
   if (rect.x > w || right < 0 || rect.y > h || bottom < 0) return false;
   if (!vertices) {
     const x = Math.max(rect.x, Math.min(right, w / 2));
@@ -1667,6 +1665,13 @@ function GraphCanvasInner({
           width: Math.abs(end.x - start.x),
           height: Math.abs(end.y - start.y),
         };
+        const labelBounds = new Map();
+        reactFlowWrapper.current?.querySelectorAll('.react-flow__node[data-id]').forEach((element) => {
+          const label = element.querySelector('.graph-shape-outside-label .graph-shape-label-chip');
+          if (label) labelBounds.set(element.dataset.id, label.getBoundingClientRect());
+        });
+        const left = Math.min(event.clientX, e.clientX), right = Math.max(event.clientX, e.clientX);
+        const top = Math.min(event.clientY, e.clientY), bottom = Math.max(event.clientY, e.clientY);
         setNodes((current) => {
           const byId = new Map(current.map((node) => [node.id, node]));
           return current.map((node) => {
@@ -1681,7 +1686,10 @@ function GraphCanvasInner({
               y += parent.position.y;
               parent = byId.get(parent.parentNode || parent.parentId);
             }
-            const selected = shapeOverlapsMarquee(node.geometry, {
+            const label = labelBounds.get(node.id);
+            const hitsLabel = label && label.width > 0 && label.height > 0 &&
+              left <= label.right && right >= label.left && top <= label.bottom && bottom >= label.top;
+            const selected = hitsLabel || shapeOverlapsMarquee(node.geometry, {
               ...rect,
               x: rect.x - x,
               y: rect.y - y,
