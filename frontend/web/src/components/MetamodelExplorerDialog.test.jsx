@@ -3,6 +3,8 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { URL as NodeURL } from 'node:url';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
 import NodeAppearanceDialog, {
@@ -493,6 +495,58 @@ describe('NodeAppearanceDialog', () => {
     expect(document.activeElement).toBe(opener);
     opener.remove();
   });
+  it.each(['light', 'dark'])(
+    'draws the %s preview stage on that theme canvas background in either page scheme',
+    (theme) => {
+      // Parse the canvas stylesheet: jsdom does not evaluate media queries.
+      const style = document.createElement('style');
+      style.textContent = readFileSync(
+        new NodeURL(
+          '../../../../packages/ui-graph-canvas/src/components/GraphCanvas.css',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      document.head.appendChild(style);
+      const backgroundFor = (element, pageLight) => {
+        let background;
+        let specificity = -1;
+        const visit = (rules) => {
+          for (const rule of rules) {
+            if (rule.media) {
+              if (pageLight && rule.conditionText === '(prefers-color-scheme: light)') {
+                visit(rule.cssRules);
+              }
+              continue;
+            }
+            const value = rule.style?.getPropertyValue('background');
+            if (!value || !element.matches(rule.selectorText)) continue;
+            const weight = (rule.selectorText.match(/[.:][\w-]+/g) || []).length;
+            if (weight >= specificity) {
+              specificity = weight;
+              background = value;
+            }
+          }
+        };
+        visit(style.sheet.cssRules);
+        return background;
+      };
+      try {
+        render(<NodeAppearanceDialog {...props} />);
+        fireEvent.change(screen.getByLabelText('node_appearance.theme'), {
+          target: { value: theme },
+        });
+        const stage = document.querySelector('.appearance-preview-stage');
+        const canvas = document.createElement('div');
+        canvas.className = 'graph-canvas-container';
+        const expected = backgroundFor(canvas, theme === 'light');
+        expect(backgroundFor(stage, true)).toBe(expected);
+        expect(backgroundFor(stage, false)).toBe(expected);
+      } finally {
+        style.remove();
+      }
+    }
+  );
   it('validates scale and applies a type draft while preserving bindings', () => {
     const apply = vi.fn();
     render(<NodeAppearanceDialog {...props} onApply={apply} />);

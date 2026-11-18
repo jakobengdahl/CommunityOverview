@@ -490,8 +490,11 @@ export default function NodeAppearanceDialog({
                 {t('node_appearance.long_text')}
               </label>
             </div>
-            {/* The canvas container supplies the canvas background. */}
-            <div className="graph-canvas-container appearance-preview-stage" aria-hidden="true">
+            {/* The canvas container supplies the canvas background of the chosen theme. */}
+            <div
+              className={`graph-canvas-container graph-card-theme-${theme} appearance-preview-stage`}
+              aria-hidden="true"
+            >
               <NodePreview
                 node={previewNode}
                 color={color}
