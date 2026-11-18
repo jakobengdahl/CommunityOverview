@@ -7,6 +7,9 @@ need as explicit parameters.  GraphService methods delegate to these.
 """
 
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -37,6 +40,17 @@ if TYPE_CHECKING:
 # Authorization evaluation
 # ---------------------------------------------------------------------------
 
+_function_graph_scope = ContextVar("function_graph_scope", default=None)
+
+
+@contextmanager
+def restrict_function_graph(graph_id):
+    token = _function_graph_scope.set(graph_id)
+    try:
+        yield
+    finally:
+        _function_graph_scope.reset(token)
+
 
 def evaluate_graph_access(
     hook: GraphAuthorizationHook,
@@ -46,7 +60,7 @@ def evaluate_graph_access(
     graph_operation: str = "",
     session_id: Optional[str] = None,
 ) -> GraphAuthorizationDecision:
-    return hook.evaluate(
+    decision = hook.evaluate(
         build_graph_authorization_context(
             action=action,
             target=target,
@@ -54,6 +68,18 @@ def evaluate_graph_access(
             session_id=session_id,
         )
     )
+    graph_id = _function_graph_scope.get()
+    if graph_id is not None:
+        allowed = decision.graph_access.matches(graph_id=graph_id)
+        decision = replace(
+            decision,
+            graph_access=GraphAccessNarrowing(
+                enabled=True,
+                allow_local_graph=False,
+                include_graph_ids=(graph_id,) if allowed and graph_id else (),
+            ),
+        )
+    return decision
 
 
 def build_access_denied_result(

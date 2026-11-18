@@ -1,15 +1,15 @@
 # User Function Contract
 
-**Contract version:** 1
+**Contract versions:** 1 and 2
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
 and its protocol session (§6, §7, §9 attribution, the per-message and tool-call
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
 Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Also implemented: manifest validation, manual REST and CLI invocation through a
-shared admission service, and function run records in the existing history store.
-**Scope:** Open-source core. This version covers manually invoked functions that
-read and write the graph through a broker. Every other trigger, tool and binding
+shared admission service, graph-bound inbound webhooks, and function run records in the existing history store.
+**Scope:** Open-source core. These versions cover manual and webhook invocation of functions that
+read and write the graph through a broker. Other triggers, tools and bindings
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
 will need are reserved here so that adding them is not a breaking change.
 
@@ -182,7 +182,7 @@ of a function that is enabled (§4.4).
 
 | Field | Required | Meaning |
 |---|---|---|
-| `contract_version` | yes | The version of this contract the manifest targets. `"1"` for this document. |
+| `contract_version` | yes | The version of this contract the manifest targets. `"1"` or `"2"` for this document. |
 | `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
 | `version` | yes | Semantic version of the function. Recorded on every run. |
 | `name` | yes | Human-readable name. |
@@ -191,7 +191,7 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]` (§13). |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Version 1 accepts only `"graph"`, the default (§13). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
@@ -207,7 +207,7 @@ A manifest is **rejected**, and the function cannot run, when:
 - `contract_version` is not one the host supports;
 - a required field is missing, or a field has the wrong type;
 - a field holds a value this contract version does not allow, such as a trigger
-  kind other than `manual`, a `write_target` other than `graph`, an unknown
+  kind unsupported by the declared version, a `write_target` other than `graph`, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory.
 
@@ -479,7 +479,7 @@ the rules it must follow:
 - **Correlation is forwarded, not regenerated**, so a chain of runs can be
   traced through one id (as in `EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`).
 
-In version 1, with manual triggers only, `chain_depth` is always 0. The rules are
+For manual and webhook triggers, `chain_depth` is always 0. The rules are
 part of this version so that the trigger slice implements them, not designs them.
 
 ## 10. Runtimes
@@ -528,7 +528,7 @@ The run record exposes:
 |---|---|
 | `id` | Run id (`job-…`). |
 | `function_id`, `function_version` | What ran. |
-| `trigger` | `manual` in version 1. |
+| `trigger` | `manual` in version 1; `manual` or `webhook` in version 2. |
 | `status` | `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
 | `error` | For `failed` and `rejected`: a code and a sanitized message. |
 | `output` | The validated `result.output`, for `succeeded`. |
@@ -609,6 +609,21 @@ The store's states and methods do not change. In the run-history store:
 - The envelope's `schema_version` follows `EVENT_SUBSCRIPTIONS.md`; the
   `invocation` block follows `contract_version`.
 
+### Version 2: inbound webhooks
+
+Version 2 adds `triggers[].kind = "webhook"` to version 1. Each function has
+one bearer token bound to a graph, shown only when minted or rotated and stored
+as a hash. `POST /functions/{id}/webhook` accepts this token only in the
+Authorization header and a JSON input object up to 64 KiB. It uses the token's
+graph and the `function_webhook` system actor with the function id. The instance
+switch and graph-admin function switch must both be enabled. A separate
+admin-controlled write switch allows graph writes and trusts the external caller;
+otherwise the broker denies `graph:write`. Existing grants and graph authorization
+still apply. A function accepts at most 60 webhook requests per minute. The route
+uses `Idempotency-Key` and the normal single-run and timeout limits. Uploaded
+attachment references in input do not grant access to attachments. Multipart
+upload and HMAC authentication are not supported by this version.
+
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
@@ -619,7 +634,6 @@ already reserved for it, so that adding it is an additive contract version
 |---|---|---|
 | Scheduled triggers | `triggers[].kind = "schedule"`, `retry` | Idempotency per fire time, as in `DURABLE_EXECUTION_CONTRACT.md` §5. |
 | Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
-| Inbound webhook triggers | `triggers[].kind = "webhook"` | Authenticated by a bearer token the application generates per function. The token is shown once, stored only as a hash, can be rotated and revoked, and is bound to one function. |
 | Session-staged writes | `write_target = "session"` | Writes land in a session overlay and reach the graph only through that contract's review and merge (`SESSION_OVERLAY_CONTRACT.md`). |
 | Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
 | Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |

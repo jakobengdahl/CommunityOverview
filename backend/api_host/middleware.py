@@ -304,6 +304,13 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         ]:
             return await call_next(request)
 
+        # This endpoint authenticates its own per-function bearer credential.
+        if request.method == "POST" and re.fullmatch(
+            rf"{re.escape(config.api_prefix)}/functions/[a-z0-9-]+/webhook",
+            request.url.path,
+        ):
+            return await call_next(request)
+
         # Visualization session endpoints are secured by the session ID itself
         # (CSPRNG, 100M-combination address space).  The browser's EventSource
         # cannot send Authorization headers, so these routes must bypass auth.
