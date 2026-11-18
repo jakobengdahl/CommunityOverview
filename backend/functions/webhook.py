@@ -259,14 +259,6 @@ async def _invoke_with_files(
                 break
         while not held.is_set():
             await anyio.sleep(0.05)
-        try:
-            existing = await run_in_threadpool(
-                service.replay_webhook, function_id, idempotency_key, binding
-            )
-        except PermissionError:
-            raise HTTPException(403)
-        if existing is not None:
-            return _response(existing)
 
     def release():
         with _receiving_lock:
@@ -284,6 +276,13 @@ async def _invoke_with_files(
 
     files = None
     try:
+        if idempotency_key is not None:
+            # A delivery of this key may have finished since the route checked.
+            existing = await run_in_threadpool(
+                service.replay_webhook, function_id, idempotency_key, binding
+            )
+            if existing is not None:
+                return _response(existing)
         code = await run_in_threadpool(
             service.precheck, function_id, trigger="webhook", actor_binding=binding
         )

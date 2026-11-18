@@ -392,6 +392,28 @@ def test_concurrent_replays_claim_once_and_refusals_store_nothing(
     assert len(host.created) == 1
 
 
+def test_delivery_finished_after_route_replay_check_is_replayed_without_files(
+    files_host, monkeypatch
+):
+    host = files_host
+    lookup = host.service.replay_webhook
+    calls = []
+
+    def lookup_then_other_delivery(*args):
+        calls.append(args)
+        existing = lookup(*args)
+        if len(calls) == 1:
+            # Another delivery of the key takes the hold, admits and releases it.
+            assert host.post("key").status_code == 200
+        return existing
+
+    monkeypatch.setattr(host.service, "replay_webhook", lookup_then_other_delivery)
+    response = host.post("key")
+    assert response.json()["id"] == host.post("key").json()["id"]
+    assert len(host.created) == 1
+    host.execute.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "body,status,code",
     [
