@@ -2075,7 +2075,9 @@ class SessionManager:
             "node_ids": removed,
             "client_id": client_id,
         }
-        applied = self._apply_op_sync(session, session_id, client_id, op)
+        applied = self._apply_op_sync(
+            session, session_id, client_id, op, enforce_session_budgets=True
+        )
         return {
             "applied": applied,
             "revision": session.seq,
@@ -2727,6 +2729,7 @@ class SessionManager:
                         for k, v in snapshot["revisions"].items()
                     }
                     saved_appearance_snapshots.append((history, field, snapshot))
+                    session._activity_record_bytes.pop(id(history), None)
                     history[field] = {**snapshot, "revisions": updated}
         applied = None
         try:
@@ -2737,11 +2740,14 @@ class SessionManager:
                 inverse_op,
                 record_activity=False,
                 trusted_replay=True,
+                enforce_session_budgets=True,
             )
         finally:
             if session.seq == seq_before:
                 for history, field, snapshot in saved_appearance_snapshots:
                     history[field] = snapshot
+                    session._activity_record_bytes.pop(id(history), None)
+                session._activity_record_bytes.pop(id(record), None)
                 for key in flag_keys:
                     record.pop(key, None)
                 record.update(saved_flags)
