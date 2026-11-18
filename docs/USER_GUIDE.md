@@ -1622,4 +1622,8 @@ webhook-settings endpoint. Send a JSON input object with the token as a Bearer
 Authorization header. The token is shown only on mint or rotation; keep it
 secret. The optional `allow_write` switch trusts the external caller to trigger
 writes with the function's enabled grants and the system actor's graph access.
-Leave it off for read-only webhooks. See [the function contract](USER_FUNCTION_CONTRACT.md#version-2-inbound-webhooks) for limits.
+Leave it off for read-only webhooks. A version 3 function also accepts files in
+the same call: send `multipart/form-data` with the JSON input in a part named
+`input` and the files as file parts. The files are inputs to that run only and
+are deleted when it ends; the function can attach one to a node only when
+`allow_write` is on. See [the function contract](USER_FUNCTION_CONTRACT.md#version-2-inbound-webhooks) and [webhook files](USER_FUNCTION_CONTRACT.md#version-3-webhook-files) for limits.
