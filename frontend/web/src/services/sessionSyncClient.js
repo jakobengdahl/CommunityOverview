@@ -112,9 +112,10 @@ const EMPTY_MIRROR = Object.freeze({
   dimmed_edge_ids: [],
   edge_intensity: 1.0,
   annotations: [],
-  shape_overrides: {},
-  type_shapes: {},
-  shape_revisions: {},
+  // Frozen too: before setBaseline every client shares this one object.
+  shape_overrides: Object.freeze({}),
+  type_shapes: Object.freeze({}),
+  shape_revisions: Object.freeze({}),
 });
 
 function roundPos(p) {
@@ -2077,14 +2078,9 @@ export class SessionSyncClient {
           // to parse (or isn't JSON) still drops the op exactly as before,
           // just without the extra detail.
           const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
-          const conflict = body?.detail;
-          if (
-            conflict?.error === 'shape_revision_conflict' &&
-            typeof conflict.revision === 'number'
-          ) {
-            const current = this._baseline.shape_revisions[conflict.target] || 0;
-            this._baseline.shape_revisions[conflict.target] = Math.max(current, conflict.revision);
-          }
+          // A shape_revision_conflict's revision is not folded here: baseline
+          // changes follow stream seq order, so the resync onDropped starts
+          // incorporates it (docs/design/NODE_SHAPES.md § Remote appearance ordering).
           if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }

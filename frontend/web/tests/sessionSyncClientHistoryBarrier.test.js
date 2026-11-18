@@ -283,34 +283,38 @@ describe('appearance ordering', () => {
     client.close();
   });
 
-  it('retains a newer revision when an older write conflicts', async () => {
-    const onDropped = vi.fn();
-    const fetchImpl = makeFetch([
-      {
-        ok: false,
-        status: 409,
-        json: async () => ({
-          detail: { error: 'shape_revision_conflict', target: 'node:a', revision: 3 },
-        }),
-      },
-    ]);
-    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
-    client.setBaseline({ node_refs: ['a'], shape_revisions: { 'node:a': 5 } });
-    client.sendOps([
-      {
-        op: 'node_shape_set',
-        node_id: 'a',
-        version: 1,
-        operation_id: 'one',
-        base_revision: 2,
-        selection: { builtin: true },
-      },
-    ]);
-    await client.flush();
-    expect(client._baseline.shape_revisions['node:a']).toBe(5);
-    expect(client.getPendingOps()).toEqual([]);
-    expect(onDropped).toHaveBeenCalledOnce();
-    expect(fetchImpl.calls[0].body.appearance_version).toBe(1);
-    client.close();
-  });
+  it.each([[{ 'node:a': 5 }], [{ 'node:a': 1 }], [null]])(
+    'leaves baseline revisions %j for resync when a write conflicts',
+    async (revs) => {
+      const onDropped = vi.fn();
+      const fetchImpl = makeFetch([
+        {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: { error: 'shape_revision_conflict', target: 'node:a', revision: 3 },
+          }),
+        },
+      ]);
+      const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+      if (revs) client.setBaseline({ node_refs: ['a'], shape_revisions: revs });
+      client.sendOps([
+        {
+          op: 'node_shape_set',
+          node_id: 'a',
+          version: 1,
+          operation_id: 'one',
+          base_revision: 2,
+          selection: { builtin: true },
+        },
+      ]);
+      await client.flush();
+      expect(client._baseline.shape_revisions).toEqual(revs || {});
+      expect(makeClient().client._baseline.shape_revisions).toEqual({});
+      expect(client.getPendingOps()).toEqual([]);
+      expect(onDropped).toHaveBeenCalledOnce();
+      expect(fetchImpl.calls[0].body.appearance_version).toBe(1);
+      client.close();
+    }
+  );
 });
