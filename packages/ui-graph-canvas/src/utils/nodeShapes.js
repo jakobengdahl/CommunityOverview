@@ -66,14 +66,23 @@ export function createNodeShapeResolver({
   };
 }
 
-/** Area values from loaded node data: built-in or declared scalar fields only. */
+const BUILTIN_FIELDS = ['type', 'name', 'summary'];
+
+/**
+ * Area values from loaded node data: built-in or declared scalar fields only.
+ * Declared fields are stored in metadata, with a top-level value as fallback.
+ */
 export function nodeShapeAreaValues(definition, node, fields = []) {
-  const allowed = new Set(['type', 'name', 'summary', ...fields]);
-  allowed.delete('metadata');
+  const declared = new Set(fields.filter((f) => f !== 'metadata' && !BUILTIN_FIELDS.includes(f)));
+  const metadata = isPlainObject(node.metadata) ? node.metadata : {};
   const values = {};
   for (const area of AREAS) {
     const binding = definition.areas[area];
-    const value = binding !== null && allowed.has(binding) ? node[binding] : null;
+    let value = null;
+    if (BUILTIN_FIELDS.includes(binding)) value = node[binding];
+    else if (declared.has(binding)) {
+      value = (Object.hasOwn(metadata, binding) ? metadata[binding] : null) ?? node[binding];
+    }
     values[area] = ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : '';
   }
   return values;
@@ -165,62 +174,4 @@ export function nodeShapeBandPath(geometry) {
     return `M 0 0 L ${w} 0 L ${w - inset} ${band} L ${inset} ${band} Z`;
   }
   return `M 0 ${band} V ${r} A ${r} ${r} 0 0 1 ${r} 0 H ${w - r} A ${r} ${r} 0 0 1 ${w} ${r} V ${band} Z`;
-}
-
-function boxesOverlap(a, b) {
-  return (
-    a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
-  );
-}
-
-/** Whether a body-local rectangle touches the painted body or the outside label. */
-export function nodeShapeOverlapsRect(geometry, rect) {
-  const { width: w, height: h, radius: r, vertices, layoutBounds } = geometry;
-  if (layoutBounds.y < 0) {
-    const label = { x: 0, y: layoutBounds.y, width: w, height: -layoutBounds.y };
-    if (boxesOverlap(rect, label)) return true;
-  }
-  if (!boxesOverlap(rect, geometry.bodyBounds)) return false;
-  if (vertices) {
-    // The bounds test covered the rectangle's axes; the edge normals remain.
-    const corners = [
-      { x: rect.x, y: rect.y },
-      { x: rect.x + rect.width, y: rect.y },
-      { x: rect.x, y: rect.y + rect.height },
-      { x: rect.x + rect.width, y: rect.y + rect.height },
-    ];
-    return vertices.every((a, i) => {
-      const b = vertices[(i + 1) % vertices.length];
-      const project = (p) => p.x * (b.y - a.y) - p.y * (b.x - a.x);
-      const body = vertices.map(project);
-      const box = corners.map(project);
-      return Math.max(...box) >= Math.min(...body) && Math.max(...body) >= Math.min(...box);
-    });
-  }
-  // A rounded box is its core grown by the radius.
-  const dx = Math.max(0, r - (rect.x + rect.width), rect.x - (w - r));
-  const dy = Math.max(0, r - (rect.y + rect.height), rect.y - (h - r));
-  return dx * dx + dy * dy <= r * r;
-}
-
-/**
- * Select changes that make a marquee (flow-space rectangle) select a shaped
- * node only where it touches its polygon or outside label, not its bounds.
- * `selectedIds` holds the shaped ids this marquee has selected and is updated
- * in place: React Flow writes `selected` onto its stored nodes before the
- * change it emits is filtered out, so the node's own flag cannot be trusted.
- */
-export function marqueeShapeChanges(nodes, rect, selectedIds) {
-  const changes = [];
-  for (const node of nodes) {
-    if (node.hidden || typeof node.geometry?.contains !== 'function') continue;
-    const origin = node.positionAbsolute || node.position;
-    const local = { ...rect, x: rect.x - origin.x, y: rect.y - origin.y };
-    const selected = nodeShapeOverlapsRect(node.geometry, local);
-    if (selected === selectedIds.has(node.id)) continue;
-    if (selected) selectedIds.add(node.id);
-    else selectedIds.delete(node.id);
-    changes.push({ id: node.id, type: 'select', selected });
-  }
-  return changes;
 }

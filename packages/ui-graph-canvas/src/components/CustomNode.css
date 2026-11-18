@@ -472,8 +472,19 @@ body.graph-menu-open .graph-node-tooltip {
 .graph-shaped-node .react-flow__handle,
 .graph-shaped-node button,
 .graph-shaped-node .graph-node-mark-badge,
-.graph-shaped-node .graph-node-staged-badge {
+.graph-shaped-node .graph-node-remote-badge,
+.graph-shaped-node .graph-node-staged-badge,
+.graph-shape-action-bridge {
   pointer-events: auto;
+}
+
+/* Runs from the side anchor on the body edge under both action buttons, so the
+   pointer reaches the edit button where a small or narrowing body leaves
+   transparent space before it. Shown only while the buttons are. */
+.graph-shape-action-bridge {
+  position: absolute;
+  width: 52px;
+  height: 24px;
 }
 
 .graph-shape-body {

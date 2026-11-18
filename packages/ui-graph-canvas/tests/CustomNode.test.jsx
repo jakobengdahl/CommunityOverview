@@ -21,7 +21,6 @@ import {
   BAND_TEXT_LIGHT,
   bandTextStyle,
   createNodeShapeResolver,
-  marqueeShapeChanges,
   nodeShapeAccessibleName,
   nodeShapeAreaValues,
   nodeShapeGeometry,
@@ -377,6 +376,14 @@ describe('CustomNode configured shapes', () => {
         FIELDS
       )
     ).toEqual({ first: '', second: '', third: '' });
+    // Declared fields live in metadata and win over a top-level value.
+    expect(
+      nodeShapeAreaValues(
+        { areas: { first: 'risk_level', second: 'owner', third: null } },
+        { ...graphNode, metadata: { risk_level: 'low', owner: 'Ada' } },
+        FIELDS
+      )
+    ).toEqual({ first: 'low', second: 'Ada', third: '' });
 
     const markup = { ...graphNode, name: '<b>bold</b>' };
     const definition = { ...CARD, areas: { first: null, second: 'name', third: 'summary' } };
@@ -484,7 +491,9 @@ describe('CustomNode configured shapes', () => {
   });
 
   it('passes the pointer through everything but the painted body and labels', () => {
-    renderFlow([shapedFlowNode(RISK)]);
+    renderFlow([
+      shapedFlowNode(RISK, { remoteSelection: { color: '#00aa00', displayName: 'Ada' } }),
+    ]);
     const wrapper = screen.getByTestId('rf__node-n1');
     withStylesheet(() => {
       // React Flow sets pointer-events inline, which only an important rule
@@ -497,64 +506,46 @@ describe('CustomNode configured shapes', () => {
       expect(getComputedStyle(wrapper.querySelector('.graph-shaped-node')).pointerEvents).toBe(
         'none'
       );
-      for (const hit of ['.graph-shape-body', '.graph-shape-label-chip']) {
+      for (const hit of [
+        '.graph-shape-body',
+        '.graph-shape-label-chip',
+        '.graph-node-remote-badge',
+      ]) {
         expect(getComputedStyle(wrapper.querySelector(hit)).pointerEvents).toBe('auto');
       }
     });
   });
 
-  it.each(['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down'])(
-    'keeps both %s action buttons and the path between them on the painted body',
-    (base) => {
-      const placement = base.startsWith('triangle') ? 'centre' : 'top-left';
-      const definition = { ...CARD, base, placement };
-      renderFlow([
-        { ...shapedFlowNode(definition, { onExpand() {}, onEdit() {} }), selected: true },
-      ]);
-      const centre = (title, dy) => {
-        const { left, top } = screen.getByTitle(title).style;
-        return { x: parseFloat(left) + 12, y: parseFloat(top) + dy };
-      };
-      // The expand button is centred on its top by translateY(-50%).
-      const expand = centre('Show related nodes', 0);
-      const edit = centre('Edit node', 12);
-      const { contains } = nodeShapeGeometry(base, 1);
-      for (const t of [0, 0.25, 0.5, 0.75, 1]) {
-        const point = { x: edit.x + t * (expand.x - edit.x), y: edit.y + t * (expand.y - edit.y) };
-        expect(contains(point)).toBe(true);
-      }
+  it.each(
+    ['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down'].flatMap((base) => [
+      [base, 1],
+      [base, 0.1],
+    ])
+  )('keeps the path from the %s body (scale %s) to its edit button hoverable', (base, scale) => {
+    const placement = base.startsWith('triangle') ? 'centre' : 'top-left';
+    const definition = { ...CARD, base, placement, scale };
+    renderFlow([{ ...shapedFlowNode(definition, { onExpand() {}, onEdit() {} }), selected: true }]);
+    const centre = (title, dy) => {
+      const { left, top } = screen.getByTitle(title).style;
+      return { x: parseFloat(left) + 12, y: parseFloat(top) + dy };
+    };
+    // The expand button is centred on its top by translateY(-50%).
+    const expand = centre('Show related nodes', 0);
+    const edit = centre('Edit node', 12);
+    const { contains } = nodeShapeGeometry(base, scale);
+    // The bridge's size comes from the stylesheet, which jsdom does not lay out.
+    const bridge = document.querySelector('.graph-shape-action-bridge').style;
+    const [left, top] = [parseFloat(bridge.left), parseFloat(bridge.top)];
+    const onBridge = (p) => p.x >= left && p.x <= left + 52 && p.y >= top && p.y <= top + 24;
+    expect(contains(expand)).toBe(true);
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const point = { x: edit.x + t * (expand.x - edit.x), y: edit.y + t * (expand.y - edit.y) };
+      expect(contains(point) || onBridge(point)).toBe(true);
     }
-  );
-
-  const triangleAt = (selected) => ({
-    id: 't',
-    position: { x: 100, y: 100 },
-    selected,
-    geometry: nodeShapeGeometry('triangle-up', 1),
-  });
-  const cardAt = {
-    id: 'r',
-    position: { x: 100, y: 100 },
-    geometry: nodeShapeGeometry('rectangle', 1),
-  };
-  // triangleAt's flag is the node's own `selected`, which React Flow may
-  // already have set; `prior` is whether this marquee has selected it.
-  it.each([
-    ['a transparent triangle corner', triangleAt(false), false, [100, 130, 20, 20], []],
-    ['the triangle body', triangleAt(false), false, [200, 200, 20, 20], [true]],
-    ['a body React Flow already flagged', triangleAt(true), false, [200, 200, 20, 20], [true]],
-    ['the outside label', triangleAt(false), false, [105, 80, 5, 5], [true]],
-    ['a corner it had selected', triangleAt(true), true, [100, 130, 20, 20], [false]],
-    ['a body it had selected', triangleAt(true), true, [200, 200, 20, 20], []],
-    ['a rounded rectangle corner', cardAt, false, [99, 99, 2, 2], []],
-  ])('lets a marquee over %s select by polygon overlap', (_, node, prior, box, selected) => {
-    const [x, y, width, height] = box;
-    const selectedIds = new Set(prior ? [node.id] : []);
-    const nodes = [node, { id: 'card', position: { x: 0, y: 0 } }];
-    expect(marqueeShapeChanges(nodes, { x, y, width, height }, selectedIds)).toEqual(
-      selected.map((value) => ({ id: node.id, type: 'select', selected: value }))
-    );
-    expect(selectedIds.has(node.id)).toBe(selected.length ? selected[0] : prior);
+    withStylesheet(() => {
+      const style = getComputedStyle(document.querySelector('.graph-shape-action-bridge'));
+      expect([style.width, style.height, style.pointerEvents]).toEqual(['52px', '24px', 'auto']);
+    });
   });
 
   it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {

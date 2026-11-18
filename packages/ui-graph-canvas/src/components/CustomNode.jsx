@@ -285,14 +285,20 @@ function CustomNode({ data, id, selected }) {
           )}
         </div>
 
-        {/* TODO(node-shape-phase3b-min-hit-target): a tiny body gets its minimum
-            hit target from the central resolver here; until then it is hit
-            only where it is painted. */}
+        {/* A tiny body is hit only where it is painted; the minimum hit target
+            is node-shape-phase3b-min-hit-target. */}
 
         {/* Also shown while selected, so a keyboard user can Tab to them. The
             edit button sits beside the expand button, not below it: below the
             side anchor a triangle has already narrowed away, and the pointer
-            leaving the painted body hides both buttons. */}
+            leaving the painted body and the bridge hides both buttons. */}
+        {(showButtons || selected) && data.onEdit && (
+          <span
+            className="graph-shape-action-bridge"
+            aria-hidden="true"
+            style={{ left: expand.x - 40, top: expand.y - 12 }}
+          />
+        )}
         {actionButtons(
           showButtons || selected,
           { left: expand.x - 12, top: expand.y, right: 'auto' },
