@@ -475,11 +475,14 @@ body.graph-menu-open .graph-node-tooltip {
   pointer-events: auto;
 }
 
-/* The connection handles sit at the bbox top and bottom centre, outside a
-   triangle's apex or tip; they keep anchoring edges but take no pointer. */
-.graph-shaped-node .react-flow__handle,
-.graph-shaped-node .react-flow__handle.connectionindicator {
-  pointer-events: none !important;
+/* The connection handles sit at the bbox top and bottom centre, on the body
+   edge of every base (a triangle's apex or tip is a body vertex), and are hit
+   exactly as on the card: React Flow's connectionindicator rule turns them on
+   while nodes are connectable. */
+
+/* Above the body and the state badges beside it. */
+.graph-shape-outside-label {
+  z-index: 7;
 }
 
 /* Sized and placed inline inside the text box; a hover transform or

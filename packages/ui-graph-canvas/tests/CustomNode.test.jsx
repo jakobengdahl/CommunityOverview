@@ -558,10 +558,36 @@ describe('CustomNode configured shapes', () => {
         '.graph-node-mark-badge',
         '.graph-node-remote-badge',
         '.graph-node-staged-badge',
-        // Handles sit at a triangle's apex and tip, off the body.
-        '.react-flow__handle.connectionindicator',
       ]) {
         expect(events(wrapper, outside)).toBe('none');
+      }
+      // The outside label stacks above the body and the badges beside it.
+      const zIndex = (selector) =>
+        Number(getComputedStyle(wrapper.querySelector(selector)).zIndex) || 0;
+      expect(zIndex('.graph-shape-outside-label')).toBeGreaterThan(
+        Math.max(zIndex('.graph-shape-svg'), zIndex('.graph-node-remote-badge'))
+      );
+      // The triangle's remote badge ends where the outside label row begins.
+      const badge = wrapper.querySelector('.graph-node-remote-badge');
+      const label = wrapper.querySelector('.graph-shape-outside-label');
+      expect(badge.style.top).toBe(label.style.top);
+      expect(badge.style.transform).toBe('translateY(-100%)');
+      // Handles are hit as on the card: React Flow's connectable rule applies
+      // unopposed, and they sit on the body edge of every base.
+      const handleRules = [...document.styleSheets]
+        .flatMap((sheet) => [...sheet.cssRules])
+        .filter(
+          (rule) =>
+            rule.selectorText &&
+            wrapper.querySelector('.react-flow__handle').matches(rule.selectorText)
+        );
+      expect(
+        handleRules.map((rule) => rule.style.getPropertyValue('pointer-events')).filter(Boolean)
+      ).toEqual([]);
+      for (const base of ['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down']) {
+        const geometry = nodeShapeGeometry(base);
+        expect(geometry.contains({ x: geometry.width / 2, y: 0 })).toBe(true);
+        expect(geometry.contains({ x: geometry.width / 2, y: geometry.height })).toBe(true);
       }
       expect(events(screen.getByTestId('rf__node-n2'), '.graph-shape-label-chip')).toBe('auto');
     });

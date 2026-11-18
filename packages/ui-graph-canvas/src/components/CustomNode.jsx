@@ -86,6 +86,12 @@ function CustomNode({ data, id, selected }) {
     },
   };
 
+  // Graph attributes are spread into data, so require the descriptor's
+  // function rather than trusting any attribute that happens to share a name.
+  const geometry =
+    typeof data.shapeRender?.geometry?.anchor === 'function' ? data.shapeRender.geometry : null;
+  const triangle = Boolean(geometry?.vertices);
+
   const stateOverlays = (
     <>
       {pulseStyle && (
@@ -100,7 +106,12 @@ function CustomNode({ data, id, selected }) {
       {remote && (
         <div
           className="graph-node-remote-badge"
-          style={{ backgroundColor: remote.color }}
+          // A triangle's outside label fills the row above the body; the
+          // badge sits on top of that row instead of over it.
+          style={{
+            backgroundColor: remote.color,
+            ...(triangle && { top: -geometry.bandHeight, transform: 'translateY(-100%)' }),
+          }}
           title={remote.displayName}
         >
           {remote.displayName}
@@ -186,14 +197,9 @@ function CustomNode({ data, id, selected }) {
       document.body
     );
 
-  // Graph attributes are spread into data, so require the descriptor's
-  // function rather than trusting any attribute that happens to share a name.
-  const geometry =
-    typeof data.shapeRender?.geometry?.anchor === 'function' ? data.shapeRender.geometry : null;
   if (geometry) {
     const { placement } = data.shapeRender.definition;
     const values = data.shapeRender.values;
-    const triangle = Boolean(geometry.vertices);
     const [vertical, horizontal] = triangle ? [placement, 'centre'] : placement.split('-');
     const align = { left: 'flex-start', centre: 'center', right: 'flex-end' }[horizontal];
     const box = nodeShapeTextBox(geometry, placement);
