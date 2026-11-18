@@ -747,6 +747,19 @@ const useGraphStore = create((set, get) => ({
         ? { typeShapeClearNodes: {} }
         : state
     ),
+  setNodeShape: (nodeId, selection) =>
+    set((state) => {
+      const shapeOverrides = { ...state.shapeOverrides };
+      if (selection == null) delete shapeOverrides[nodeId];
+      else
+        Object.defineProperty(shapeOverrides, nodeId, {
+          value: selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      return { shapeOverrides };
+    }),
   setTypeShape: (type, selection, nodeId) =>
     set((state) => {
       const typeShapes = { ...state.typeShapes };
@@ -1119,12 +1132,12 @@ const useGraphStore = create((set, get) => ({
   requestCloseMenus: () => set((state) => ({ closeMenusSignal: state.closeMenusSignal + 1 })),
 
   // Delete node from visualization
-  removeNode: (nodeId, { preserveAppearance = false } = {}) => {
+  removeNode: (nodeId) => {
     const { nodes, edges, navHistory } = get();
     set({
-      shapeOverrides: preserveAppearance
-        ? get().shapeOverrides
-        : Object.fromEntries(Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)),
+      shapeOverrides: Object.fromEntries(
+        Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)
+      ),
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
       // Drop the removed node from the trail so its row can't become a dead

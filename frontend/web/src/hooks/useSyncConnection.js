@@ -78,7 +78,6 @@ export function useSyncConnection(sessionId) {
       };
       client = new SessionSyncClient({
         sessionId: targetId,
-        appearanceVersion: 1,
         clientId: api.getClientId(),
         displayName: api.getDisplayName(),
         streamUrl: api.getSessionStreamUrl(targetId),
@@ -91,10 +90,6 @@ export function useSyncConnection(sessionId) {
           },
           onResync: (...a) => callIfCurrent('onResync', ...a),
           onRemoteOps: (...a) => callRemoteOpsIfCurrentSession(...a),
-          onLocalAppearanceRevisions: (...a) => {
-            if (targetId === activeSessionIdRef.current)
-              callIfCurrent('onLocalAppearanceRevisions', ...a);
-          },
           onPresence: (...a) => callIfCurrent('onPresence', ...a),
           onSelections: (...a) => callIfCurrent('onSelections', ...a),
           onLeases: (...a) => callIfCurrent('onLeases', ...a),

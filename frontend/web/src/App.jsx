@@ -1,4 +1,3 @@
-import { applyOpToMirror } from './services/sessionSyncClient';
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import {
   GraphCanvas,
@@ -32,7 +31,6 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
   MEMBERSHIP_OPS,
   hydrateAddedNodes,
-  holdRemoteOpSave,
 } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useStagedSession } from './hooks/useStagedSession';
@@ -185,13 +183,13 @@ function App() {
     showMinimap,
     nodePreviewEnabled,
     canvasLocked,
-    shapeOverrides,
-    typeShapes,
     setCanvasLocked,
     nodeMarks,
     pulsedNodeIds,
     startGuide,
     getNodeColor,
+    shapeOverrides,
+    typeShapes,
     closeMenusSignal,
     resetSessionScopedState,
     editingEdge,
@@ -602,7 +600,7 @@ function App() {
             op.op === 'nodes_replaced'
               ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
               : [];
-          dropped.forEach((n) => removeNode(n.id, { preserveAppearance: keep.has(n.id) }));
+          dropped.forEach((n) => removeNode(n.id));
           // The op carries the layout it leaves (positions, hidden ids, a
           // loaded view's annotations); until all of it is drawn, autosave
           // waits, so no part of it is saved back as this user's change. A
@@ -699,7 +697,6 @@ function App() {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
           removeIds.forEach((id) => removeNode(id));
-          if (heldLayoutRelease) releaseAfterDraw(heldLayoutRelease);
           return removeIds.some((id) => existing.has(id));
         }
         case 'nodes_hidden': {
@@ -804,27 +801,6 @@ function App() {
           if (!(store.dimmedEdgeIds || []).some((id) => drop.has(id))) return false;
           setDimmedEdgeIds((store.dimmedEdgeIds || []).filter((id) => !drop.has(id)));
           return true;
-        }
-        case 'node_shape_set':
-        case 'type_shape_set': {
-          try {
-            const mirror = applyOpToMirror(
-              {
-                shape_overrides: store.shapeOverrides,
-                type_shapes: store.typeShapes,
-                shape_revisions: store.shapeRevisions,
-              },
-              op
-            );
-            useGraphStore.setState({
-              shapeOverrides: mirror.shape_overrides,
-              typeShapes: mirror.type_shapes,
-              shapeRevisions: mirror.shape_revisions,
-            });
-            return true;
-          } finally {
-            heldLayoutRelease?.();
-          }
         }
         case 'edge_intensity_set':
           if (typeof op.value !== 'number') return false;
@@ -2059,10 +2035,6 @@ function App() {
         annotations: viewData?.annotations || [],
       });
       const nextState = {
-        shape_overrides: state.shapeOverrides || {},
-        type_shapes: state.typeShapes || {},
-        type_shape_clear_nodes: state.typeShapeClearNodes || {},
-        shape_revisions: state.shapeRevisions || {},
         node_refs: state.nodes.map((n) => n.id),
         positions,
         hidden_node_ids: state.hiddenNodeIds || [],
@@ -2078,8 +2050,7 @@ function App() {
       // the session server-side lazily, preserving the "no empty session files"
       // behaviour of step 4 (an empty, never-edited session never connects).
       const sync = ensureSyncConnected(targetId);
-      if (sync?.syncState(nextState))
-        state.consumeTypeShapeClearNodes(nextState.type_shape_clear_nodes);
+      sync?.syncState(nextState);
       sessionStore.touchSession(targetId);
       setSessionsVersion((v) => v + 1);
     },
@@ -2368,8 +2339,6 @@ function App() {
     dimmedNodeIds,
     dimmedEdgeIds,
     edgeIntensity,
-    shapeOverrides,
-    typeShapes,
     scheduleAutoSave,
   ]);
 
@@ -2925,7 +2894,10 @@ function App() {
             const generation = sessionGenerationRef.current;
             // The sync baseline already holds this op's layout: autosave
             // waits from now, not from when the ops ahead of it are done.
-            const release = holdRemoteOpSave(syncRef.current, op);
+            const release =
+              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
+                ? syncRef.current?.holdLayoutSave() || null
+                : null;
             remoteOpsChainRef.current = remoteOpsChainRef.current
               .then(() => applyRemoteOp(op, release, generation))
               .catch(() => release?.());
@@ -2950,14 +2922,6 @@ function App() {
       // own prior write. Goes through applyAnnotationUpsertToCanvas directly
       // rather than applyRemoteOp/its claim() gate — see that helper's own
       // comment for why this ack must not touch the image-ingest dedup.
-      onLocalAppearanceRevisions: (revisions) => {
-        const current = useGraphStore.getState().shapeRevisions || {};
-        const next = { ...current };
-        for (const [key, revision] of Object.entries(revisions)) {
-          next[key] = Math.max(next[key] || 0, revision);
-        }
-        useGraphStore.setState({ shapeRevisions: next });
-      },
       onLocalAnnotationsApplied: (ops) => {
         (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
       },
@@ -3873,6 +3837,8 @@ function App() {
           compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
+          shapeOverrides={shapeOverrides}
+          typeShapes={typeShapes}
           onContextMenuAction={handleContextMenuAction}
           stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
           stagedStateLabels={stagedStateLabels}
