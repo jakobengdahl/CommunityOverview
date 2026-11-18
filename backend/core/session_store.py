@@ -1137,8 +1137,12 @@ class SessionStore:
             ):
                 raise OpError("appearance operation_id is required")
             receipts = state["shape_operation_ids"]
-            receipt = json.dumps([op.get("client_id"), operation_id])
-            if not trusted_replay and receipt in receipts:
+            receipt = json.dumps([operation_id])
+            # Older sessions stored receipts as [client_id, operation_id].
+            legacy_suffix = ", " + json.dumps(operation_id) + "]"
+            if not trusted_replay and (
+                receipt in receipts or any(k.endswith(legacy_suffix) for k in receipts)
+            ):
                 return None
             if node and target not in state["node_refs"]:
                 raise OpError("appearance node must belong to the session")
