@@ -635,4 +635,6 @@ body.graph-menu-open .graph-node-tooltip {
   -webkit-box-orient: vertical;
   text-overflow: ellipsis;
   margin-bottom: 0.3em;
+  /* A long summary must clip itself, not squeeze the name out of the column. */
+  flex-shrink: 0;
 }

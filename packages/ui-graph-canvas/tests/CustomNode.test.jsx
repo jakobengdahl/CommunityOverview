@@ -400,7 +400,14 @@ describe('CustomNode configured shapes', () => {
     const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
     expect(parseFloat(area.style.width)).toBe(box.width);
     expect(parseFloat(area.style.height)).toBe(box.height);
-    withStylesheet(() => expect(getComputedStyle(area).overflow).toBe('hidden'));
+    withStylesheet(() => {
+      expect(getComputedStyle(area).overflow).toBe('hidden');
+      // Only the summary shrinks in the fixed-height column; the name keeps its lines.
+      const shrink = (el) => getComputedStyle(el).flexShrink;
+      expect(shrink(area.querySelector('.graph-node-label'))).toBe('0');
+      const summary = [...area.children].find((el) => !el.matches('.graph-node-label'));
+      expect(shrink(summary)).not.toBe('0');
+    });
   });
 
   it('keeps every placement inside its base and the downward bottom stack off the tip', () => {
