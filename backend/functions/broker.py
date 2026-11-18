@@ -353,11 +353,10 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
-            if (
-                ctx.authorization_inputs.get("actor_type") == "function_webhook"
-                and not decision.graph_access.matches(
-                    graph_id=ctx.authorization_inputs.get("graph_id") or ""
-                )
+            if ctx.authorization_inputs.get(
+                "actor_type"
+            ) == "function_webhook" and not decision.graph_access.matches(
+                graph_id=ctx.authorization_inputs.get("graph_id") or ""
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
             try:
