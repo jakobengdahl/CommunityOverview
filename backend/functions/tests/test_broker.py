@@ -1,4 +1,4 @@
-# covers: backend/functions/broker.py, backend/functions/run_files.py, backend/service/attachment_tools.py
+# covers: backend/functions/broker.py
 """Invariants of the user-function tool broker (USER_FUNCTION_CONTRACT §6.3–§7, §9)."""
 
 import json

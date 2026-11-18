@@ -1,4 +1,4 @@
-# covers: backend/functions/runner.py, backend/functions/runtime/python/communityoverview_function/__init__.py
+# covers: backend/functions/runner.py
 """Invariants of the hardened-subprocess runner (ADR 0012, USER_FUNCTION_CONTRACT §3, §8).
 
 Tests that need a control are skipped where the host cannot enforce it, so the
