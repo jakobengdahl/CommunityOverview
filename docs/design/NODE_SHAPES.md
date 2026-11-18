@@ -264,6 +264,17 @@ operation rather than thousands of per-node edits. Never copy remote state back
 out as fresh operations. Old clients must be read-only for appearance-enabled
 sessions unless they can preserve the new fields and operations.
 
+### Remote appearance ordering
+
+Remote removals and appearance operations enter the same ordered canvas queue.
+Their baseline changes are folded at the point the queued canvas operation runs,
+with autosave held from receipt until drawing finishes. Resync waits for the
+queue and any registered asynchronous local edit before replacing state. Local
+editors hold autosave until their changes are ready for a fresh snapshot. A
+rejected stale appearance write is not retried
+as a fresh overwrite: its current revision is incorporated during resync, and
+any further edit must use that revision after the user reviews the conflict.
+
 ## Geometry and hit areas
 
 One geometry descriptor must drive drawing, hit tests, edge anchors and layout

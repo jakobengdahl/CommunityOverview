@@ -112,6 +112,9 @@ const EMPTY_MIRROR = Object.freeze({
   dimmed_edge_ids: [],
   edge_intensity: 1.0,
   annotations: [],
+  shape_overrides: {},
+  type_shapes: {},
+  shape_revisions: {},
 });
 
 function roundPos(p) {
@@ -144,6 +147,9 @@ export function normalizeMirror(state) {
     dimmed_edge_ids: Array.from(new Set(s.dimmed_edge_ids || [])),
     edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: Array.isArray(s.annotations) ? s.annotations : [],
+    shape_overrides: { ...s.shape_overrides },
+    type_shapes: { ...s.type_shapes },
+    shape_revisions: { ...s.shape_revisions },
   };
 }
 
@@ -375,10 +381,19 @@ export function applyOpToMirror(mirrorState, op) {
       const named = new Set(op.node_ids || []);
       const replace = type === 'nodes_replaced';
       const drop = replace ? new Set(m.node_refs.filter((id) => !named.has(id))) : named;
+      for (const id of m.node_refs) {
+        if (drop.has(id)) {
+          const key = `node:${id}`;
+          m.shape_revisions[key] = (m.shape_revisions[key] || 0) + 1;
+        }
+      }
       m.node_refs = replace ? [...named] : m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
+      m.shape_overrides = Object.fromEntries(
+        Object.entries(m.shape_overrides).filter(([id]) => !drop.has(id))
+      );
       m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
@@ -406,6 +421,35 @@ export function applyOpToMirror(mirrorState, op) {
       return op.dropped_node_ids?.length
         ? applyOpToMirror(m, { op: 'nodes_removed', node_ids: op.dropped_node_ids })
         : m;
+    case 'node_shape_set':
+    case 'type_shape_set': {
+      const node = type === 'node_shape_set';
+      const target = node ? op.node_id : op.type;
+      const map = node ? m.shape_overrides : m.type_shapes;
+      if (op.selection == null) delete map[target];
+      else
+        Object.defineProperty(map, target, {
+          value: op.selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      if (!node && op.clear_node_id != null) {
+        delete m.shape_overrides[op.clear_node_id];
+        if (op.restore_selection != null) {
+          Object.defineProperty(m.shape_overrides, op.clear_node_id, {
+            value: op.restore_selection,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+        }
+      }
+      for (const [key, revision] of Object.entries(op.revisions || {})) {
+        m.shape_revisions[key] = Math.max(m.shape_revisions[key] || 0, revision);
+      }
+      break;
+    }
     case 'node_moved':
       if (op.node_id && op.position)
         m.positions = { ...m.positions, [op.node_id]: roundPos(op.position) };
@@ -750,6 +794,7 @@ export class SessionSyncClient {
     fetchImpl,
     EventSourceImpl,
     nowFn,
+    deferRemoteOps = false,
   }) {
     this.sessionId = sessionId;
     this.clientId = clientId;
@@ -757,6 +802,7 @@ export class SessionSyncClient {
     this.streamUrl = streamUrl;
     this.opsUrl = opsUrl;
     this.handlers = handlers;
+    this._deferRemoteOps = deferRemoteOps;
     this.flushIntervalMs = flushIntervalMs;
     // Upper bound on how long a single ops POST may stay in flight before it is
     // aborted and retried; <= 0 disables the bound. See DEFAULT_REQUEST_TIMEOUT_MS.
@@ -829,6 +875,8 @@ export class SessionSyncClient {
     // Broadcasts still being drawn (holdLayoutSave), and the nodes this
     // browser's user moved since the last snapshot (noteUserMoved).
     this._renderHolds = 0;
+    this._localEditHolds = 0;
+    this._localEditWaiters = [];
     this._savePendingRelease = false;
     this._userMoved = new Set();
 
@@ -1451,6 +1499,25 @@ export class SessionSyncClient {
     };
   }
 
+  /** Hold snapshots and resync while an asynchronous local edit is being applied. */
+  holdLocalEdit() {
+    this._localEditHolds += 1;
+    const releaseSave = this.holdLayoutSave();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._localEditHolds -= 1;
+      releaseSave();
+      if (!this._localEditHolds) this._localEditWaiters.splice(0).forEach((resolve) => resolve());
+    };
+  }
+
+  waitForLocalEdits() {
+    if (!this._localEditHolds) return Promise.resolve();
+    return new Promise((resolve) => this._localEditWaiters.push(resolve));
+  }
+
   /** Nodes this browser's user moved: their positions are saved even unplaced. */
   noteUserMoved(nodeIds) {
     for (const id of nodeIds || []) this._userMoved.add(id);
@@ -1552,6 +1619,9 @@ export class SessionSyncClient {
     };
     const ops = computeOps(this._baseline, next);
     const sent = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    sent.shape_overrides = this._baseline.shape_overrides;
+    sent.type_shapes = this._baseline.type_shapes;
+    sent.shape_revisions = this._baseline.shape_revisions;
     sent.node_refs = this._baseline.node_refs;
     sent.positions = { ...this._baseline.positions, ...sent.positions };
     this._baseline = sent;
@@ -1778,7 +1848,12 @@ export class SessionSyncClient {
     const options = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
+      body: JSON.stringify({
+        client_id: this.clientId,
+        base_seq: this._seq,
+        appearance_version: 1,
+        ops: batch,
+      }),
     };
     if (controller) options.signal = controller.signal;
     const request = this._fetch(this.opsUrl, options);
@@ -1884,6 +1959,14 @@ export class SessionSyncClient {
         // already-baked, already-sent prediction — reintroducing the very
         // self-conflict race this mechanism exists to close, the next time
         // that later op's own ack round-trips.
+        for (const entry of body.applied || []) {
+          if (entry?.op === 'node_shape_set' || entry?.op === 'type_shape_set') {
+            const newer = Object.entries(entry.revisions || {}).some(
+              ([key, revision]) => revision < (this._baseline.shape_revisions[key] || 0)
+            );
+            if (!newer) this._baseline = applyOpToMirror(this._baseline, entry);
+          }
+        }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
           if (
@@ -1959,6 +2042,14 @@ export class SessionSyncClient {
           // to parse (or isn't JSON) still drops the op exactly as before,
           // just without the extra detail.
           const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
+          const conflict = body?.detail;
+          if (
+            conflict?.error === 'shape_revision_conflict' &&
+            typeof conflict.revision === 'number'
+          ) {
+            const current = this._baseline.shape_revisions[conflict.target] || 0;
+            this._baseline.shape_revisions[conflict.target] = Math.max(current, conflict.revision);
+          }
           if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
@@ -2172,21 +2263,30 @@ export class SessionSyncClient {
         // "stale", it means "already handled via foldLocalOp" (image
         // ingest), and its own delivery must still reach the canvas the same
         // way it always has (see foldLocalOp's docstring).
-        const foldedId = op?.annotation?.id;
-        let staleRemoteAnnotation = false;
-        if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
-          staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
-          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
-          const changesMembers = MEMBERSHIP_OPS.has(op.op) || op.dropped_node_ids?.length > 0;
-          if (changesMembers && typeof data.seq === 'number') {
-            this._membershipVersion = data.seq;
+        const applyBaseline = () => {
+          const revisions = Object.entries(op.revisions || {});
+          if (
+            (op.op === 'node_shape_set' || op.op === 'type_shape_set') &&
+            revisions.some(
+              ([key, revision]) => revision < (this._baseline.shape_revisions[key] || 0)
+            )
+          )
+            return false;
+          const foldedId = op?.annotation?.id;
+          let stale = false;
+          if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
+            stale = isAnnotationOpStale(this._baseline, op);
+            this._baseline = foldRemoteAnnotationOp(this._baseline, op);
           }
-        }
-        if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
-          this.handlers.onRemoteOps([op], {
-            clientId: data.client_id,
-            sessionId: this.sessionId,
-          });
+          return !stale;
+        };
+        const changesMembers = MEMBERSHIP_OPS.has(op.op) || op.dropped_node_ids?.length > 0;
+        if (changesMembers && typeof data.seq === 'number') this._membershipVersion = data.seq;
+        const meta = { clientId: data.client_id, sessionId: this.sessionId };
+        if (this._deferRemoteOps && this.handlers.onRemoteOps) {
+          this.handlers.onRemoteOps([op], { ...meta, applyBaseline });
+        } else if (applyBaseline() && this.handlers.onRemoteOps) {
+          this.handlers.onRemoteOps([op], meta);
         }
         break;
       }

@@ -99,3 +99,92 @@ describe('history synchronization barrier', () => {
     client.close();
   });
 });
+
+describe('appearance ordering', () => {
+  it('folds removal and appearance only when the canvas queue reaches them', () => {
+    const deliveries = [];
+    const { client } = makeClient({
+      deferRemoteOps: true,
+      handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+    });
+    client.setBaseline({ node_refs: ['a'], shape_overrides: { a: { builtin: true } } });
+    client._handleEvent({
+      type: 'op',
+      seq: 1,
+      client_id: 'other',
+      op: { op: 'nodes_removed', node_ids: ['a'] },
+    });
+    client._handleEvent({
+      type: 'op',
+      seq: 2,
+      client_id: 'other',
+      op: {
+        op: 'type_shape_set',
+        type: 'Thing',
+        selection: { builtin: true },
+        revisions: { 'type:Thing': 1 },
+      },
+    });
+    expect(client.isMember('a')).toBe(true);
+    expect(deliveries.map((entry) => entry.op.op)).toEqual(['nodes_removed', 'type_shape_set']);
+    expect(deliveries[0].applyBaseline()).toBe(true);
+    expect(client.isMember('a')).toBe(false);
+    expect(deliveries[1].applyBaseline()).toBe(true);
+    expect(client._baseline).toMatchObject({
+      shape_overrides: {},
+      type_shapes: { Thing: { builtin: true } },
+      shape_revisions: { 'node:a': 1, 'type:Thing': 1 },
+    });
+    client.close();
+  });
+
+  it('holds autosave and resync until a local edit completes', async () => {
+    const onHeldSaveReleased = vi.fn();
+    const { client } = makeClient({ handlers: { onHeldSaveReleased } });
+    const release = client.holdLocalEdit();
+    client.syncState({ node_refs: ['a'], positions: { a: { x: 1, y: 2 } } });
+    let settled = false;
+    const waiting = client.waitForLocalEdits().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(client.getPendingOps()).toEqual([]);
+    release();
+    await waiting;
+    expect(onHeldSaveReleased).toHaveBeenCalledOnce();
+    expect(settled).toBe(true);
+    client.close();
+  });
+
+  it('retains a newer revision when an older write conflicts', async () => {
+    const onDropped = vi.fn();
+    const fetchImpl = makeFetch([
+      {
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: { error: 'shape_revision_conflict', target: 'node:a', revision: 3 },
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.setBaseline({ node_refs: ['a'], shape_revisions: { 'node:a': 5 } });
+    client.sendOps([
+      {
+        op: 'node_shape_set',
+        node_id: 'a',
+        version: 1,
+        operation_id: 'one',
+        base_revision: 2,
+        selection: { builtin: true },
+      },
+    ]);
+    await client.flush();
+    expect(client._baseline.shape_revisions['node:a']).toBe(5);
+    expect(client.getPendingOps()).toEqual([]);
+    expect(onDropped).toHaveBeenCalledOnce();
+    expect(fetchImpl.calls[0].body.appearance_version).toBe(1);
+    client.close();
+  });
+});

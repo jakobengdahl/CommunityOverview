@@ -693,6 +693,45 @@ function App() {
           releaseSoon();
           return drew || dropped.length > 0;
         }
+        case 'node_shape_set':
+        case 'type_shape_set': {
+          const node = op.op === 'node_shape_set';
+          useGraphStore.setState((state) => {
+            const shapeOverrides = { ...state.shapeOverrides };
+            const typeShapes = { ...state.typeShapes };
+            const map = node ? shapeOverrides : typeShapes;
+            const key = node ? op.node_id : op.type;
+            if (op.selection == null) delete map[key];
+            else
+              Object.defineProperty(map, key, {
+                value: op.selection,
+                enumerable: true,
+                configurable: true,
+                writable: true,
+              });
+            if (!node && op.clear_node_id != null) {
+              delete shapeOverrides[op.clear_node_id];
+              if (op.restore_selection != null) {
+                Object.defineProperty(shapeOverrides, op.clear_node_id, {
+                  value: op.restore_selection,
+                  enumerable: true,
+                  configurable: true,
+                  writable: true,
+                });
+              }
+            }
+            return {
+              shapeOverrides,
+              typeShapes,
+              shapeRevisions: Object.fromEntries(
+                Object.entries({ ...state.shapeRevisions, ...op.revisions }).map(
+                  ([key, revision]) => [key, Math.max(revision, state.shapeRevisions[key] || 0)]
+                )
+              ),
+            };
+          });
+          return true;
+        }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
@@ -1004,6 +1043,9 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
+        await client.waitForLocalEdits();
+        await remoteOpsChainRef.current;
+        if (syncRef.current !== client || resyncGuardTokenRef.current !== myToken) return 0;
         // Stream ops keep arriving while the GET is in flight, and each one
         // is applied to the canvas and advances the client's appliedSeq (so
         // does this client's own echo, which is not re-applied). A
@@ -1019,6 +1061,8 @@ function App() {
             return 0;
           }
           adoptSessionPayload(targetId, payload);
+          await client.waitForLocalEdits();
+          await remoteOpsChainRef.current;
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
@@ -2890,24 +2934,35 @@ function App() {
       onRemoteOps: (ops, meta = {}) => {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
-          if (!handleStagedSessionOp(op)) {
-            const generation = sessionGenerationRef.current;
-            // The sync baseline already holds this op's layout: autosave
-            // waits from now, not from when the ops ahead of it are done.
-            const release =
-              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
-                ? syncRef.current?.holdLayoutSave() || null
-                : null;
-            remoteOpsChainRef.current = remoteOpsChainRef.current
-              .then(() => applyRemoteOp(op, release, generation))
-              .catch(() => release?.());
-          } else if (op.op === 'graph_change_staged') {
-            refreshStagedEntities(op);
-          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
-            // Merged entities now read from the graph; discarded ones are
-            // back to what the graph holds, or gone.
-            refreshStagedEntities(op, { removeMissing: true });
-          }
+          const generation = sessionGenerationRef.current;
+          // Hold from receipt through the canvas commit, including queued work.
+          const client = syncRef.current;
+          const release = client?.holdLayoutSave() || null;
+          remoteOpsChainRef.current = remoteOpsChainRef.current
+            .then(async () => {
+              await client?.waitForLocalEdits();
+              if (generation !== sessionGenerationRef.current || meta.applyBaseline?.() === false) {
+                release?.();
+                return;
+              }
+              let deferredRelease = false;
+              try {
+                if (!handleStagedSessionOp(op)) {
+                  deferredRelease = op.op === 'nodes_added' || op.op === 'nodes_replaced';
+                  await applyRemoteOp(op, release, generation);
+                } else if (op.op === 'graph_change_staged') {
+                  refreshStagedEntities(op);
+                } else if (
+                  op.op === 'graph_changes_merged' ||
+                  op.op === 'graph_changes_discarded'
+                ) {
+                  refreshStagedEntities(op, { removeMissing: true });
+                }
+              } finally {
+                if (!deferredRelease && release) releaseAfterDraw(release);
+              }
+            })
+            .catch(() => release?.());
         });
       },
       // This client's own annotation write just got acked with a fresh
@@ -3022,6 +3077,8 @@ function App() {
           const detail = body && typeof body.detail === 'object' ? body.detail : null;
           if (detail && detail.error === 'field_conflict') {
             showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else if (detail?.error === 'shape_revision_conflict') {
+            showNotification('error', t('sessions.change_not_saved'));
           } else {
             showNotification('info', t('context_menu.annotation_remote_locked'));
           }
