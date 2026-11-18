@@ -247,7 +247,11 @@ export function computeOps(prevState, nextState, typeShapeClearNodes = {}) {
     ['type_shapes', 'type_shape_set', 'type', 'type:'],
     ['shape_overrides', 'node_shape_set', 'node_id', 'node:'],
   ]) {
-    for (const id of new Set([...Object.keys(prev[map]), ...Object.keys(next[map])])) {
+    for (const id of new Set([
+      ...Object.keys(prev[map]),
+      ...Object.keys(next[map]),
+      ...(map === 'type_shapes' ? Object.keys(typeShapeClearNodes) : []),
+    ])) {
       if (map === 'shape_overrides' && !next.node_refs.includes(id)) continue;
       const before = Object.hasOwn(prev[map], id) ? prev[map][id] : undefined;
       const after = Object.hasOwn(next[map], id) ? next[map][id] : undefined;

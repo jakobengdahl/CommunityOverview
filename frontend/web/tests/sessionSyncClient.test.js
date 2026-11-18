@@ -3692,6 +3692,13 @@ describe('appearance operations', () => {
       expect(Object.hasOwn(applyOpToMirror(before, clearOps[0]).shape_overrides, nodeId)).toBe(
         false
       );
+      const inheritedOps = computeOps(before, initial, { [nodeId]: nodeId });
+      expect(inheritedOps).toHaveLength(1);
+      expect(inheritedOps[0]).toMatchObject({
+        op: 'type_shape_set', type: nodeId, selection: null,
+        clear_node_id: nodeId, clear_base_revision: 1,
+      });
+      expect(computeOps(applyOpToMirror(before, inheritedOps[0]), initial)).toEqual([]);
 
       const next = { ...initial, type_shapes: { [nodeId]: { ref: 'config:card' } } };
       const inheritedMapping = Object.create({ [nodeId]: nodeId });
