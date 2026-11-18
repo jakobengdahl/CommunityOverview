@@ -364,7 +364,23 @@ class FunctionInvocationService:
 
     def precheck(self, function_id, *, trigger, actor_binding):
         """The rejection code ``admit`` would record before validating input."""
-        return self._refusal(function_id, _bind(actor_binding), trigger, _UNCHECKED)[0]
+        code = self._refusal(function_id, _bind(actor_binding), trigger, _UNCHECKED)[0]
+        if code is None:
+            try:
+                code = self._isolation()[0]
+            except Exception:  # Fail closed, as admit does.
+                code = "invalid_manifest"
+        return code
+
+    def _isolation(self):
+        """``isolation_below_minimum`` or None, with the runner probe."""
+        try:
+            probe = self.runner.probe()
+        except RunnerUnavailable:
+            return "isolation_below_minimum", None
+        if self.isolation_minimum == "full" and probe.level != "full":
+            return "isolation_below_minimum", probe
+        return None, probe
 
     def refuse(self, function_id, code, *, actor_binding, idempotency_key=None):
         """Record a webhook call refused before admission, or replay its key."""
@@ -542,21 +558,12 @@ class FunctionInvocationService:
                 ):
                     code = "busy"
                 if code is None:
-                    try:
-                        probe = self.runner.probe()
-                    except RunnerUnavailable:
-                        code = "isolation_below_minimum"
+                    code, probe = self._isolation()
                     if probe is not None and probe.level == "degraded":
                         logger.warning(
                             "User function isolation is degraded; missing controls: %s",
                             probe.missing,
                         )
-                    if (
-                        probe is not None
-                        and self.isolation_minimum == "full"
-                        and probe.level != "full"
-                    ):
-                        code = "isolation_below_minimum"
             except Exception:  # Fail closed.
                 code = "invalid_manifest"
             if code:

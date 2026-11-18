@@ -22,7 +22,7 @@ from backend.agents.execution import (
     SqliteExecutionStore,
 )
 from backend.functions import invocation, run_files, webhook
-from backend.functions.runner import FunctionRunResult, RunnerProbe
+from backend.functions.runner import FunctionRunResult, RunnerProbe, RunnerUnavailable
 from backend.functions.token_store import WebhookTokenStore
 from backend.functions.webhook import register_webhook_routes
 from backend.runtime.authorization import GraphAuthorizationDecision
@@ -384,6 +384,11 @@ def test_concurrent_replays_claim_once_and_refusals_store_nothing(
         allowed=False
     )
     assert host.post("denied").json()["error"]["code"] == "access_denied"
+    host.graph.authorization_hook.evaluate.return_value = GraphAuthorizationDecision(
+        allowed=True
+    )
+    host.service.runner.probe.side_effect = RunnerUnavailable("no confinement")
+    assert host.post("isolated").json()["error"]["code"] == "isolation_below_minimum"
     assert len(host.created) == 1
 
 
