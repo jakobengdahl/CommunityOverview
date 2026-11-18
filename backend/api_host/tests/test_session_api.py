@@ -502,6 +502,27 @@ class TestSessionActivityAndUndo:
         restored = test_app.get(f"/api/sessions/{sid}").json()["state"]["annotations"]
         assert restored[0]["id"] == "note-1"
 
+    @pytest.mark.parametrize("endpoint", ["undo", "redo"])
+    def test_history_rejects_document_budget_and_can_retry(
+        self, test_app: TestClient, monkeypatch, endpoint
+    ):
+        from backend.core import session_manager as manager_module
+
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid)
+        url = f"/api/sessions/{sid}/{endpoint}"
+        body = {"client_id": "c1"}
+        if endpoint == "redo":
+            assert test_app.post(f"/api/sessions/{sid}/undo", json=body).status_code == 200
+        before = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_module, "_document_bytes", lambda *args: 10**12)
+            response = test_app.post(url, json=body)
+        assert response.status_code == 413
+        assert "document limit" in response.json()["detail"]
+        assert test_app.get(f"/api/sessions/{sid}").json()["state"] == before
+        assert test_app.post(url, json=body).status_code == 200
+
     def test_undo_is_409_while_another_client_holds_the_lease(
         self, test_app: TestClient
     ):

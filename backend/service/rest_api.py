@@ -1969,6 +1969,8 @@ def _register_session_endpoints(
             raise HTTPException(status_code=409, detail="session busy, retry")
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except ImageBudgetExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
