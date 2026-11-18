@@ -188,6 +188,8 @@ function App() {
     pulsedNodeIds,
     startGuide,
     getNodeColor,
+    shapeOverrides,
+    typeShapes,
     closeMenusSignal,
     resetSessionScopedState,
     editingEdge,
@@ -3835,6 +3837,8 @@ function App() {
           compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
+          shapeOverrides={shapeOverrides}
+          typeShapes={typeShapes}
           onContextMenuAction={handleContextMenuAction}
           stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
           stagedStateLabels={stagedStateLabels}

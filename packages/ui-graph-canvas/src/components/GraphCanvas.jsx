@@ -50,6 +50,12 @@ import {
   distributeNodes,
 } from '../utils/graphLayout';
 import {
+  createNodeShapeResolver,
+  nodeShapeAccessibleName,
+  nodeShapeAreaValues,
+  nodeShapeGeometry,
+} from '../utils/nodeShapes';
+import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
@@ -493,6 +499,10 @@ function GraphCanvasInner({
   lazyLoadHiddenConnectionsLabel = '{count} connections to nodes not yet loaded are hidden — Load More to reveal them',
   showMinimap = false,
   schema = null,
+  // Session shape selections (docs/design/NODE_SHAPES.md); configured type
+  // shapes come from `schema`. A node with no resolved shape keeps the card.
+  shapeOverrides = null,
+  typeShapes = null,
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
@@ -1502,15 +1512,50 @@ function GraphCanvasInner({
     });
   }, [visibleEdges, dimmedEdgeIds, edgeIntensity, stagedStates, stagedLabels]);
 
+  const resolveNodeShape = useMemo(
+    () =>
+      createNodeShapeResolver({
+        nodeTypes: schema?.node_types,
+        nodeShapes: schema?.node_shapes,
+        shapeOverrides: shapeOverrides || {},
+        typeShapes: typeShapes || {},
+      }),
+    [schema, shapeOverrides, typeShapes]
+  );
+
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
     const hasSavedPositions = nodesToRender.some((n) => n._savedPosition);
 
     const nodesWithoutPosition = nodesToRender.map((node) => {
       const mark = nodeMarks[node.id];
+      const remote = remoteSelections?.[node.id] ?? null;
+      const stagedLabel = stagedLabels[stagedStates?.nodes?.[node.id]] ?? null;
+      const resolved = resolveNodeShape(node);
+      let shaped = null;
+      if (resolved) {
+        const { definition, fields } = resolved;
+        const values = nodeShapeAreaValues(definition, node, fields);
+        const geometry = nodeShapeGeometry(definition.base, definition.scale);
+        shaped = {
+          node: {
+            geometry,
+            className: 'graph-shaped-flow-node',
+            // React Flow puts this on the focusable wrapper, replacing the
+            // visible (possibly clipped) text as the node's name.
+            ariaLabel: nodeShapeAccessibleName(definition, node, values, [
+              stagedLabel,
+              mark?.label,
+              remote?.displayName,
+            ]),
+          },
+          data: { shapeRender: { definition, values, geometry } },
+        };
+      }
       return {
         id: node.id,
         type: 'custom',
+        ...shaped?.node,
         data: {
           ...node,
           label: node.name,
@@ -1522,12 +1567,13 @@ function GraphCanvasInner({
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
-          remoteSelection: remoteSelections?.[node.id] ?? null,
+          remoteSelection: remote,
           stagedState: stagedStates?.nodes?.[node.id] ?? null,
-          stagedLabel: stagedLabels[stagedStates?.nodes?.[node.id]] ?? null,
+          stagedLabel,
           previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
+          ...shaped?.data,
         },
         position: node._savedPosition || { x: 0, y: 0 },
       };
@@ -1572,6 +1618,7 @@ function GraphCanvasInner({
     stagedStates,
     stagedLabels,
     nodePreviewEnabled,
+    resolveNodeShape,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);

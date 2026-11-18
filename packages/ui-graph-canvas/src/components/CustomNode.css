@@ -8,6 +8,7 @@
   --graph-card-focus: rgba(100, 108, 255, 0.7);
   --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --graph-card-shadow-color: rgba(0, 0, 0, 0.3);
   --graph-card-control-border: #1a1a1a;
 }
 
@@ -18,6 +19,7 @@
     --graph-card-text-secondary: #666;
     --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+    --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
     --graph-card-control-border: white;
   }
 }
@@ -435,4 +437,204 @@ body.graph-menu-open .graph-node-tooltip {
   white-space: nowrap;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   z-index: 6;
+}
+
+/* Configured shapes (docs/design/NODE_SHAPES.md). The React Flow wrapper and
+   this root pass the pointer through, so selection, drag, context menu and
+   erase (elementFromPoint) only hit the painted body and the text and
+   controls inside it; transparent corners reach whatever lies beneath. */
+/* !important: React Flow sets pointer-events inline on its wrapper. */
+.react-flow__node.graph-shaped-flow-node {
+  pointer-events: none !important;
+}
+
+.graph-shaped-node,
+.graph-shape-svg {
+  pointer-events: none;
+}
+
+.graph-shaped-node {
+  position: relative;
+  overflow: visible;
+}
+
+.graph-shape-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+}
+
+/* Only the painted body and the visible text labels are hit, including a
+   triangle's outside label; the state badges pass the pointer through. */
+.graph-shape-body,
+.graph-shape-band,
+.graph-shape-label-chip,
+.graph-shape-text > *,
+.graph-shaped-node button {
+  pointer-events: auto;
+}
+
+/* The connection handles sit at the bbox top and bottom centre, on the body
+   edge of every base (a triangle's apex or tip is a body vertex), and are hit
+   exactly as on the card: React Flow's connectionindicator rule turns them on
+   while nodes are connectable. */
+
+/* Above the body and the state badges beside it. */
+.graph-shape-outside-label {
+  z-index: 7;
+}
+
+/* Sized and placed inline inside the text box; a hover transform or
+   overflowing glyph would reach past the body. */
+.graph-shaped-node .graph-expand-button,
+.graph-shaped-node .graph-expand-button:hover,
+.graph-shaped-node .graph-edit-button,
+.graph-shaped-node .graph-edit-button:hover {
+  right: auto;
+  transform: none;
+  box-sizing: border-box;
+  padding: 0;
+  overflow: hidden;
+}
+
+.graph-shape-body {
+  fill: var(--graph-card-surface);
+}
+
+.graph-shape-shadow {
+  fill: var(--graph-card-shadow-color);
+  transform: translateY(2px);
+}
+
+.graph-shape-outline {
+  fill: none;
+  stroke-width: 2;
+}
+
+/* State rings sit under the body, so half their stroke shows outside it.
+   Each ring is 6px wider than the next one in, so stacked states each keep
+   a visible 3px band. */
+.graph-shape-ring {
+  fill: none;
+  stroke-linejoin: round;
+}
+
+.graph-shape-ring-mark {
+  stroke-width: 6;
+}
+
+.graph-shape-ring-focus {
+  stroke: rgba(100, 108, 255, 0.4);
+  stroke-width: 12;
+}
+
+/* Selection is a wider ring than highlight, not only another colour. */
+.graph-shaped-node.selected .graph-shape-ring-focus {
+  stroke: var(--graph-card-focus);
+  stroke-width: 18;
+}
+
+.graph-shape-ring-remote {
+  stroke-width: 24;
+  stroke-dasharray: 6 3;
+}
+
+/* React Flow drops the wrapper outline on keyboard focus; this ring, solid
+   #646cff (at least 3:1 on both canvas backgrounds), replaces it. */
+.graph-shape-ring-keyboard {
+  stroke: transparent;
+  stroke-width: 30;
+}
+
+.react-flow__node:focus-visible .graph-shape-ring-keyboard {
+  stroke: #646cff;
+}
+
+.graph-shaped-node.skill-node .graph-shape-outline {
+  stroke-dasharray: 6 3;
+}
+
+.graph-shaped-node.skill-node.selected .graph-shape-ring-focus {
+  stroke: rgba(251, 191, 36, 0.8);
+}
+
+.graph-shaped-node.staged .graph-shape-outline {
+  stroke: #f0b429 !important;
+  stroke-dasharray: 6 4;
+}
+
+.graph-shaped-node.staged-deleted,
+.graph-shaped-node.staged-orphaned {
+  opacity: 0.7;
+}
+
+.graph-shaped-node.staged-deleted .graph-node-label {
+  text-decoration: line-through;
+}
+
+.graph-shaped-node.dimmed {
+  opacity: 0.35;
+}
+
+.graph-shaped-node.dimmed.selected,
+.graph-shaped-node.dimmed:hover,
+.graph-shaped-node.dimmed.remote-selected,
+.react-flow__node:focus-visible .graph-shaped-node.dimmed {
+  opacity: 1;
+}
+
+@media (prefers-contrast: more) {
+  .graph-shaped-node.dimmed {
+    opacity: 0.7;
+  }
+}
+
+.graph-shape-band-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.graph-shape-label-chip {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-radius: 4px;
+}
+
+.graph-shape-label-chip[style*='background'] {
+  padding: 0 0.3em;
+}
+
+.graph-shape-text {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--graph-card-text-primary);
+}
+
+.graph-shape-text > * {
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.graph-shape-text .graph-node-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  margin-bottom: 0.3em;
+  /* A long summary must clip itself, not squeeze the name out of the column. */
+  flex-shrink: 0;
 }
