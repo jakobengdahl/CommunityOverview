@@ -286,10 +286,15 @@ starting between a wait resolving and the apply holds the operation back too.
 
 Resync waits for the queue and any registered asynchronous local edit before
 replacing state; it rechecks local edits after the queue drains and repeats if
-either work source changed while waiting. Each target of a combined type-default
-and node-clear operation is applied independently when its revision is current,
-preserving a newer value for either target. Captured appearance writes are not
-replayed by resync until node-shape-phase4c-2 implements conflict rebasing.
+either work source changed while waiting. Resync may replay a captured appearance
+write only when the server has acknowledged that write with its applied operation
+and revisions. A pending write, a successful response without that operation, or
+a predicted base revision plus one is not evidence of its applied revision.
+Replay enters the ordered canvas queue and checks each server-returned revision
+against the baseline when the queued operation runs, not when it is captured.
+Each target of a combined type-default and node-clear operation is applied
+independently when its revision is present and current, preserving a newer value
+for either target.
 Local editors hold autosave until their changes are ready for a fresh snapshot.
 A rejected stale appearance write is not retried as a fresh overwrite: its
 current revision is incorporated during resync, and any further edit must use
