@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
@@ -40,11 +41,18 @@ let renderCount = 0;
 let flowNodes = [];
 let selectionOnChange = null;
 
-vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes, edges }) => {
+vi.mock('reactflow', async (importOriginal) => {
+  const { applyNodeChanges } = await importOriginal();
+  const MockReactFlow = ({ children, nodes, edges, onSelectionStart, onNodesChange }) => {
     flowNodes = nodes || [];
     return (
-      <div data-testid="react-flow">
+      <div
+        data-testid="react-flow"
+        onMouseDown={onSelectionStart}
+        onMouseMove={() => {
+          onNodesChange(nodes.map((node) => ({ id: node.id, type: 'select', selected: true })));
+        }}
+      >
         <div data-testid="nodes">
           {nodes?.map((n) => (
             <div key={n.id} data-testid={`node-${n.id}`}>
@@ -77,7 +85,11 @@ vi.mock('reactflow', () => {
         throw new Error('useNodesState render count exceeded 60 - GraphCanvas is not settling');
       }
       const [nodes, setNodes] = React.useState(initialNodes);
-      return [nodes, setNodes, vi.fn()];
+      return [
+        nodes,
+        setNodes,
+        (changes) => setNodes((current) => applyNodeChanges(changes, current)),
+      ];
     },
     useEdgesState: (initialEdges) => {
       const [edges, setEdges] = React.useState(initialEdges);
@@ -296,3 +308,39 @@ describe.each(MIRRORS)(
     });
   }
 );
+
+it('corrects pane selection after node changes while preserving card selection', () => {
+  renderCount = 0;
+  const schema = {
+    node_shapes: {
+      triangle: {
+        version: 1,
+        base: 'triangle-up',
+        scale: 1,
+        placement: 'centre',
+        areas: { first: 'type', second: 'name', third: null },
+      },
+    },
+    node_types: { Risk: { shape: 'triangle' } },
+  };
+  render(
+    <GraphCanvas
+      nodes={[
+        { id: 'triangle', name: 'Risk', type: 'Risk' },
+        { id: 'card', name: 'Card', type: 'Actor' },
+      ]}
+      edges={[]}
+      schema={schema}
+    />
+  );
+  const pane = screen.getByTestId('react-flow');
+  const triangle = flowNodes.find((node) => node.id === 'triangle');
+  const { x, y } = triangle.position;
+  fireEvent.mouseDown(pane, { button: 0, clientX: x + 2, clientY: y + 2 });
+  fireEvent.mouseMove(pane, { clientX: x + 12, clientY: y + 12 });
+  expect(flowNodes.find((node) => node.id === 'triangle').selected).toBeFalsy();
+  expect(flowNodes.find((node) => node.id === 'card').selected).toBe(true);
+  fireEvent.mouseMove(pane, { clientX: x + 120, clientY: y + 100 });
+  expect(flowNodes.find((node) => node.id === 'triangle').selected).toBe(true);
+  fireEvent.mouseUp(pane);
+});
