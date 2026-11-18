@@ -291,8 +291,10 @@ function CustomNode({ data, id, selected }) {
         {/* Also shown while selected, so a keyboard user can Tab to them. The
             edit button sits beside the expand button, not below it: below the
             side anchor a triangle has already narrowed away, and the pointer
-            leaving the painted body and the bridge hides both buttons. */}
-        {(showButtons || selected) && data.onEdit && (
+            leaving the painted body and the bridge hides both buttons. While
+            selected the buttons stay visible without a hover path, so the
+            bridge would only add unpainted hit area. */}
+        {showButtons && !selected && data.onEdit && (
           <span
             className="graph-shape-action-bridge"
             aria-hidden="true"

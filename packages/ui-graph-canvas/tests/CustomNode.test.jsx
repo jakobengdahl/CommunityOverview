@@ -524,7 +524,9 @@ describe('CustomNode configured shapes', () => {
   )('keeps the path from the %s body (scale %s) to its edit button hoverable', (base, scale) => {
     const placement = base.startsWith('triangle') ? 'centre' : 'top-left';
     const definition = { ...CARD, base, placement, scale };
-    renderFlow([{ ...shapedFlowNode(definition, { onExpand() {}, onEdit() {} }), selected: true }]);
+    const flowNode = shapedFlowNode(definition, { onExpand() {}, onEdit() {} });
+    const { rerender } = renderFlow([flowNode]);
+    fireEvent.mouseEnter(document.querySelector('.graph-shaped-node'));
     const centre = (title, dy) => {
       const { left, top } = screen.getByTitle(title).style;
       return { x: parseFloat(left) + 12, y: parseFloat(top) + dy };
@@ -546,6 +548,14 @@ describe('CustomNode configured shapes', () => {
       const style = getComputedStyle(document.querySelector('.graph-shape-action-bridge'));
       expect([style.width, style.height, style.pointerEvents]).toEqual(['52px', '24px', 'auto']);
     });
+    // Still hovered, now selected: the buttons need no hover path, so no bridge.
+    rerender(
+      <ReactFlowProvider>
+        <ReactFlow nodes={[{ ...flowNode, selected: true }]} edges={[]} nodeTypes={flowNodeTypes} />
+      </ReactFlowProvider>
+    );
+    expect(screen.getByTitle('Edit node')).toBeTruthy();
+    expect(document.querySelector('.graph-shape-action-bridge')).toBeNull();
   });
 
   it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {
