@@ -9,6 +9,7 @@ import {
   foldRemoteAnnotationOp,
   isAnnotationOpStale,
   hydrateAddedNodes,
+  holdRemoteOpSave,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import {
@@ -3812,32 +3813,45 @@ it('keeps predicted appearance revisions through unchanged stale canvas snapshot
   client.close();
 });
 
-it('holds autosave until a queued remote appearance has reached the canvas', () => {
-  const onHeldSaveReleased = vi.fn();
-  const { client } = makeClient({ handlers: { onHeldSaveReleased } });
-  let release;
-  client.handlers.onRemoteOps = () => {
-    release = client.holdLayoutSave();
-  };
-  client.connect();
-  const canvas = { node_refs: ['a'], shape_overrides: {} };
-  client.setBaseline(canvas);
-  FakeEventSource.instances[0].emit({
-    type: 'op',
-    seq: 1,
-    client_id: 'other',
-    op: {
-      op: 'node_shape_set',
-      node_id: 'a',
-      selection: { builtin: true },
-      revisions: { 'node:a': 1 },
-    },
-  });
-  expect(client.syncState(canvas)).toBeUndefined();
-  expect(client.getPendingOps()).toEqual([]);
-  release();
-  expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
-  client.syncState({ ...canvas, shape_overrides: { a: { builtin: true } } });
-  expect(client.getPendingOps()).toEqual([]);
-  client.close();
-});
+it.each(['node_shape_set', 'nodes_removed'])(
+  'holds autosave until a queued remote %s has reached the canvas',
+  (kind) => {
+    const onHeldSaveReleased = vi.fn();
+    const { client } = makeClient({ handlers: { onHeldSaveReleased } });
+    let release;
+    client.handlers.onRemoteOps = ([op]) => {
+      release = holdRemoteOpSave(client, op);
+    };
+    client.connect();
+    const canvas = {
+      node_refs: ['a'],
+      shape_overrides: kind === 'nodes_removed' ? { a: { builtin: true } } : {},
+    };
+    client.setBaseline(canvas);
+    FakeEventSource.instances[0].emit({
+      type: 'op',
+      seq: 1,
+      client_id: 'other',
+      op:
+        kind === 'nodes_removed'
+          ? { op: kind, node_ids: ['a'] }
+          : {
+              op: 'node_shape_set',
+              node_id: 'a',
+              selection: { builtin: true },
+              revisions: { 'node:a': 1 },
+            },
+    });
+    expect(client.syncState(canvas)).toBeUndefined();
+    expect(client.getPendingOps()).toEqual([]);
+    release();
+    expect(onHeldSaveReleased).toHaveBeenCalledTimes(1);
+    client.syncState(
+      kind === 'nodes_removed'
+        ? { node_refs: [], shape_overrides: {} }
+        : { ...canvas, shape_overrides: { a: { builtin: true } } }
+    );
+    expect(client.getPendingOps()).toEqual([]);
+    client.close();
+  }
+);

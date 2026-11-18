@@ -46,6 +46,14 @@ const SERVER_ONLY_OPS = new Set([
 // broadcasts are applied even when this client sent them.
 export const MEMBERSHIP_OPS = new Set(['nodes_added', 'nodes_removed', 'nodes_replaced']);
 
+// The mirror advances before the queued canvas update. Keep snapshots from
+// treating the old canvas as a new edit until that update has been drawn.
+export function holdRemoteOpSave(client, op) {
+  return MEMBERSHIP_OPS.has(op?.op) || op?.op === 'node_shape_set' || op?.op === 'type_shape_set'
+    ? client?.holdLayoutSave() || null
+    : null;
+}
+
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
 // initial materialisation within the server's per-batch op cap.

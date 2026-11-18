@@ -32,6 +32,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
   MEMBERSHIP_OPS,
   hydrateAddedNodes,
+  holdRemoteOpSave,
 } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useStagedSession } from './hooks/useStagedSession';
@@ -698,6 +699,7 @@ function App() {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
           removeIds.forEach((id) => removeNode(id));
+          if (heldLayoutRelease) releaseAfterDraw(heldLayoutRelease);
           return removeIds.some((id) => existing.has(id));
         }
         case 'nodes_hidden': {
@@ -2923,13 +2925,7 @@ function App() {
             const generation = sessionGenerationRef.current;
             // The sync baseline already holds this op's layout: autosave
             // waits from now, not from when the ops ahead of it are done.
-            const release =
-              op?.op === 'nodes_added' ||
-              op?.op === 'nodes_replaced' ||
-              op?.op === 'node_shape_set' ||
-              op?.op === 'type_shape_set'
-                ? syncRef.current?.holdLayoutSave() || null
-                : null;
+            const release = holdRemoteOpSave(syncRef.current, op);
             remoteOpsChainRef.current = remoteOpsChainRef.current
               .then(() => applyRemoteOp(op, release, generation))
               .catch(() => release?.());
