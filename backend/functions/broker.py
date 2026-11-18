@@ -31,7 +31,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional
 
 from backend.core import attachment_extract as extraction
@@ -47,7 +47,13 @@ from backend.runtime.authorization import (
     use_request_authorization,
 )
 from backend.service import access
-from backend.service.attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS, ENVELOPE
+from backend.service.attachment_tools import (
+    ATTACHMENT_READ_DEFAULT_CHARS,
+    ENVELOPE,
+    _audit_write,
+    _write_refusal,
+    error,
+)
 from backend.service.attachments import FEDERATED_NODE_PREFIX
 from backend.service.mutations import _FEDERATION_BOOKKEEPING_METADATA_KEYS
 
@@ -460,9 +466,7 @@ class FunctionBroker:
             result = extraction.ExtractionResult(extraction.STATUS_UNSUPPORTED_TYPE)
             content_type = None
         else:
-            tools = getattr(self._service, "_attachment_read_tools", None)
-            limits = tools.extraction_limits if tools else extraction.ExtractionLimits()
-            result = extraction.extract(data, content_type, limits)
+            result = self._extract(data, content_type, settings)
         segments, position = [], 0
         end = offset + max_chars
         for segment in result.segments if result.status == "ok" else ():
@@ -485,17 +489,49 @@ class FunctionBroker:
             "segments": segments,
         }
 
+    def _extract(self, data: bytes, content_type: str, settings: Any) -> Any:
+        tools = getattr(self._service, "_attachment_read_tools", None)
+        if tools is None:
+            return extraction.extract(data, content_type)
+        limits = tools.extraction_limits
+        if settings is not None:
+            # As for a stored attachment: the configured file cap is the
+            # extraction input bound.
+            limits = replace(limits, max_input_bytes=settings.limits.max_file_bytes)
+        # The process-wide extraction slots bound concurrent extraction across
+        # every caller, function runs included.
+        if not tools.slots.acquire(timeout=tools.limits.extract_timeout_seconds):
+            raise BrokerError(ERR_TOOL_FAILED, "Extraction is busy; retry later.")
+        try:
+            return extraction.extract(data, content_type, limits)
+        finally:
+            tools.slots.release()
+
     def _attach(self, node_id: str, record: Any, data: bytes) -> Any:
-        # The service's upload is async and does its own node, type and cap
-        # checks; run it on a private loop carrying this call's context.
-        upload = self._service.add_node_attachment(
-            node_id,
-            filename=record.filename,
-            declared_content_type=record.declared_content_type,
-            content=data,
-        )
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(copy_context().run, asyncio.run, upload).result()
+        result = error("failed")
+        try:
+            # The instance ceiling (ADR 0010 rollback) applies to this
+            # attachment write as to every other one.
+            result = _write_refusal(self._service, "add_node_attachment")
+            if result is not None:
+                return result
+            # The service's upload is async and does its own node, type and cap
+            # checks; run it on a private loop carrying this call's context.
+            upload = self._service.add_node_attachment(
+                node_id,
+                filename=record.filename,
+                declared_content_type=record.declared_content_type,
+                content=data,
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(copy_context().run, asyncio.run, upload).result()
+            return result
+        finally:
+            _audit_write(
+                "add_node_attachment",
+                node_id,
+                result if isinstance(result, Mapping) else error("failed"),
+            )
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:

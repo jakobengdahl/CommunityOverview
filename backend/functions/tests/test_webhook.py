@@ -19,6 +19,8 @@ from backend.agents.execution import (
     RetryPolicy,
     SqliteExecutionStore,
 )
+from backend.core.attachment_extract import ExtractionLimits
+from backend.core.attachment_types import parse_allowed_types
 from backend.functions import invocation, run_files, webhook
 from backend.functions.runner import FunctionRunResult, RunnerProbe
 from backend.functions.token_store import WebhookTokenStore
@@ -309,9 +311,36 @@ def _tool(broker, name, **arguments):
     return response.get("result") or response["error"]["data"]["code"]
 
 
-@pytest.mark.parametrize("allow_write", [False, True])
-def test_files_are_run_inputs_read_through_broker_and_deleted(files_host, allow_write):
+@pytest.mark.parametrize(
+    "allow_write,content_access,attached",
+    [
+        (False, "read_write", "grant_denied"),
+        (True, "read_write", "ok"),
+        (True, "read", "access_denied"),
+    ],
+)
+def test_files_are_run_inputs_read_through_broker_and_deleted(
+    files_host, monkeypatch, caplog, allow_write, content_access, attached
+):
     host = files_host
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", content_access)
+    attachment = {"id": "att-1", "sha256": "0" * 64, "size": 13}
+    host.graph.add_node_attachment.return_value = {
+        "success": True,
+        "attachment": attachment,
+    }
+    # The configured file cap bounds extraction, under the process-wide slots.
+    host.graph.attachment_settings = SimpleNamespace(
+        allowed_types=parse_allowed_types(None),
+        limits=SimpleNamespace(max_file_bytes=13),
+    )
+    slots = Mock()
+    slots.acquire.return_value = True
+    host.graph._attachment_read_tools = SimpleNamespace(
+        extraction_limits=ExtractionLimits(),
+        limits=SimpleNamespace(extract_timeout_seconds=5),
+        slots=slots,
+    )
     host.service.webhook_policy.set(
         "example",
         "graph-a",
@@ -328,6 +357,7 @@ def test_files_are_run_inputs_read_through_broker_and_deleted(files_host, allow_
         seen["listed"] = listed
         seen["text"] = _tool(broker, "run_files.read", file_id="file-1")
         seen["binary"] = _tool(broker, "run_files.read", file_id="file-2")
+        seen["big"] = _tool(broker, "run_files.read", file_id="file-3")
         seen["foreign"] = _tool(broker, "run_files.read", file_id="../file-1")
         seen["attach"] = _tool(
             broker, "graph.attach_run_file", node_id="n1", file_id="file-1"
@@ -337,12 +367,14 @@ def test_files_are_run_inputs_read_through_broker_and_deleted(files_host, allow_
         return FunctionRunResult("succeeded", output={})
 
     host.execute.side_effect = run
-    response = host.post(
-        files={
-            "a": ("notes.txt", b"hello webhook", "text/plain"),
-            "b": ("blob.bin", b"\x00\x01\x02", "application/octet-stream"),
-        }
-    )
+    with caplog.at_level("INFO", logger="attachments.audit"):
+        response = host.post(
+            files={
+                "a": ("notes.txt", b"hello webhook", "text/plain"),
+                "b": ("blob.bin", b"\x00\x01\x02", "application/octet-stream"),
+                "c": ("big.txt", b"x" * 14, "text/plain"),
+            }
+        )
     assert response.status_code == 200
     assert response.json()["status"] == ("failed" if allow_write else "succeeded")
     # G4: bytes and paths stay out of the envelope and the package.
@@ -355,19 +387,27 @@ def test_files_are_run_inputs_read_through_broker_and_deleted(files_host, allow_
     assert [(f["file_id"], f["size"]) for f in seen["listed"]["files"]] == [
         ("file-1", 13),
         ("file-2", 3),
+        ("file-3", 14),
     ]
     assert seen["text"]["untrusted_content"] is True
     assert seen["text"]["segments"][0]["text"] == "hello webhook"
     assert seen["binary"]["extraction_status"] == "unsupported_type"
     assert seen["binary"]["segments"] == []
+    assert seen["big"]["extraction_status"] == "too_large"
+    assert slots.acquire.call_count == slots.release.call_count == 2
     assert seen["foreign"] == "invalid_arguments"
-    if allow_write:
-        assert seen["attach"] == {"success": True}
+    audits = [r for r in caplog.records if r.name == "attachments.audit"]
+    if attached == "ok":
+        assert seen["attach"]["attachment"] == attachment
         call = host.graph.add_node_attachment.call_args
         assert call.args == ("n1",) and call.kwargs["content"] == b"hello webhook"
     else:
-        assert seen["attach"] == "grant_denied"
+        assert seen["attach"] == attached
         host.graph.add_node_attachment.assert_not_called()
+    # Every attachment write the broker attempts is audited (ADR 0010 §6).
+    assert [(r.event, r.outcome) for r in audits] == (
+        [] if attached == "grant_denied" else [("attachment_added", attached)]
+    )
 
 
 def test_concurrent_replays_claim_once_and_refusals_store_nothing(
@@ -431,3 +471,12 @@ def test_refused_body_rejects_claimed_run_and_deletes_files(
     host.execute.assert_not_called()
     replay = host.post("key").json()
     assert replay["status"] == "rejected" and replay["error"]["code"] == code
+
+
+def test_file_store_failure_rejects_claimed_run(files_host, monkeypatch):
+    host = files_host
+    monkeypatch.setattr(webhook, "RunFiles", Mock(side_effect=OSError))
+    with pytest.raises(OSError):
+        host.post("key")
+    host.execute.assert_not_called()
+    assert host.post("key").json()["status"] == "rejected"

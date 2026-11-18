@@ -245,13 +245,15 @@ async def _invoke_with_files(
             raise HTTPException(403)
     if not isinstance(admitted, Admission):
         return _response(admitted)
-    files = RunFiles()
+    files = None
     try:
+        files = RunFiles()
         value = await _read_multipart(request, boundary, files)
         if not _valid_input(admitted.manifest, value):
             raise ValueError("Invalid input")
     except BaseException as exc:
-        files.close()
+        if files is not None:
+            files.close()
         too_large = isinstance(exc, RunFilesTooLarge)
         with CancelScope(shield=True):
             await run_in_threadpool(
