@@ -693,6 +693,45 @@ function App() {
           releaseSoon();
           return drew || dropped.length > 0;
         }
+        case 'node_shape_set':
+        case 'type_shape_set': {
+          const node = op.op === 'node_shape_set';
+          useGraphStore.setState((state) => {
+            const shapeOverrides = { ...state.shapeOverrides };
+            const typeShapes = { ...state.typeShapes };
+            const map = node ? shapeOverrides : typeShapes;
+            const key = node ? op.node_id : op.type;
+            if (op.selection == null) delete map[key];
+            else
+              Object.defineProperty(map, key, {
+                value: op.selection,
+                enumerable: true,
+                configurable: true,
+                writable: true,
+              });
+            if (!node && op.clear_node_id != null) {
+              delete shapeOverrides[op.clear_node_id];
+              if (op.restore_selection != null) {
+                Object.defineProperty(shapeOverrides, op.clear_node_id, {
+                  value: op.restore_selection,
+                  enumerable: true,
+                  configurable: true,
+                  writable: true,
+                });
+              }
+            }
+            return {
+              shapeOverrides,
+              typeShapes,
+              shapeRevisions: Object.fromEntries(
+                Object.entries({ ...state.shapeRevisions, ...op.revisions }).map(
+                  ([key, revision]) => [key, Math.max(revision, state.shapeRevisions[key] || 0)]
+                )
+              ),
+            };
+          });
+          return true;
+        }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
@@ -1004,6 +1043,15 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
+        // An edit or another remote operation can arrive while either await
+        // is pending. Recheck synchronously after the queue drains.
+        let drainedChain;
+        do {
+          await client.waitForLocalEdits();
+          drainedChain = remoteOpsChainRef.current;
+          await drainedChain;
+        } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
+        if (syncRef.current !== client || resyncGuardTokenRef.current !== myToken) return 0;
         // Stream ops keep arriving while the GET is in flight, and each one
         // is applied to the canvas and advances the client's appliedSeq (so
         // does this client's own echo, which is not re-applied). A
@@ -1019,6 +1067,11 @@ function App() {
             return 0;
           }
           adoptSessionPayload(targetId, payload);
+          do {
+            await client.waitForLocalEdits();
+            drainedChain = remoteOpsChainRef.current;
+            await drainedChain;
+          } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
@@ -1036,12 +1089,7 @@ function App() {
         // `payload` either, and without this second read it would be
         // silently wiped by the reload with nothing to bring it back (review
         // round 6). An op present only in the first read (delivered and
-        // confirmed by the server while we waited) is harmless to keep too —
-        // replaying an already-confirmed op is redundant, never wrong, under
-        // the same idempotent-op contract this whole function already relies
-        // on (see this function's opening comment), so the union below errs
-        // on the side of including rather than trying to guess which read is
-        // more current.
+        // confirmed by the server while we waited) is also retained.
         const pendingOpsAfter = capturePendingOps();
         const seenBefore = new Set(pendingOpsBefore);
         const unionedOps = pendingOpsBefore.concat(
@@ -1097,9 +1145,12 @@ function App() {
         // for its original caller (handleImageIngest), whose op is broadcast
         // under a shared, non-personal client id specifically so its own
         // echo is *not* filtered there.
-        for (const op of pendingOps) {
-          client.foldOpIntoBaseline(op);
-        }
+        // TODO(node-shape-phase4c-2): Rebase acknowledged appearance writes
+        // against current revisions inside the canvas queue during resync.
+        const replayOps = pendingOps.filter(
+          (op) => op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set'
+        );
+        for (const op of replayOps) client.foldOpIntoBaseline(op);
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
         // Re-checked every iteration, not just once before the loop (review
@@ -1115,7 +1166,7 @@ function App() {
         // resync's own return value is the one the caller should act on.
         // A pending membership op is not drawn here: its broadcast draws it.
         let appliedCount = 0;
-        for (const op of pendingOps) {
+        for (const op of replayOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (syncRef.current !== client) break;
           if (MEMBERSHIP_OPS.has(op?.op)) continue;
@@ -2037,6 +2088,8 @@ function App() {
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
+        shape_overrides: state.shapeOverrides,
+        type_shapes: state.typeShapes,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
         dimmed_node_ids: state.dimmedNodeIds || [],
@@ -2890,24 +2943,38 @@ function App() {
       onRemoteOps: (ops, meta = {}) => {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
-          if (!handleStagedSessionOp(op)) {
-            const generation = sessionGenerationRef.current;
-            // The sync baseline already holds this op's layout: autosave
-            // waits from now, not from when the ops ahead of it are done.
-            const release =
-              op?.op === 'nodes_added' || op?.op === 'nodes_replaced'
-                ? syncRef.current?.holdLayoutSave() || null
-                : null;
-            remoteOpsChainRef.current = remoteOpsChainRef.current
-              .then(() => applyRemoteOp(op, release, generation))
-              .catch(() => release?.());
-          } else if (op.op === 'graph_change_staged') {
-            refreshStagedEntities(op);
-          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
-            // Merged entities now read from the graph; discarded ones are
-            // back to what the graph holds, or gone.
-            refreshStagedEntities(op, { removeMissing: true });
-          }
+          const generation = sessionGenerationRef.current;
+          // Hold from receipt through the canvas commit, including queued work.
+          const client = syncRef.current;
+          const release = client?.holdLayoutSave() || null;
+          remoteOpsChainRef.current = remoteOpsChainRef.current
+            .then(async () => {
+              // An edit can start after the wait resolves but before this
+              // continuation runs: re-check after every await, then apply
+              // synchronously with the last check.
+              while (client?.hasLocalEdits()) await client.waitForLocalEdits();
+              if (generation !== sessionGenerationRef.current || meta.applyBaseline?.() === false) {
+                release?.();
+                return;
+              }
+              let deferredRelease = false;
+              try {
+                if (!handleStagedSessionOp(op)) {
+                  deferredRelease = op.op === 'nodes_added' || op.op === 'nodes_replaced';
+                  await applyRemoteOp(op, release, generation);
+                } else if (op.op === 'graph_change_staged') {
+                  refreshStagedEntities(op);
+                } else if (
+                  op.op === 'graph_changes_merged' ||
+                  op.op === 'graph_changes_discarded'
+                ) {
+                  refreshStagedEntities(op, { removeMissing: true });
+                }
+              } finally {
+                if (!deferredRelease && release) releaseAfterDraw(release);
+              }
+            })
+            .catch(() => release?.());
         });
       },
       // This client's own annotation write just got acked with a fresh
@@ -3022,6 +3089,8 @@ function App() {
           const detail = body && typeof body.detail === 'object' ? body.detail : null;
           if (detail && detail.error === 'field_conflict') {
             showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else if (detail?.error === 'shape_revision_conflict') {
+            showNotification('error', t('sessions.change_not_saved'));
           } else {
             showNotification('info', t('context_menu.annotation_remote_locked'));
           }
