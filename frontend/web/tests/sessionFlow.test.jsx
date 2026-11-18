@@ -581,16 +581,16 @@ describe('Server-backed session lifecycle', () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    // The replace has not started, yet its layout is in the baseline.
+    // Both operations hold autosave from receipt, including the queued replace.
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
-    expect(holds).toHaveBeenCalledTimes(1);
+    expect(holds).toHaveBeenCalledTimes(2);
     await act(async () => {
       openGate();
     });
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
-    expect(holds).toHaveBeenCalledTimes(1);
+    expect(holds).toHaveBeenCalledTimes(2);
   });
 
   it('a node read that never settles holds later ops only until its timeout, then is aborted', async () => {
@@ -778,6 +778,155 @@ describe('Server-backed session lifecycle', () => {
     await waitFor(() => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a']);
     });
+  });
+
+  it('defers the remote baseline until every held local edit releases the canvas queue', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    client.setBaseline({ node_refs: ['node-a'] });
+    const release = client.holdLocalEdit();
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 100,
+          client_id: 'other',
+          op: { op: 'nodes_removed', node_ids: ['node-a'] },
+        }),
+      })
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(client.isMember('node-a')).toBe(true);
+    expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-a');
+    // A second edit starts after the wait resolves, before the queue resumes.
+    let releaseNext;
+    await act(async () => {
+      release();
+      releaseNext = client.holdLocalEdit();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.isMember('node-a')).toBe(true);
+    await act(async () => {
+      releaseNext();
+    });
+    await waitFor(() => expect(client.isMember('node-a')).toBe(false));
+  });
+
+  it('waits for an edit started during the resync fetch before applying its payload', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    let finishFetch;
+    api.getSession.mockImplementationOnce(
+      (id) =>
+        new Promise((resolve) => {
+          finishFetch = () =>
+            resolve({ id, state: {}, resolved: { nodes: [NODE_B], edges: [] }, roster: [] });
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 2,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+        }),
+      })
+    );
+    await waitFor(() => expect(finishFetch).toBeTruthy());
+    const release = client.holdLocalEdit();
+    await act(async () => {
+      finishFetch();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-a');
+    await act(async () => {
+      release();
+    });
+    await waitFor(() =>
+      expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-b')
+    );
+  });
+
+  it('waits for a local edit started while resync drains remote work', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    let releaseRead;
+    api.getNodeDetails.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = () => resolve({ node: NODE_B, edges: [] });
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 1,
+          client_id: 'other',
+          op: { op: 'nodes_added', node_ids: ['node-b'] },
+        }),
+      })
+    );
+    await waitFor(() => expect(releaseRead).toBeTruthy());
+    const readsBefore = api.getSession.mock.calls.length;
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 2,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+        }),
+      })
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const releaseEdit = client.holdLocalEdit();
+    await act(async () => {
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(api.getSession.mock.calls.length).toBe(readsBefore);
+    await act(async () => {
+      releaseEdit();
+    });
+    await waitFor(() => expect(api.getSession.mock.calls.length).toBeGreaterThan(readsBefore));
   });
 
   // task fbd32fc9: a reconnect used to reload the canvas wholesale from
@@ -1194,6 +1343,67 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
     foldOpIntoBaselineSpy.mockRestore();
     foldLocalOpSpy.mockRestore();
+  });
+
+  it.each([
+    [3, 3],
+    [3, 1],
+    [1, 3],
+    [1, 1],
+  ])('defers captured appearance replay on resync (node %s, type %s)', async (nodeRev, typeRev) => {
+    const pendingOp = {
+      op: 'type_shape_set',
+      type: 'Actor',
+      selection: { builtin: 'old' },
+      base_revision: 1,
+      clear_node_id: 'node-a',
+      clear_base_revision: 1,
+    };
+    const pending = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    const fold = vi.spyOn(SessionSyncClient.prototype, 'foldOpIntoBaseline');
+    const { container } = renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    const buttons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+    const source = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: {
+        node_refs: ['node-a'],
+        shape_overrides: { 'node-a': { builtin: 'later' } },
+        type_shapes: { Actor: { builtin: 'later' } },
+        shape_revisions: { 'node:node-a': nodeRev, 'type:Actor': typeRev },
+      },
+      resolved: { nodes: [NODE_A], edges: [] },
+      roster: [],
+    }));
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      })
+    );
+    await waitFor(() =>
+      expect(useGraphStore.getState().typeShapes.Actor).toEqual({ builtin: 'later' })
+    );
+    expect(useGraphStore.getState().shapeOverrides['node-a']).toEqual({ builtin: 'later' });
+    expect(fold).not.toHaveBeenCalledWith(pendingOp);
+    pending.mockRestore();
+    fold.mockRestore();
   });
 
   // Review round 1 regression: a bare local selection (no offline edits at

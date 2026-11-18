@@ -264,6 +264,37 @@ operation rather than thousands of per-node edits. Never copy remote state back
 out as fresh operations. Old clients must be read-only for appearance-enabled
 sessions unless they can preserve the new fields and operations.
 
+### Remote appearance ordering
+
+**Ordering rule.** Every event that changes the appearance baseline — a
+remote appearance operation, a node removal (which bumps the node's revision)
+and the acknowledgment of this client's own appearance write — is folded in
+server seq order, at the stream position of the event. The event stream is that
+order. An acknowledgment arriving on the POST response ahead of the stream is
+held until the stream reaches its seq and released there, before the event at
+that seq; one arriving after the stream passed its seq is dropped, because the
+echo was folded at its position (or a snapshot or catch-up superseded it). So an
+acknowledgment never lands ahead of an earlier removal, and a removal never
+increments a revision that lacks an earlier acknowledged write.
+
+All of these enter one ordered canvas queue. Their baseline changes are folded
+at the point the queued canvas operation runs, with autosave held from receipt
+until drawing finishes; acknowledgments are baseline-only work there. Before a
+queued operation is applied, the queue re-checks for an asynchronous local edit
+after every await and applies synchronously with the last check, so an edit
+starting between a wait resolving and the apply holds the operation back too.
+
+Resync waits for the queue and any registered asynchronous local edit before
+replacing state; it rechecks local edits after the queue drains and repeats if
+either work source changed while waiting. Each target of a combined type-default
+and node-clear operation is applied independently when its revision is current,
+preserving a newer value for either target. Captured appearance writes are not
+replayed by resync until node-shape-phase4c-2 implements conflict rebasing.
+Local editors hold autosave until their changes are ready for a fresh snapshot.
+A rejected stale appearance write is not retried as a fresh overwrite: its
+current revision is incorporated during resync, and any further edit must use
+that revision after the user reviews the conflict.
+
 ## Geometry and hit areas
 
 One geometry descriptor must drive drawing, hit tests, edge anchors and layout
