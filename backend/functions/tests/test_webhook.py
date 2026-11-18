@@ -43,7 +43,10 @@ def endpoint(tmp_path, monkeypatch):
         state=ExecutionState.RUNNING,
     )
     service = SimpleNamespace(
-        root=tmp_path, enabled={"example": []}, invoke=Mock(return_value=job)
+        root=tmp_path,
+        enabled={"example": []},
+        invoke=Mock(return_value=job),
+        replay_webhook=Mock(return_value=None),
     )
 
     def authorize(request, graph_id, target):
@@ -108,6 +111,16 @@ def test_auth_limits_input_and_bound_actor(endpoint, monkeypatch):
         "graph_id": "graph-a",
     }
     assert args.kwargs["idempotency_key"] == "key"
+    service.replay_webhook.return_value = service.invoke.return_value
+    manifest_path = service.root / "example" / "function.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["input_schema"]["required"] = ["new_field"]
+    manifest_path.write_text(json.dumps(manifest))
+    replay = client.post(
+        path, json={"value": 1}, headers={**auth, "Idempotency-Key": "key"}
+    )
+    assert replay.status_code == 200 and replay.json()["id"] == response.json()["id"]
+    service.invoke.assert_called_once()
     monkeypatch.setattr(service.webhook_policy, "admit", lambda _: False)
     assert client.post(path, content=b"invalid", headers=auth).status_code == 429
     monkeypatch.setenv("FUNCTION_WEBHOOKS_ENABLED", "false")

@@ -684,6 +684,55 @@ def test_every_node_in_a_batch_is_scope_checked(service):
     assert service.calls == []
 
 
+def test_webhook_broker_intersects_every_service_decision_with_bound_graph(storage):
+    hook = RecordingHook(
+        narrowing=GraphAccessNarrowing(
+            enabled=True, allow_local_graph=True, include_graph_ids=("g1", "g2")
+        )
+    )
+    service = SpyService(storage, authorization_hook=hook)
+    storage.add_nodes(
+        [
+            Node(
+                id="one",
+                name="First",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "g1"},
+            ),
+            Node(
+                id="two",
+                name="Second",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "g2"},
+            ),
+            Node(id="local", name="Local", type=NodeType.ACTOR),
+        ],
+        [],
+    )
+    broker = make_broker(
+        service,
+        authorization_inputs={
+            "actor_id": "fn",
+            "actor_type": "function_webhook",
+            "graph_id": "g1",
+        },
+    )
+    assert "result" in call(broker, "graph.get_node", {"node_id": "one"})
+    for node_id in ("two", "local"):
+        assert "error" in call(broker, "graph.get_node", {"node_id": node_id})
+        assert "error" in call(
+            broker,
+            "graph.update_node",
+            {"node_id": node_id, "updates": {"name": "Changed"}},
+        )
+    assert "result" in call(
+        broker, "graph.update_node", {"node_id": "one", "updates": {"name": "Changed"}}
+    )
+    assert "error" in call(
+        broker, "graph.add", {"nodes": [{"name": "New", "type": "Actor"}]}
+    )
+
+
 def test_grant_enablement_has_no_default():
     with pytest.raises(TypeError):
         BrokerContext(

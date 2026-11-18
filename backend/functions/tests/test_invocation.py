@@ -142,6 +142,15 @@ def test_busy_rejects_without_queue_and_same_delivery_replays(host, trigger):
         assert future.result().id == running.id
     assert execute.call_count == 1
     assert call(idempotency_key="delivery").id == running.id
+    if trigger == "webhook":
+        assert (
+            service.replay_webhook("example", "delivery", {"actor_id": "operator"}).id
+            == running.id
+        )
+        assert (
+            service.replay_webhook("example", "missing", {"actor_id": "operator"})
+            is None
+        )
     assert call(idempotency_key="fresh").state == ExecutionState.SUCCEEDED
     assert execute.call_count == 2
 

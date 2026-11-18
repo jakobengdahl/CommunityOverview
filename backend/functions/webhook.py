@@ -123,6 +123,21 @@ def register_webhook_routes(router, service, store, authorize, existing):
             data.extend(chunk)
             if len(data) > 65536:
                 raise HTTPException(413)
+        binding = {
+            "actor_id": function_id,
+            "actor_type": "function_webhook",
+            "auth_source": "webhook",
+            "graph_id": row["graph_id"],
+        }
+        idempotency_key = request.headers.get("Idempotency-Key")
+        try:
+            existing_job = await run_in_threadpool(
+                service.replay_webhook, function_id, idempotency_key, binding
+            )
+        except PermissionError:
+            raise HTTPException(403)
+        if existing_job is not None:
+            return function_run_to_dict(existing_job)
         try:
             value = json.loads(data)
             manifest, _ = load_manifest(service.root, function_id)
@@ -134,12 +149,6 @@ def register_webhook_routes(router, service, store, authorize, existing):
                 raise ValueError()
         except (ValueError, OSError, ValidationError):
             raise HTTPException(422)
-        binding = {
-            "actor_id": function_id,
-            "actor_type": "function_webhook",
-            "auth_source": "webhook",
-            "graph_id": row["graph_id"],
-        }
         try:
             job = await run_in_threadpool(
                 service.invoke,
@@ -147,7 +156,7 @@ def register_webhook_routes(router, service, store, authorize, existing):
                 value,
                 trigger="webhook",
                 actor_binding=binding,
-                idempotency_key=request.headers.get("Idempotency-Key"),
+                idempotency_key=idempotency_key,
             )
         except PermissionError:
             raise HTTPException(403)

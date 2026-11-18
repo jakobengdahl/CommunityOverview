@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping
 
@@ -314,11 +315,25 @@ class FunctionBroker:
             )
             call_args["event_correlation_id"] = ctx.correlation_id
         if spec.method == "add_nodes":
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
+                raise BrokerError(
+                    ERR_ACCESS_DENIED, "Cannot add nodes outside the bound graph."
+                )
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
 
-        with use_request_authorization(
-            **_authorization_kwargs(ctx.authorization_inputs)
+        scope = (
+            access.restrict_function_graph(
+                ctx.authorization_inputs.get("graph_id") or ""
+            )
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook"
+            else nullcontext()
+        )
+        with (
+            use_request_authorization(
+                **_authorization_kwargs(ctx.authorization_inputs)
+            ),
+            scope,
         ):
             decision = access.evaluate_graph_access(
                 self._service.authorization_hook,

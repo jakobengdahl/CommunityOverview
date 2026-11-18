@@ -298,6 +298,29 @@ class FunctionInvocationService:
                 raise PermissionError("Access denied")
         return existing
 
+    def replay_webhook(self, function_id, idempotency_key, actor_binding):
+        if idempotency_key is None:
+            return None
+        binding = {
+            key: actor_binding.get(key)
+            for key in (
+                "actor_id",
+                "actor_type",
+                "auth_source",
+                "workspace_id",
+                "workspace_kind",
+                "graph_id",
+                "authenticated_principal",
+            )
+        }
+        with _admission(self.root):
+            for existing in self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            ):
+                if existing.idempotency_key == f"fn:{function_id}:{idempotency_key}":
+                    return self._replay(existing, binding)
+        return None
+
     def invoke(
         self,
         function_id,
