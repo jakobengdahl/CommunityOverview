@@ -780,6 +780,89 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
+  it('defers the remote baseline until a held local edit releases the canvas queue', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    client.setBaseline({ node_refs: ['node-a'] });
+    const release = client.holdLocalEdit();
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 100,
+          client_id: 'other',
+          op: { op: 'nodes_removed', node_ids: ['node-a'] },
+        }),
+      })
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(client.isMember('node-a')).toBe(true);
+    expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-a');
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(client.isMember('node-a')).toBe(false));
+  });
+
+  it('waits for an edit started during the resync fetch before applying its payload', async () => {
+    const connect = SessionSyncClient.prototype.connect;
+    let client;
+    vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
+      client = this;
+      return connect.apply(this, args);
+    });
+    renderApp();
+    act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
+    act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
+    await waitFor(() => expect(client).toBeTruthy());
+    let finishFetch;
+    api.getSession.mockImplementationOnce(
+      (id) =>
+        new Promise((resolve) => {
+          finishFetch = () =>
+            resolve({ id, state: {}, resolved: { nodes: [NODE_B], edges: [] }, roster: [] });
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 2,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+        }),
+      })
+    );
+    await waitFor(() => expect(finishFetch).toBeTruthy());
+    const release = client.holdLocalEdit();
+    await act(async () => {
+      finishFetch();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-a');
+    await act(async () => {
+      release();
+    });
+    await waitFor(() =>
+      expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-b')
+    );
+  });
+
   it('waits for a local edit started while resync drains remote work', async () => {
     const connect = SessionSyncClient.prototype.connect;
     let client;
@@ -792,17 +875,49 @@ describe('Server-backed session lifecycle', () => {
     act(() => useGraphStore.getState().publishMembership('nodes_added', ['node-a']));
     await waitFor(() => expect(client).toBeTruthy());
     let releaseRead;
-    api.getNodeDetails.mockImplementation(() => new Promise((resolve) => { releaseRead = () => resolve({ node: NODE_B, edges: [] }); }));
-    const source = FakeEventSource.instances.filter((es) => es.url.includes('/api/sessions/')).at(-1);
-    act(() => source.onmessage({ data: JSON.stringify({ type: 'op', seq: 1, client_id: 'other', op: { op: 'nodes_added', node_ids: ['node-b'] } }) }));
+    api.getNodeDetails.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = () => resolve({ node: NODE_B, edges: [] });
+        })
+    );
+    const source = FakeEventSource.instances
+      .filter((es) => es.url.includes('/api/sessions/'))
+      .at(-1);
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'op',
+          seq: 1,
+          client_id: 'other',
+          op: { op: 'nodes_added', node_ids: ['node-b'] },
+        }),
+      })
+    );
     await waitFor(() => expect(releaseRead).toBeTruthy());
     const readsBefore = api.getSession.mock.calls.length;
-    act(() => source.onmessage({ data: JSON.stringify({ type: 'catch_up', seq: 2, ops: [{ op: 'nodes_hidden', node_ids: [] }] }) }));
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 2,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+        }),
+      })
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     const releaseEdit = client.holdLocalEdit();
-    await act(async () => { releaseRead(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await act(async () => {
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
     expect(api.getSession.mock.calls.length).toBe(readsBefore);
-    await act(async () => { releaseEdit(); });
+    await act(async () => {
+      releaseEdit();
+    });
     await waitFor(() => expect(api.getSession.mock.calls.length).toBeGreaterThan(readsBefore));
   });
 
@@ -1223,16 +1338,22 @@ describe('Server-backed session lifecycle', () => {
   });
 
   it.each([
-    [3, 3, { builtin: 'later' }, { builtin: 'later' }],
-    [3, 1, { builtin: 'old' }, { builtin: 'later' }],
-    [1, 3, { builtin: 'later' }, undefined],
-    [1, 1, { builtin: 'old' }, undefined],
-  ])('rebases captured appearance targets on resync (node %s, type %s)', async (nodeRev, typeRev, expectedType, expectedNode) => {
+    [3, 3],
+    [3, 1],
+    [1, 3],
+    [1, 1],
+  ])('defers captured appearance replay on resync (node %s, type %s)', async (nodeRev, typeRev) => {
     const pendingOp = {
-      op: 'type_shape_set', type: 'Actor', selection: { builtin: 'old' },
-      base_revision: 1, clear_node_id: 'node-a', clear_base_revision: 1,
+      op: 'type_shape_set',
+      type: 'Actor',
+      selection: { builtin: 'old' },
+      base_revision: 1,
+      clear_node_id: 'node-a',
+      clear_base_revision: 1,
     };
-    const pending = vi.spyOn(SessionSyncClient.prototype, 'getPendingOps').mockReturnValue([pendingOp]);
+    const pending = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
     const fold = vi.spyOn(SessionSyncClient.prototype, 'foldOpIntoBaseline');
     const { container } = renderApp();
     act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
@@ -1240,7 +1361,9 @@ describe('Server-backed session lifecycle', () => {
     fireEvent.click(buttons[buttons.length - 1]);
     await waitFor(() => screen.getByText('Save View'));
     const source = await waitFor(() => {
-      const found = FakeEventSource.instances.find((es) => es.url.includes('/api/sessions/') && es.url.includes('/stream'));
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
       expect(found).toBeTruthy();
       return found;
     });
@@ -1252,19 +1375,25 @@ describe('Server-backed session lifecycle', () => {
         type_shapes: { Actor: { builtin: 'later' } },
         shape_revisions: { 'node:node-a': nodeRev, 'type:Actor': typeRev },
       },
-      resolved: { nodes: [NODE_A], edges: [] }, roster: [],
+      resolved: { nodes: [NODE_A], edges: [] },
+      roster: [],
     }));
-    act(() => source.onmessage({ data: JSON.stringify({ type: 'catch_up', seq: 5, ops: [{ op: 'nodes_hidden', node_ids: [] }], roster: [], claims: {} }) }));
-    await waitFor(() => expect(fold).toHaveBeenCalledWith(pendingOp));
-    await waitFor(() => {
-      const state = useGraphStore.getState();
-      expect(state.typeShapes.Actor).toEqual(expectedType);
-      expect(state.shapeOverrides['node-a']).toEqual(expectedNode);
-    });
-    const baseline = fold.mock.instances[0]._baseline;
-    expect(baseline.type_shapes.Actor).toEqual(expectedType);
-    expect(baseline.shape_overrides['node-a']).toEqual(expectedNode);
-    expect(baseline.shape_revisions).toEqual({ 'node:node-a': Math.max(nodeRev, 2), 'type:Actor': Math.max(typeRev, 2) });
+    act(() =>
+      source.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      })
+    );
+    await waitFor(() =>
+      expect(useGraphStore.getState().typeShapes.Actor).toEqual({ builtin: 'later' })
+    );
+    expect(useGraphStore.getState().shapeOverrides['node-a']).toEqual({ builtin: 'later' });
+    expect(fold).not.toHaveBeenCalledWith(pendingOp);
     pending.mockRestore();
     fold.mockRestore();
   });

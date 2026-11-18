@@ -142,17 +142,38 @@ describe('appearance ordering', () => {
     [3, 1, { Thing: { builtin: 'new' } }, { a: { builtin: 'later' } }],
     [1, 3, { Thing: { builtin: 'later' } }, {}],
     [1, 1, { Thing: { builtin: 'new' } }, {}],
-  ])('applies each current target independently (node %s, type %s)', (nodeRev, typeRev, types, overrides) => {
-    const deliveries = [];
-    const { client } = makeClient({ deferRemoteOps: true, handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) } });
-    client.setBaseline({ shape_overrides: { a: { builtin: 'later' } }, type_shapes: { Thing: { builtin: 'later' } }, shape_revisions: { 'node:a': nodeRev, 'type:Thing': typeRev } });
-    client._handleEvent({ type: 'op', seq: 1, client_id: 'other', op: { op: 'type_shape_set', type: 'Thing', selection: { builtin: 'new' }, clear_node_id: 'a', revisions: { 'type:Thing': 2, 'node:a': 2 } } });
-    expect(deliveries[0].applyBaseline()).toBe(true);
-    expect(client._baseline.type_shapes).toEqual(types);
-    expect(client._baseline.shape_overrides).toEqual(overrides);
-    expect(deliveries[0].op.op).toBe(typeRev > 2 ? 'node_shape_set' : 'type_shape_set');
-    client.close();
-  });
+  ])(
+    'applies each current target independently (node %s, type %s)',
+    (nodeRev, typeRev, types, overrides) => {
+      const deliveries = [];
+      const { client } = makeClient({
+        deferRemoteOps: true,
+        handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+      });
+      client.setBaseline({
+        shape_overrides: { a: { builtin: 'later' } },
+        type_shapes: { Thing: { builtin: 'later' } },
+        shape_revisions: { 'node:a': nodeRev, 'type:Thing': typeRev },
+      });
+      client._handleEvent({
+        type: 'op',
+        seq: 1,
+        client_id: 'other',
+        op: {
+          op: 'type_shape_set',
+          type: 'Thing',
+          selection: { builtin: 'new' },
+          clear_node_id: 'a',
+          revisions: { 'type:Thing': 2, 'node:a': 2 },
+        },
+      });
+      expect(deliveries[0].applyBaseline()).toBe(true);
+      expect(client._baseline.type_shapes).toEqual(types);
+      expect(client._baseline.shape_overrides).toEqual(overrides);
+      expect(deliveries[0].op.op).toBe(typeRev > 2 ? 'node_shape_set' : 'type_shape_set');
+      client.close();
+    }
+  );
 
   it('holds autosave and resync until a local edit completes', async () => {
     const onHeldSaveReleased = vi.fn();
