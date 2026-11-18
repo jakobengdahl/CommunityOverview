@@ -56,6 +56,7 @@ export default function NodeAppearanceDialog({
   const { t } = useI18n();
   const ref = useRef(null);
   const opener = useRef(null);
+  const overlay = useRef(null);
   const type = node.nodeType || node.type;
   const entity = { ...node, type };
   const resolved = createNodeShapeResolver({
@@ -109,6 +110,15 @@ export default function NodeAppearanceDialog({
   const alignment = { left: 'flex-start', centre: 'center', right: 'flex-end' }[horizontal];
   useEffect(() => {
     opener.current = document.activeElement;
+    const inerted = [];
+    for (let element = overlay.current; element?.parentElement; element = element.parentElement) {
+      for (const sibling of element.parentElement.children) {
+        if (sibling !== element && !sibling.hasAttribute('inert')) {
+          sibling.setAttribute('inert', '');
+          inerted.push(sibling);
+        }
+      }
+    }
     ref.current?.focus();
     const keepFocus = (event) => {
       if (ref.current && !ref.current.contains(event.target)) ref.current.focus();
@@ -116,6 +126,7 @@ export default function NodeAppearanceDialog({
     document.addEventListener('focusin', keepFocus);
     return () => {
       document.removeEventListener('focusin', keepFocus);
+      inerted.forEach((element) => element.removeAttribute('inert'));
       opener.current?.focus();
     };
   }, []);
@@ -175,8 +186,21 @@ export default function NodeAppearanceDialog({
     setTab(next);
     ref.current.querySelectorAll('[role="tab"]')[next]?.focus();
   }
+  useEffect(() => {
+    const isolateKeys = (event) => {
+      event.stopPropagation();
+      if (!ref.current?.contains(event.target)) {
+        event.preventDefault();
+        return;
+      }
+      handleKey(event);
+      if (event.target.closest('[role="tablist"]')) tabKey(event);
+    };
+    window.addEventListener('keydown', isolateKeys, true);
+    return () => window.removeEventListener('keydown', isolateKeys, true);
+  });
   return (
-    <div className="mme-overlay appearance-overlay" onKeyDown={handleKey}>
+    <div className="mme-overlay appearance-overlay" ref={overlay}>
       <div
         className="mme-dialog appearance-dialog"
         role="dialog"
@@ -203,7 +227,6 @@ export default function NodeAppearanceDialog({
             className="mme-tabs"
             role="tablist"
             aria-label={t('node_appearance.title')}
-            onKeyDown={tabKey}
           >
             {tabs.map((key, i) => (
               <button
@@ -325,6 +348,11 @@ export default function NodeAppearanceDialog({
                       }
                     >
                       <option value="">{t('node_appearance.none')}</option>
+                      {draft.areas[area] && !fields.includes(draft.areas[area]) && (
+                        <option value={draft.areas[area]}>
+                          {draft.areas[area]} ({t('node_appearance.missing')})
+                        </option>
+                      )}
                       {fields.map((field) => (
                         <option key={field} value={field}>
                           {field}
@@ -386,7 +414,15 @@ export default function NodeAppearanceDialog({
               </label>
             </div>
             <div className="appearance-preview-stage" aria-hidden="true">
-              <div
+              {builtin ? (
+                <div className="appearance-builtin-card" style={{ borderColor: schema?.node_types?.[type]?.color || '#646cff' }}>
+                  <div className="appearance-builtin-header" style={{ backgroundColor: schema?.node_types?.[type]?.color || '#646cff' }}>{type}</div>
+                  <div className="appearance-builtin-content">
+                    <div className="appearance-builtin-name">{node.name}</div>
+                    {node.summary && <div className="appearance-builtin-summary">{longText ? `${node.summary} ${node.summary} ${node.summary}` : node.summary}</div>}
+                  </div>
+                </div>
+              ) : <div
                 className="appearance-preview-card"
                 style={{
                   width: geometry.width,
@@ -419,7 +455,7 @@ export default function NodeAppearanceDialog({
                     fontSize: `${geometry.text.type}rem`,
                   }}
                 >
-                  {values.first || (draft.areas.first ? t('node_appearance.missing') : '')}
+                  <span className="appearance-preview-chip">{values.first || (draft.areas.first ? t('node_appearance.missing') : '')}</span>
                 </div>
                 <div
                   className="appearance-preview-text"
@@ -454,9 +490,9 @@ export default function NodeAppearanceDialog({
                     </div>
                   ))}
                 </div>
-              </div>
+              </div>}
             </div>
-            {AREAS.some((area) => draft.areas[area] && !values[area]) && (
+            {!builtin && AREAS.some((area) => draft.areas[area] && !values[area]) && (
               <p>{t('node_appearance.missing_warning')}</p>
             )}
           </section>

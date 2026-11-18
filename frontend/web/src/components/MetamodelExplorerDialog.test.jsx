@@ -6,6 +6,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
 import NodeAppearanceDialog, { appearanceOperation } from './NodeAppearanceDialog';
+import { readFileSync } from 'node:fs';
 import { nodeShapeGeometry, nodeShapeTextBox } from '@community-graph/ui-graph-canvas';
 
 vi.mock('../i18n', () => ({
@@ -420,11 +421,19 @@ describe('NodeAppearanceDialog', () => {
   it('applies an unchanged built-in appearance and turns edits into an inline shape', () => {
     const apply = vi.fn();
     const view = render(<NodeAppearanceDialog {...props} onApply={apply} />);
+    expect(document.querySelector('.appearance-builtin-card')).toBeTruthy();
+    expect(document.querySelector('.appearance-preview-card')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
     fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply.mock.calls[1][1].inline.scale).toBe(2);
+    expect(document.querySelector('.appearance-builtin-card')).toBeNull();
+    expect(document.querySelector('.appearance-preview-band .appearance-preview-chip').textContent).toBe('Actor');
+    expect(document.querySelector('.appearance-preview-card svg path:nth-child(2)').getAttribute('fill')).toBe('#3B82F6');
+    expect(readFileSync('src/components/NodeAppearanceDialog.css', 'utf8').match(/\.appearance-preview-band\s*\{([^}]*)\}/)[1]).not.toMatch(/background/);
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), { target: { value: 'triangle-up' } });
+    expect(document.querySelector('.appearance-preview-band .appearance-preview-chip').textContent).toBe('Actor');
     view.unmount();
     render(
       <NodeAppearanceDialog {...props} shapeOverrides={{ a: { builtin: true } }} onApply={apply} />
@@ -490,7 +499,12 @@ describe('NodeAppearanceDialog', () => {
     });
   });
   it('supports keyboard tabs and traps focus inside the modal', () => {
-    render(<NodeAppearanceDialog {...props} />);
+    const canvas = document.createElement('div');
+    document.body.append(canvas);
+    const shortcut = vi.fn();
+    document.addEventListener('keydown', shortcut, true);
+    const view = render(<NodeAppearanceDialog {...props} />);
+    expect(canvas.hasAttribute('inert')).toBe(true);
     const first = screen.getByRole('tab', { name: 'node_appearance.shape' });
     first.focus();
     fireEvent.keyDown(first, { key: 'End' });
@@ -504,6 +518,12 @@ describe('NodeAppearanceDialog', () => {
     fireEvent.keyDown(last, { key: 'Tab' });
     expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
     expect(document.activeElement).not.toBe(last);
+    fireEvent.keyDown(last, { key: 'Delete' });
+    expect(shortcut).not.toHaveBeenCalled();
+    view.unmount();
+    expect(canvas.hasAttribute('inert')).toBe(false);
+    document.removeEventListener('keydown', shortcut, true);
+    canvas.remove();
   });
   it('applies an explicitly selected configuration reference to the node', () => {
     const apply = vi.fn();
@@ -525,6 +545,10 @@ describe('NodeAppearanceDialog', () => {
       target: { value: 'example' },
     });
     expect(screen.getByText('node_appearance.missing_warning')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    const binding = screen.getByLabelText('node_appearance.area_third');
+    expect(binding.value).toBe('missing');
+    expect(binding.selectedOptions[0].textContent).toContain('missing');
     const textBox = screen.getByText('node_appearance.missing').parentElement;
     const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
     expect(textBox.style.left).toBe(`${box.x}px`);
