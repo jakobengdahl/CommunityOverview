@@ -550,9 +550,9 @@ describe('CustomNode configured shapes', () => {
     });
   });
 
-  it('passes the pointer through everything but the painted body and its visible labels', () => {
+  it('passes the pointer through everything but the painted body and its outside label', () => {
     renderFlow([
-      shapedFlowNode(RISK, {
+      shapedFlowNode({ ...CARD, base: 'triangle-down', placement: 'bottom' }, {
         markColor: '#ff0000',
         remoteSelection: { color: '#00aa00', displayName: 'Ada' },
         stagedState: 'created',
@@ -572,6 +572,13 @@ describe('CustomNode configured shapes', () => {
         getComputedStyle(root.querySelector(selector)).pointerEvents;
       expect(events(wrapper, '.graph-shaped-node')).toBe('none');
       expect(events(wrapper, '.graph-shape-body')).toBe('auto');
+      // The rem-sized minimum can extend below this fixed-pixel box at an
+      // enlarged root font size, into the triangle's transparent corners.
+      const text = wrapper.querySelector('.graph-shape-text');
+      expect(parseFloat(text.style.minHeight) * 64).toBeGreaterThan(parseFloat(text.style.height));
+      expect(events(wrapper, '.graph-shape-text')).toBe('none');
+      expect(events(wrapper, '.graph-shape-text .graph-node-label')).toBe('none');
+      expect(events(wrapper, '.graph-shape-text .graph-node-summary')).toBe('none');
       // A triangle's outside label is a visible label, so it is hit too.
       expect(events(wrapper, '.graph-shape-outside-label .graph-shape-label-chip')).toBe('auto');
       // Badges lie beyond the body.
