@@ -22,7 +22,10 @@ from backend.agents.run_history import function_run_to_dict
 from backend.functions import invocation
 from backend.functions.runner import FunctionRunResult, RunnerProbe
 from backend.functions.routes import register_function_routes
-from backend.runtime.authorization import GraphAuthorizationDecision
+from backend.runtime.authorization import (
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 
 
 @pytest.fixture
@@ -102,8 +105,25 @@ def test_admission_failure_never_runs_code(host, failure):
     assert len(service.store.list_jobs(kind=ExecutionKind.FUNCTION)) == 1
 
 
-def test_busy_rejects_without_queue_and_same_delivery_replays(host):
-    service, execute, _, _ = host
+@pytest.mark.parametrize("trigger", ["manual", "webhook"])
+def test_busy_rejects_without_queue_and_same_delivery_replays(host, trigger):
+    service, execute, manifest, directory = host
+    if trigger == "webhook":
+        manifest["contract_version"] = "2"
+        manifest["triggers"].append({"kind": "webhook"})
+        (directory / "function.json").write_text(json.dumps(manifest))
+        service.webhook_policy = Mock()
+        service.webhook_policy.get.return_value = (True, True)
+
+    def call(**kwargs):
+        return service.invoke(
+            "example",
+            {},
+            trigger=trigger,
+            actor_binding={"actor_id": "operator"},
+            **kwargs,
+        )
+
     entered, release = Event(), Event()
 
     def run(*args):
@@ -113,19 +133,40 @@ def test_busy_rejects_without_queue_and_same_delivery_replays(host):
 
     execute.side_effect = run
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(invoke, service, idempotency_key="delivery")
+        future = pool.submit(call, idempotency_key="delivery")
         try:
             assert entered.wait(5)
-            running = invoke(service, idempotency_key="delivery")
+            running = call(idempotency_key="delivery")
             assert running.state == ExecutionState.RUNNING
-            busy = invoke(service, idempotency_key="other")
+            if trigger == "webhook":
+                binding = {"actor_id": "operator"}
+                assert (
+                    service.replay_webhook("example", "delivery", binding).id
+                    == running.id
+                )
+                rejected = service.replay_webhook("example", "preflight", binding)
+                assert rejected.result["error"]["code"] == "busy"
+                assert (
+                    service.replay_webhook("example", "preflight", binding).id
+                    == rejected.id
+                )
+            busy = call(idempotency_key="other")
             assert busy.result["error"]["code"] == "busy"
         finally:
             release.set()
         assert future.result().id == running.id
     assert execute.call_count == 1
-    assert invoke(service, idempotency_key="delivery").id == running.id
-    assert invoke(service, idempotency_key="fresh").state == ExecutionState.SUCCEEDED
+    assert call(idempotency_key="delivery").id == running.id
+    if trigger == "webhook":
+        assert (
+            service.replay_webhook("example", "delivery", {"actor_id": "operator"}).id
+            == running.id
+        )
+        assert (
+            service.replay_webhook("example", "missing", {"actor_id": "operator"})
+            is None
+        )
+    assert call(idempotency_key="fresh").state == ExecutionState.SUCCEEDED
     assert execute.call_count == 2
 
 
@@ -273,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "2"),
+        ("contract_version", "4"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -394,12 +435,21 @@ def test_independent_history_connections_share_busy_and_deduplication(host):
 
 def test_replay_survives_auth_transport_change_and_retention_redaction(host):
     service, execute, _, _ = host
+    service.graph_service.authorization_hook.evaluate.return_value = (
+        GraphAuthorizationDecision(
+            allowed=True,
+            graph_access=GraphAccessNarrowing(
+                enabled=True, allow_local_graph=False, include_graph_ids=("g1",)
+            ),
+        )
+    )
     job = service.invoke(
         "example",
         {},
         idempotency_key="delivery",
         actor_binding={"actor_id": "operator", "auth_source": "basic"},
     )
+    assert job.state == ExecutionState.SUCCEEDED
     assert (
         service.invoke(
             "example",
@@ -455,3 +505,27 @@ def test_enqueue_conflict_cannot_expose_another_actors_run(host, monkeypatch):
             actor_binding={"actor_id": "other"},
         )
     assert execute.call_count == 1
+
+
+def test_webhook_version_and_write_switch_use_bound_actor(host):
+    service, execute, manifest, directory = host
+    manifest["contract_version"] = "2"
+    manifest["triggers"] = [{"kind": "manual"}, {"kind": "webhook"}]
+    (directory / "function.json").write_text(json.dumps(manifest))
+    service.webhook_policy = Mock()
+    service.webhook_policy.get.return_value = (True, False)
+    binding = {
+        "actor_id": "example",
+        "actor_type": "function_webhook",
+        "graph_id": "graph-a",
+    }
+    result = service.invoke("example", {}, trigger="webhook", actor_binding=binding)
+    assert result.state == ExecutionState.SUCCEEDED
+    context = execute.call_args.args[2].context
+    assert context.authorization_inputs["graph_id"] == "graph-a"
+    assert context.authorization_inputs["actor_type"] == "function_webhook"
+    assert not context.grant_enabled("graph:write")
+    service.webhook_policy.get.return_value = (True, True)
+    assert context.grant_enabled("graph:write")
+    service.webhook_policy.get.return_value = (False, True)
+    assert not context.grant_enabled("graph:write")

@@ -61,6 +61,8 @@ class RuntimeContext:
     correlation_id: str = ""
     request_id: str = ""
     attribution: Mapping[str, Any] = field(default_factory=lambda: immutable({}))
+    # Bytes of files the run received as input, for hosted per-plan quotas.
+    input_bytes: int = 0
 
 
 _execution_context: ContextVar[RuntimeContext | None] = ContextVar(

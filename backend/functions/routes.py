@@ -136,3 +136,7 @@ def register_token_routes(router, service, store):
         authorize(request, row["graph_id"], "revoke_webhook_token")
         if not store.revoke(function_id, row["graph_id"], row["id"]):
             raise HTTPException(status_code=404, detail="Token not found")
+
+    from backend.functions.webhook import register_webhook_routes
+
+    register_webhook_routes(router, service, store, authorize, existing)

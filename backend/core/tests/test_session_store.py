@@ -728,3 +728,202 @@ class TestRestoreRing:
 
         assert store.ring(s.id).maxlen == 2
         assert [op["seq"] for op in store.ring(s.id)] == [4, 5]
+
+
+class TestAppearanceOperations:
+    def test_special_dictionary_keys_survive_persistence_and_removal(self, tmp_path):
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["__proto__"]})
+        for op in (
+            dict(op="node_shape_set", node_id="__proto__"),
+            dict(op="type_shape_set", type="__proto__"),
+        ):
+            store.apply_state_op(
+                session,
+                {
+                    **op,
+                    "version": 1,
+                    "selection": {"builtin": True},
+                    "base_revision": 0,
+                    "operation_id": op["op"],
+                    "client_id": "c",
+                },
+            )
+        store.persist(session)
+        restored = _store(tmp_path).get(session.id)
+        assert restored.state["shape_overrides"]["__proto__"] == {"builtin": True}
+        assert restored.state["type_shapes"]["__proto__"] == {"builtin": True}
+        store.apply_state_op(
+            session, {"op": "nodes_removed", "node_ids": ["__proto__"]}
+        )
+        assert "__proto__" not in session.state["shape_overrides"]
+        assert session.state["shape_revisions"]["node:__proto__"] == 2
+
+    def test_validated_selections_reject_malformed_payloads(self, tmp_path):
+        """Only complete supported selections can enter session state."""
+        store = _store(tmp_path)
+        session = store.create()
+        for selection in [
+            {"builtin": True},
+            {"ref": "config:card"},
+            {"ref": "saved:card"},
+            {
+                "inline": {
+                    "version": 1,
+                    "base": "triangle-up",
+                    "scale": 1,
+                    "placement": "centre",
+                    "areas": {"first": "name", "second": None, "third": None},
+                }
+            },
+            None,
+        ]:
+            op = dict(
+                op="type_shape_set",
+                type="Thing",
+                selection=selection,
+                version=1,
+                base_revision=session.state["shape_revisions"].get("type:Thing", 0),
+                operation_id=str(session.seq),
+            )
+            assert store.apply_state_op(session, op)["seq"] == session.seq
+            assert session.state["type_shapes"].get("Thing") == selection
+        before = copy.deepcopy(session.to_dict())
+        for selection in [
+            {"builtin": False},
+            {"ref": "card"},
+            {"builtin": True, "ref": "saved:card"},
+            {"inline": {"version": 2}},
+        ]:
+            with pytest.raises(OpError):
+                store.apply_state_op(
+                    session, {**op, "selection": selection, "operation_id": "invalid"}
+                )
+        for extra in ({"node_id": "a"}, {"unexpected": True}):
+            with pytest.raises(OpError):
+                store.apply_state_op(session, {**op, **extra})
+        assert session.to_dict() == before
+
+    def test_revision_retry_persistence_and_atomic_undo(self, tmp_path):
+        """Concurrent edits conflict and retries never repeat an atomic type change."""
+        from backend.core.session_store import ShapeRevisionConflict
+
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        for node_id in ["a", "b"]:
+            store.apply_state_op(
+                session,
+                dict(
+                    op="node_shape_set",
+                    node_id=node_id,
+                    selection={"builtin": True},
+                    version=1,
+                    base_revision=0,
+                    operation_id=node_id,
+                    client_id="first",
+                ),
+            )
+        node_record = store.find_latest_undoable(session, "first")
+        store.apply_state_op(
+            session,
+            node_record["inverse_op"],
+            trusted_replay=True,
+            record_activity=False,
+        )
+        assert "b" not in session.state["shape_overrides"]
+        store.apply_state_op(
+            session,
+            {
+                "op": "node_shape_set",
+                "node_id": "b",
+                "selection": {"builtin": True},
+                "version": 1,
+            },
+            trusted_replay=True,
+            record_activity=False,
+        )
+        op = dict(
+            op="type_shape_set",
+            type="Thing",
+            selection={"ref": "config:card"},
+            clear_node_id="a",
+            clear_base_revision=1,
+            version=1,
+            base_revision=0,
+            operation_id="type",
+            client_id="first",
+        )
+        seq = session.seq
+        store.apply_state_op(session, op)
+        assert session.seq == seq + 1
+        assert session.state["shape_overrides"] == {"b": {"builtin": True}}
+        record = store.find_latest_undoable(session, "first")
+        assert store.undo_conflict_reason(session, record) is None
+        store.persist(session)
+        restored_store = _store(tmp_path)
+        restored = restored_store.get(session.id)
+        assert restored.to_dict() == session.to_dict()
+        assert restored_store.apply_state_op(restored, op) is None
+        current_retry = {
+            **op,
+            "client_id": "second",
+            "base_revision": 1,
+            "clear_base_revision": 2,
+            "selection": {"builtin": True},
+        }
+        assert restored_store.apply_state_op(restored, current_retry) is None
+        reconnect_retry = {**op, "client_id": "second"}
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
+        receipt = json.dumps([op["operation_id"]])
+        restored.state["shape_operation_ids"][
+            json.dumps(["first", op["operation_id"]])
+        ] = restored.state["shape_operation_ids"].pop(receipt)
+        assert restored_store.apply_state_op(restored, current_retry) is None
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
+        with pytest.raises(ShapeRevisionConflict):
+            restored_store.apply_state_op(restored, {**op, "operation_id": "new"})
+        assert restored.seq == seq + 1
+        assert restored.state["type_shapes"] == {"Thing": {"ref": "config:card"}}
+        restored_store.apply_state_op(
+            restored, record["inverse_op"], trusted_replay=True, record_activity=False
+        )
+        assert restored.state["shape_overrides"] == {
+            "a": {"builtin": True},
+            "b": {"builtin": True},
+        }
+        assert restored.state["type_shapes"] == {}
+        restored_store.apply_state_op(
+            restored, {"op": "nodes_removed", "node_ids": ["a"]}
+        )
+        assert "a" not in restored.state["shape_overrides"]
+
+    def test_node_operation_rejects_clear_fields(self, tmp_path):
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        before = copy.deepcopy(session.to_dict())
+        for field, value in [
+            ("clear_node_id", "b"),
+            ("clear_base_revision", 0),
+            ("type", "Thing"),
+        ]:
+            with pytest.raises(OpError):
+                store.apply_state_op(
+                    session,
+                    dict(
+                        op="node_shape_set",
+                        node_id="a",
+                        selection={"builtin": True},
+                        version=1,
+                        base_revision=0,
+                        operation_id="bad",
+                        **{field: value},
+                    ),
+                )
+            assert session.to_dict() == before

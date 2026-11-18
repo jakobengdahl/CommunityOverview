@@ -417,7 +417,7 @@ set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view wo
 **Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
 the tool stays armed until you pick a different one — so placing a row of dots is a row of
 taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
-the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+the way back to ordinary clicking, dragging and marquee-selection (configured shapes are selected when the selection touches their body or outside label); pressing Escape does the
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 
@@ -1612,3 +1612,14 @@ before a failed or timed-out run remain in the graph.
 Webhook credentials can be minted, rotated and revoked through the function API.
 The token is shown only on mint or rotation; save it securely. A graph-admin
 authorization hook is required. Webhook invocation is not yet available.
+
+### Inbound user-function webhooks
+
+An administrator of the bound graph can enable an external function call using
+its webhook settings. Set `FUNCTION_WEBHOOKS_ENABLED=true` on the instance,
+mint a function token for the graph, then set `enabled` through the function's
+webhook-settings endpoint. Send a JSON input object with the token as a Bearer
+Authorization header. The token is shown only on mint or rotation; keep it
+secret. The optional `allow_write` switch trusts the external caller to trigger
+writes with the function's enabled grants and the system actor's graph access.
+Leave it off for read-only webhooks. See [the function contract](USER_FUNCTION_CONTRACT.md#version-2-inbound-webhooks) for limits.

@@ -11,9 +11,10 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from jsonschema import validators
 from jsonschema.exceptions import ValidationError
@@ -108,6 +109,64 @@ def _schema(schema):
     return validator(schema)
 
 
+# ``precheck`` validates everything but the input, which is not read yet.
+_UNCHECKED = object()
+
+
+def _bind(actor_binding):
+    return {
+        key: actor_binding.get(key)
+        for key in (
+            "actor_id",
+            "actor_type",
+            "auth_source",
+            "workspace_id",
+            "workspace_kind",
+            "graph_id",
+            "authenticated_principal",
+        )
+    }
+
+
+@dataclass
+class Admission:
+    """A claimed RUNNING record and what its run needs."""
+
+    job: ExecutionJob
+    started: float
+    binding: dict = None
+    trigger: str = "manual"
+    idempotency_key: str = None
+    manifest: dict = None
+    package: dict = None
+    probe: object = None
+
+
+def _valid_input(manifest, input):
+    try:
+        if not isinstance(input, dict):
+            raise ValueError("Input must be an object")
+        if "input_schema" in manifest:
+            _schema(manifest["input_schema"]).validate(input)
+        elif input:
+            raise ValueError("Input must be empty")
+    except (ValidationError, ValueError):
+        return False
+    return True
+
+
+def _valid_triggers(manifest):
+    triggers = manifest.get("triggers")
+    if manifest.get("contract_version") == "1":
+        return triggers == [{"kind": "manual"}]
+    return (
+        isinstance(triggers, list)
+        and bool(triggers)
+        and all(item in ({"kind": "manual"}, {"kind": "webhook"}) for item in triggers)
+        and len({item["kind"] for item in triggers}) == len(triggers)
+    )
+
+
 def load_manifest(root, function_id):
     """Read and validate a package without following paths outside its directory."""
     if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
@@ -143,11 +202,11 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] != "1"
+        manifest["contract_version"] not in {"1", "2", "3"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
-        or manifest.get("triggers") != [{"kind": "manual"}]
+        or not _valid_triggers(manifest)
         or manifest.get("write_target", "graph") != "graph"
         or any(key in manifest for key in ("retry", "secrets", "egress"))
         or ("description" in manifest and not isinstance(manifest["description"], str))
@@ -243,6 +302,46 @@ class FunctionInvocationService:
             self._require_durable_history()
         self.runner = runner or HardenedSubprocessRunner()
         self.isolation_minimum = isolation_minimum
+        # Functions held by an unclaimed webhook upload, by function id.
+        self._reserved = {}
+
+    def _in_progress(self, function_id, idempotency_key, reservation=None):
+        # Another delivery of this key holds the function and will record the
+        # key; any record stored here would be replayed to it instead.
+        held = self._reserved.get(function_id)
+        return (
+            idempotency_key is not None
+            and held is not None
+            and held is not reservation
+            and held.key == idempotency_key
+        )
+
+    def _busy(self, function_id, previous, reservation=None):
+        return any(job.state == ExecutionState.RUNNING for job in previous) or (
+            self._reserved.get(function_id, reservation) is not reservation
+        )
+
+    def reserve(self, function_id, idempotency_key=None):
+        """Hold an idle function for a call that stores files before admit.
+
+        Other admissions see it as busy until ``release``, and store nothing
+        under its ``idempotency_key``; None if it is busy.
+        """
+        with _admission(self.root):
+            previous = self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            )
+            if self._busy(function_id, previous):
+                return None
+            reservation = self._reserved[function_id] = SimpleNamespace(
+                key=idempotency_key
+            )
+        return reservation
+
+    def release(self, function_id, reservation):
+        with _admission(self.root):
+            if self._reserved.get(function_id) is reservation:
+                del self._reserved[function_id]
 
     def _require_durable_history(self):
         # Enabled functions must share persistent history across host restarts
@@ -275,13 +374,145 @@ class FunctionInvocationService:
             ):
                 raise PermissionError("Run belongs to another actor")
         with use_request_authorization(**binding):
-            if not evaluate_graph_access(
+            decision = evaluate_graph_access(
                 self.graph_service.authorization_hook,
                 action="read",
                 target="invoke_function",
-            ).allowed:
+            )
+            if not decision.allowed or (
+                binding.get("actor_type") == "function_webhook"
+                and not decision.graph_access.matches(graph_id=binding["graph_id"])
+            ):
                 raise PermissionError("Access denied")
         return existing
+
+    def replay_webhook(self, function_id, idempotency_key, actor_binding):
+        binding = _bind(actor_binding)
+        with _admission(self.root):
+            previous = self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            )
+            for existing in previous:
+                if (
+                    idempotency_key is not None
+                    and existing.idempotency_key
+                    == f"fn:{function_id}:{idempotency_key}"
+                ):
+                    return self._replay(existing, binding)
+            if self._busy(function_id, previous) and not self._in_progress(
+                function_id, idempotency_key
+            ):
+                return self._rejected(function_id, binding, idempotency_key, "busy")
+        return None
+
+    def precheck(self, function_id, *, trigger, actor_binding):
+        """The rejection code ``admit`` would record before validating input."""
+        code = self._refusal(function_id, _bind(actor_binding), trigger, _UNCHECKED)[0]
+        if code is None:
+            try:
+                code = self._isolation()[0]
+            except Exception:  # Fail closed, as admit does.
+                code = "invalid_manifest"
+        return code
+
+    def _isolation(self):
+        """``isolation_below_minimum`` or None, with the runner probe."""
+        try:
+            probe = self.runner.probe()
+        except RunnerUnavailable:
+            return "isolation_below_minimum", None
+        if self.isolation_minimum == "full" and probe.level != "full":
+            return "isolation_below_minimum", probe
+        return None, probe
+
+    def refuse(self, function_id, code, *, actor_binding, idempotency_key=None):
+        """Record a webhook call refused before admission, or replay its key."""
+        binding = _bind(actor_binding)
+        with _admission(self.root):
+            for existing in self.store.list_jobs(
+                agent_id=function_id, kind=ExecutionKind.FUNCTION
+            ):
+                if (
+                    idempotency_key is not None
+                    and existing.idempotency_key
+                    == f"fn:{function_id}:{idempotency_key}"
+                ):
+                    return self._replay(existing, binding)
+            return self._rejected(function_id, binding, idempotency_key, code)
+
+    def _rejected(self, function_id, binding, idempotency_key, code):
+        job = ExecutionJob(
+            agent_id=function_id,
+            kind=ExecutionKind.FUNCTION,
+            idempotency_key=f"fn:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
+            state=ExecutionState.RUNNING,
+            payload={
+                "function_id": function_id,
+                "trigger": "webhook",
+                "attribution": {
+                    "actor": {
+                        key: binding[key]
+                        for key in ("actor_id", "actor_type", "auth_source")
+                    },
+                    "scope": {
+                        key: binding[key]
+                        for key in ("workspace_id", "workspace_kind", "graph_id")
+                    },
+                },
+            },
+        )
+        self.store.enqueue(job)
+        self.store.cancel(
+            job.id,
+            result={
+                "status": "rejected",
+                "error": {"code": code, "message": "Invocation rejected."},
+                "duration_ms": 0,
+            },
+        )
+        return self.store.get(job.id)
+
+    def _refusal(self, function_id, binding, trigger, input):
+        """A rejection code, or None, with the manifest and package it loaded."""
+        manifest = package = None
+        try:
+            if function_id not in self.enabled:
+                return "not_enabled", manifest, package
+            manifest, package = load_manifest(self.root, function_id)
+            if not set(manifest["grants"]).issubset(self.enabled[function_id]):
+                return "not_enabled", manifest, package
+            if {"kind": trigger} not in manifest["triggers"]:
+                return "invalid_manifest", manifest, package
+            if not binding.get("actor_id"):
+                return "access_denied", manifest, package
+            with use_request_authorization(**binding):
+                actions = ["read"] + (
+                    ["mutate"]
+                    if "graph:write" in manifest["grants"]
+                    and (
+                        trigger != "webhook"
+                        or self.webhook_policy.get(function_id, binding["graph_id"])[1]
+                    )
+                    else []
+                )
+                for action in actions:
+                    decision = evaluate_graph_access(
+                        self.graph_service.authorization_hook,
+                        action=action,
+                        target="invoke_function",
+                    )
+                    if not decision.allowed or (
+                        trigger == "webhook"
+                        and not decision.graph_access.matches(
+                            graph_id=binding["graph_id"]
+                        )
+                    ):
+                        return "access_denied", manifest, package
+            if input is not _UNCHECKED and not _valid_input(manifest, input):
+                return "invalid_input", manifest, package
+        except Exception:  # Fail closed, including unresolvable schema references.
+            return "invalid_manifest", manifest, package
+        return None, manifest, package
 
     def invoke(
         self,
@@ -293,24 +524,41 @@ class FunctionInvocationService:
         idempotency_key=None,
         correlation_id=None,
     ) -> RunRecord:
+        admitted = self.admit(
+            function_id,
+            input,
+            trigger=trigger,
+            actor_binding=actor_binding,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+        )
+        if not isinstance(admitted, Admission):
+            return admitted
+        return self.execute(admitted, input)
+
+    def admit(
+        self,
+        function_id,
+        input,
+        *,
+        trigger="manual",
+        actor_binding,
+        idempotency_key=None,
+        correlation_id=None,
+        reservation=None,
+    ):
+        """Claim the run record, or return the replayed or rejected record.
+
+        An ``Admission`` must end in ``execute``. ``reservation`` is the
+        caller's own ``reserve`` hold, which does not make it busy.
+        """
         if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
             raise ValueError("Invalid function id")
         self._require_durable_history()
         started = time.monotonic()
         # Only the trusted binding supplies identity and scope. In particular,
         # never carry its headers through the authorization helper.
-        binding = {
-            key: actor_binding.get(key)
-            for key in (
-                "actor_id",
-                "actor_type",
-                "auth_source",
-                "workspace_id",
-                "workspace_kind",
-                "graph_id",
-                "authenticated_principal",
-            )
-        }
+        binding = _bind(actor_binding)
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
@@ -334,8 +582,6 @@ class FunctionInvocationService:
             },
         )
         job.started_at = utcnow()
-        manifest = None
-        code = None
         probe = None
         with _admission(self.root):
             # Enqueue's UNIQUE constraint is the authority for delivery deduplication.
@@ -345,66 +591,31 @@ class FunctionInvocationService:
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
                     return self._replay(existing, binding)
+            if self._in_progress(function_id, idempotency_key, reservation):
+                job.state, job.started_at = ExecutionState.CANCELLED, None
+                job.result = {
+                    "status": "rejected",
+                    "error": {"code": "busy", "message": "Invocation rejected."},
+                    "duration_ms": 0,
+                }
+                return job  # Unrecorded: a retry replays the holder's record.
+            code, manifest, package = self._refusal(
+                function_id, binding, trigger, input
+            )
+            if manifest is not None:
+                job.payload["function_version"] = manifest["version"]
+                job.origin = f"function:{function_id}@{manifest['version']}"
             try:
-                if function_id not in self.enabled:
-                    code = "not_enabled"
-                else:
-                    manifest, files = load_manifest(self.root, function_id)
-                    job.payload["function_version"] = manifest["version"]
-                    job.origin = f"function:{function_id}@{manifest['version']}"
-                    if not set(manifest["grants"]).issubset(self.enabled[function_id]):
-                        code = "not_enabled"
-                    elif trigger != "manual":
-                        code = "invalid_manifest"
-                    elif not binding.get("actor_id"):
-                        code = "access_denied"
-                    else:
-                        with use_request_authorization(**binding):
-                            actions = ["read"] + (
-                                ["mutate"]
-                                if "graph:write" in manifest["grants"]
-                                else []
-                            )
-                            if any(
-                                not evaluate_graph_access(
-                                    self.graph_service.authorization_hook,
-                                    action=action,
-                                    target="invoke_function",
-                                ).allowed
-                                for action in actions
-                            ):
-                                code = "access_denied"
-                        if code is None:
-                            try:
-                                if not isinstance(input, dict):
-                                    raise ValueError("Input must be an object")
-                                if "input_schema" in manifest:
-                                    _schema(manifest["input_schema"]).validate(input)
-                                elif input:
-                                    raise ValueError("Input must be empty")
-                            except (ValidationError, ValueError):
-                                code = "invalid_input"
-                if code is None and any(
-                    j.state == ExecutionState.RUNNING for j in previous
-                ):
+                if code is None and self._busy(function_id, previous, reservation):
                     code = "busy"
                 if code is None:
-                    try:
-                        probe = self.runner.probe()
-                    except RunnerUnavailable:
-                        code = "isolation_below_minimum"
+                    code, probe = self._isolation()
                     if probe is not None and probe.level == "degraded":
                         logger.warning(
                             "User function isolation is degraded; missing controls: %s",
                             probe.missing,
                         )
-                    if (
-                        probe is not None
-                        and self.isolation_minimum == "full"
-                        and probe.level != "full"
-                    ):
-                        code = "isolation_below_minimum"
-            except Exception:  # Fail closed, including unresolvable schema references.
+            except Exception:  # Fail closed.
                 code = "invalid_manifest"
             if code:
                 job.started_at = None
@@ -420,22 +631,47 @@ class FunctionInvocationService:
                     raise PermissionError("Conflicting run identity")
                 return self._replay(stored, binding)
             if code:
-                self.store.cancel(
-                    job.id,
-                    result={
-                        "status": "rejected",
-                        "error": {"code": code, "message": "Invocation rejected."},
-                        "duration_ms": int((time.monotonic() - started) * 1000),
-                    },
-                )
-                return self.store.get(job.id)
+                return self.reject(Admission(job, started), code)
+        return Admission(
+            job, started, binding, trigger, idempotency_key, manifest, package, probe
+        )
+
+    def reject(self, admission, code):
+        """Record a claimed run as rejected; it never started."""
+        self.store.cancel(
+            admission.job.id,
+            result={
+                "status": "rejected",
+                "error": {"code": code, "message": "Invocation rejected."},
+                "duration_ms": int((time.monotonic() - admission.started) * 1000),
+            },
+        )
+        return self.store.get(admission.job.id)
+
+    def execute(self, admission, input, run_files=None) -> RunRecord:
+        """Run an admitted invocation; run files are deleted when it ends."""
+        try:
+            return self._execute(admission, input, run_files)
+        finally:
+            if run_files is not None:
+                run_files.close()
+
+    def _execute(self, admission, input, run_files):
+        job, started, binding, trigger = (
+            admission.job,
+            admission.started,
+            admission.binding,
+            admission.trigger,
+        )
+        function_id, manifest, probe = job.agent_id, admission.manifest, admission.probe
+        idempotency_key = admission.idempotency_key
         try:
             limits = manifest.get("limits", {})
             spec = RunSpec(
                 job.id,
                 manifest["runtime"],
                 manifest["entry_point"],
-                files,
+                admission.package,
                 timeout_seconds=limits.get("timeout_seconds", 120),
                 memory_mib=limits.get("memory_mib", 256),
             )
@@ -447,9 +683,23 @@ class FunctionInvocationService:
                 job.correlation_id,
                 binding,
                 lambda grant: (
-                    function_id in self.enabled and grant in self.enabled[function_id]
+                    function_id in self.enabled
+                    and grant in self.enabled[function_id]
+                    and (
+                        trigger != "webhook"
+                        or (
+                            self.webhook_policy.get(function_id, binding["graph_id"])[0]
+                            and (
+                                grant != "graph:write"
+                                or self.webhook_policy.get(
+                                    function_id, binding["graph_id"]
+                                )[1]
+                            )
+                        )
+                    )
                 ),
                 max_tool_calls=limits.get("max_tool_calls", 200),
+                run_files=run_files,
             )
             envelope = {
                 "schema_version": "1.0",
@@ -464,7 +714,7 @@ class FunctionInvocationService:
                     "attribution": job.payload["attribution"],
                 },
                 "invocation": {
-                    "contract_version": "1",
+                    "contract_version": manifest["contract_version"],
                     "run_id": job.id,
                     "function_id": function_id,
                     "function_version": manifest["version"],

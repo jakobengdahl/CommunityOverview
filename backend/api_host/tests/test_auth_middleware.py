@@ -999,3 +999,26 @@ class TestSessionCookieLogin:
             assert after.status_code == 401
         finally:
             os.unlink(path)
+
+
+def test_webhook_bypass_is_limited_to_post_execution_path():
+    app = FastAPI()
+
+    @app.api_route("/api/functions/{function_id}/{action}", methods=["POST", "PUT"])
+    def target(function_id: str, action: str):
+        return {"reached": True}
+
+    add_auth_middleware(
+        app, AppConfig(auth_enabled=True, auth_bearer_token="instance-secret")
+    )
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/functions/example/webhook",
+            headers={"Authorization": "Bearer function-token"},
+        ).status_code
+        == 200
+    )
+    assert client.put("/api/functions/example/webhook").status_code == 401
+    assert client.post("/api/functions/example/webhook-settings").status_code == 401
+    assert client.post("/api/functions/example/webhook-token").status_code == 401

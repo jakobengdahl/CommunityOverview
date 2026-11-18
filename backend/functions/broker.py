@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping
 
@@ -172,6 +173,8 @@ class BrokerContext:
     grant_enabled: Callable[[str], bool]
     max_tool_calls: int = MAX_TOOL_CALLS
     max_message_bytes: int = MAX_MESSAGE_BYTES
+    # backend.functions.run_files.RunFiles of a webhook call with files.
+    run_files: Any = None
 
 
 @dataclass
@@ -316,9 +319,31 @@ class FunctionBroker:
         if spec.method == "add_nodes":
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
+                graph_id = ctx.authorization_inputs.get("graph_id") or ""
+                call_args["nodes"] = [
+                    {
+                        **node,
+                        "metadata": {
+                            **(node.get("metadata") or {}),
+                            "origin_graph_id": graph_id,
+                        },
+                    }
+                    for node in call_args["nodes"]
+                ]
 
-        with use_request_authorization(
-            **_authorization_kwargs(ctx.authorization_inputs)
+        scope = (
+            access.restrict_function_graph(
+                ctx.authorization_inputs.get("graph_id") or ""
+            )
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook"
+            else nullcontext()
+        )
+        with (
+            use_request_authorization(
+                **_authorization_kwargs(ctx.authorization_inputs)
+            ),
+            scope,
         ):
             decision = access.evaluate_graph_access(
                 self._service.authorization_hook,
@@ -330,6 +355,12 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
+            if ctx.authorization_inputs.get(
+                "actor_type"
+            ) == "function_webhook" and not decision.graph_access.matches(
+                graph_id=ctx.authorization_inputs.get("graph_id") or ""
+            ):
+                raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:

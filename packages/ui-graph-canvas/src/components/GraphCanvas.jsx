@@ -372,6 +372,35 @@ function referenceHostBroken(node, isReferenceTargetAvailable) {
   return isReferenceTargetAvailable?.(node.data?.target_kind, target) === false;
 }
 
+// Test the convex triangle against both rectangle axes and its edge normals.
+function shapeOverlapsMarquee(geometry, rect) {
+  const { width: w, height: h, vertices, radius } = geometry;
+  const right = rect.x + rect.width,
+    bottom = rect.y + rect.height;
+  if (rect.x > w || right < 0 || rect.y > h || bottom < 0) return false;
+  if (!vertices) {
+    const x = Math.max(rect.x, Math.min(right, w / 2));
+    const y = Math.max(rect.y, Math.min(bottom, h / 2));
+    const dx = Math.max(radius - x, 0, x - (w - radius));
+    const dy = Math.max(radius - y, 0, y - (h - radius));
+    return dx * dx + dy * dy <= radius * radius;
+  }
+  const corners = [
+    { x: rect.x, y: rect.y },
+    { x: right, y: rect.y },
+    { x: right, y: bottom },
+    { x: rect.x, y: bottom },
+  ];
+  return vertices.every((a, i) => {
+    const b = vertices[(i + 1) % vertices.length];
+    const axis = { x: -(b.y - a.y), y: b.x - a.x };
+    const project = (p) => p.x * axis.x + p.y * axis.y;
+    const polygon = vertices.map(project),
+      box = corners.map(project);
+    return Math.max(...polygon) >= Math.min(...box) && Math.max(...box) >= Math.min(...polygon);
+  });
+}
+
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
@@ -1622,6 +1651,79 @@ function GraphCanvasInner({
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
+  const marqueeCleanupRef = useRef(null);
+  useEffect(() => () => marqueeCleanupRef.current?.(), []);
+  const onSelectionStart = useCallback(
+    (event) => {
+      marqueeCleanupRef.current?.();
+      const start = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const move = (e) => {
+        const end = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        const rect = {
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          width: Math.abs(end.x - start.x),
+          height: Math.abs(end.y - start.y),
+        };
+        const labelBounds = new Map();
+        reactFlowWrapper.current
+          ?.querySelectorAll('.react-flow__node[data-id]')
+          .forEach((element) => {
+            const label = element.querySelector(
+              '.graph-shape-outside-label .graph-shape-label-chip'
+            );
+            if (label) labelBounds.set(element.dataset.id, label.getBoundingClientRect());
+          });
+        const left = Math.min(event.clientX, e.clientX),
+          right = Math.max(event.clientX, e.clientX);
+        const top = Math.min(event.clientY, e.clientY),
+          bottom = Math.max(event.clientY, e.clientY);
+        setNodes((current) => {
+          const byId = new Map(current.map((node) => [node.id, node]));
+          return current.map((node) => {
+            if (!node.geometry || node.selectable === false) return node;
+            let x = node.position.x,
+              y = node.position.y;
+            let parent = byId.get(node.parentNode || node.parentId);
+            const visited = new Set([node.id]);
+            while (parent && !visited.has(parent.id)) {
+              visited.add(parent.id);
+              x += parent.position.x;
+              y += parent.position.y;
+              parent = byId.get(parent.parentNode || parent.parentId);
+            }
+            const label = labelBounds.get(node.id);
+            const hitsLabel =
+              label &&
+              label.width > 0 &&
+              label.height > 0 &&
+              left <= label.right &&
+              right >= label.left &&
+              top <= label.bottom &&
+              bottom >= label.top;
+            const selected =
+              hitsLabel ||
+              shapeOverlapsMarquee(node.geometry, {
+                ...rect,
+                x: rect.x - x,
+                y: rect.y - y,
+              });
+            return Boolean(node.selected) === selected ? node : { ...node, selected };
+          });
+        });
+      };
+      const cleanup = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', cleanup);
+        marqueeCleanupRef.current = null;
+      };
+      marqueeCleanupRef.current = cleanup;
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', cleanup);
+    },
+    [screenToFlowPosition, setNodes]
+  );
+
   // Kept current here, next to the state it mirrors — the ref is declared far
   // above because the erase gesture's other refs live together, but it cannot
   // be initialised there: `nodes` does not exist yet at that point.
@@ -1706,7 +1808,12 @@ function GraphCanvasInner({
       // the session changed: that flag drops `prevNodes` entirely, and with it
       // the parentId and style that live only on the flow node — silently
       // detaching every grouped node from its group.
-      let positioned = reconciled;
+      const priorSelection = new Map(nds.map((node) => [node.id, node.selected]));
+      let positioned = contentSwapped
+        ? reconciled
+        : reconciled.map((node) =>
+            priorSelection.has(node.id) ? { ...node, selected: priorSelection.get(node.id) } : node
+          );
       if (enteringFocus) {
         // The ego ring is in absolute flow coordinates, so a node still parented
         // to a group would be drawn relative to that group's box. Focus detaches
@@ -5392,6 +5499,8 @@ function GraphCanvasInner({
             nodes={nodesWithAriaLabels}
             edges={edges}
             onNodesChange={onNodesChange}
+            onSelectionStart={onSelectionStart}
+            onSelectionEnd={() => marqueeCleanupRef.current?.()}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeDragStart={onNodeDragStart}

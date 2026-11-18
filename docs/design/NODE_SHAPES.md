@@ -264,6 +264,42 @@ operation rather than thousands of per-node edits. Never copy remote state back
 out as fresh operations. Old clients must be read-only for appearance-enabled
 sessions unless they can preserve the new fields and operations.
 
+### Remote appearance ordering
+
+**Ordering rule.** Every event that changes the appearance baseline — a
+remote appearance operation, a node removal (which bumps the node's revision)
+and the acknowledgment of this client's own appearance write — is folded in
+server seq order, at the stream position of the event. The event stream is that
+order. An acknowledgment arriving on the POST response ahead of the stream is
+held until the stream reaches its seq and released there, before the event at
+that seq; one arriving after the stream passed its seq is dropped, because the
+echo was folded at its position (or a snapshot or catch-up superseded it). So an
+acknowledgment never lands ahead of an earlier removal, and a removal never
+increments a revision that lacks an earlier acknowledged write.
+
+All of these enter one ordered canvas queue. Their baseline changes are folded
+at the point the queued canvas operation runs, with autosave held from receipt
+until drawing finishes; acknowledgments are baseline-only work there. Before a
+queued operation is applied, the queue re-checks for an asynchronous local edit
+after every await and applies synchronously with the last check, so an edit
+starting between a wait resolving and the apply holds the operation back too.
+
+Resync waits for the queue and any registered asynchronous local edit before
+replacing state; it rechecks local edits after the queue drains and repeats if
+either work source changed while waiting. Resync may replay a captured appearance
+write only when the server has acknowledged that write with its applied operation
+and revisions. A pending write, a successful response without that operation, or
+a predicted base revision plus one is not evidence of its applied revision.
+Replay enters the ordered canvas queue and checks each server-returned revision
+against the baseline when the queued operation runs, not when it is captured.
+Each target of a combined type-default and node-clear operation is applied
+independently when its revision is present and current, preserving a newer value
+for either target.
+Local editors hold autosave until their changes are ready for a fresh snapshot.
+A rejected stale appearance write is not retried as a fresh overwrite: its
+current revision is incorporated during resync, and any further edit must use
+that revision after the user reviews the conflict.
+
 ## Geometry and hit areas
 
 One geometry descriptor must drive drawing, hit tests, edge anchors and layout
@@ -308,8 +344,7 @@ painted, including the text and the action buttons inside it, and on a
 triangle's outside label; the state badges, which lie beyond the body, pass
 the pointer through. The action buttons stack at the trailing edge of the text box, which
 keeps its text clear of them, sized to fit at every base and scale. The minimum
-screen-space hit target is not implemented yet. A marquee still selects every node by React Flow's rectangular bounds;
-polygon-precise marquee selection is future work. Zero-distance endpoint centres use opposite
+screen-space hit target is not implemented yet. Marquee selection tests the shape body and outside label against the selection rectangle; unconfigured cards retain rectangular selection. Zero-distance endpoint centres use opposite
 vertical anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale
