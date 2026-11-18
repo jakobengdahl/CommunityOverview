@@ -136,6 +136,17 @@ def test_webhook_database_default_outside_graph_when_home_is_inside(
         .is_relative_to(graph_dir.resolve())
     )
 
+    import pwd
+    from types import SimpleNamespace
+
+    import pytest
+
+    monkeypatch.setattr(
+        pwd, "getpwuid", lambda _: SimpleNamespace(pw_dir=str(graph_dir))
+    )
+    with pytest.raises(ValueError, match="No private state directory"):
+        config.get_webhook_tokens_db_path(excluded_dirs=[graph_dir])
+
 
 def test_webhook_database_rejects_actual_graph_and_config_directories(
     tmp_path, monkeypatch

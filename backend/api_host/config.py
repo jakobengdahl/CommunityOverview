@@ -8,7 +8,6 @@ or by passing a custom AppConfig to create_app().
 import os
 import hashlib
 import json
-import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -346,8 +345,7 @@ class AppConfig:
             namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             roots = [Path.home() / ".local" / "state"]
             # HOME can itself be beneath the graph directory (for example in
-            # pytest subprocesses). Use the account home or a separate system
-            # temporary directory if that happens.
+            # pytest subprocesses). Use the account home if that happens.
             try:
                 import pwd
 
@@ -356,7 +354,10 @@ class AppConfig:
                 )
             except (ImportError, KeyError, AttributeError):
                 pass
-            roots.extend(Path(p) for p in (tempfile.gettempdir(), "/var/tmp"))
+            excluded = [
+                graph_path.parent.resolve(),
+                *(Path(d).resolve() for d in excluded_dirs),
+            ]
             state = next(
                 (
                     root / "communityoverview" / namespace
@@ -365,11 +366,15 @@ class AppConfig:
                         (root / "communityoverview" / namespace / "webhook_tokens.db")
                         .resolve()
                         .is_relative_to(directory)
-                        for directory in excluded_dirs
+                        for directory in excluded
                     )
                 ),
-                roots[0] / "communityoverview" / namespace,
+                None,
             )
+            if state is None:
+                raise ValueError(
+                    "No private state directory outside graph and config directories"
+                )
         path = state / "webhook_tokens.db"
         if path.resolve() == self.get_import_jobs_db_path().resolve():
             raise ValueError("Webhook token and import job databases must be separate")

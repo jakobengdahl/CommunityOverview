@@ -296,6 +296,29 @@ def test_invalid_manifest_is_rejected_and_its_delivery_key_is_retained(
     assert invoke(service, idempotency_key="fixed").state == ExecutionState.SUCCEEDED
 
 
+@pytest.mark.parametrize("target", ["directory", "manifest", "entry", "package"])
+def test_package_paths_cannot_escape_the_function_directory(host, tmp_path, target):
+    _, _, _, directory = host
+    outside = tmp_path / "outside"
+    outside.write_text("pass")
+    if target == "directory":
+        alias = tmp_path / "alias"
+        alias.symlink_to(tmp_path, target_is_directory=True)
+        with pytest.raises(ValueError, match="Invalid function directory"):
+            invocation.load_manifest(tmp_path, "alias")
+        return
+    path = (
+        directory
+        / {"manifest": "function.json", "entry": "main.py", "package": "extra.py"}[
+            target
+        ]
+    )
+    path.unlink(missing_ok=True)
+    path.symlink_to(outside)
+    with pytest.raises(ValueError):
+        invocation.load_manifest(tmp_path, "example")
+
+
 def test_invalid_output_fails_and_attribution_obeys_actor_erasure(host):
     service, execute, manifest, directory = host
     manifest["output_schema"] = {"required": ["missing"]}

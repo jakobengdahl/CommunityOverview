@@ -114,7 +114,11 @@ def load_manifest(root, function_id):
         raise ValueError("Invalid function id")
     root = Path(root).resolve()
     directory = (root / function_id).resolve()
-    if directory.parent != root or directory.name != function_id:
+    if (
+        not directory.is_relative_to(root)
+        or directory.parent != root
+        or directory.name != function_id
+    ):
         raise ValueError("Invalid function directory")
     manifest_path = (directory / "function.json").resolve()
     if not manifest_path.is_relative_to(directory):
@@ -156,15 +160,18 @@ def load_manifest(root, function_id):
     for key in ("input_schema", "output_schema"):
         if key in manifest:
             _schema(manifest[key])
-    entry = directory / safe_relative_path(manifest["entry_point"])
-    if not entry.resolve().is_relative_to(directory) or not entry.is_file():
+    entry = (directory / safe_relative_path(manifest["entry_point"])).resolve()
+    if not entry.is_relative_to(directory) or not entry.is_file():
         raise ValueError("Invalid entry point")
     files = {}
     for path in directory.rglob("*"):
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(directory):
+            raise ValueError("Invalid package path")
         if path.is_symlink():
             raise ValueError("Package symlinks are unsupported")
-        if path.is_file():
-            files[path.relative_to(directory).as_posix()] = path.read_bytes()
+        if resolved_path.is_file():
+            files[path.relative_to(directory).as_posix()] = resolved_path.read_bytes()
     return manifest, files
 
 
