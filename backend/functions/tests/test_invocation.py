@@ -22,7 +22,10 @@ from backend.agents.run_history import function_run_to_dict
 from backend.functions import invocation
 from backend.functions.runner import FunctionRunResult, RunnerProbe
 from backend.functions.routes import register_function_routes
-from backend.runtime.authorization import GraphAuthorizationDecision
+from backend.runtime.authorization import (
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 
 
 @pytest.fixture
@@ -420,12 +423,21 @@ def test_independent_history_connections_share_busy_and_deduplication(host):
 
 def test_replay_survives_auth_transport_change_and_retention_redaction(host):
     service, execute, _, _ = host
+    service.graph_service.authorization_hook.evaluate.return_value = (
+        GraphAuthorizationDecision(
+            allowed=True,
+            graph_access=GraphAccessNarrowing(
+                enabled=True, allow_local_graph=False, include_graph_ids=("g1",)
+            ),
+        )
+    )
     job = service.invoke(
         "example",
         {},
         idempotency_key="delivery",
         actor_binding={"actor_id": "operator", "auth_source": "basic"},
     )
+    assert job.state == ExecutionState.SUCCEEDED
     assert (
         service.invoke(
             "example",

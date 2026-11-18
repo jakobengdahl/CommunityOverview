@@ -730,9 +730,13 @@ def test_webhook_broker_intersects_every_service_decision_with_bound_graph(stora
     assert "result" in call(
         broker, "graph.update_node", {"node_id": "one", "updates": {"name": "Changed"}}
     )
-    assert "result" in call(
-        broker, "graph.add", {"nodes": [{"name": "New", "type": "Actor"}]}
+    assert (
+        error_code(
+            call(broker, "graph.add", {"nodes": [{"name": "New", "type": "Actor"}]})
+        )
+        == "access_denied"
     )
+    assert not any(node.name == "New" for node in storage.nodes.values())
     enabled.remove(GRANT_GRAPH_WRITE)
     assert error_code(call(broker, "graph.add", {"nodes": []})) == "grant_denied"
 

@@ -31,6 +31,12 @@ class WebhookPolicy:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS webhook_rate (function_id TEXT PRIMARY KEY, window REAL NOT NULL, count INTEGER NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS webhook_rate_events (function_id TEXT NOT NULL, admitted REAL NOT NULL)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS webhook_rate_events_function_time ON webhook_rate_events (function_id, admitted)"
+            )
 
     def get(self, function_id, graph_id):
         with self.store._connect() as db:
@@ -54,23 +60,30 @@ class WebhookPolicy:
             )
 
     def admit(self, function_id):
-        now = time.time()
         with self.store._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            db.execute(
+                "DELETE FROM webhook_rate_events WHERE function_id = ? AND admitted <= ?",
+                (function_id, now - 60),
+            )
+            count = db.execute(
+                "SELECT COUNT(*) FROM webhook_rate_events WHERE function_id = ?",
+                (function_id,),
+            ).fetchone()[0]
+            # Preserve admissions made by the old fixed-window limiter during
+            # upgrades until its entire window has expired.
             row = db.execute(
                 "SELECT window, count FROM webhook_rate WHERE function_id = ?",
                 (function_id,),
             ).fetchone()
-            if row and now < row[0] + 60 and row[1] >= 60:
+            if row and now < row[0] + 60:
+                count += row[1]
+            if count >= 60:
                 return False
-            window, count = (
-                (row[0], row[1] + 1)
-                if row and row[0] <= now < row[0] + 60
-                else (now, 1)
-            )
             db.execute(
-                "INSERT OR REPLACE INTO webhook_rate VALUES (?, ?, ?)",
-                (function_id, window, count),
+                "INSERT INTO webhook_rate_events VALUES (?, ?)",
+                (function_id, now),
             )
         return True
 

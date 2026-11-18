@@ -173,12 +173,21 @@ async def test_rejections_do_not_receive_body(endpoint, monkeypatch):
     await app(scope.copy(), receive, send)
 
 
-def test_rate_limit_is_shared_by_policy_instances(endpoint):
+def test_rate_limit_is_shared_by_policy_instances(endpoint, monkeypatch):
     from backend.functions.webhook import WebhookPolicy
 
     _, service, store, _ = endpoint
     first = service.webhook_policy
     second = WebhookPolicy(store)
-    assert all(first.admit("example") for _ in range(60))
+    now = [1000.0]
+    monkeypatch.setattr("backend.functions.webhook.time.time", lambda: now[0])
+    assert first.admit("example")
+    now[0] += 59
+    assert all(first.admit("example") for _ in range(59))
     assert not second.admit("example")
     assert second.admit("other")
+    now[0] += 1
+    assert second.admit("example")
+    assert not first.admit("example")
+    now[0] += 59
+    assert first.admit("example")

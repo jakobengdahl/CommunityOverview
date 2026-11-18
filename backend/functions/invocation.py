@@ -292,8 +292,9 @@ class FunctionInvocationService:
                 action="read",
                 target="invoke_function",
             )
-            if not decision.allowed or not decision.graph_access.matches(
-                graph_id=binding["graph_id"]
+            if not decision.allowed or (
+                binding.get("actor_type") == "function_webhook"
+                and not decision.graph_access.matches(graph_id=binding["graph_id"])
             ):
                 raise PermissionError("Access denied")
         return existing
@@ -415,9 +416,9 @@ class FunctionInvocationService:
                                     action=action,
                                     target="invoke_function",
                                 )
-                                if (
-                                    not decision.allowed
-                                    or not decision.graph_access.matches(
+                                if not decision.allowed or (
+                                    trigger == "webhook"
+                                    and not decision.graph_access.matches(
                                         graph_id=binding["graph_id"]
                                     )
                                 ):

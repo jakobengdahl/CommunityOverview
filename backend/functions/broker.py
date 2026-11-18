@@ -341,6 +341,15 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
+            # New nodes are local to this service; they cannot be assigned to
+            # the named graph carried by a webhook credential.
+            if (
+                spec.method == "add_nodes"
+                and call_args["nodes"]
+                and ctx.authorization_inputs.get("actor_type") == "function_webhook"
+                and not decision.graph_access.matches(graph_id="")
+            ):
+                raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:
