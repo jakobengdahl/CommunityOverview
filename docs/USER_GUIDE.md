@@ -1612,3 +1612,14 @@ before a failed or timed-out run remain in the graph.
 Webhook credentials can be minted, rotated and revoked through the function API.
 The token is shown only on mint or rotation; save it securely. A graph-admin
 authorization hook is required. Webhook invocation is not yet available.
+
+### Inbound user-function webhooks
+
+An administrator of the bound graph can enable an external function call using
+its webhook settings. Set `FUNCTION_WEBHOOKS_ENABLED=true` on the instance,
+mint a function token for the graph, then set `enabled` through the function's
+webhook-settings endpoint. Send a JSON input object with the token as a Bearer
+Authorization header. The token is shown only on mint or rotation; keep it
+secret. The optional `allow_write` switch trusts the external caller to trigger
+writes with the function's enabled grants and the system actor's graph access.
+Leave it off for read-only webhooks. See [the function contract](USER_FUNCTION_CONTRACT.md#version-2-inbound-webhooks) for limits.

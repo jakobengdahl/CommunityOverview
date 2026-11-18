@@ -539,6 +539,8 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/search` | Search nodes |
+| POST | `/api/functions/{function_id}/webhook` | Run with the graph-bound function bearer token and JSON input (see User Function Contract §12) |
+| PUT | `/api/functions/{function_id}/webhook-settings` | Graph admin sets `enabled` and `allow_write` |
 | POST | `/api/functions/{function_id}/invoke` | Manually run an enabled operator function; accepts `input`, optional `correlation_id`, and `Idempotency-Key`; returns a run record (see *Manual user functions*) |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
