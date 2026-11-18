@@ -21,6 +21,7 @@ import {
   BAND_TEXT_LIGHT,
   bandTextStyle,
   createNodeShapeResolver,
+  nodeShapeActionLayout,
   nodeShapeAccessibleName,
   nodeShapeAreaValues,
   nodeShapeGeometry,
@@ -490,9 +491,14 @@ describe('CustomNode configured shapes', () => {
     });
   });
 
-  it('passes the pointer through everything but the painted body and labels', () => {
+  it('passes the pointer through everything but the painted body and what lies inside it', () => {
     renderFlow([
-      shapedFlowNode(RISK, { remoteSelection: { color: '#00aa00', displayName: 'Ada' } }),
+      shapedFlowNode(RISK, {
+        markColor: '#ff0000',
+        remoteSelection: { color: '#00aa00', displayName: 'Ada' },
+        stagedState: 'created',
+      }),
+      { ...shapedFlowNode(CARD), id: 'n2' },
     ]);
     const wrapper = screen.getByTestId('rf__node-n1');
     withStylesheet(() => {
@@ -503,60 +509,83 @@ describe('CustomNode configured shapes', () => {
         .find((rule) => rule.selectorText && wrapper.matches(rule.selectorText));
       expect(wrapperRule.style.getPropertyValue('pointer-events')).toBe('none');
       expect(wrapperRule.style.getPropertyPriority('pointer-events')).toBe('important');
-      expect(getComputedStyle(wrapper.querySelector('.graph-shaped-node')).pointerEvents).toBe(
-        'none'
-      );
-      for (const hit of [
-        '.graph-shape-body',
+      const events = (root, selector) =>
+        getComputedStyle(root.querySelector(selector)).pointerEvents;
+      expect(events(wrapper, '.graph-shaped-node')).toBe('none');
+      expect(events(wrapper, '.graph-shape-body')).toBe('auto');
+      // Badges and a triangle's outside label lie beyond the body.
+      for (const outside of [
         '.graph-shape-label-chip',
+        '.graph-node-mark-badge',
         '.graph-node-remote-badge',
+        '.graph-node-staged-badge',
       ]) {
-        expect(getComputedStyle(wrapper.querySelector(hit)).pointerEvents).toBe('auto');
+        expect(events(wrapper, outside)).toBe('none');
       }
+      expect(events(screen.getByTestId('rf__node-n2'), '.graph-shape-label-chip')).toBe('auto');
     });
   });
 
   it.each(
     ['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down'].flatMap((base) => [
-      [base, 1],
       [base, 0.1],
+      [base, 10],
     ])
-  )('keeps the path from the %s body (scale %s) to its edit button hoverable', (base, scale) => {
-    const placement = base.startsWith('triangle') ? 'centre' : 'top-left';
-    const definition = { ...CARD, base, placement, scale };
-    const flowNode = shapedFlowNode(definition, { onExpand() {}, onEdit() {} });
-    const { rerender } = renderFlow([flowNode]);
-    fireEvent.mouseEnter(document.querySelector('.graph-shaped-node'));
-    const centre = (title, dy) => {
-      const { left, top } = screen.getByTitle(title).style;
-      return { x: parseFloat(left) + 12, y: parseFloat(top) + dy };
-    };
-    // The expand button is centred on its top by translateY(-50%).
-    const expand = centre('Show related nodes', 0);
-    const edit = centre('Edit node', 12);
-    const { contains } = nodeShapeGeometry(base, scale);
-    // The bridge's size comes from the stylesheet, which jsdom does not lay out.
-    const bridge = document.querySelector('.graph-shape-action-bridge').style;
-    const [left, top] = [parseFloat(bridge.left), parseFloat(bridge.top)];
-    const onBridge = (p) => p.x >= left && p.x <= left + 52 && p.y >= top && p.y <= top + 24;
-    expect(contains(expand)).toBe(true);
-    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
-      const point = { x: edit.x + t * (expand.x - edit.x), y: edit.y + t * (expand.y - edit.y) };
-      expect(contains(point) || onBridge(point)).toBe(true);
+  )(
+    'keeps every action button of a %s body (scale %s) inside it and off the text',
+    (base, scale) => {
+      const geometry = nodeShapeGeometry(base, scale);
+      const placements = base.startsWith('triangle')
+        ? ['centre', 'bottom']
+        : ['top-left', 'middle-centre', 'bottom-right'];
+      const inside = ({ x, y, size }) =>
+        [
+          { x, y },
+          { x: x + size, y },
+          { x, y: y + size },
+          { x: x + size, y: y + size },
+        ].every((corner) => geometry.contains(corner));
+      for (const placement of placements) {
+        for (const count of [1, 2]) {
+          const { buttons, inset } = nodeShapeActionLayout(geometry, placement, count);
+          const box = nodeShapeTextBox(geometry, placement);
+          expect(buttons).toHaveLength(count);
+          for (const button of buttons) {
+            expect(inside(button)).toBe(true);
+            expect(button.x).toBeGreaterThanOrEqual(box.x + box.width - inset);
+          }
+        }
+      }
+
+      // Selected rather than hovered: the buttons stay visible without a hover path.
+      const placement = placements[1];
+      renderFlow([
+        {
+          ...shapedFlowNode({ ...CARD, base, placement, scale }, { onExpand() {}, onEdit() {} }),
+          selected: true,
+        },
+      ]);
+      const text = document.querySelector('.graph-shape-text');
+      const box = nodeShapeTextBox(geometry, placement);
+      const reserved = box.x + box.width - parseFloat(text.style.paddingRight);
+      const rendered = ['Show related nodes', 'Edit node'].map((title) => {
+        const { left, top, width, height } = screen.getByTitle(title).style;
+        expect(parseFloat(width)).toBe(parseFloat(height));
+        return { x: parseFloat(left), y: parseFloat(top), size: parseFloat(width) };
+      });
+      for (const button of rendered) {
+        expect(inside(button)).toBe(true);
+        expect(button.x).toBeGreaterThanOrEqual(reserved);
+      }
+      expect(rendered[1].y).toBeGreaterThanOrEqual(rendered[0].y + rendered[0].size);
+      withStylesheet(() => {
+        expect(getComputedStyle(text).boxSizing).toBe('border-box');
+        for (const button of document.querySelectorAll('.graph-shaped-node button')) {
+          expect(getComputedStyle(button).transform).toBe('none');
+        }
+      });
     }
-    withStylesheet(() => {
-      const style = getComputedStyle(document.querySelector('.graph-shape-action-bridge'));
-      expect([style.width, style.height, style.pointerEvents]).toEqual(['52px', '24px', 'auto']);
-    });
-    // Still hovered, now selected: the buttons need no hover path, so no bridge.
-    rerender(
-      <ReactFlowProvider>
-        <ReactFlow nodes={[{ ...flowNode, selected: true }]} edges={[]} nodeTypes={flowNodeTypes} />
-      </ReactFlowProvider>
-    );
-    expect(screen.getByTitle('Edit node')).toBeTruthy();
-    expect(document.querySelector('.graph-shape-action-bridge')).toBeNull();
-  });
+  );
 
   it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {
     expect(bandTextStyle('#767676')).toEqual({ color: BAND_TEXT_LIGHT });

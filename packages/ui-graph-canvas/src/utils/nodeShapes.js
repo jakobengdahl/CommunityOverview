@@ -162,7 +162,29 @@ export function nodeShapeTextBox(geometry, placement) {
   return { x: pad, y: band + pad, width: w - 2 * pad, height: h - band - 2 * pad };
 }
 
-/** The coloured band: the silhouette's intersection with its top band height. */
+/**
+ * Action buttons stacked in a column at the trailing edge of the text box,
+ * and the inset that keeps the text clear of that column. The text box lies
+ * inside the convex body, so every button does too, at any base and scale.
+ */
+export function nodeShapeActionLayout(geometry, placement, count) {
+  if (!count) return { buttons: [], inset: 0 };
+  const box = nodeShapeTextBox(geometry, placement);
+  const size = Math.min(24, box.height / (count + (count - 1) / 6), box.width / 3);
+  const gap = size / 6;
+  const top = box.y + (box.height - count * size - (count - 1) * gap) / 2;
+  const x = box.x + box.width - size;
+  return {
+    buttons: Array.from({ length: count }, (_, i) => ({
+      x,
+      y: top + i * (size + gap),
+      size,
+    })),
+    inset: size + gap,
+  };
+}
+
+/** The coloured band:the silhouette's intersection with its top band height. */
 export function nodeShapeBandPath(geometry) {
   const { width: w, height: h, bandHeight: band, radius: r, base } = geometry;
   if (base === 'triangle-up') {

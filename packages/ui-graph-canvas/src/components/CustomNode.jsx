@@ -1,7 +1,12 @@
 import { useState, memo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Handle, Position } from 'reactflow';
-import { bandTextStyle, nodeShapeBandPath, nodeShapeTextBox } from '../utils/nodeShapes';
+import {
+  bandTextStyle,
+  nodeShapeActionLayout,
+  nodeShapeBandPath,
+  nodeShapeTextBox,
+} from '../utils/nodeShapes';
 import './CustomNode.css';
 
 /**
@@ -192,7 +197,20 @@ function CustomNode({ data, id, selected }) {
     const [vertical, horizontal] = triangle ? [placement, 'centre'] : placement.split('-');
     const align = { left: 'flex-start', centre: 'center', right: 'flex-end' }[horizontal];
     const box = nodeShapeTextBox(geometry, placement);
-    const expand = geometry.anchor({ x: 1, y: 0 });
+    const actions = nodeShapeActionLayout(
+      geometry,
+      placement,
+      [data.onExpand, data.onEdit].filter(Boolean).length
+    );
+    const [expandSlot, editSlot] = data.onExpand ? actions.buttons : [null, actions.buttons[0]];
+    const slotStyle = (slot, em) =>
+      slot && {
+        left: slot.x,
+        top: slot.y,
+        width: slot.size,
+        height: slot.size,
+        fontSize: `${(em * slot.size) / 24}rem`,
+      };
     const outline = data.markColor || data.color;
     const bandText = triangle
       ? { color: 'var(--graph-card-text-primary)', background: 'var(--graph-card-surface)' }
@@ -271,6 +289,7 @@ function CustomNode({ data, id, selected }) {
               { top: 'flex-start', middle: 'center', centre: 'center' }[vertical] || 'flex-end',
             alignItems: align,
             textAlign: horizontal === 'centre' ? 'center' : horizontal,
+            paddingRight: actions.inset,
           }}
         >
           {values.second && (
@@ -288,24 +307,9 @@ function CustomNode({ data, id, selected }) {
         {/* A tiny body is hit only where it is painted; the minimum hit target
             is node-shape-phase3b-min-hit-target. */}
 
-        {/* Also shown while selected, so a keyboard user can Tab to them. The
-            edit button sits beside the expand button, not below it: below the
-            side anchor a triangle has already narrowed away, and the pointer
-            leaving the painted body and the bridge hides both buttons. While
-            selected the buttons stay visible without a hover path, so the
-            bridge would only add unpainted hit area. */}
-        {showButtons && !selected && data.onEdit && (
-          <span
-            className="graph-shape-action-bridge"
-            aria-hidden="true"
-            style={{ left: expand.x - 40, top: expand.y - 12 }}
-          />
-        )}
-        {actionButtons(
-          showButtons || selected,
-          { left: expand.x - 12, top: expand.y, right: 'auto' },
-          { left: expand.x - 40, top: expand.y - 12, right: 'auto' }
-        )}
+        {/* Inside the body, so no hover path leaves it; also shown while
+            selected, so a keyboard user can Tab to them. */}
+        {actionButtons(showButtons || selected, slotStyle(expandSlot, 1), slotStyle(editSlot, 0.8))}
         {tooltip}
         <Handle type="source" position={Position.Bottom} />
       </div>

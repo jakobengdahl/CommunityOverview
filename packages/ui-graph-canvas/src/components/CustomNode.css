@@ -441,8 +441,8 @@ body.graph-menu-open .graph-node-tooltip {
 
 /* Configured shapes (docs/design/NODE_SHAPES.md). The React Flow wrapper and
    this root pass the pointer through, so selection, drag, context menu and
-   erase (elementFromPoint) only hit the painted body, visible labels and the
-   controls; transparent corners reach whatever lies beneath. */
+   erase (elementFromPoint) only hit the painted body and the text and
+   controls inside it; transparent corners reach whatever lies beneath. */
 /* !important: React Flow sets pointer-events inline on its wrapper. */
 .react-flow__node.graph-shaped-flow-node {
   pointer-events: none !important;
@@ -465,26 +465,27 @@ body.graph-menu-open .graph-node-tooltip {
   overflow: visible;
 }
 
+/* Only what lies inside the painted body is hit. The state badges and a
+   triangle's outside label sit beyond it, so they pass the pointer through. */
 .graph-shape-body,
 .graph-shape-band,
-.graph-shape-band-text .graph-shape-label-chip,
+.graph-shape-band-text:not(.graph-shape-outside-label) .graph-shape-label-chip,
 .graph-shape-text > *,
-.graph-shaped-node .react-flow__handle,
-.graph-shaped-node button,
-.graph-shaped-node .graph-node-mark-badge,
-.graph-shaped-node .graph-node-remote-badge,
-.graph-shaped-node .graph-node-staged-badge,
-.graph-shape-action-bridge {
+.graph-shaped-node button {
   pointer-events: auto;
 }
 
-/* Runs from the side anchor on the body edge under both action buttons, so the
-   pointer reaches the edit button where a small or narrowing body leaves
-   transparent space before it. Shown only while the buttons are. */
-.graph-shape-action-bridge {
-  position: absolute;
-  width: 52px;
-  height: 24px;
+/* Sized and placed inline inside the text box; a hover transform or
+   overflowing glyph would reach past the body. */
+.graph-shaped-node .graph-expand-button,
+.graph-shaped-node .graph-expand-button:hover,
+.graph-shaped-node .graph-edit-button,
+.graph-shaped-node .graph-edit-button:hover {
+  right: auto;
+  transform: none;
+  box-sizing: border-box;
+  padding: 0;
+  overflow: hidden;
 }
 
 .graph-shape-body {
@@ -591,6 +592,7 @@ body.graph-menu-open .graph-node-tooltip {
 
 .graph-shape-text {
   position: absolute;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   overflow: hidden;
