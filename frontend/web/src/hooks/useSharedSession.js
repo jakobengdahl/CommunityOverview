@@ -19,6 +19,9 @@ export function serverStateToMirror(state, resolvedNodeIds) {
   const overlays = annotationsToOverlays(s.annotations);
   const intensity = Number(s.edge_intensity);
   return {
+    shape_overrides: s.shape_overrides || {},
+    type_shapes: s.type_shapes || {},
+    shape_revisions: s.shape_revisions || {},
     node_refs: resolvedNodeIds || s.node_refs || [],
     positions: s.positions || {},
     hidden_node_ids: s.hidden_node_ids || [],
@@ -89,6 +92,7 @@ export function useSharedSession({
       useGraphStore.setState({
         shapeOverrides: state.shape_overrides || {},
         typeShapes: state.type_shapes || {},
+        shapeRevisions: state.shape_revisions || {},
       });
       if (loadedNodes.length) {
         const positioned = loadedNodes.map((n) =>

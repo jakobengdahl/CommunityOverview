@@ -1324,7 +1324,7 @@ export async function getSessionActivity(sessionId, { actor, limit } = {}) {
 export async function undoSessionAction(sessionId, clientId) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/undo`, {
     method: 'POST',
-    body: JSON.stringify({ client_id: clientId }),
+    body: JSON.stringify({ client_id: clientId, appearance_version: 1 }),
   });
 }
 
@@ -1332,7 +1332,7 @@ export async function undoSessionAction(sessionId, clientId) {
 export async function redoSessionAction(sessionId, clientId) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/redo`, {
     method: 'POST',
-    body: JSON.stringify({ client_id: clientId }),
+    body: JSON.stringify({ client_id: clientId, appearance_version: 1 }),
   });
 }
 

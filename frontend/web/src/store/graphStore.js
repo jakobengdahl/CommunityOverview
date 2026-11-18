@@ -417,6 +417,9 @@ const useGraphStore = create((set, get) => ({
           : null;
     if (dropped?.size) {
       set({
+        shapeOverrides: Object.fromEntries(
+          Object.entries(state.shapeOverrides).filter(([id]) => !dropped.has(id) || (op === 'nodes_replaced' && nodeIds.includes(id)))
+        ),
         nodes: state.nodes.filter((n) => !dropped.has(n.id)),
         edges: state.edges.filter((e) => !dropped.has(e.source) && !dropped.has(e.target)),
         navHistory: state.navHistory.filter((e) => !dropped.has(e.id)),
@@ -540,8 +543,10 @@ const useGraphStore = create((set, get) => ({
       clearGroupsFlag: true,
       selectedGraphNodes: [],
       selectedNodeId: null,
+      shapeRevisions: {},
       shapeOverrides: {},
       typeShapes: {},
+      typeShapeClearNodes: {},
       canvasBaselineEpoch: state.canvasBaselineEpoch + 1,
     }));
     scheduleClearGroupsReset(set);
@@ -730,8 +735,18 @@ const useGraphStore = create((set, get) => ({
     });
   },
 
+  shapeRevisions: {},
   shapeOverrides: {},
   typeShapes: {},
+  typeShapeClearNodes: {},
+  setTypeShape: (type, selection, nodeId) => set((state) => {
+    const typeShapes = { ...state.typeShapes };
+    const shapeOverrides = { ...state.shapeOverrides };
+    if (selection == null) delete typeShapes[type];
+    else Object.defineProperty(typeShapes, type, { value: selection, enumerable: true, configurable: true, writable: true });
+    if (nodeId != null) delete shapeOverrides[nodeId];
+    return { typeShapes, shapeOverrides, typeShapeClearNodes: { ...state.typeShapeClearNodes, [type]: nodeId } };
+  }),
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
@@ -1075,9 +1090,12 @@ const useGraphStore = create((set, get) => ({
   requestCloseMenus: () => set((state) => ({ closeMenusSignal: state.closeMenusSignal + 1 })),
 
   // Delete node from visualization
-  removeNode: (nodeId) => {
+  removeNode: (nodeId, { preserveAppearance = false } = {}) => {
     const { nodes, edges, navHistory } = get();
     set({
+      shapeOverrides: preserveAppearance ? get().shapeOverrides : Object.fromEntries(
+        Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)
+      ),
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
       // Drop the removed node from the trail so its row can't become a dead

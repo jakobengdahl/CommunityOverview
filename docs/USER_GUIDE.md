@@ -892,6 +892,12 @@ confirmation warns you how many are currently in it.
 
 ### 5.1 Collaborating in a session
 
+Session documents also preserve node appearance overrides and type defaults.
+Appearance changes use revision checks: a stale change conflicts instead of
+replacing a collaborator's newer selection. Clients without appearance support
+cannot write to sessions with saved appearance selections. The API contract is
+in [Configurable node shapes](design/NODE_SHAPES.md#shared-sessions).
+
 Several people can work in the same session at the same time — just share the
 session URL (or the session ID via **Connect to session**). Everyone sees the
 same nodes, positions, groups and annotations, and changes appear for the others
@@ -1608,7 +1614,3 @@ permissions. Repeating an idempotency key returns the same run record; use a new
 key for a new run. If the function is already running, another invocation is
 rejected as busy. Function records share agent run-history retention. Writes made
 before a failed or timed-out run remain in the graph.
-
-Webhook credentials can be minted, rotated and revoked through the function API.
-The token is shown only on mint or rotation; save it securely. A graph-admin
-authorization hook is required. Webhook invocation is not yet available.

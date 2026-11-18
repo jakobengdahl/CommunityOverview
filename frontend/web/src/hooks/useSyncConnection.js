@@ -78,6 +78,7 @@ export function useSyncConnection(sessionId) {
       };
       client = new SessionSyncClient({
         sessionId: targetId,
+        appearanceVersion: 1,
         clientId: api.getClientId(),
         displayName: api.getDisplayName(),
         streamUrl: api.getSessionStreamUrl(targetId),

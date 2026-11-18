@@ -3673,3 +3673,109 @@ describe('SessionSyncClient — a stream that never opens', () => {
     expect(handlers.onStreamRefused).not.toHaveBeenCalled();
   });
 });
+
+describe('appearance operations', () => {
+  it.each(['a', '__proto__'])(
+    'diffs a type apply and restores initiating override %s without echoes',
+    (nodeId) => {
+      const selection = { builtin: true };
+      const initial = normalizeMirror({ node_refs: [nodeId, 'b'] });
+      const set = { ...initial, shape_overrides: { [nodeId]: selection } };
+      const setOps = computeOps(initial, set);
+      expect(setOps).toHaveLength(1);
+      expect(setOps[0]).toMatchObject({ op: 'node_shape_set', node_id: nodeId, selection });
+      const before = applyOpToMirror(initial, setOps[0]);
+      expect(computeOps(before, set)).toEqual([]);
+      const clearOps = computeOps(before, initial);
+      expect(clearOps).toHaveLength(1);
+      expect(clearOps[0]).toMatchObject({ op: 'node_shape_set', node_id: nodeId, selection: null });
+      expect(Object.hasOwn(applyOpToMirror(before, clearOps[0]).shape_overrides, nodeId)).toBe(
+        false
+      );
+
+      const next = { ...initial, type_shapes: { [nodeId]: { ref: 'config:card' } } };
+      const ops = computeOps(before, next, { [nodeId]: nodeId });
+      expect(ops).toHaveLength(1);
+      expect(ops[0]).toMatchObject({ op: 'type_shape_set', type: nodeId, base_revision: 0, clear_node_id: nodeId, clear_base_revision: 1 });
+      const remote = applyOpToMirror(before, {
+        ...ops[0],
+        clear_node_id: nodeId,
+        revisions: { ['type:' + nodeId]: 1, ['node:' + nodeId]: 2 },
+      });
+      expect(remote.type_shapes).toEqual(next.type_shapes);
+      expect(remote.shape_overrides).toEqual(next.shape_overrides);
+      expect(computeOps(remote, remote)).toEqual([]);
+      const newer = applyOpToMirror(remote, {
+        op: 'node_shape_set', node_id: nodeId, selection,
+        revisions: { ['node:' + nodeId]: 3 },
+      });
+      const partial = applyOpToMirror(newer, {
+        ...ops[0], selection: { ref: 'saved:new' }, clear_node_id: nodeId,
+        revisions: { ['type:' + nodeId]: 2, ['node:' + nodeId]: 2 },
+      });
+      expect(partial.type_shapes[nodeId]).toEqual({ ref: 'saved:new' });
+      expect(partial.shape_overrides[nodeId]).toEqual(selection);
+      expect(partial.shape_revisions['node:' + nodeId]).toBe(3);
+      const restored = applyOpToMirror(remote, {
+        op: 'type_shape_set',
+        type: nodeId,
+        selection: null,
+        clear_node_id: nodeId,
+        restore_selection: selection,
+        revisions: { ['type:' + nodeId]: 2, ['node:' + nodeId]: 3 },
+      });
+      expect(Object.hasOwn(restored.shape_overrides, nodeId)).toBe(true);
+      expect(Object.getPrototypeOf(restored.shape_overrides)).toBe(Object.prototype);
+      expect(JSON.parse(JSON.stringify(restored.shape_overrides))).toEqual({ [nodeId]: selection });
+      expect(restored.shape_overrides[nodeId]).not.toBe(selection);
+      expect(computeOps(restored, normalizeMirror(restored))).toEqual([]);
+      expect(
+        applyOpToMirror(remote, { op: 'nodes_removed', node_ids: ['b'] }).shape_overrides
+      ).toEqual({});
+    }
+  );
+});
+
+it('preserves appearance drafts on reconnect and discards events after switching away', async () => {
+  const { client, handlers } = makeClient();
+  const resync = vi.fn();
+  handlers.onResync = resync;
+  handlers.onRemoteOps = vi.fn();
+  client.connect();
+  const stream = FakeEventSource.instances[0];
+  const state = { type_shapes: { Thing: { builtin: true } } };
+  client.setBaseline(state, { seq: 1 });
+  stream.emit({ type: 'snapshot', seq: 1, session: { state } });
+  client.syncState({ type_shapes: { Thing: { ref: 'saved:card' } } });
+  const pending = client.getPendingOps();
+  stream.emit({
+    type: 'catch_up',
+    seq: 2,
+    ops: [{ op: 'type_shape_set', type: 'Thing', selection: null }],
+  });
+  expect(resync).toHaveBeenCalled();
+  expect(client.getPendingOps()).toEqual(pending);
+  client.close();
+  stream.emit({ type: 'op', seq: 3, op: { op: 'type_shape_set', type: 'Thing', selection: null } });
+  expect(handlers.onRemoteOps).not.toHaveBeenCalled();
+});
+
+it('keeps predicted appearance revisions through unchanged stale canvas snapshots', async () => {
+  const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ applied: [{ op: 'type_shape_set', revisions: { 'type:Thing': 1 } }] }) }));
+  const { client, handlers } = makeClient({ fetchImpl });
+  handlers.onLocalAppearanceRevisions = vi.fn();
+  handlers.onRemoteOps = vi.fn();
+  client.connect();
+  client.setBaseline({ type_shapes: {}, shape_revisions: {} });
+  const canvas = { type_shapes: { Thing: { builtin: true } }, shape_revisions: {} };
+  client.syncState(canvas);
+  client.syncState(canvas);
+  client.syncState({ ...canvas, type_shapes: { Thing: { ref: 'saved:card' } } });
+  const ops = client.getPendingOps().filter((op) => op.op === 'type_shape_set');
+  expect(ops.map((op) => op.base_revision)).toEqual([0, 1]);
+  await client.flush();
+  expect(handlers.onLocalAppearanceRevisions).toHaveBeenCalledWith({ 'type:Thing': 1 });
+  FakeEventSource.instances[0].emit({ type: 'op', seq: 2, client_id: 'other', op: { op: 'type_shape_set', type: 'Thing', selection: null, revisions: { 'type:Thing': 1 } } });
+  expect(handlers.onRemoteOps).not.toHaveBeenCalled();
+  client.close();
+});

@@ -100,6 +100,9 @@ const LEASE_TTL_MS = 30_000;
 const LEASE_RENEW_MS = 15_000;
 
 const EMPTY_MIRROR = Object.freeze({
+  shape_overrides: {},
+  type_shapes: {},
+  shape_revisions: {},
   node_refs: [],
   positions: {},
   hidden_node_ids: [],
@@ -136,6 +139,9 @@ export function normalizeMirror(state) {
   }
   const intensity = Number(s.edge_intensity);
   return {
+    shape_overrides: structuredClone(s.shape_overrides || {}),
+    type_shapes: structuredClone(s.type_shapes || {}),
+    shape_revisions: { ...(s.shape_revisions || {}) },
     node_refs: Array.from(new Set(s.node_refs || [])),
     positions,
     hidden_node_ids: Array.from(new Set(s.hidden_node_ids || [])),
@@ -232,10 +238,41 @@ export function diffAnnotationFields(before, next, { ignoreMembers = false } = {
  * depend on them, deletions last. Never a membership op: `next.node_refs`
  * only scopes which positions are compared.
  */
-export function computeOps(prevState, nextState) {
+export function computeOps(prevState, nextState, typeShapeClearNodes = {}) {
   const prev = normalizeMirror(prevState);
   const next = normalizeMirror(nextState);
   const ops = [];
+  const clearedNodes = new Set();
+  for (const [map, op, key, prefix] of [
+    ['type_shapes', 'type_shape_set', 'type', 'type:'],
+    ['shape_overrides', 'node_shape_set', 'node_id', 'node:'],
+  ]) {
+    for (const id of new Set([...Object.keys(prev[map]), ...Object.keys(next[map])])) {
+      if (map === 'shape_overrides' && !next.node_refs.includes(id)) continue;
+      const before = Object.hasOwn(prev[map], id) ? prev[map][id] : undefined;
+      const after = Object.hasOwn(next[map], id) ? next[map][id] : undefined;
+      const clear = map === 'type_shapes' ? typeShapeClearNodes[id] : undefined;
+      const clearing = typeof clear === 'string' && next.node_refs.includes(clear) &&
+        Object.hasOwn(prev.shape_overrides, clear) && !Object.hasOwn(next.shape_overrides, clear) &&
+        !clearedNodes.has(clear);
+      if (!clearing && JSON.stringify(canonical(before)) === JSON.stringify(canonical(after))) continue;
+      const change = {
+        op,
+        [key]: id,
+        selection: after ?? null,
+        version: 1,
+        base_revision: prev.shape_revisions[prefix + id] || 0,
+        operation_id: globalThis.crypto.randomUUID(),
+      };
+      if (clearing) {
+        change.clear_node_id = clear;
+        change.clear_base_revision = prev.shape_revisions['node:' + clear] || 0;
+        clearedNodes.add(clear);
+      }
+      if (map === 'shape_overrides' && clearedNodes.has(id)) continue;
+      ops.push(change);
+    }
+  }
 
   // Positions: only for nodes on the canvas. New-with-position and moved
   // both count. Bulk changes collapse into one layout_applied op.
@@ -360,10 +397,64 @@ function withGroupTextColor(ann) {
  * the baseline, the next local snapshot no longer looks like it added it.
  * Pure — exported for unit testing. Returns a new mirror.
  */
+function currentAppearanceOp(mirror, op) {
+  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return op;
+  const key = op.op === 'node_shape_set' ? 'node:' + op.node_id : 'type:' + op.type;
+  const revisions = op.revisions || {
+    [key]: (op.base_revision || 0) + 1,
+    ...(op.clear_node_id != null ? { ['node:' + op.clear_node_id]: (op.clear_base_revision || 0) + 1 } : {}),
+  };
+  const primaryCurrent = revisions[key] >= (mirror.shape_revisions[key] || 0);
+  const clearKey = 'node:' + op.clear_node_id;
+  const clearCurrent = op.clear_node_id != null && revisions[clearKey] >= (mirror.shape_revisions[clearKey] || 0);
+  if (!primaryCurrent) {
+    return clearCurrent ? { op: 'node_shape_set', node_id: op.clear_node_id, selection: op.restore_selection ?? null, revisions: { [clearKey]: revisions[clearKey] } } : null;
+  }
+  if (op.clear_node_id != null && !clearCurrent) {
+    const { clear_node_id, clear_base_revision, restore_selection, ...rest } = op;
+    return { ...rest, revisions: { [key]: revisions[key] } };
+  }
+  return op;
+}
+
 export function applyOpToMirror(mirrorState, op) {
   const m = normalizeMirror(mirrorState);
+  op = currentAppearanceOp(m, op);
   const type = op && op.op;
   switch (type) {
+    case 'node_shape_set':
+    case 'type_shape_set': {
+      const node = type === 'node_shape_set';
+      const map = node ? 'shape_overrides' : 'type_shapes';
+      const id = node ? op.node_id : op.type;
+      const revisionKey = (node ? 'node:' : 'type:') + id;
+      const revisions = op.revisions || {
+        [revisionKey]: (op.base_revision || 0) + 1,
+        ...(op.clear_node_id != null
+          ? { ['node:' + op.clear_node_id]: (op.clear_base_revision || 0) + 1 }
+          : {}),
+      };
+      if (op.selection == null) delete m[map][id];
+      else
+        Object.defineProperty(m[map], id, {
+          value: structuredClone(op.selection),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      if (op.clear_node_id != null) {
+        delete m.shape_overrides[op.clear_node_id];
+        if (op.restore_selection != null)
+          Object.defineProperty(m.shape_overrides, op.clear_node_id, {
+            value: structuredClone(op.restore_selection),
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+      }
+      Object.assign(m.shape_revisions, revisions);
+      break;
+    }
     case 'nodes_added':
       m.node_refs = Array.from(new Set([...m.node_refs, ...(op.node_ids || [])]));
       // The server places every node it adds in the same op.
@@ -377,6 +468,14 @@ export function applyOpToMirror(mirrorState, op) {
       const drop = replace ? new Set(m.node_refs.filter((id) => !named.has(id))) : named;
       m.node_refs = replace ? [...named] : m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
+      for (const id of drop) {
+        const key = 'node:' + id;
+        if (normalizeMirror(mirrorState).node_refs.includes(id))
+          m.shape_revisions[key] = (m.shape_revisions[key] || 0) + 1;
+      }
+      m.shape_overrides = Object.fromEntries(
+        Object.entries(m.shape_overrides).filter(([id]) => !drop.has(id))
+      );
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
       m.annotations = m.annotations.map((a) =>
@@ -746,6 +845,7 @@ export class SessionSyncClient {
     opsUrl,
     handlers = {},
     flushIntervalMs = 150,
+    appearanceVersion = null,
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     fetchImpl,
     EventSourceImpl,
@@ -753,6 +853,7 @@ export class SessionSyncClient {
   }) {
     this.sessionId = sessionId;
     this.clientId = clientId;
+    this.appearanceVersion = appearanceVersion;
     this.displayName = displayName;
     this.streamUrl = streamUrl;
     this.opsUrl = opsUrl;
@@ -1331,7 +1432,7 @@ export class SessionSyncClient {
     const url = `${this.streamUrl}?${params.toString()}`;
     const source = new this._EventSource(url);
     source.onmessage = (e) => {
-      if (!e || !e.data) return;
+      if (this._closed || this._source !== source || !e || !e.data) return;
       let data;
       try {
         data = JSON.parse(e.data);
@@ -1550,10 +1651,16 @@ export class SessionSyncClient {
       ...this._baseline,
       positions: { ...this._baseline.positions, ...computed },
     };
-    const ops = computeOps(this._baseline, next);
+    const ops = computeOps(this._baseline, next, state.type_shape_clear_nodes);
     const sent = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    sent.shape_revisions = { ...this._baseline.shape_revisions };
     sent.node_refs = this._baseline.node_refs;
     sent.positions = { ...this._baseline.positions, ...sent.positions };
+    for (const op of ops) {
+      if (op.op === 'node_shape_set' || op.op === 'type_shape_set') {
+        sent.shape_revisions = applyOpToMirror(sent, op).shape_revisions;
+      }
+    }
     this._baseline = sent;
     if (ops.length) this._enqueue(ops);
   }
@@ -1778,7 +1885,12 @@ export class SessionSyncClient {
     const options = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
+      body: JSON.stringify({
+        client_id: this.clientId,
+        base_seq: this._seq,
+        appearance_version: this.appearanceVersion,
+        ops: batch,
+      }),
     };
     if (controller) options.signal = controller.signal;
     const request = this._fetch(this.opsUrl, options);
@@ -1885,7 +1997,13 @@ export class SessionSyncClient {
         // self-conflict race this mechanism exists to close, the next time
         // that later op's own ack round-trips.
         const appliedAnnotations = [];
+        const appearanceRevisions = {};
         for (const entry of body.applied || []) {
+          if (entry?.op === 'node_shape_set' || entry?.op === 'type_shape_set') {
+            for (const [key, revision] of Object.entries(entry.revisions || {})) {
+              appearanceRevisions[key] = Math.max(appearanceRevisions[key] || 0, revision);
+            }
+          }
           if (
             (entry?.op === 'annotation_created' || entry?.op === 'annotation_updated') &&
             entry.annotation?.id
@@ -1905,6 +2023,7 @@ export class SessionSyncClient {
         // than adding a second one, the same way handleImageIngest already
         // reuses it for its own direct-apply case.
         this._settleSentMembership(batch, body.applied || []);
+        if (Object.keys(appearanceRevisions).length) this.handlers.onLocalAppearanceRevisions?.(appearanceRevisions);
         if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
@@ -2172,18 +2291,19 @@ export class SessionSyncClient {
         // "stale", it means "already handled via foldLocalOp" (image
         // ingest), and its own delivery must still reach the canvas the same
         // way it always has (see foldLocalOp's docstring).
+        const appearanceOp = currentAppearanceOp(this._baseline, op);
         const foldedId = op?.annotation?.id;
         let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
-          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
+          this._baseline = foldRemoteAnnotationOp(this._baseline, appearanceOp);
           const changesMembers = MEMBERSHIP_OPS.has(op.op) || op.dropped_node_ids?.length > 0;
           if (changesMembers && typeof data.seq === 'number') {
             this._membershipVersion = data.seq;
           }
         }
-        if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
-          this.handlers.onRemoteOps([op], {
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation && appearanceOp) {
+          this.handlers.onRemoteOps([appearanceOp], {
             clientId: data.client_id,
             sessionId: this.sessionId,
           });

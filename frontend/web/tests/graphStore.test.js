@@ -1,3 +1,4 @@
+// covers: frontend/web/src/store/graphStore.js
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 
@@ -24,6 +25,13 @@ describe('graphStore', () => {
       configLoaded: false,
       error: null,
     });
+  });
+
+  it('preserves appearance during a retained-node redraw and drops it on removal', () => {
+    useGraphStore.setState({ nodes: [{ id: 'a' }, { id: 'b' }], shapeOverrides: { a: { builtin: true }, b: { builtin: true } } });
+    useGraphStore.getState().removeNode('a', { preserveAppearance: true });
+    useGraphStore.getState().removeNode('b');
+    expect(useGraphStore.getState().shapeOverrides).toEqual({ a: { builtin: true } });
   });
 
   describe('AI assistant collapsed preference', () => {
