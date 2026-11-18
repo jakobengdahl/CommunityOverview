@@ -206,16 +206,21 @@ export function nodeShapeOverlapsRect(geometry, rect) {
 /**
  * Select changes that make a marquee (flow-space rectangle) select a shaped
  * node only where it touches its polygon or outside label, not its bounds.
+ * `selectedIds` holds the shaped ids this marquee has selected and is updated
+ * in place: React Flow writes `selected` onto its stored nodes before the
+ * change it emits is filtered out, so the node's own flag cannot be trusted.
  */
-export function marqueeShapeChanges(nodes, rect) {
+export function marqueeShapeChanges(nodes, rect, selectedIds) {
   const changes = [];
   for (const node of nodes) {
     if (node.hidden || typeof node.geometry?.contains !== 'function') continue;
     const origin = node.positionAbsolute || node.position;
     const local = { ...rect, x: rect.x - origin.x, y: rect.y - origin.y };
     const selected = nodeShapeOverlapsRect(node.geometry, local);
-    if (selected !== Boolean(node.selected))
-      changes.push({ id: node.id, type: 'select', selected });
+    if (selected === selectedIds.has(node.id)) continue;
+    if (selected) selectedIds.add(node.id);
+    else selectedIds.delete(node.id);
+    changes.push({ id: node.id, type: 'select', selected });
   }
   return changes;
 }

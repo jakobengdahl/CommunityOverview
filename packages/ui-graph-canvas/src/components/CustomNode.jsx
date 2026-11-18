@@ -289,11 +289,14 @@ function CustomNode({ data, id, selected }) {
             hit target from the central resolver here; until then it is hit
             only where it is painted. */}
 
-        {/* Also shown while selected, so a keyboard user can Tab to them. */}
+        {/* Also shown while selected, so a keyboard user can Tab to them. The
+            edit button sits beside the expand button, not below it: below the
+            side anchor a triangle has already narrowed away, and the pointer
+            leaving the painted body hides both buttons. */}
         {actionButtons(
           showButtons || selected,
           { left: expand.x - 12, top: expand.y, right: 'auto' },
-          { left: expand.x - 12, top: expand.y + 32, right: 'auto' }
+          { left: expand.x - 40, top: expand.y - 12, right: 'auto' }
         )}
         {tooltip}
         <Handle type="source" position={Position.Bottom} />

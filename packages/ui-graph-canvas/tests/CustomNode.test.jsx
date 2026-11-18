@@ -503,6 +503,29 @@ describe('CustomNode configured shapes', () => {
     });
   });
 
+  it.each(['rectangle', 'rectangle-flat', 'triangle-up', 'triangle-down'])(
+    'keeps both %s action buttons and the path between them on the painted body',
+    (base) => {
+      const placement = base.startsWith('triangle') ? 'centre' : 'top-left';
+      const definition = { ...CARD, base, placement };
+      renderFlow([
+        { ...shapedFlowNode(definition, { onExpand() {}, onEdit() {} }), selected: true },
+      ]);
+      const centre = (title, dy) => {
+        const { left, top } = screen.getByTitle(title).style;
+        return { x: parseFloat(left) + 12, y: parseFloat(top) + dy };
+      };
+      // The expand button is centred on its top by translateY(-50%).
+      const expand = centre('Show related nodes', 0);
+      const edit = centre('Edit node', 12);
+      const { contains } = nodeShapeGeometry(base, 1);
+      for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+        const point = { x: edit.x + t * (expand.x - edit.x), y: edit.y + t * (expand.y - edit.y) };
+        expect(contains(point)).toBe(true);
+      }
+    }
+  );
+
   const triangleAt = (selected) => ({
     id: 't',
     position: { x: 100, y: 100 },
@@ -514,26 +537,24 @@ describe('CustomNode configured shapes', () => {
     position: { x: 100, y: 100 },
     geometry: nodeShapeGeometry('rectangle', 1),
   };
+  // triangleAt's flag is the node's own `selected`, which React Flow may
+  // already have set; `prior` is whether this marquee has selected it.
   it.each([
-    [
-      'a transparent triangle corner',
-      triangleAt(false),
-      { x: 100, y: 130, width: 20, height: 20 },
-      [],
-    ],
-    ['the triangle body', triangleAt(false), { x: 200, y: 200, width: 20, height: 20 }, [true]],
-    ['the outside label', triangleAt(false), { x: 105, y: 80, width: 5, height: 5 }, [true]],
-    [
-      'a corner it had selected',
-      triangleAt(true),
-      { x: 100, y: 130, width: 20, height: 20 },
-      [false],
-    ],
-    ['a rounded rectangle corner', cardAt, { x: 99, y: 99, width: 2, height: 2 }, []],
-  ])('lets a marquee over %s select by polygon overlap', (_, node, rect, selected) => {
-    expect(marqueeShapeChanges([node, { id: 'card', position: { x: 0, y: 0 } }], rect)).toEqual(
+    ['a transparent triangle corner', triangleAt(false), false, [100, 130, 20, 20], []],
+    ['the triangle body', triangleAt(false), false, [200, 200, 20, 20], [true]],
+    ['a body React Flow already flagged', triangleAt(true), false, [200, 200, 20, 20], [true]],
+    ['the outside label', triangleAt(false), false, [105, 80, 5, 5], [true]],
+    ['a corner it had selected', triangleAt(true), true, [100, 130, 20, 20], [false]],
+    ['a body it had selected', triangleAt(true), true, [200, 200, 20, 20], []],
+    ['a rounded rectangle corner', cardAt, false, [99, 99, 2, 2], []],
+  ])('lets a marquee over %s select by polygon overlap', (_, node, prior, box, selected) => {
+    const [x, y, width, height] = box;
+    const selectedIds = new Set(prior ? [node.id] : []);
+    const nodes = [node, { id: 'card', position: { x: 0, y: 0 } }];
+    expect(marqueeShapeChanges(nodes, { x, y, width, height }, selectedIds)).toEqual(
       selected.map((value) => ({ id: node.id, type: 'select', selected: value }))
     );
+    expect(selectedIds.has(node.id)).toBe(selected.length ? selected[0] : prior);
   });
 
   it('picks band text with at least 4.5:1 contrast or an opaque backing', () => {

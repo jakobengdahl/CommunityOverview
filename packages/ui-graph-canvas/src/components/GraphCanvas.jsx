@@ -1655,6 +1655,8 @@ function GraphCanvasInner({
     (event) => {
       marqueeStopRef.current?.();
       marqueeStartRef.current = { x: event.clientX, y: event.clientY };
+      // React Flow has just cleared the selection, so nothing starts selected.
+      const selectedIds = new Set();
       const onMove = (move) => {
         const toFlow = screenToFlowPositionRef.current;
         const a = toFlow(marqueeStartRef.current);
@@ -1665,7 +1667,7 @@ function GraphCanvasInner({
           width: Math.abs(a.x - b.x),
           height: Math.abs(a.y - b.y),
         };
-        const changes = marqueeShapeChanges(getFlowNodesRef.current(), rect);
+        const changes = marqueeShapeChanges(getFlowNodesRef.current(), rect, selectedIds);
         if (changes.length) onNodesChange(changes);
       };
       const stop = () => {
