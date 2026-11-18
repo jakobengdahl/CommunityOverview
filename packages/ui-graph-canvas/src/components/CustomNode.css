@@ -576,7 +576,8 @@ body.graph-menu-open .graph-node-tooltip {
 
 .graph-shaped-node.dimmed.selected,
 .graph-shaped-node.dimmed:hover,
-.graph-shaped-node.dimmed.remote-selected {
+.graph-shaped-node.dimmed.remote-selected,
+.react-flow__node:focus-visible .graph-shaped-node.dimmed {
   opacity: 1;
 }
 

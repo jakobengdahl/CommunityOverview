@@ -512,9 +512,20 @@ describe('CustomNode configured shapes', () => {
           .filter((rule) => rule.selectorText && keyboard.matches(rule.selectorText))
           .map((rule) => rule.style.getPropertyValue('stroke'))
           .filter(Boolean);
+      // A dimmed, unselected node lifts its dimming while keyboard-focused.
+      root.classList.remove('selected', 'remote-selected');
+      const opacity = () =>
+        [...document.styleSheets]
+          .flatMap((sheet) => [...sheet.cssRules])
+          .filter((rule) => rule.selectorText && root.matches(rule.selectorText))
+          .map((rule) => rule.style.getPropertyValue('opacity'))
+          .filter(Boolean)
+          .at(-1);
       expect(strokes()).toEqual(['transparent']);
+      expect(opacity()).toBe('0.35');
       wrapper.focus();
       expect(strokes().at(-1)).not.toBe('transparent');
+      expect(opacity()).toBe('1');
     });
   });
 
