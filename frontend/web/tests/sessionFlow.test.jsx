@@ -21,9 +21,13 @@ vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
     onSaveView,
     canvasBaselineEpoch,
     remoteAnnotationOps,
+    shapeOverrides,
+    typeShapes,
   }) {
     canvasProps.baselineEpoch = canvasBaselineEpoch;
     canvasProps.remoteAnnotationOps = remoteAnnotationOps;
+    canvasProps.shapeOverrides = shapeOverrides;
+    canvasProps.typeShapes = typeShapes;
     useEffect(() => {
       canvasProps.committedNodeIds = nodes.map((n) => n.id);
     });
@@ -249,6 +253,32 @@ describe('Server-backed session lifecycle', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('restores shape maps to the canvas and includes them in the next snapshot', async () => {
+    const shapeOverrides = { 'node-b': { ref: 'config:example' } };
+    const typeShapes = { Theme: { inline: { version: 1, base: 'triangle-up' } } };
+    api.getSession.mockResolvedValue({
+      id: '5555-6666',
+      state: { shape_overrides: shapeOverrides, type_shapes: typeShapes },
+      resolved: { nodes: [NODE_B], edges: [] },
+      roster: [],
+    });
+    const syncState = vi.spyOn(SessionSyncClient.prototype, 'syncState');
+    sessionStore.touchSession('5555-6666');
+    renderApp();
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(await screen.findByText('5555-6666'));
+    await waitFor(() => expect(canvasProps.shapeOverrides).toEqual(shapeOverrides));
+    expect(canvasProps.typeShapes).toEqual(typeShapes);
+
+    await waitFor(
+      () =>
+        expect(syncState).toHaveBeenCalledWith(
+          expect.objectContaining({ shape_overrides: shapeOverrides, type_shapes: typeShapes })
+        ),
+      { timeout: 3000 }
+    );
   });
 
   it('shows a clear read-only offline state when the network is gone', async () => {
