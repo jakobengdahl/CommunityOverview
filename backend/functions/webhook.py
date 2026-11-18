@@ -131,11 +131,6 @@ def register_webhook_routes(router, service, store, authorize, existing):
             raise HTTPException(401)
         if not policy.admit(function_id):
             raise HTTPException(429)
-        data = bytearray()
-        async for chunk in request.stream():
-            data.extend(chunk)
-            if len(data) > 65536:
-                raise HTTPException(413)
         binding = {
             "actor_id": f"function_webhook:{function_id}",
             "actor_type": "function_webhook",
@@ -150,7 +145,17 @@ def register_webhook_routes(router, service, store, authorize, existing):
         except PermissionError:
             raise HTTPException(403)
         if existing_job is not None:
-            return function_run_to_dict(existing_job)
+            result = function_run_to_dict(existing_job)
+            if (result.get("error") or {}).get("code") == "busy":
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(result, status_code=409)
+            return result
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > 65536:
+                raise HTTPException(413)
         try:
             value = json.loads(data)
             manifest, _ = load_manifest(service.root, function_id)

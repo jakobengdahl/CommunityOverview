@@ -300,8 +300,6 @@ class FunctionInvocationService:
         return existing
 
     def replay_webhook(self, function_id, idempotency_key, actor_binding):
-        if idempotency_key is None:
-            return None
         binding = {
             key: actor_binding.get(key)
             for key in (
@@ -315,11 +313,51 @@ class FunctionInvocationService:
             )
         }
         with _admission(self.root):
-            for existing in self.store.list_jobs(
+            previous = self.store.list_jobs(
                 agent_id=function_id, kind=ExecutionKind.FUNCTION
-            ):
-                if existing.idempotency_key == f"fn:{function_id}:{idempotency_key}":
+            )
+            for existing in previous:
+                if (
+                    idempotency_key is not None
+                    and existing.idempotency_key
+                    == f"fn:{function_id}:{idempotency_key}"
+                ):
                     return self._replay(existing, binding)
+            if any(job.state == ExecutionState.RUNNING for job in previous):
+                job = ExecutionJob(
+                    agent_id=function_id,
+                    kind=ExecutionKind.FUNCTION,
+                    idempotency_key=f"fn:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
+                    state=ExecutionState.RUNNING,
+                    payload={
+                        "function_id": function_id,
+                        "trigger": "webhook",
+                        "attribution": {
+                            "actor": {
+                                key: binding[key]
+                                for key in ("actor_id", "actor_type", "auth_source")
+                            },
+                            "scope": {
+                                key: binding[key]
+                                for key in (
+                                    "workspace_id",
+                                    "workspace_kind",
+                                    "graph_id",
+                                )
+                            },
+                        },
+                    },
+                )
+                self.store.enqueue(job)
+                self.store.cancel(
+                    job.id,
+                    result={
+                        "status": "rejected",
+                        "error": {"code": "busy", "message": "Invocation rejected."},
+                        "duration_ms": 0,
+                    },
+                )
+                return self.store.get(job.id)
         return None
 
     def invoke(

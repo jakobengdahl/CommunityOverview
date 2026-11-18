@@ -167,6 +167,22 @@ async def test_rejections_do_not_receive_body(endpoint, monkeypatch):
     }
     await app(scope.copy(), receive, send)
     scope["headers"] = [(b"authorization", f"Bearer {token}".encode())]
+    service.replay_webhook.return_value = ExecutionJob(
+        agent_id="example",
+        idempotency_key="busy",
+        kind=ExecutionKind.FUNCTION,
+        state=ExecutionState.CANCELLED,
+        result={"status": "rejected", "error": {"code": "busy"}},
+    )
+    messages = []
+
+    async def capture(message):
+        messages.append(message)
+
+    await app(scope.copy(), receive, capture)
+    assert messages[0]["status"] == 409
+    service.invoke.assert_not_called()
+    service.replay_webhook.return_value = None
     monkeypatch.setattr(service.webhook_policy, "admit", lambda _: False)
     await app(scope.copy(), receive, send)
     monkeypatch.setenv("FUNCTION_WEBHOOKS_ENABLED", "false")

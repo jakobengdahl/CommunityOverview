@@ -317,6 +317,18 @@ class FunctionBroker:
         if spec.method == "add_nodes":
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
+                graph_id = ctx.authorization_inputs.get("graph_id") or ""
+                call_args["nodes"] = [
+                    {
+                        **node,
+                        "metadata": {
+                            **(node.get("metadata") or {}),
+                            "origin_graph_id": graph_id,
+                        },
+                    }
+                    for node in call_args["nodes"]
+                ]
 
         scope = (
             access.restrict_function_graph(
@@ -341,13 +353,11 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
-            # New nodes are local to this service; they cannot be assigned to
-            # the named graph carried by a webhook credential.
             if (
-                spec.method == "add_nodes"
-                and call_args["nodes"]
-                and ctx.authorization_inputs.get("actor_type") == "function_webhook"
-                and not decision.graph_access.matches(graph_id="")
+                ctx.authorization_inputs.get("actor_type") == "function_webhook"
+                and not decision.graph_access.matches(
+                    graph_id=ctx.authorization_inputs.get("graph_id") or ""
+                )
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
             try:

@@ -138,6 +138,18 @@ def test_busy_rejects_without_queue_and_same_delivery_replays(host, trigger):
             assert entered.wait(5)
             running = call(idempotency_key="delivery")
             assert running.state == ExecutionState.RUNNING
+            if trigger == "webhook":
+                binding = {"actor_id": "operator"}
+                assert (
+                    service.replay_webhook("example", "delivery", binding).id
+                    == running.id
+                )
+                rejected = service.replay_webhook("example", "preflight", binding)
+                assert rejected.result["error"]["code"] == "busy"
+                assert (
+                    service.replay_webhook("example", "preflight", binding).id
+                    == rejected.id
+                )
             busy = call(idempotency_key="other")
             assert busy.result["error"]["code"] == "busy"
         finally:
