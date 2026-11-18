@@ -368,10 +368,11 @@ function withGroupTextColor(ann) {
  * Pure — exported for unit testing. Returns a new mirror.
  */
 // A type change and its optional node override change have separate revisions.
-function currentAppearanceOp(baseline, op) {
+function currentAppearanceOp(baseline, op, requireRevision = false) {
   const revisions = op.revisions || {};
   const isCurrent = (key) =>
-    revisions[key] == null || revisions[key] >= (baseline.shape_revisions[key] || 0);
+    (revisions[key] == null && !requireRevision) ||
+    (Number.isInteger(revisions[key]) && revisions[key] >= (baseline.shape_revisions[key] || 0));
   const target = op.op === 'node_shape_set' ? `node:${op.node_id}` : `type:${op.type}`;
   const targetCurrent = isCurrent(target);
   const nodeKey =
@@ -894,6 +895,9 @@ export class SessionSyncClient {
     // Acknowledged appearance writes ({seq, entry}) whose stream position has
     // not been reached yet; see _releaseAppearanceAcks.
     this._appearanceAcks = [];
+    // Captured pending operations keep their own server receipt without retaining
+    // settled operations for the lifetime of the session.
+    this._appearanceReceipts = new WeakMap();
     // The session's membership version: the stream seq of the last
     // membership op applied, or the seq a loaded baseline, snapshot or
     // catch-up reflects. A hydration read across a change of it is stale
@@ -970,6 +974,32 @@ export class SessionSyncClient {
    */
   getPendingOps() {
     return this._inFlightOps.concat(this._queue);
+  }
+
+  /** Queue captured, acknowledged appearance writes for replay after a reload. */
+  replayAcknowledgedAppearanceOps(capturedOps) {
+    if (this._closed || !this.handlers.onRemoteOps) return 0;
+    let count = 0;
+    for (const captured of capturedOps || []) {
+      const receipt = captured && this._appearanceReceipts.get(captured);
+      if (!receipt) continue;
+      const op = { ...receipt, revisions: { ...receipt.revisions } };
+      const applyBaseline = () => {
+        const current = currentAppearanceOp(this._baseline, op, true);
+        if (!current) return false;
+        for (const key of Object.keys(op)) delete op[key];
+        Object.assign(op, current);
+        this._baseline = applyOpToMirror(this._baseline, op);
+        return true;
+      };
+      this.handlers.onRemoteOps([op], {
+        clientId: this.clientId,
+        sessionId: this.sessionId,
+        applyBaseline,
+      });
+      count += 1;
+    }
+    return count;
   }
 
   /**
@@ -1997,6 +2027,10 @@ export class SessionSyncClient {
         // that later op's own ack round-trips.
         for (const entry of body.applied || []) {
           if (entry?.op !== 'node_shape_set' && entry?.op !== 'type_shape_set') continue;
+          const original = batch.find(
+            (op) => op.op === entry.op && op.operation_id && op.operation_id === entry.operation_id
+          );
+          if (original && entry.revisions) this._appearanceReceipts.set(original, entry);
           const seq = typeof entry.seq === 'number' ? entry.seq : body.seq;
           // Past the stream position the echo was already folded there (or a
           // snapshot/catch-up superseded it); ahead of it, wait for the stream.

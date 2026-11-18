@@ -101,6 +101,84 @@ describe('history synchronization barrier', () => {
 });
 
 describe('appearance ordering', () => {
+  it('replays only captured writes with server receipts and rechecks each target in the queue', async () => {
+    const deliveries = [];
+    let respond;
+    const { client } = makeClient({
+      deferRemoteOps: true,
+      fetchImpl: () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+      handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+    });
+    const write = {
+      op: 'type_shape_set',
+      type: 'Thing',
+      clear_node_id: 'a',
+      operation_id: 'one',
+      base_revision: 0,
+      clear_base_revision: 0,
+      selection: { builtin: 'mine' },
+    };
+    const unconfirmed = { ...write, operation_id: 'two' };
+    client.sendOps([write, unconfirmed]);
+    const captured = client.getPendingOps();
+    const sending = client.flush();
+    expect(client.replayAcknowledgedAppearanceOps(captured)).toBe(0);
+    respond({
+      ok: true,
+      json: async () => ({
+        seq: 2,
+        applied: [{ ...write, revisions: { 'type:Thing': 4, 'node:a': 6 } }],
+      }),
+    });
+    await sending;
+    client.setBaseline({
+      shape_revisions: { 'type:Thing': 3, 'node:a': 5 },
+      shape_overrides: { a: { builtin: 'old' } },
+    });
+    expect(client.replayAcknowledgedAppearanceOps(captured)).toBe(1);
+    // A newer node write lands after replay was queued but before it runs.
+    client.setBaseline({
+      shape_revisions: { 'type:Thing': 3, 'node:a': 7 },
+      shape_overrides: { a: { builtin: 'new' } },
+    });
+    expect(deliveries[0].applyBaseline()).toBe(true);
+    expect(deliveries[0].op.clear_node_id).toBeUndefined();
+    expect(client._baseline).toMatchObject({
+      type_shapes: { Thing: { builtin: 'mine' } },
+      shape_overrides: { a: { builtin: 'new' } },
+      shape_revisions: { 'type:Thing': 4, 'node:a': 7 },
+    });
+    client.close();
+  });
+
+  it('never replays a target without its acknowledged revision', async () => {
+    const deliveries = [];
+    const write = {
+      op: 'node_shape_set',
+      node_id: 'a',
+      operation_id: 'one',
+      base_revision: 0,
+      selection: { builtin: true },
+    };
+    const { client } = makeClient({
+      deferRemoteOps: true,
+      fetchImpl: makeFetch([
+        { ok: true, json: async () => ({ seq: 1, applied: [{ ...write, revisions: {} }] }) },
+      ]),
+      handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+    });
+    client.sendOps([write]);
+    const captured = client.getPendingOps();
+    await client.flush();
+    client.replayAcknowledgedAppearanceOps(captured);
+    expect(deliveries[0].applyBaseline()).toBe(false);
+    expect(client._baseline.shape_overrides).toEqual({});
+    client.close();
+  });
+
   it('folds removal, acknowledgment and remote appearance in canvas queue order', async () => {
     const deliveries = [];
     const acknowledged = {
