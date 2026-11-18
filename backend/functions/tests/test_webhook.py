@@ -307,6 +307,7 @@ def files_host(tmp_path, monkeypatch):
             tokens=tokens,
             root=tmp_path / "function-run-files",
             execute=execute,
+            history=history,
             created=created,
             post=post,
             running=running,
@@ -456,21 +457,30 @@ def test_reading_body_records_no_run_but_no_other_call_claims_it(
     read = webhook._read_multipart
     seen = {}
 
+    binding = {
+        "actor_id": "function_webhook:example",
+        "actor_type": "function_webhook",
+        "auth_source": "webhook",
+        "graph_id": "graph-a",
+    }
+
     async def reading(request, boundary, files):
         value = await read(request, boundary, files)
         seen["running"] = host.running()
         # Another call arrives after this one stored its files.
         seen["other"] = host.service.admit(
+            "example", {"value": 2}, trigger="webhook", actor_binding=binding
+        )
+        # So does another delivery of this key, by either content type.
+        seen["replay"] = host.service.replay_webhook("example", "key", binding)
+        seen["same"] = host.service.admit(
             "example",
             {"value": 2},
             trigger="webhook",
-            actor_binding={
-                "actor_id": "function_webhook:example",
-                "actor_type": "function_webhook",
-                "auth_source": "webhook",
-                "graph_id": "graph-a",
-            },
+            actor_binding=binding,
+            idempotency_key="key",
         )
+        seen["keys"] = {job.idempotency_key for job in host.history.list_jobs()}
         if slow_read:
             await anyio.sleep(5)
         return value
@@ -480,6 +490,8 @@ def test_reading_body_records_no_run_but_no_other_call_claims_it(
     response = host.post("key")
     assert seen["running"] == [] and host.running() == []
     assert seen["other"].result["error"]["code"] == "busy"
+    assert seen["replay"] is None and seen["same"].result["error"]["code"] == "busy"
+    assert "fn:example:key" not in seen["keys"]
     assert not os.path.exists(host.created[0])
     if slow_read:
         assert response.status_code == 408

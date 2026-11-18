@@ -291,7 +291,9 @@ async def _invoke_with_files(
         )
         if code is not None:
             return _response(await run_in_threadpool(refuse, code))
-        reservation = await run_in_threadpool(service.reserve, function_id)
+        reservation = await run_in_threadpool(
+            service.reserve, function_id, idempotency_key
+        )
         if reservation is None:
             return _response(await run_in_threadpool(refuse, "busy"))
         files = RunFiles(files_root)

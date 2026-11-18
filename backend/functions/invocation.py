@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from jsonschema import validators
 from jsonschema.exceptions import ValidationError
@@ -304,15 +305,27 @@ class FunctionInvocationService:
         # Functions held by an unclaimed webhook upload, by function id.
         self._reserved = {}
 
+    def _in_progress(self, function_id, idempotency_key, reservation=None):
+        # Another delivery of this key holds the function and will record the
+        # key; any record stored here would be replayed to it instead.
+        held = self._reserved.get(function_id)
+        return (
+            idempotency_key is not None
+            and held is not None
+            and held is not reservation
+            and held.key == idempotency_key
+        )
+
     def _busy(self, function_id, previous, reservation=None):
         return any(job.state == ExecutionState.RUNNING for job in previous) or (
             self._reserved.get(function_id, reservation) is not reservation
         )
 
-    def reserve(self, function_id):
+    def reserve(self, function_id, idempotency_key=None):
         """Hold an idle function for a call that stores files before admit.
 
-        Other admissions see it as busy until ``release``; None if it is busy.
+        Other admissions see it as busy until ``release``, and store nothing
+        under its ``idempotency_key``; None if it is busy.
         """
         with _admission(self.root):
             previous = self.store.list_jobs(
@@ -320,7 +333,9 @@ class FunctionInvocationService:
             )
             if self._busy(function_id, previous):
                 return None
-            reservation = self._reserved[function_id] = object()
+            reservation = self._reserved[function_id] = SimpleNamespace(
+                key=idempotency_key
+            )
         return reservation
 
     def release(self, function_id, reservation):
@@ -384,7 +399,9 @@ class FunctionInvocationService:
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
                     return self._replay(existing, binding)
-            if self._busy(function_id, previous):
+            if self._busy(function_id, previous) and not self._in_progress(
+                function_id, idempotency_key
+            ):
                 return self._rejected(function_id, binding, idempotency_key, "busy")
         return None
 
@@ -574,6 +591,14 @@ class FunctionInvocationService:
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
                     return self._replay(existing, binding)
+            if self._in_progress(function_id, idempotency_key, reservation):
+                job.state, job.started_at = ExecutionState.CANCELLED, None
+                job.result = {
+                    "status": "rejected",
+                    "error": {"code": "busy", "message": "Invocation rejected."},
+                    "duration_ms": 0,
+                }
+                return job  # Unrecorded: a retry replays the holder's record.
             code, manifest, package = self._refusal(
                 function_id, binding, trigger, input
             )
