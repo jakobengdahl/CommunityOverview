@@ -28,7 +28,10 @@ describe('graphStore', () => {
   });
 
   it('preserves appearance during a retained-node redraw and drops it on removal', () => {
-    useGraphStore.setState({ nodes: [{ id: 'a' }, { id: 'b' }], shapeOverrides: { a: { builtin: true }, b: { builtin: true } } });
+    useGraphStore.setState({
+      nodes: [{ id: 'a' }, { id: 'b' }],
+      shapeOverrides: { a: { builtin: true }, b: { builtin: true } },
+    });
     useGraphStore.getState().removeNode('a', { preserveAppearance: true });
     useGraphStore.getState().removeNode('b');
     expect(useGraphStore.getState().shapeOverrides).toEqual({ a: { builtin: true } });

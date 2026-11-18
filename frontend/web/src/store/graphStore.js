@@ -418,7 +418,9 @@ const useGraphStore = create((set, get) => ({
     if (dropped?.size) {
       set({
         shapeOverrides: Object.fromEntries(
-          Object.entries(state.shapeOverrides).filter(([id]) => !dropped.has(id) || (op === 'nodes_replaced' && nodeIds.includes(id)))
+          Object.entries(state.shapeOverrides).filter(
+            ([id]) => !dropped.has(id) || (op === 'nodes_replaced' && nodeIds.includes(id))
+          )
         ),
         nodes: state.nodes.filter((n) => !dropped.has(n.id)),
         edges: state.edges.filter((e) => !dropped.has(e.source) && !dropped.has(e.target)),
@@ -739,14 +741,25 @@ const useGraphStore = create((set, get) => ({
   shapeOverrides: {},
   typeShapes: {},
   typeShapeClearNodes: {},
-  setTypeShape: (type, selection, nodeId) => set((state) => {
-    const typeShapes = { ...state.typeShapes };
-    const shapeOverrides = { ...state.shapeOverrides };
-    if (selection == null) delete typeShapes[type];
-    else Object.defineProperty(typeShapes, type, { value: selection, enumerable: true, configurable: true, writable: true });
-    if (nodeId != null) delete shapeOverrides[nodeId];
-    return { typeShapes, shapeOverrides, typeShapeClearNodes: { ...state.typeShapeClearNodes, [type]: nodeId } };
-  }),
+  setTypeShape: (type, selection, nodeId) =>
+    set((state) => {
+      const typeShapes = { ...state.typeShapes };
+      const shapeOverrides = { ...state.shapeOverrides };
+      if (selection == null) delete typeShapes[type];
+      else
+        Object.defineProperty(typeShapes, type, {
+          value: selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      if (nodeId != null) delete shapeOverrides[nodeId];
+      return {
+        typeShapes,
+        shapeOverrides,
+        typeShapeClearNodes: { ...state.typeShapeClearNodes, [type]: nodeId },
+      };
+    }),
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
@@ -1093,9 +1106,9 @@ const useGraphStore = create((set, get) => ({
   removeNode: (nodeId, { preserveAppearance = false } = {}) => {
     const { nodes, edges, navHistory } = get();
     set({
-      shapeOverrides: preserveAppearance ? get().shapeOverrides : Object.fromEntries(
-        Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)
-      ),
+      shapeOverrides: preserveAppearance
+        ? get().shapeOverrides
+        : Object.fromEntries(Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)),
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
       // Drop the removed node from the trail so its row can't become a dead

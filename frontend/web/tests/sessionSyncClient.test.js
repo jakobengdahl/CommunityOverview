@@ -3694,9 +3694,19 @@ describe('appearance operations', () => {
       );
 
       const next = { ...initial, type_shapes: { [nodeId]: { ref: 'config:card' } } };
+      const inheritedMapping = Object.create({ [nodeId]: nodeId });
+      const separateOps = computeOps(before, next, inheritedMapping);
+      expect(separateOps).toHaveLength(2);
+      expect(separateOps[0]).not.toHaveProperty('clear_node_id');
       const ops = computeOps(before, next, { [nodeId]: nodeId });
       expect(ops).toHaveLength(1);
-      expect(ops[0]).toMatchObject({ op: 'type_shape_set', type: nodeId, base_revision: 0, clear_node_id: nodeId, clear_base_revision: 1 });
+      expect(ops[0]).toMatchObject({
+        op: 'type_shape_set',
+        type: nodeId,
+        base_revision: 0,
+        clear_node_id: nodeId,
+        clear_base_revision: 1,
+      });
       const remote = applyOpToMirror(before, {
         ...ops[0],
         clear_node_id: nodeId,
@@ -3706,11 +3716,15 @@ describe('appearance operations', () => {
       expect(remote.shape_overrides).toEqual(next.shape_overrides);
       expect(computeOps(remote, remote)).toEqual([]);
       const newer = applyOpToMirror(remote, {
-        op: 'node_shape_set', node_id: nodeId, selection,
+        op: 'node_shape_set',
+        node_id: nodeId,
+        selection,
         revisions: { ['node:' + nodeId]: 3 },
       });
       const partial = applyOpToMirror(newer, {
-        ...ops[0], selection: { ref: 'saved:new' }, clear_node_id: nodeId,
+        ...ops[0],
+        selection: { ref: 'saved:new' },
+        clear_node_id: nodeId,
         revisions: { ['type:' + nodeId]: 2, ['node:' + nodeId]: 2 },
       });
       expect(partial.type_shapes[nodeId]).toEqual({ ref: 'saved:new' });
@@ -3761,7 +3775,10 @@ it('preserves appearance drafts on reconnect and discards events after switching
 });
 
 it('keeps predicted appearance revisions through unchanged stale canvas snapshots', async () => {
-  const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ applied: [{ op: 'type_shape_set', revisions: { 'type:Thing': 1 } }] }) }));
+  const fetchImpl = vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ applied: [{ op: 'type_shape_set', revisions: { 'type:Thing': 1 } }] }),
+  }));
   const { client, handlers } = makeClient({ fetchImpl });
   handlers.onLocalAppearanceRevisions = vi.fn();
   handlers.onRemoteOps = vi.fn();
@@ -3775,7 +3792,12 @@ it('keeps predicted appearance revisions through unchanged stale canvas snapshot
   expect(ops.map((op) => op.base_revision)).toEqual([0, 1]);
   await client.flush();
   expect(handlers.onLocalAppearanceRevisions).toHaveBeenCalledWith({ 'type:Thing': 1 });
-  FakeEventSource.instances[0].emit({ type: 'op', seq: 2, client_id: 'other', op: { op: 'type_shape_set', type: 'Thing', selection: null, revisions: { 'type:Thing': 1 } } });
+  FakeEventSource.instances[0].emit({
+    type: 'op',
+    seq: 2,
+    client_id: 'other',
+    op: { op: 'type_shape_set', type: 'Thing', selection: null, revisions: { 'type:Thing': 1 } },
+  });
   expect(handlers.onRemoteOps).not.toHaveBeenCalled();
   client.close();
 });

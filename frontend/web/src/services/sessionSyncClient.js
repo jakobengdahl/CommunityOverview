@@ -163,7 +163,7 @@ function diffAdded(prev, next) {
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
-    const out = {};
+    const out = Object.create(null);
     for (const key of Object.keys(value).sort()) out[key] = canonical(value[key]);
     return out;
   }
@@ -251,11 +251,18 @@ export function computeOps(prevState, nextState, typeShapeClearNodes = {}) {
       if (map === 'shape_overrides' && !next.node_refs.includes(id)) continue;
       const before = Object.hasOwn(prev[map], id) ? prev[map][id] : undefined;
       const after = Object.hasOwn(next[map], id) ? next[map][id] : undefined;
-      const clear = map === 'type_shapes' ? typeShapeClearNodes[id] : undefined;
-      const clearing = typeof clear === 'string' && next.node_refs.includes(clear) &&
-        Object.hasOwn(prev.shape_overrides, clear) && !Object.hasOwn(next.shape_overrides, clear) &&
+      const clear =
+        map === 'type_shapes' && Object.hasOwn(typeShapeClearNodes, id)
+          ? typeShapeClearNodes[id]
+          : undefined;
+      const clearing =
+        typeof clear === 'string' &&
+        next.node_refs.includes(clear) &&
+        Object.hasOwn(prev.shape_overrides, clear) &&
+        !Object.hasOwn(next.shape_overrides, clear) &&
         !clearedNodes.has(clear);
-      if (!clearing && JSON.stringify(canonical(before)) === JSON.stringify(canonical(after))) continue;
+      if (!clearing && JSON.stringify(canonical(before)) === JSON.stringify(canonical(after)))
+        continue;
       const change = {
         op,
         [key]: id,
@@ -402,13 +409,23 @@ function currentAppearanceOp(mirror, op) {
   const key = op.op === 'node_shape_set' ? 'node:' + op.node_id : 'type:' + op.type;
   const revisions = op.revisions || {
     [key]: (op.base_revision || 0) + 1,
-    ...(op.clear_node_id != null ? { ['node:' + op.clear_node_id]: (op.clear_base_revision || 0) + 1 } : {}),
+    ...(op.clear_node_id != null
+      ? { ['node:' + op.clear_node_id]: (op.clear_base_revision || 0) + 1 }
+      : {}),
   };
   const primaryCurrent = revisions[key] >= (mirror.shape_revisions[key] || 0);
   const clearKey = 'node:' + op.clear_node_id;
-  const clearCurrent = op.clear_node_id != null && revisions[clearKey] >= (mirror.shape_revisions[clearKey] || 0);
+  const clearCurrent =
+    op.clear_node_id != null && revisions[clearKey] >= (mirror.shape_revisions[clearKey] || 0);
   if (!primaryCurrent) {
-    return clearCurrent ? { op: 'node_shape_set', node_id: op.clear_node_id, selection: op.restore_selection ?? null, revisions: { [clearKey]: revisions[clearKey] } } : null;
+    return clearCurrent
+      ? {
+          op: 'node_shape_set',
+          node_id: op.clear_node_id,
+          selection: op.restore_selection ?? null,
+          revisions: { [clearKey]: revisions[clearKey] },
+        }
+      : null;
   }
   if (op.clear_node_id != null && !clearCurrent) {
     const { clear_node_id, clear_base_revision, restore_selection, ...rest } = op;
@@ -434,8 +451,9 @@ export function applyOpToMirror(mirrorState, op) {
           ? { ['node:' + op.clear_node_id]: (op.clear_base_revision || 0) + 1 }
           : {}),
       };
-      if (op.selection == null) delete m[map][id];
-      else
+      if (op.selection == null) {
+        if (Object.hasOwn(m[map], id)) delete m[map][id];
+      } else
         Object.defineProperty(m[map], id, {
           value: structuredClone(op.selection),
           enumerable: true,
@@ -443,7 +461,8 @@ export function applyOpToMirror(mirrorState, op) {
           configurable: true,
         });
       if (op.clear_node_id != null) {
-        delete m.shape_overrides[op.clear_node_id];
+        if (Object.hasOwn(m.shape_overrides, op.clear_node_id))
+          delete m.shape_overrides[op.clear_node_id];
         if (op.restore_selection != null)
           Object.defineProperty(m.shape_overrides, op.clear_node_id, {
             value: structuredClone(op.restore_selection),
@@ -2023,7 +2042,8 @@ export class SessionSyncClient {
         // than adding a second one, the same way handleImageIngest already
         // reuses it for its own direct-apply case.
         this._settleSentMembership(batch, body.applied || []);
-        if (Object.keys(appearanceRevisions).length) this.handlers.onLocalAppearanceRevisions?.(appearanceRevisions);
+        if (Object.keys(appearanceRevisions).length)
+          this.handlers.onLocalAppearanceRevisions?.(appearanceRevisions);
         if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
