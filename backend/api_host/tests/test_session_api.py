@@ -1665,3 +1665,79 @@ class TestSessionsDirIsolation:
         # A session materialised in app A's store must stay invisible to a
         # second, independently configured app using the same id.
         assert app_b.get(f"/api/sessions/{sid}").status_code == 404
+
+
+def test_appearance_writes_require_current_permission_and_capability(
+    test_app, monkeypatch
+):
+    """Appearance sessions reject read-only callers and incompatible writers."""
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    url = f"/api/sessions/{sid}/ops"
+    op = dict(
+        op="type_shape_set",
+        type="Thing",
+        selection={"builtin": True},
+        version=1,
+        base_revision=0,
+        operation_id="appearance",
+    )
+    body = dict(client_id="first", appearance_version=1, ops=[op])
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert test_app.post(url, json=body).status_code == 403
+    assert test_app.get(f"/api/sessions/{sid}").json()["seq"] == 0
+    manager = test_app.app.state.session_manager
+    original_apply = manager.apply_ops
+
+    async def concurrent_appearance(*args, **kwargs):
+        session = manager.get_session(sid)
+        session.state["shape_overrides"]["a"] = {"builtin": True}
+        return await original_apply(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "apply_ops", concurrent_appearance)
+    membership = dict(
+        client_id="first",
+        appearance_version=1,
+        ops=[dict(op="nodes_removed", node_ids=["a"])],
+    )
+    assert test_app.post(url, json=membership).status_code == 403
+    assert manager.get_session(sid).state["shape_overrides"] == {"a": {"builtin": True}}
+    manager.get_session(sid).state["shape_overrides"].clear()
+    monkeypatch.setattr(manager, "apply_ops", original_apply)
+    monkeypatch.delenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE")
+    assert test_app.post(url, json={**body, "appearance_version": 2}).status_code == 409
+    applied = test_app.post(url, json=body)
+    assert applied.status_code == 200
+    assert test_app.post(url, json=body).json()["seq"] == applied.json()["seq"]
+    conflict = test_app.post(url, json={**body, "client_id": "second"})
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error"] == "shape_revision_conflict"
+    legacy = dict(client_id="old", ops=[dict(op="nodes_hidden", node_ids=["a"])])
+    assert test_app.post(url, json=legacy).status_code == 409
+
+    undo_url = f"/api/sessions/{sid}/undo"
+    replay = dict(client_id="first", appearance_version=1)
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert test_app.post(undo_url, json=replay).status_code == 403
+    monkeypatch.delenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE")
+    assert test_app.post(undo_url, json={"client_id": "first"}).status_code == 409
+    assert test_app.post(undo_url, json=replay).status_code == 200
+    assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {}
+    assert test_app.post(f"/api/sessions/{sid}/redo", json=replay).status_code == 200
+    assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {
+        "Thing": {"builtin": True}
+    }
+
+
+@pytest.mark.parametrize("endpoint", ["undo", "redo"])
+def test_history_requires_capability_after_appearance_activity_pruned(
+    test_app, endpoint
+):
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    session = test_app.app.state.session_manager.get_session(sid)
+    session.state["type_shapes"] = {"Thing": {"builtin": True}}
+    session.activity_log.clear()
+    response = test_app.post(
+        f"/api/sessions/{sid}/{endpoint}", json={"client_id": "old"}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "appearance_version_required"

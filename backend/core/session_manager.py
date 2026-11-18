@@ -66,6 +66,7 @@ from .session_store import (
     MAX_SESSION_DESCRIPTION_CHARS,
     SERVER_ONLY_OPS,
     STATE_OPS,
+    AppearanceVersionRequired,
     OpError,
     Session,
     SessionRetired,
@@ -1508,6 +1509,8 @@ class SessionManager:
         *,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+        appearance_version: Optional[int] = None,
+        authorize_appearance: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1574,6 +1577,20 @@ class SessionManager:
             session = self.store.get(session_id)
             if session is None:
                 raise SessionNotFound()
+
+            if authorize_appearance and (
+                session.state.get("shape_overrides")
+                or session.state.get("type_shapes")
+                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
+            ):
+                authorize_appearance()
+
+            if (
+                session.state.get("shape_overrides")
+                or session.state.get("type_shapes")
+                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
+            ) and (type(appearance_version) is not int or appearance_version != 1):
+                raise AppearanceVersionRequired("appearance version 1 required")
 
             # Snapshot for rollback. persist() is inside the protected region so
             # a persistence-layer failure (disk full, IO error) rolls back too —
@@ -2689,6 +2706,26 @@ class SessionManager:
             None if redo else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         )
         record["redo_seq"] = None if redo else session.seq + 1
+        # Replays create fresh target revisions. Carry those revisions into
+        # history snapshots that describe the restored version, so successive
+        # undo/redo remains possible without accepting a collaborator's write.
+        saved_appearance_snapshots = []
+        if record["affected"].get("kind") == "appearance":
+            destination = record["after" if redo else "before"].get("revisions", {})
+            fresh = {
+                k: session.state["shape_revisions"].get(k, 0) + 1 for k in destination
+            }
+            for history in session.activity_log:
+                for field in ("before", "after"):
+                    snapshot = history.get(field)
+                    if not isinstance(snapshot, dict) or "revisions" not in snapshot:
+                        continue
+                    updated = {
+                        k: fresh[k] if k in destination and v == destination[k] else v
+                        for k, v in snapshot["revisions"].items()
+                    }
+                    saved_appearance_snapshots.append((history, field, snapshot))
+                    history[field] = {**snapshot, "revisions": updated}
         applied = None
         try:
             applied = self._apply_op_sync(
@@ -2701,6 +2738,8 @@ class SessionManager:
             )
         finally:
             if session.seq == seq_before:
+                for history, field, snapshot in saved_appearance_snapshots:
+                    history[field] = snapshot
                 for key in flag_keys:
                     record.pop(key, None)
                 record.update(saved_flags)

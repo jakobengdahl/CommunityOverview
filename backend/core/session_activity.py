@@ -48,6 +48,8 @@ _PADDED_TIMESTAMP = re.compile(
 # removal has group-membership side effects a single inverse cannot restore.
 UNDOABLE_OPS = frozenset(
     {
+        "node_shape_set",
+        "type_shape_set",
         "annotation_created",
         "annotation_updated",
         "annotation_deleted",
@@ -185,6 +187,22 @@ def current_snapshot_for(session_state: Dict[str, Any], record: Dict[str, Any]) 
     """
     affected = record.get("affected") or {}
     kind = affected.get("kind")
+    if kind == "appearance":
+        result = {
+            "selection": session_state.get(affected["map"], {}).get(affected["id"])
+        }
+        if affected.get("clear_node_id") is not None:
+            result["cleared_selection"] = session_state.get("shape_overrides", {}).get(
+                affected["clear_node_id"]
+            )
+        prefix = "node:" if affected["map"] == "shape_overrides" else "type:"
+        targets = [prefix + affected["id"]]
+        if affected.get("clear_node_id") is not None:
+            targets.append("node:" + affected["clear_node_id"])
+        result["revisions"] = {
+            k: session_state.get("shape_revisions", {}).get(k, 0) for k in targets
+        }
+        return result
     if kind == "annotation":
         ann_id = affected.get("id")
         return next(
