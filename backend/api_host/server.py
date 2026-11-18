@@ -362,6 +362,30 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         config, graph_storage, authorization_hook, runtime_extensions
     )
     graph_storage = runtime.graph_storage
+    from backend.config.config_loader import DEFAULT_CONFIG_PATH
+    from backend.federation.config import resolve_federation_config_path
+    from backend.runtime.config_context import (
+        get_tenant_config_dir,
+        resolve_schema_config_path_info,
+    )
+
+    graph_path = Path(graph_storage.json_path).resolve()
+    locations = {
+        "graph": graph_path.parent,
+        "schema config": Path(
+            resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]
+        ).parent,
+        "federation config": Path(resolve_federation_config_path()).parent,
+    }
+    tenant_dir = get_tenant_config_dir()
+    if tenant_dir:
+        locations = {"tenant config": Path(tenant_dir), **locations}
+    token_path = config.get_webhook_tokens_db_path(graph_path, locations.values())
+    for name, directory in locations.items():
+        if token_path.resolve().is_relative_to(directory.resolve()):
+            raise ValueError(
+                f"Webhook token database must be outside the {name} directory"
+            )
     graph_service = runtime.graph_service
     federation_manager = runtime.federation_manager
     federation_config = runtime.federation_config
@@ -460,7 +484,18 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             "COMMUNITYOVERVIEW_FUNCTIONS_ISOLATION_MINIMUM", "degraded"
         ),
     )
+    function_invocation_service.webhook_graph_bindings = json.loads(
+        os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_WEBHOOK_GRAPHS", "{}")
+    )
+    if not isinstance(function_invocation_service.webhook_graph_bindings, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in function_invocation_service.webhook_graph_bindings.items()
+    ):
+        raise ValueError("Invalid webhook graph bindings")
     app.state.function_invocation_service = function_invocation_service
+    from backend.functions.token_store import WebhookTokenStore
+
+    function_invocation_service.webhook_token_store = WebhookTokenStore(token_path)
 
     # Create and mount REST API router
     rest_router = create_rest_router(
