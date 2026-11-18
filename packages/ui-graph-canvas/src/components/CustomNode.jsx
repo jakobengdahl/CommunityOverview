@@ -294,7 +294,8 @@ function CustomNode({ data, id, selected }) {
             width: box.width,
             height: box.height,
             justifyContent:
-              { top: 'flex-start', middle: 'center', centre: 'center' }[vertical] || 'flex-end',
+              { top: 'flex-start', middle: 'safe center', centre: 'safe center' }[vertical] ||
+              'safe flex-end',
             alignItems: align,
             textAlign: horizontal === 'centre' ? 'center' : horizontal,
             paddingRight: actions.inset,
