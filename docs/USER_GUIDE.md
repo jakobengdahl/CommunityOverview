@@ -417,7 +417,7 @@ set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view wo
 **Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
 the tool stays armed until you pick a different one — so placing a row of dots is a row of
 taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
-the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+the way back to ordinary clicking, dragging and marquee-selection (configured shapes are selected when the selection touches their body or outside label); pressing Escape does the
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 

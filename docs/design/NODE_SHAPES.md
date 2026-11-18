@@ -308,8 +308,7 @@ painted, including the text and the action buttons inside it, and on a
 triangle's outside label; the state badges, which lie beyond the body, pass
 the pointer through. The action buttons stack at the trailing edge of the text box, which
 keeps its text clear of them, sized to fit at every base and scale. The minimum
-screen-space hit target is not implemented yet. A marquee still selects every node by React Flow's rectangular bounds;
-polygon-precise marquee selection is future work. Zero-distance endpoint centres use opposite
+screen-space hit target is not implemented yet. Marquee selection tests the shape body and outside label against the selection rectangle; unconfigured cards retain rectangular selection. Zero-distance endpoint centres use opposite
 vertical anchors to keep edge coordinates finite.
 
 ## Theme, accessibility and scale
