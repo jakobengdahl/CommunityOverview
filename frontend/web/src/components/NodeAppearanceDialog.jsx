@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  NodePreview,
   createNodeShapeResolver,
   nodeShapeAreaValues,
-  nodeShapeGeometry,
-  nodeShapeBandPath,
-  nodeShapeTextBox,
 } from '@community-graph/ui-graph-canvas';
 import { useI18n } from '../i18n';
 import './MetamodelExplorerDialog.css';
@@ -23,6 +21,85 @@ const DEFAULT = {
   areas: { first: 'type', second: 'name', third: 'summary' },
 };
 const AREAS = ['first', 'second', 'third'];
+const SHAPE_EDITS = ['base', 'scale', 'placement', 'areas'];
+// Attribute names with a translation; other declared fields are config keys.
+const FIELD_LABELS = ['type', 'name', 'summary', 'description', 'tags'];
+
+const sameDefinition = (a, b) =>
+  a.version === b.version &&
+  a.base === b.base &&
+  a.scale === b.scale &&
+  a.placement === b.placement &&
+  AREAS.every((area) => a.areas[area] === b.areas[area]);
+
+/**
+ * The selection the node's look comes from and the source to report. A
+ * selection the canvas cannot resolve falls back to the built-in card, so
+ * the source is then 'fallback' rather than the level that holds it.
+ */
+export function currentAppearance(node, schema, shapeOverrides, typeShapes) {
+  const type = node.nodeType || node.type;
+  const configShape = Object.hasOwn(schema?.node_types || {}, type)
+    ? schema.node_types[type]?.shape
+    : null;
+  let selection, level;
+  if (Object.hasOwn(shapeOverrides, node.id))
+    [selection, level] = [shapeOverrides[node.id], 'node'];
+  else if (Object.hasOwn(typeShapes, type)) [selection, level] = [typeShapes[type], 'type'];
+  else if (typeof configShape === 'string')
+    [selection, level] = [{ ref: `config:${configShape}` }, 'config'];
+  else return { selection: { builtin: true }, source: 'builtin' };
+  const resolved = createNodeShapeResolver({
+    nodeTypes: schema?.node_types,
+    nodeShapes: schema?.node_shapes,
+    shapeOverrides,
+    typeShapes,
+  })({ ...node, type });
+  const explicitBuiltin = selection?.builtin === true && Object.keys(selection).length === 1;
+  return { selection, source: resolved || explicitBuiltin ? level : 'fallback' };
+}
+
+/**
+ * The draft as a pure function of the original selection and the user's
+ * explicit edits: no edit, or edits that land on the starting definition,
+ * give back the starting selection itself; any other shape edit gives an
+ * inline copy. `resolve(selection)` is the canvas resolver for this node.
+ */
+export function appearanceDraft(original, edits, resolve) {
+  const selection = edits.ref ? { ref: edits.ref } : original;
+  const start = resolve(selection);
+  const from = start || DEFAULT;
+  const scaleText = edits.scale ?? String(from.scale);
+  if (!SHAPE_EDITS.some((key) => Object.hasOwn(edits, key))) {
+    return { selection, definition: start, from, shown: from, scaleText, valid: true };
+  }
+  const definition = {
+    version: 1,
+    base: edits.base ?? from.base,
+    scale: Number(scaleText),
+    placement: edits.placement ?? from.placement,
+    areas: { ...from.areas, ...edits.areas },
+  };
+  const valid =
+    scaleText.trim() !== '' &&
+    Number.isFinite(definition.scale) &&
+    definition.scale >= 0.1 &&
+    definition.scale <= 10 &&
+    placements(definition.base).includes(definition.placement);
+  if (valid && start && sameDefinition(definition, start)) {
+    return { selection, definition: start, from, shown: start, scaleText, valid };
+  }
+  // An invalid scale previews at the starting scale until it is fixed.
+  const preview = valid ? definition : { ...definition, scale: from.scale };
+  return {
+    selection: { inline: definition },
+    definition: preview,
+    from,
+    shown: definition,
+    scaleText,
+    valid,
+  };
+}
 
 export function appearanceOperation(scope, node, selection, revisions, operationId) {
   const type = node.nodeType || node.type;
@@ -47,6 +124,7 @@ export function appearanceOperation(scope, node, selection, revisions, operation
 export default function NodeAppearanceDialog({
   node,
   schema,
+  color,
   shapeOverrides,
   typeShapes,
   nodes,
@@ -59,35 +137,22 @@ export default function NodeAppearanceDialog({
   const overlay = useRef(null);
   const type = node.nodeType || node.type;
   const entity = { ...node, type };
-  const resolved = createNodeShapeResolver({
-    nodeTypes: schema?.node_types,
-    nodeShapes: schema?.node_shapes,
-    shapeOverrides,
-    typeShapes,
-  })(entity);
-  const source = Object.hasOwn(shapeOverrides, node.id)
-    ? 'node'
-    : Object.hasOwn(typeShapes, type)
-      ? 'type'
-      : schema?.node_types?.[type]?.shape
-        ? 'config'
-        : 'builtin';
-  const [draft, setDraft] = useState(() => structuredClone(resolved?.definition || DEFAULT));
-  const [scale, setScale] = useState(() => String((resolved?.definition || DEFAULT).scale));
-  const [configRef, setConfigRef] = useState('');
-  const [builtin, setBuiltin] = useState(() => !resolved);
+  const [original] = useState(() => currentAppearance(node, schema, shapeOverrides, typeShapes));
+  const [edits, setEdits] = useState({});
   const [tab, setTab] = useState(0);
   const [scope, setScope] = useState('node');
   const [status, setStatus] = useState({ message: '', slot: 0 });
   const [theme, setTheme] = useState('light');
   const [longText, setLongText] = useState(false);
   const tabs = ['shape', 'text', 'apply'];
-  const valid =
-    scale !== '' &&
-    Number.isFinite(Number(scale)) &&
-    Number(scale) >= 0.1 &&
-    Number(scale) <= 10 &&
-    placements(draft.base).includes(draft.placement);
+  const resolve = (selection) =>
+    createNodeShapeResolver({
+      nodeTypes: schema?.node_types,
+      nodeShapes: schema?.node_shapes,
+      shapeOverrides: { [node.id]: selection },
+    })(entity)?.definition || null;
+  const draft = appearanceDraft(original.selection, edits, resolve);
+  const { shown, valid } = draft;
   const fields = [
     ...new Set([
       'type',
@@ -96,18 +161,34 @@ export default function NodeAppearanceDialog({
       ...(schema?.node_types?.[type]?.fields || []).filter((f) => f !== 'metadata'),
     ]),
   ];
-  const values = nodeShapeAreaValues(draft, entity, fields);
+  const fieldLabel = (field) =>
+    FIELD_LABELS.includes(field) ? t(`node_appearance.field_${field}`) : field;
+  const unavailable = (area) => shown.areas[area] !== null && !fields.includes(shown.areas[area]);
+  const stretch = (text) => (longText && text ? `${text} ${text} ${text}` : text);
+  const values = nodeShapeAreaValues(shown, entity, fields);
+  const previewValues = Object.fromEntries(
+    AREAS.map((area) => [
+      area,
+      shown.areas[area] === null
+        ? ''
+        : unavailable(area)
+          ? t('node_appearance.unavailable')
+          : stretch(values[area]) || t('node_appearance.missing'),
+    ])
+  );
+  const previewNode = {
+    ...entity,
+    name: stretch(entity.name),
+    summary: stretch(entity.summary || entity.description?.slice(0, 100)),
+  };
+  const configName =
+    typeof draft.selection?.ref === 'string' && draft.selection.ref.startsWith('config:')
+      ? draft.selection.ref.slice('config:'.length)
+      : '';
   const retained = nodes.filter(
     (n) =>
       n.id !== node.id && (n.nodeType || n.type) === type && Object.hasOwn(shapeOverrides, n.id)
   );
-  const geometry = nodeShapeGeometry(draft.base, valid ? Number(scale) : 1);
-  const box = nodeShapeTextBox(geometry, draft.placement);
-  const triangle = draft.base.startsWith('triangle');
-  const [vertical, horizontal] = triangle
-    ? [draft.placement, 'centre']
-    : draft.placement.split('-');
-  const alignment = { left: 'flex-start', centre: 'center', right: 'flex-end' }[horizontal];
   useEffect(() => {
     opener.current = document.activeElement;
     const inerted = [];
@@ -137,15 +218,22 @@ export default function NodeAppearanceDialog({
     }));
   }
   function update(patch, message = 'preview_updated') {
-    setConfigRef('');
-    setBuiltin(false);
-    setDraft((d) => ({ ...d, ...patch }));
+    setEdits((previous) => {
+      const next = { ...previous, ...patch };
+      if (patch.areas) next.areas = { ...previous.areas, ...patch.areas };
+      return next;
+    });
     announce(message);
   }
   function changeBase(base) {
-    const reset = !placements(base).includes(draft.placement);
+    const reset = !placements(base).includes(shown.placement);
+    // The starting placement is preferred, so undoing a base change undoes
+    // its placement reset too.
+    const placement = placements(base).includes(draft.from.placement)
+      ? draft.from.placement
+      : placements(base)[0];
     update(
-      { base, ...(reset ? { placement: placements(base)[0] } : {}) },
+      { base, ...(reset ? { placement } : {}) },
       reset ? 'placement_reset' : 'preview_updated'
     );
   }
@@ -215,7 +303,7 @@ export default function NodeAppearanceDialog({
               {t('node_appearance.title')}
             </h2>
             <p>
-              {node.name} · {type} · {t(`node_appearance.source_${source}`)}
+              {node.name} · {type} · {t(`node_appearance.source_${original.source}`)}
             </p>
           </div>
           <button className="mme-close" onClick={onClose} aria-label={t('node_appearance.cancel')}>
@@ -223,11 +311,7 @@ export default function NodeAppearanceDialog({
           </button>
         </header>
         <div className="mme-toolbar">
-          <div
-            className="mme-tabs"
-            role="tablist"
-            aria-label={t('node_appearance.title')}
-          >
+          <div className="mme-tabs" role="tablist" aria-label={t('node_appearance.title')}>
             {tabs.map((key, i) => (
               <button
                 key={key}
@@ -255,7 +339,7 @@ export default function NodeAppearanceDialog({
               <>
                 <label>
                   {t('node_appearance.base')}
-                  <select value={draft.base} onChange={(e) => changeBase(e.target.value)}>
+                  <select value={shown.base} onChange={(e) => changeBase(e.target.value)}>
                     {BASES.map((base) => (
                       <option key={base} value={base}>
                         {t(`node_appearance.base_${base}`)}
@@ -267,14 +351,10 @@ export default function NodeAppearanceDialog({
                   <label>
                     {t('node_appearance.config_shape')}
                     <select
-                      value={configRef}
+                      value={configName}
                       onChange={(e) => {
-                        const definition = schema.node_shapes[e.target.value];
-                        if (definition) {
-                          setConfigRef(e.target.value);
-                          setBuiltin(false);
-                          setDraft(structuredClone(definition));
-                          setScale(String(definition.scale));
+                        if (Object.hasOwn(schema.node_shapes, e.target.value)) {
+                          setEdits({ ref: `config:${e.target.value}` });
                           announce('preview_updated');
                         }
                       }}
@@ -296,13 +376,8 @@ export default function NodeAppearanceDialog({
                     min="0.1"
                     max="10"
                     step="0.1"
-                    value={scale}
-                    onChange={(e) => {
-                      setConfigRef('');
-                      setBuiltin(false);
-                      setScale(e.target.value);
-                      announce('preview_updated');
-                    }}
+                    value={draft.scaleText}
+                    onChange={(e) => update({ scale: e.target.value })}
                   />
                 </label>
                 <label>
@@ -312,13 +387,8 @@ export default function NodeAppearanceDialog({
                     min="0.1"
                     max="10"
                     step="0.1"
-                    value={valid ? Number(scale) : 1}
-                    onChange={(e) => {
-                      setConfigRef('');
-                      setBuiltin(false);
-                      setScale(e.target.value);
-                      announce('preview_updated');
-                    }}
+                    value={(draft.definition || shown).scale}
+                    onChange={(e) => update({ scale: e.target.value })}
                   />
                 </label>
               </>
@@ -328,10 +398,10 @@ export default function NodeAppearanceDialog({
                 <label>
                   {t('node_appearance.placement')}
                   <select
-                    value={draft.placement}
+                    value={shown.placement}
                     onChange={(e) => update({ placement: e.target.value })}
                   >
-                    {placements(draft.base).map((p) => (
+                    {placements(shown.base).map((p) => (
                       <option key={p} value={p}>
                         {t(`node_appearance.placement_${p}`)}
                       </option>
@@ -339,27 +409,37 @@ export default function NodeAppearanceDialog({
                   </select>
                 </label>
                 {AREAS.map((area) => (
-                  <label key={area}>
-                    {t(`node_appearance.area_${area}`)}
-                    <select
-                      value={draft.areas[area] || ''}
-                      onChange={(e) =>
-                        update({ areas: { ...draft.areas, [area]: e.target.value || null } })
-                      }
-                    >
-                      <option value="">{t('node_appearance.none')}</option>
-                      {draft.areas[area] && !fields.includes(draft.areas[area]) && (
-                        <option value={draft.areas[area]}>
-                          {draft.areas[area]} ({t('node_appearance.missing')})
-                        </option>
-                      )}
-                      {fields.map((field) => (
-                        <option key={field} value={field}>
-                          {field}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div key={area}>
+                    <label>
+                      {t(`node_appearance.area_${area}`)}
+                      <select
+                        value={shown.areas[area] ?? ''}
+                        aria-describedby={
+                          unavailable(area) ? `appearance-unavailable-${area}` : undefined
+                        }
+                        onChange={(e) => update({ areas: { [area]: e.target.value || null } })}
+                      >
+                        <option value="">{t('node_appearance.none')}</option>
+                        {unavailable(area) && (
+                          <option value={shown.areas[area]}>
+                            {fieldLabel(shown.areas[area])} ({t('node_appearance.unavailable')})
+                          </option>
+                        )}
+                        {fields.map((field) => (
+                          <option key={field} value={field}>
+                            {fieldLabel(field)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {unavailable(area) && (
+                      <p id={`appearance-unavailable-${area}`} className="appearance-warning">
+                        {t('node_appearance.unavailable_warning', {
+                          field: fieldLabel(shown.areas[area]),
+                        })}
+                      </p>
+                    )}
+                  </div>
                 ))}
               </>
             )}
@@ -383,10 +463,7 @@ export default function NodeAppearanceDialog({
             )}
             {!valid && <p role="alert">{t('node_appearance.invalid')}</p>}
           </div>
-          <section
-            className={`appearance-preview ${theme}`}
-            aria-label={t('node_appearance.preview')}
-          >
+          <section className="appearance-preview" aria-label={t('node_appearance.preview')}>
             <div className="appearance-preview-controls">
               <label>
                 {t('node_appearance.theme')}
@@ -413,88 +490,20 @@ export default function NodeAppearanceDialog({
                 {t('node_appearance.long_text')}
               </label>
             </div>
-            <div className="appearance-preview-stage" aria-hidden="true">
-              {builtin ? (
-                <div className="appearance-builtin-card" style={{ borderColor: schema?.node_types?.[type]?.color || '#646cff' }}>
-                  <div className="appearance-builtin-header" style={{ backgroundColor: schema?.node_types?.[type]?.color || '#646cff' }}>{type}</div>
-                  <div className="appearance-builtin-content">
-                    <div className="appearance-builtin-name">{node.name}</div>
-                    {node.summary && <div className="appearance-builtin-summary">{longText ? `${node.summary} ${node.summary} ${node.summary}` : node.summary}</div>}
-                  </div>
-                </div>
-              ) : <div
-                className="appearance-preview-card"
-                style={{
-                  width: geometry.width,
-                  height: geometry.height,
-                  marginTop: triangle ? geometry.bandHeight : 0,
-                }}
-              >
-                <svg
-                  width={geometry.width}
-                  height={geometry.height}
-                  viewBox={`0 0 ${geometry.width} ${geometry.height}`}
-                >
-                  <path
-                    d={geometry.path}
-                    fill="var(--preview-surface)"
-                    stroke="#777"
-                    strokeWidth={2 * geometry.scale}
-                  />
-                  <path
-                    d={nodeShapeBandPath(geometry)}
-                    fill={schema?.node_types?.[type]?.color || '#646cff'}
-                  />
-                </svg>
-                <div
-                  className="appearance-preview-band"
-                  style={{
-                    top: triangle ? -geometry.bandHeight : 0,
-                    height: geometry.bandHeight,
-                    justifyContent: alignment,
-                    fontSize: `${geometry.text.type}rem`,
-                  }}
-                >
-                  <span className="appearance-preview-chip">{values.first || (draft.areas.first ? t('node_appearance.missing') : '')}</span>
-                </div>
-                <div
-                  className="appearance-preview-text"
-                  style={{
-                    left: box.x,
-                    top: box.y,
-                    width: box.width,
-                    height: box.height,
-                    alignItems: alignment,
-                    justifyContent: {
-                      top: 'flex-start',
-                      middle: 'center',
-                      centre: 'center',
-                      bottom: 'flex-end',
-                    }[vertical],
-                    textAlign: horizontal === 'centre' ? 'center' : horizontal,
-                  }}
-                >
-                  {AREAS.slice(1).map((area, index) => (
-                    <div
-                      key={area}
-                      style={{
-                        fontSize: `${index ? geometry.text.summary : geometry.text.title}rem`,
-                      }}
-                    >
-                      {draft.areas[area] &&
-                        (values[area]
-                          ? longText
-                            ? `${values[area]} ${values[area]} ${values[area]}`
-                            : values[area]
-                          : t('node_appearance.missing'))}
-                    </div>
-                  ))}
-                </div>
-              </div>}
+            {/* The canvas container supplies the canvas background. */}
+            <div className="graph-canvas-container appearance-preview-stage" aria-hidden="true">
+              <NodePreview
+                node={previewNode}
+                color={color}
+                definition={draft.definition}
+                values={previewValues}
+                theme={theme}
+              />
             </div>
-            {!builtin && AREAS.some((area) => draft.areas[area] && !values[area]) && (
-              <p>{t('node_appearance.missing_warning')}</p>
-            )}
+            {draft.definition &&
+              AREAS.some(
+                (area) => shown.areas[area] !== null && !unavailable(area) && !values[area]
+              ) && <p>{t('node_appearance.missing_warning')}</p>}
           </section>
         </div>
         <div className="appearance-footer">
@@ -516,16 +525,7 @@ export default function NodeAppearanceDialog({
           <button onClick={onClose}>{t('node_appearance.cancel')}</button>
           <button
             disabled={!valid}
-            onClick={() =>
-              onApply(
-                scope,
-                configRef
-                  ? { ref: `config:${configRef}` }
-                  : builtin
-                    ? { builtin: true }
-                    : { inline: { ...draft, scale: Number(scale) } }
-              )
-            }
+            onClick={() => onApply(scope, structuredClone(draft.selection))}
           >
             {t('node_appearance.apply')}
           </button>

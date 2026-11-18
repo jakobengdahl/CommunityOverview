@@ -5,8 +5,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
-import NodeAppearanceDialog, { appearanceOperation } from './NodeAppearanceDialog';
-import { readFileSync } from 'node:fs';
+import NodeAppearanceDialog, {
+  appearanceOperation,
+  currentAppearance,
+} from './NodeAppearanceDialog';
 import { nodeShapeGeometry, nodeShapeTextBox } from '@community-graph/ui-graph-canvas';
 
 vi.mock('../i18n', () => ({
@@ -408,10 +410,30 @@ describe('MetamodelExplorerDialog', () => {
 });
 
 describe('NodeAppearanceDialog', () => {
+  const EXAMPLE_SHAPE = {
+    version: 1,
+    base: 'rectangle-flat',
+    scale: 2,
+    placement: 'middle-centre',
+    areas: { first: 'type', second: 'name', third: null },
+  };
+  const DEFAULT_SHAPE = {
+    ...EXAMPLE_SHAPE,
+    base: 'rectangle',
+    scale: 1,
+    placement: 'top-left',
+    areas: { first: 'type', second: 'name', third: 'summary' },
+  };
+  const CONFIG_SCHEMA = {
+    ...SCHEMA,
+    node_types: { ...SCHEMA.node_types, Actor: { ...SCHEMA.node_types.Actor, shape: 'example' } },
+    node_shapes: { example: EXAMPLE_SHAPE },
+  };
   const node = { id: 'a', name: 'First', type: 'Actor' };
   const props = {
     node,
     schema: SCHEMA,
+    color: '#FBBF24',
     shapeOverrides: { b: { builtin: true } },
     typeShapes: {},
     nodes: [node, { id: 'b', name: 'Second', type: 'Actor' }],
@@ -421,19 +443,24 @@ describe('NodeAppearanceDialog', () => {
   it('applies an unchanged built-in appearance and turns edits into an inline shape', () => {
     const apply = vi.fn();
     const view = render(<NodeAppearanceDialog {...props} onApply={apply} />);
-    expect(document.querySelector('.appearance-builtin-card')).toBeTruthy();
-    expect(document.querySelector('.appearance-preview-card')).toBeNull();
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+    expect(document.querySelector('.graph-shaped-node')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
     fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply.mock.calls[1][1].inline.scale).toBe(2);
-    expect(document.querySelector('.appearance-builtin-card')).toBeNull();
-    expect(document.querySelector('.appearance-preview-band .appearance-preview-chip').textContent).toBe('Actor');
-    expect(document.querySelector('.appearance-preview-card svg path:nth-child(2)').getAttribute('fill')).toBe('#3B82F6');
-    expect(readFileSync('src/components/NodeAppearanceDialog.css', 'utf8').match(/\.appearance-preview-band\s*\{([^}]*)\}/)[1]).not.toMatch(/background/);
-    fireEvent.change(screen.getByLabelText('node_appearance.base'), { target: { value: 'triangle-up' } });
-    expect(document.querySelector('.appearance-preview-band .appearance-preview-chip').textContent).toBe('Actor');
+    expect(document.querySelector('.graph-custom-node')).toBeNull();
+    // The canvas renderer draws the band in the type colour, with band text
+    // that stays readable on a light colour.
+    const chip = () => document.querySelector('.graph-shape-label-chip');
+    expect(chip().textContent).toBe('Actor');
+    expect(chip().style.color).toBe('rgb(0, 0, 0)');
+    expect(document.querySelector('.graph-shape-band').style.fill).toBe('#FBBF24');
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    expect(chip().textContent).toBe('Actor');
     view.unmount();
     render(
       <NodeAppearanceDialog {...props} shapeOverrides={{ a: { builtin: true } }} onApply={apply} />
@@ -544,12 +571,18 @@ describe('NodeAppearanceDialog', () => {
     fireEvent.change(screen.getByLabelText('node_appearance.config_shape'), {
       target: { value: 'example' },
     });
-    expect(screen.getByText('node_appearance.missing_warning')).toBeTruthy();
     fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    // An unavailable binding is named and warned about, never shown as None.
     const binding = screen.getByLabelText('node_appearance.area_third');
     expect(binding.value).toBe('missing');
-    expect(binding.selectedOptions[0].textContent).toContain('missing');
-    const textBox = screen.getByText('node_appearance.missing').parentElement;
+    expect(binding.selectedOptions[0].textContent).toContain('node_appearance.unavailable');
+    expect(document.getElementById(binding.getAttribute('aria-describedby'))).toBeTruthy();
+    expect(
+      [...screen.getByLabelText('node_appearance.area_second').options].find(
+        (option) => option.value === 'name'
+      ).textContent
+    ).toBe('node_appearance.field_name');
+    const textBox = screen.getByText('node_appearance.unavailable').parentElement;
     const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
     expect(textBox.style.left).toBe(`${box.x}px`);
     expect(textBox.style.top).toBe(`${box.y}px`);
@@ -557,6 +590,40 @@ describe('NodeAppearanceDialog', () => {
     expect(textBox.style.height).toBe(`${box.height}px`);
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply).toHaveBeenCalledWith('node', { ref: 'config:example' });
+  });
+  it.each([
+    ['a built-in node override', { shapeOverrides: { a: { builtin: true } } }, 'node'],
+    ['a configuration default', { schema: CONFIG_SCHEMA }, 'config'],
+    ['a type default', { typeShapes: { Actor: { inline: EXAMPLE_SHAPE } } }, 'type'],
+    ['an unresolvable reference', { shapeOverrides: { a: { ref: 'saved:gone' } } }, 'fallback'],
+  ])('applies %s unchanged as the original value and reports its source', (_, extra, source) => {
+    const apply = vi.fn();
+    const merged = { ...props, ...extra };
+    const original = currentAppearance(
+      node,
+      merged.schema,
+      merged.shapeOverrides,
+      merged.typeShapes
+    );
+    expect(original.source).toBe(source);
+    render(<NodeAppearanceDialog {...merged} onApply={apply} />);
+    expect(screen.getByText(new RegExp(`node_appearance.source_${source}`))).toBeTruthy();
+    // A fallback is drawn as the built-in card it reports.
+    expect(Boolean(document.querySelector('.graph-custom-node'))).toBe(
+      source === 'fallback' || source === 'node'
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    // A base edit and its reversal are no edit at all.
+    const base = screen.getByLabelText('node_appearance.base');
+    const start = base.value;
+    fireEvent.change(base, { target: { value: 'triangle-down' } });
+    fireEvent.change(base, { target: { value: start } });
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    const value = source === 'config' ? { ref: 'config:example' } : original.selection;
+    expect(apply.mock.calls[0][1]).toEqual(value);
+    expect(apply.mock.calls[1][1]).toEqual(
+      source === 'node' || source === 'fallback' ? { inline: DEFAULT_SHAPE } : value
+    );
   });
   it('constructs one revision-checked operation for each scope', () => {
     const selection = { builtin: true };

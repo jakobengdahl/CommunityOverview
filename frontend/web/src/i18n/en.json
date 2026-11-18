@@ -1079,6 +1079,14 @@
     "placement_centre": "Centre",
     "placement_bottom": "Bottom",
     "pending": "Wait for the previous appearance change to finish before applying another.",
-    "changed": "The appearance changed while editing. Close and reopen the editor to review it."
+    "changed": "The appearance changed while editing. Close and reopen the editor to review it.",
+    "source_fallback": "Built-in card (the selected shape is unavailable)",
+    "unavailable": "Unavailable attribute",
+    "unavailable_warning": "{field} is not an attribute of this node type, so this area stays empty on the canvas.",
+    "field_type": "Type",
+    "field_name": "Name",
+    "field_summary": "Summary",
+    "field_description": "Description",
+    "field_tags": "Tags"
   }
 }

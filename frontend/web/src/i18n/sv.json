@@ -1079,6 +1079,14 @@
     "placement_centre": "Mitten",
     "placement_bottom": "Nederst",
     "pending": "Vänta tills den föregående utseendeändringen är klar innan du använder en ny.",
-    "changed": "Utseendet ändrades under redigeringen. Stäng och öppna redigeraren igen för att granska det."
+    "changed": "Utseendet ändrades under redigeringen. Stäng och öppna redigeraren igen för att granska det.",
+    "source_fallback": "Inbyggt kort (den valda formen är inte tillgänglig)",
+    "unavailable": "Attribut saknas för typen",
+    "unavailable_warning": "{field} är inget attribut för den här nodtypen, så området förblir tomt på ytan.",
+    "field_type": "Typ",
+    "field_name": "Namn",
+    "field_summary": "Sammanfattning",
+    "field_description": "Beskrivning",
+    "field_tags": "Taggar"
   }
 }
