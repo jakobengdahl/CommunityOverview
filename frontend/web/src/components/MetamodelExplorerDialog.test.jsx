@@ -1,9 +1,12 @@
+// covers: frontend/web/src/components/MetamodelExplorerDialog.jsx, frontend/web/src/components/NodeAppearanceDialog.jsx
 /**
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
+import NodeAppearanceDialog, { appearanceOperation } from './NodeAppearanceDialog';
+import { nodeShapeGeometry, nodeShapeTextBox } from '@community-graph/ui-graph-canvas';
 
 vi.mock('../i18n', () => ({
   useI18n: () => ({ t: (key) => key, language: 'en' }),
@@ -400,5 +403,157 @@ describe('MetamodelExplorerDialog', () => {
     });
 
     expect(capture).not.toHaveBeenCalled();
+  });
+});
+
+describe('NodeAppearanceDialog', () => {
+  const node = { id: 'a', name: 'First', type: 'Actor' };
+  const props = {
+    node,
+    schema: SCHEMA,
+    shapeOverrides: { b: { builtin: true } },
+    typeShapes: {},
+    nodes: [node, { id: 'b', name: 'Second', type: 'Actor' }],
+    onClose: vi.fn(),
+    onApply: vi.fn(),
+  };
+  it('applies an unchanged built-in appearance and turns edits into an inline shape', () => {
+    const apply = vi.fn();
+    const view = render(<NodeAppearanceDialog {...props} onApply={apply} />);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply.mock.calls[1][1].inline.scale).toBe(2);
+    view.unmount();
+    render(
+      <NodeAppearanceDialog {...props} shapeOverrides={{ a: { builtin: true } }} onApply={apply} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
+  });
+  it('shows retained overrides on every tab when applying to a type', () => {
+    render(<NodeAppearanceDialog {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.click(screen.getByLabelText('node_appearance.scope_type'));
+    for (const tab of ['shape', 'text', 'apply']) {
+      fireEvent.click(screen.getByRole('tab', { name: `node_appearance.${tab}` }));
+      expect(screen.getByText(/Second/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'node_appearance.apply' }).disabled).toBe(false);
+    }
+  });
+  it('keeps a draft isolated and restores focus on Escape', () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const view = render(<NodeAppearanceDialog {...props} />);
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    expect(props.onApply).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalled();
+    view.unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+  it('validates scale and applies a type draft while preserving bindings', () => {
+    const apply = vi.fn();
+    render(<NodeAppearanceDialog {...props} onApply={apply} />);
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '11' } });
+    expect(screen.getByRole('button', { name: 'node_appearance.apply' }).disabled).toBe(true);
+    const statuses = screen.getAllByRole('status');
+    expect(statuses.map((status) => status.textContent)).toEqual([
+      '',
+      'node_appearance.preview_updated',
+    ]);
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
+    expect(statuses.map((status) => status.textContent)).toEqual([
+      'node_appearance.preview_updated',
+      '',
+    ]);
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.click(screen.getByLabelText('node_appearance.scope_type'));
+    expect(screen.getByText(/Second/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenCalledWith('type', {
+      inline: {
+        version: 1,
+        base: 'triangle-up',
+        scale: 2,
+        placement: 'centre',
+        areas: { first: 'type', second: 'name', third: 'summary' },
+      },
+    });
+  });
+  it('supports keyboard tabs and traps focus inside the modal', () => {
+    render(<NodeAppearanceDialog {...props} />);
+    const first = screen.getByRole('tab', { name: 'node_appearance.shape' });
+    first.focus();
+    fireEvent.keyDown(first, { key: 'End' });
+    expect(
+      screen.getByRole('tab', { name: 'node_appearance.apply' }).getAttribute('aria-selected')
+    ).toBe('true');
+    fireEvent.keyDown(document.activeElement, { key: 'Home' });
+    expect(document.activeElement).toBe(first);
+    const last = screen.getByRole('button', { name: 'node_appearance.apply' });
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(last);
+  });
+  it('applies an explicitly selected configuration reference to the node', () => {
+    const apply = vi.fn();
+    const definition = {
+      version: 1,
+      base: 'rectangle',
+      scale: 1,
+      placement: 'top-left',
+      areas: { first: 'type', second: 'name', third: 'missing' },
+    };
+    render(
+      <NodeAppearanceDialog
+        {...props}
+        schema={{ ...SCHEMA, node_shapes: { example: definition } }}
+        onApply={apply}
+      />
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.config_shape'), {
+      target: { value: 'example' },
+    });
+    expect(screen.getByText('node_appearance.missing_warning')).toBeTruthy();
+    const textBox = screen.getByText('node_appearance.missing').parentElement;
+    const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
+    expect(textBox.style.left).toBe(`${box.x}px`);
+    expect(textBox.style.top).toBe(`${box.y}px`);
+    expect(textBox.style.width).toBe(`${box.width}px`);
+    expect(textBox.style.height).toBe(`${box.height}px`);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenCalledWith('node', { ref: 'config:example' });
+  });
+  it('constructs one revision-checked operation for each scope', () => {
+    const selection = { builtin: true };
+    const revisions = { 'node:a': 2, 'type:Actor': 3 };
+    expect(appearanceOperation('node', node, selection, revisions, 'id')).toEqual({
+      op: 'node_shape_set',
+      version: 1,
+      operation_id: 'id',
+      node_id: 'a',
+      selection,
+      base_revision: 2,
+    });
+    expect(appearanceOperation('type', node, selection, revisions, 'id')).toEqual({
+      op: 'type_shape_set',
+      version: 1,
+      operation_id: 'id',
+      type: 'Actor',
+      selection,
+      base_revision: 3,
+      clear_node_id: 'a',
+      clear_base_revision: 2,
+    });
   });
 });
