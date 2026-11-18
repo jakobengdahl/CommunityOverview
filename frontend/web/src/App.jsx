@@ -2947,7 +2947,10 @@ function App() {
           const release = client?.holdLayoutSave() || null;
           remoteOpsChainRef.current = remoteOpsChainRef.current
             .then(async () => {
-              await client?.waitForLocalEdits();
+              // An edit can start after the wait resolves but before this
+              // continuation runs: re-check after every await, then apply
+              // synchronously with the last check.
+              while (client?.hasLocalEdits()) await client.waitForLocalEdits();
               if (generation !== sessionGenerationRef.current || meta.applyBaseline?.() === false) {
                 release?.();
                 return;

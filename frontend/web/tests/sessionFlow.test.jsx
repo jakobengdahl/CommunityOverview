@@ -780,7 +780,7 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
-  it('defers the remote baseline until a held local edit releases the canvas queue', async () => {
+  it('defers the remote baseline until every held local edit releases the canvas queue', async () => {
     const connect = SessionSyncClient.prototype.connect;
     let client;
     vi.spyOn(SessionSyncClient.prototype, 'connect').mockImplementation(function (...args) {
@@ -811,8 +811,16 @@ describe('Server-backed session lifecycle', () => {
     });
     expect(client.isMember('node-a')).toBe(true);
     expect(useGraphStore.getState().nodes.map((node) => node.id)).toContain('node-a');
+    // A second edit starts after the wait resolves, before the queue resumes.
+    let releaseNext;
     await act(async () => {
       release();
+      releaseNext = client.holdLocalEdit();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.isMember('node-a')).toBe(true);
+    await act(async () => {
+      releaseNext();
     });
     await waitFor(() => expect(client.isMember('node-a')).toBe(false));
   });

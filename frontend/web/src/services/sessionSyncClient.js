@@ -890,6 +890,9 @@ export class SessionSyncClient {
     // (by-then possibly stale) creation-time content over it a second time —
     // see foldLocalOp and _handleEvent's 'op' case.
     this._locallyFoldedAnnotationIds = new Set();
+    // Acknowledged appearance writes ({seq, entry}) whose stream position has
+    // not been reached yet; see _releaseAppearanceAcks.
+    this._appearanceAcks = [];
     // The session's membership version: the stream seq of the last
     // membership op applied, or the seq a loaded baseline, snapshot or
     // catch-up reflects. A hydration read across a change of it is stale
@@ -1992,22 +1995,12 @@ export class SessionSyncClient {
         // self-conflict race this mechanism exists to close, the next time
         // that later op's own ack round-trips.
         for (const entry of body.applied || []) {
-          if (entry?.op === 'node_shape_set' || entry?.op === 'type_shape_set') {
-            const applyBaseline = () => {
-              const current = currentAppearanceOp(this._baseline, entry);
-              if (current) this._baseline = applyOpToMirror(this._baseline, current);
-              return false; // The local edit is already on the canvas.
-            };
-            if (this._deferRemoteOps && this.handlers.onRemoteOps) {
-              this.handlers.onRemoteOps([entry], {
-                clientId: this.clientId,
-                sessionId: this.sessionId,
-                applyBaseline,
-              });
-            } else {
-              applyBaseline();
-            }
-          }
+          if (entry?.op !== 'node_shape_set' && entry?.op !== 'type_shape_set') continue;
+          const seq = typeof entry.seq === 'number' ? entry.seq : body.seq;
+          // Past the stream position the echo was already folded there (or a
+          // snapshot/catch-up superseded it); ahead of it, wait for the stream.
+          if (typeof seq !== 'number') this._foldOwnAppearance(entry);
+          else if (seq > this._appliedSeq) this._appearanceAcks.push({ seq, entry });
         }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
@@ -2130,6 +2123,47 @@ export class SessionSyncClient {
     this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
   }
 
+  /**
+   * Fold this client's own acknowledged appearance write into the baseline,
+   * through the same deferred canvas queue as remote operations so it keeps
+   * its place among them. Baseline only: the edit is already on the canvas.
+   */
+  _foldOwnAppearance(entry) {
+    const applyBaseline = () => {
+      const current = currentAppearanceOp(this._baseline, entry);
+      if (current) this._baseline = applyOpToMirror(this._baseline, current);
+      return false;
+    };
+    if (this._deferRemoteOps && this.handlers.onRemoteOps) {
+      this.handlers.onRemoteOps([entry], {
+        clientId: this.clientId,
+        sessionId: this.sessionId,
+        applyBaseline,
+      });
+    } else {
+      applyBaseline();
+    }
+  }
+
+  /**
+   * Appearance baseline changes are folded in server seq order, at the stream
+   * position of the event that made them (docs/design/NODE_SHAPES.md, "Remote
+   * appearance ordering"). The stream is that order; a POST acknowledgment can
+   * arrive before or after neighbouring stream events, so it is held until the
+   * stream reaches its seq and released there, ahead of the event at `seq`.
+   * Returns true when an acknowledgment for exactly `seq` was released, i.e.
+   * the stream event at `seq` is its echo and needs no second fold.
+   */
+  _releaseAppearanceAcks(seq) {
+    if (!this._appearanceAcks.length) return false;
+    const due = this._appearanceAcks.filter((ack) => ack.seq <= seq);
+    if (!due.length) return false;
+    this._appearanceAcks = this._appearanceAcks.filter((ack) => ack.seq > seq);
+    due.sort((a, b) => a.seq - b.seq);
+    for (const ack of due) this._foldOwnAppearance(ack.entry);
+    return due.some((ack) => ack.seq === seq);
+  }
+
   _scheduleRetry() {
     if (this._closed) return;
     // A flush debounced while this request was in flight would otherwise fire
@@ -2165,6 +2199,7 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
+          this._releaseAppearanceAcks(data.seq);
           // It may carry membership changes this client never saw as ops; a
           // read marked stale still keeps every current member.
           this._membershipVersion = data.seq;
@@ -2197,6 +2232,7 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
+          this._releaseAppearanceAcks(data.seq);
           this._membershipVersion = data.seq; // as for a snapshot
         }
         this._ready = true;
@@ -2233,6 +2269,7 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq;
           if (data.seq > this._seq) this._seq = data.seq;
         }
+        const ackedHere = typeof data.seq === 'number' && this._releaseAppearanceAcks(data.seq);
         // Claim ops are ephemeral (advisory soft-locks, never sequenced state).
         // Track other clients' claims for presence markers; our own echoes need
         // no tracking since the local user sees their own selection natively.
@@ -2255,11 +2292,16 @@ export class SessionSyncClient {
         // the id, which must still learn of it.
         // Nor for a membership op: the server is its only writer, so its
         // broadcast, not the local action, is what the baseline follows.
+        // An appearance echo is the one exception: it is folded here, at its
+        // stream position, unless its acknowledgment was just released for it.
         if (
           data.client_id === this.clientId &&
           !SERVER_ONLY_OPS.has(op.op) &&
           !MEMBERSHIP_OPS.has(op.op)
         ) {
+          if (!ackedHere && (op.op === 'node_shape_set' || op.op === 'type_shape_set')) {
+            this._foldOwnAppearance(op);
+          }
           return;
         }
         // Fold the remote change into the baseline before the host applies it,
@@ -2428,6 +2470,7 @@ export class SessionSyncClient {
       this._leasePruneTimer = null;
     }
     this._queue = [];
+    this._appearanceAcks = [];
     // A close() before the client ever became ready (e.g. a session switch
     // while whenReady() is still pending) must still resolve any waiter, or
     // its awaiter hangs forever holding this whole client alive. Resolving
