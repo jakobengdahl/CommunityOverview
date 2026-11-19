@@ -100,6 +100,9 @@ class _Graph:
     def update_node(self, **arguments):
         return self._channel.call("graph.update_node", arguments)
 
+    def attach_run_file(self, **arguments):
+        return self._channel.call("graph.attach_run_file", arguments)
+
 
 class _RunFiles:
     def __init__(self, channel):

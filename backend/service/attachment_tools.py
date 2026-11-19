@@ -712,12 +712,45 @@ def add_attachment(
     content_type=None,
 ):
     """Store one file through the same service path as the REST upload."""
+    return _store_attachment(
+        service,
+        node_id,
+        filename,
+        content_type,
+        _content_length(content_text, content_base64),
+        lambda: _decoded_content(content_text, content_base64),
+        in_arguments=True,
+    )
+
+
+def attach_run_file(service, run_files, node_id, file_id):
+    """Attach only a file owned by this run, through add_attachment's path."""
+    try:
+        found = run_files.get(file_id) if run_files is not None else None
+    except Exception:
+        found = None
+    # An unknown id fails argument validation after the write ceiling.
+    record, data = found if found is not None else (None, None)
+    return _store_attachment(
+        service,
+        node_id,
+        record.filename if record else None,
+        record.declared_content_type if record else None,
+        len(data) if data is not None else None,
+        lambda: data,
+        in_arguments=False,
+    )
+
+
+def _store_attachment(
+    service, node_id, filename, content_type, size, content, in_arguments
+):
+    """The single attachment write path for tools; audits every outcome."""
     result, resolved = error("failed"), False
     try:
         result = _write_refusal(service, "add_node_attachment")
         if result is not None:
             return result
-        size = _content_length(content_text, content_base64)
         if (
             not isinstance(node_id, str)
             or not isinstance(filename, str)
@@ -734,10 +767,15 @@ def add_attachment(
             result = _write_result(refused)
             return result
         resolved = True
-        if size > service._attachment_read_tools.limits.mcp_max_decoded_bytes:
+        # The message-size limit applies only to content carried in tool
+        # arguments; run files never pass through a tool message.
+        if (
+            in_arguments
+            and size > service._attachment_read_tools.limits.mcp_max_decoded_bytes
+        ):
             result = error("attachment_too_large_for_tool")
             return result
-        data = _decoded_content(content_text, content_base64)
+        data = content()
         if data is None:
             result = error("invalid_arguments")
             return result
