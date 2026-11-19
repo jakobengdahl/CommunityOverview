@@ -213,12 +213,14 @@ describe('App handler wiring', () => {
 
   it.each(
     ['node', 'type'].flatMap((scope) => [
-      [scope, false],
-      [scope, true],
+      [scope, 'none'],
+      [scope, 'edited'],
+      [scope, 'reconnect'],
     ])
   )(
-    'sends one revision-checked appearance operation for %s (edited after apply: %s)',
-    async (scope, edited) => {
+    'sends one appearance operation for %s at the store revision (after apply: %s)',
+    async (scope, after) => {
+      const edited = after !== 'none';
       const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
       await renderApp();
       act(() => canvas().onSaveView({ nodes: [] }));
@@ -256,22 +258,28 @@ describe('App handler wiring', () => {
         ...op,
         revisions: scope === 'node' ? { 'node:a': 1 } : { 'type:Actor': 1, 'node:a': 1 },
       };
+      // A reconnect settles the write before its reload reaches the store.
       const meta = { ownAppearance: true, sessionId: canvas().sessionKey };
       meta.applyBaseline = () => {
-        meta.currentAppearance = acknowledged;
+        if (after !== 'reconnect') meta.currentAppearance = acknowledged;
         return false;
       };
       await act(async () => captured.syncHandlersRef.current.onRemoteOps([acknowledged], meta));
+      const revision = after === 'reconnect' ? 0 : 1;
       await waitFor(() =>
-        expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor']).toBe(1)
+        expect(screen.queryByRole('dialog')?.querySelector('[role="alert"]') ?? null).toBeNull()
+      );
+      expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor'] || 0).toBe(
+        revision
       );
       if (edited) {
         expect(screen.getByLabelText(en.node_appearance.scale)).toHaveValue(2);
         fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
         expect(send).toHaveBeenCalledTimes(2);
         expect(send.mock.calls[1][0][0]).toEqual(
           expect.objectContaining({
-            base_revision: 1,
+            base_revision: revision,
             selection: { inline: expect.objectContaining({ scale: 2 }) },
           })
         );
@@ -311,22 +319,26 @@ describe('App handler wiring', () => {
         expect(send.mock.calls[1][0][0].node_id).toBe('b');
       } else {
         expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+        // The refusal does not latch: once a reload updates the store, Apply sends.
+        act(() => useGraphStore.setState({ shapeRevisions: { 'node:a': 1 } }));
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].base_revision).toBe(1);
       }
     }
   );
 
-  it('refuses a changed revision inside the dialog and guards double Escape', async () => {
+  it('refuses a node gone from the store inside the dialog and guards double Escape', async () => {
     const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps');
     await renderApp();
     fireEvent.keyDown(document, { key: 'Escape' });
     act(() => canvas().onAppearance('a'));
-    act(() => useGraphStore.setState({ shapeRevisions: { 'node:a': 1 } }));
+    const nodes = store().nodes;
+    act(() => useGraphStore.setState({ nodes: nodes.filter((node) => node.id !== 'a') }));
     fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
     expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
     expect(send).not.toHaveBeenCalled();
-    act(() => useGraphStore.setState({ shapeRevisions: {} }));
-    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
-    expect(send).not.toHaveBeenCalled();
+    act(() => useGraphStore.setState({ nodes }));
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(nodeIds()).toEqual(['a', 'b']);

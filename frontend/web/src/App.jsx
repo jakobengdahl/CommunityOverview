@@ -2680,14 +2680,12 @@ function App() {
     const node = state.nodes.find((item) => item.id === id);
     if (!node) return;
     setAppearanceError(null);
-    setAppearanceDialog({ node, revisions: { ...state.shapeRevisions } });
+    setAppearanceDialog({ node });
   }, []);
 
   const applyAppearance = useCallback(
     (scope, selection) => {
       const client = syncRef.current;
-      if (appearanceError?.dialog === appearanceDialog && appearanceError.code === 'changed')
-        return;
       if (
         appearancePendingRef.current ||
         client
@@ -2697,14 +2695,11 @@ function App() {
         setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
-      const { node, revisions } = appearanceDialog;
+      const { node } = appearanceDialog;
+      // The store is the only revision source: a settled write or a reconnect
+      // reload advances it, and the server refuses a stale base revision.
       const state = useGraphStore.getState();
-      const type = node.nodeType || node.type;
-      const keys = [`node:${node.id}`, `type:${type}`];
-      if (
-        !state.nodes.some((item) => item.id === node.id) ||
-        keys.some((key) => (state.shapeRevisions[key] || 0) !== (revisions[key] || 0))
-      ) {
+      if (!state.nodes.some((item) => item.id === node.id)) {
         setAppearanceError({ dialog: appearanceDialog, code: 'changed' });
         return;
       }
@@ -2712,7 +2707,13 @@ function App() {
         setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
-      const op = appearanceOperation(scope, node, selection, revisions, crypto.randomUUID());
+      const op = appearanceOperation(
+        scope,
+        node,
+        selection,
+        state.shapeRevisions,
+        crypto.randomUUID()
+      );
       appearancePendingRef.current = {
         id: op.operation_id,
         dialog: appearanceDialog,
@@ -2722,7 +2723,7 @@ function App() {
       applyRemoteOp(op);
       client.sendOps([op]);
     },
-    [appearanceDialog, appearanceError, syncRef, sessionId, applyRemoteOp]
+    [appearanceDialog, syncRef, sessionId, applyRemoteOp]
   );
 
   // Callback: Context menu action triggered from schema-defined callback items
@@ -3021,12 +3022,9 @@ function App() {
               if (meta.ownAppearance && appearancePendingRef.current?.id === op.operation_id) {
                 const pending = appearancePendingRef.current;
                 appearancePendingRef.current = null;
-                setAppearanceDialog((current) => {
-                  if (current !== pending.dialog) return current;
-                  return pending.edited
-                    ? { ...current, revisions: { ...current.revisions, ...op.revisions } }
-                    : null;
-                });
+                setAppearanceDialog((current) =>
+                  current === pending.dialog && !pending.edited ? null : current
+                );
                 setAppearanceError((error) => (error?.dialog === pending.dialog ? null : error));
               }
               if (baselineResult === false && !meta.currentAppearance) {
