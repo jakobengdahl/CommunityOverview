@@ -776,9 +776,15 @@ def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
     assert client.get("/shape-library/card/usage").status_code == 404
 
 
-def test_a_replaced_policy_governs_every_library_route(tmp_path):
+def test_a_replaced_policy_governs_every_library_route(tmp_path, monkeypatch):
     """Swapping the one authorize function restricts create, edit and delete
-    alike, and a refused write persists nothing."""
+    alike, a graph hook that refuses mutations refuses them all before the
+    library policy runs, and a refused write persists nothing."""
+    from backend.runtime.authorization import (
+        AUTHORIZATION_MODE_ENV,
+        AUTHORIZATION_MODE_READ_ONLY,
+    )
+
     calls = []
 
     def owner_only(identity, action, entry):
@@ -808,6 +814,16 @@ def test_a_replaced_policy_governs_every_library_route(tmp_path):
         == 403
     )
     assert manager.shape_library.revision() == 1
+    monkeypatch.setenv(AUTHORIZATION_MODE_ENV, AUTHORIZATION_MODE_READ_ONLY)
+    for method, path, kwargs in (
+        ("post", "/shape-library", {"json": {"key": "other", **body}}),
+        ("put", "/shape-library/card", {"json": {**body, **expected}}),
+        ("delete", "/shape-library/card", {"params": expected}),
+    ):
+        refused = getattr(client, method)(path, headers=as_alice, **kwargs)
+        assert refused.status_code == 403
+    assert manager.shape_library.revision() == 1
+    monkeypatch.delenv(AUTHORIZATION_MODE_ENV)
     assert (
         client.delete(
             "/shape-library/card", params=expected, headers=as_alice

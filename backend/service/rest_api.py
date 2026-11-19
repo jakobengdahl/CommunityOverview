@@ -1489,9 +1489,13 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="no shape library")
         return session_manager.shape_library
 
-    def _library_write(http_request: Request, key: str, write) -> Dict[str, Any]:
+    def _library_write(
+        http_request: Request, target: str, key: str, write
+    ) -> Dict[str, Any]:
         """Run ``write(identity)`` as the request's authenticated identity.
 
+        A saved shape restyles every session referencing it, so the graph
+        authorization hook must allow the mutation as for any session change.
         The identity is only ever the principal the auth middleware recorded in
         the request scope; with none, the library refuses the write.
         """
@@ -1503,6 +1507,7 @@ def _register_session_endpoints(
         )
 
         library = _library()
+        _authorize_session_change(http_request, target, None)
         identity = library_identity(
             http_request.scope.get(AUTHENTICATED_PRINCIPAL_SCOPE_KEY)
         )
@@ -1550,6 +1555,7 @@ def _register_session_endpoints(
     ) -> Dict[str, Any]:
         return _library_write(
             http_request,
+            "create_shape_library_entry",
             request.key,
             lambda library, identity: library.put(
                 request.key, request.name, request.definition, identity=identity
@@ -1562,6 +1568,7 @@ def _register_session_endpoints(
     ) -> Dict[str, Any]:
         return _library_write(
             http_request,
+            "update_shape_library_entry",
             key,
             lambda library, identity: library.put(
                 key,
@@ -1583,6 +1590,7 @@ def _register_session_endpoints(
         """Tombstone the entry; references resolve to the built-in card."""
         return _library_write(
             http_request,
+            "delete_shape_library_entry",
             key,
             lambda library, identity: library.delete(
                 key,

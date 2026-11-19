@@ -741,6 +741,19 @@ describe('NodeAppearanceDialog', () => {
     await click('node_appearance.save_copy');
     expect(create.mock.calls[1][0]).not.toBe(key);
     expect(create.mock.calls[1][2]).toEqual(DEFAULT_SHAPE);
+    expect(screen.getByRole('button', { name: 'node_appearance.delete_saved' })).toBeTruthy();
+    // A fetch read after both writes omits them: they were deleted elsewhere.
+    view.rerender(
+      <NodeAppearanceDialog
+        {...props}
+        savedShapes={{}}
+        savedShapesRevision={2}
+        library={{ create }}
+        onApply={apply}
+      />
+    );
+    expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
   });
   it('edits and deletes a saved shape only after a usage warning on the reviewed revision', async () => {
     const apply = vi.fn();

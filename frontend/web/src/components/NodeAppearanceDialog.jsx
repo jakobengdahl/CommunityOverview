@@ -118,11 +118,14 @@ export function freshShapeKey(name) {
 /**
  * The fetched library with this dialog's own committed writes laid over it,
  * so a saved entry previews before the session's fetch catches up; the
- * higher revision of an entry wins and a deletion removes it.
+ * higher revision of an entry wins and a deletion removes it. A fetch read at
+ * or after a write's revision already holds that write, or its deletion
+ * elsewhere, so the write no longer applies.
  */
-export function mergeSavedShapes(fetched, written) {
+export function mergeSavedShapes(fetched, written, fetchedRevision = null) {
   const merged = { ...(fetched || {}) };
   for (const [key, entry] of Object.entries(written)) {
+    if (fetchedRevision != null && fetchedRevision >= entry.revision) continue;
     if (merged[key] && merged[key].revision > entry.revision) continue;
     if (entry.deleted) delete merged[key];
     else merged[key] = entry;
@@ -158,6 +161,7 @@ export default function NodeAppearanceDialog({
   typeShapes,
   nodes,
   savedShapes,
+  savedShapesRevision = null,
   library,
   onApply,
   onDraftChange,
@@ -171,7 +175,7 @@ export default function NodeAppearanceDialog({
   const type = node.nodeType || node.type;
   const entity = { ...node, type };
   const [written, setWritten] = useState({});
-  const saved = mergeSavedShapes(savedShapes, written);
+  const saved = mergeSavedShapes(savedShapes, written, savedShapesRevision);
   const [original] = useState(() =>
     currentAppearance(node, schema, shapeOverrides, typeShapes, saved)
   );

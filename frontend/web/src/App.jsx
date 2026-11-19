@@ -360,6 +360,7 @@ function App() {
     setRemoteLeases,
     opStreamReady,
     savedShapes,
+    savedShapesRevision,
     refreshSavedShapes,
   } = useSyncConnection(sessionId);
   // The active session's write mode and staged changes
@@ -4376,6 +4377,7 @@ function App() {
           typeShapes={typeShapes}
           nodes={nodes}
           savedShapes={savedShapes}
+          savedShapesRevision={savedShapesRevision}
           library={shapeLibrary}
           error={appearanceError?.dialog === appearanceDialog ? appearanceError.code : null}
           onDraftChange={() => {
