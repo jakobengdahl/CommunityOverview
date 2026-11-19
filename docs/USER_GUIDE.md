@@ -88,6 +88,15 @@ them. Cancel discards the draft. If another appearance change is still pending o
 the appearance changes while the editor is open, follow the notice in the dialog
 before applying again. The light and dark preview options do not change the page theme.
 
+**Saved shapes:** signed-in users can keep a look in the shared shape library. On the
+**Apply** tab of **Node appearance**, name the draft and choose **Save as named shape**,
+then **Apply** to use it; saving and applying are separate steps, so a failed Apply keeps
+both the saved shape and your draft for another try. Pick a saved shape on the **Shape**
+tab to use it. Saved shapes are shared and live: after a warning with the number of
+sessions that use it, **Edit saved shape** changes it everywhere, while **Save copy**
+makes an independent one. **Delete saved shape** returns every user of it to the
+built-in card. If someone else changed the shape meanwhile, review it again before saving.
+
 ### 2.2 Creating edges
 
 Hover over a node until the connection handle appears on its border, then drag to a target

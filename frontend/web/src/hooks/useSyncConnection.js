@@ -40,6 +40,8 @@ export function useSyncConnection(sessionId) {
   // The fetched library itself outlives the connection.
   const [savedShapes, setSavedShapes] = useState(null);
   const libraryRef = useRef(null);
+  // The connected client's library fetch, for a refresh after a local write.
+  const confirmLibraryRef = useRef(null);
 
   // Clear everything scoped to a single connected client, so a stale roster /
   // remote positions from the previous session never bleed into the next one.
@@ -115,6 +117,7 @@ export function useSyncConnection(sessionId) {
             }
           );
       };
+      confirmLibraryRef.current = confirmLibrary;
       client = new SessionSyncClient({
         sessionId: targetId,
         deferRemoteOps: true,
@@ -177,6 +180,13 @@ export function useSyncConnection(sessionId) {
     };
   }, [sessionId, resetConnectionState]);
 
+  // Fetch the library unless the cache already holds ``revision`` (null:
+  // always), so a library write made here shows without a stream notice.
+  const refreshSavedShapes = useCallback(
+    (revision = null) => confirmLibraryRef.current?.(revision) ?? null,
+    []
+  );
+
   return {
     syncRef,
     syncHandlersRef,
@@ -196,5 +206,6 @@ export function useSyncConnection(sessionId) {
     opStreamReady,
     setOpStreamReady,
     savedShapes,
+    refreshSavedShapes,
   };
 }

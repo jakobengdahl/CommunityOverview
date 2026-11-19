@@ -6,8 +6,9 @@ renderer with accessible text are implemented. A node whose type names a
 configured shape (or whose session selection resolves to a config or inline
 definition) renders that shape; saved library references resolve to the
 entry the client fetched for the session's confirmed library revision, else to
-the built-in card. Library writes stay disabled; minimum hit targets, editing
-and shared appearance operations remain future work.
+the built-in card. Library writes are enabled for authenticated users through
+the REST library routes, and the editor saves, edits, copies and deletes saved
+shapes; minimum hit targets remain future work.
 Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
@@ -216,6 +217,16 @@ Until a trustworthy identity/permission boundary is available, disable library
 writes rather than treating a client ID as an owner. Config changes remain an
 operator file workflow. The ownership decision is recorded below.
 
+As implemented, a library write needs the principal the authentication
+middleware recorded in the request scope (`library_identity` in
+`backend/core/shape_library.py`); without one, including on an instance with
+authentication off, the REST routes refuse it, and actor headers or body owner
+fields are never read. The permission check is `authorize_library_write` in
+the same file, called by `ShapeLibrary` inside the library transaction with
+the identity, the action (`create`, `edit`, `delete`) and the current entry for
+every write; a deployment passes its own function as `ShapeLibrary(authorize=…)`
+to restrict writes without changing the routes.
+
 On edit/delete, show the count of referencing sessions, including inactive
 persisted ones, without exposing their names to unauthorized users. Recheck
 revision and usage at confirmation; a stale revision returns conflict and
@@ -244,6 +255,8 @@ Library saves and session Apply are distinct transactions. If saving succeeds
 but Apply fails, keep the saved entry and draft, report the failure, and allow
 retry. Never report success for an optimistic preview. The static editor shows
 these steps and warnings; it is a flow mockup rather than a working library.
+The working editor in `NodeAppearanceDialog.jsx` commits library writes from
+its Apply tab and changes the session only on Apply.
 
 ## Shared sessions
 

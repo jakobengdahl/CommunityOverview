@@ -677,3 +677,146 @@ def test_commits_invalidate_referencing_streams_and_reconnect_reads_the_revision
     }
     (tmp_path / "library" / "library.json").write_text("{", encoding="utf-8")
     assert manager.library_revision() is None
+
+
+def _library_client(tmp_path, **options):
+    """REST client whose ``x-test-user`` header stands in for the principal the
+    auth middleware records; no other input marks a request authenticated."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.api_host.middleware import AUTHENTICATED_PRINCIPAL_SCOPE_KEY
+
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    manager.shape_library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
+        writes_enabled=True,
+        writers=store,
+        invalidate=manager.publish_library_invalidation,
+        **options,
+    )
+    app = FastAPI()
+    service = GraphService(GraphStorage(json_path=str(tmp_path / "g.json")))
+    app.include_router(create_rest_router(service, session_manager=manager))
+
+    @app.middleware("http")
+    async def authenticate(request, call_next):
+        if user := request.headers.get("x-test-user"):
+            request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                "kind": "user",
+                "id": user,
+            }
+        return await call_next(request)
+
+    return TestClient(app), manager
+
+
+def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
+    """Any signed-in user may create, edit and delete; anonymous writes and
+    client-named owners or actors persist nothing, the owner is the creating
+    principal, usage counts closed sessions without naming them, a stale
+    revision conflicts unchanged and a deleted key is never reused."""
+    client, manager = _library_client(tmp_path)
+    library = manager.shape_library
+    session = manager.create_session()
+    session.state["shape_overrides"] = {"a": {"ref": "saved:card"}}
+    manager.store.persist(session)
+    # Persisted by another store: closed as far as this process knows.
+    SessionStore(library.sessions).create(
+        state={"type_shapes": {"X": {"ref": "saved:card"}}}
+    )
+    body = {"key": "card", "name": "Card", "definition": DEFINITION}
+    anonymous = client.post(
+        "/shape-library",
+        json={**body, "owner": "mallory"},
+        headers={"x-communityoverview-actor-id": "mallory"},
+    )
+    assert anonymous.status_code == 403
+    assert not (tmp_path / "library" / "library.json").exists()
+    created = client.post(
+        "/shape-library",
+        json={**body, "owner": "mallory", "identity": "mallory"},
+        headers={"x-test-user": "alice"},
+    )
+    assert created.status_code == 201 and "owner" not in created.json()
+    assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
+    usage = client.get("/shape-library/card/usage")
+    assert usage.json() == {"revision": 1, "usage": 2}
+    edit = {"name": "Flat", "definition": {**DEFINITION, "base": "rectangle-flat"}}
+    stale = client.put(
+        "/shape-library/card",
+        json={**edit, "expected_revision": 0, "expected_usage": 2},
+        headers={"x-test-user": "bob"},
+    )
+    assert stale.status_code == 409
+    assert (stale.json()["detail"]["revision"], stale.json()["detail"]["usage"]) == (
+        1,
+        2,
+    )
+    assert library.snapshot()["entries"]["card"]["name"] == "Card"
+    edited = client.put(
+        "/shape-library/card",
+        json={**edit, "expected_revision": 1, "expected_usage": 2, "owner": "bob"},
+        headers={"x-test-user": "bob"},
+    )
+    assert edited.status_code == 200 and edited.json()["revision"] == 2
+    assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
+    deleted = client.delete(
+        "/shape-library/card",
+        params={"expected_revision": 2, "expected_usage": 2},
+        headers={"x-test-user": "bob"},
+    )
+    assert deleted.json()["deleted"] is True
+    reused = client.post("/shape-library", json=body, headers={"x-test-user": "alice"})
+    assert reused.status_code == 409
+    assert client.get("/shape-library").json()["entries"] == {}
+    assert client.get("/shape-library/card/usage").status_code == 404
+
+
+def test_a_replaced_policy_governs_every_library_route(tmp_path):
+    """Swapping the one authorize function restricts create, edit and delete
+    alike, and a refused write persists nothing."""
+    calls = []
+
+    def owner_only(identity, action, entry):
+        calls.append((identity, action, entry and entry["owner"]))
+        return entry is None or entry["owner"] == identity
+
+    client, manager = _library_client(tmp_path, authorize=owner_only)
+    body = {"name": "Card", "definition": DEFINITION}
+    as_alice, as_bob = ({"x-test-user": user} for user in ("alice", "bob"))
+    assert (
+        client.post(
+            "/shape-library", json={"key": "card", **body}, headers=as_alice
+        ).status_code
+        == 201
+    )
+    expected = {"expected_revision": 1, "expected_usage": 0}
+    assert (
+        client.put(
+            "/shape-library/card", json={**body, **expected}, headers=as_bob
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(
+            "/shape-library/card", params=expected, headers=as_bob
+        ).status_code
+        == 403
+    )
+    assert manager.shape_library.revision() == 1
+    assert (
+        client.delete(
+            "/shape-library/card", params=expected, headers=as_alice
+        ).status_code
+        == 200
+    )
+    assert calls == [
+        ("user:alice", "create", None),
+        ("user:bob", "edit", "user:alice"),
+        ("user:bob", "delete", "user:alice"),
+        ("user:alice", "delete", "user:alice"),
+    ]

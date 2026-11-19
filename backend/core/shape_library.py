@@ -1,8 +1,11 @@
 """Persistent named node shapes and their session references.
 
-Storage core only: mutations stay refused until ``writes_enabled`` is set, which
-no caller does yet. The identity passed to a write is recorded as the owner; it
-must come from an authenticated boundary, never a browser client ID.
+Mutations stay refused until ``writes_enabled`` is set (the API host sets it)
+and are refused for a write without an identity. The identity is recorded as
+the owner of a new entry; callers derive it with ``library_identity`` from the
+principal the authentication middleware recorded, never from a client field.
+Who may create, edit or delete is decided by the one ``authorize`` policy, by
+default ``authorize_library_write``.
 
 A mutation that also changes a session holds the session backend's transaction
 throughout and makes the library durable before the session is written, so a
@@ -23,7 +26,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 from pydantic import TypeAdapter
 
@@ -102,6 +105,32 @@ class LibraryForbidden(Exception):
     """Library mutation is disabled or no identity was supplied."""
 
 
+LIBRARY_CREATE = "create"
+LIBRARY_EDIT = "edit"
+LIBRARY_DELETE = "delete"
+
+
+def library_identity(principal):
+    """The identity for a principal set by the authentication middleware, else None."""
+    if not isinstance(principal, Mapping):
+        return None
+    kind, ident = principal.get("kind"), principal.get("id")
+    if not (isinstance(kind, str) and kind and isinstance(ident, str) and ident):
+        return None
+    return f"{kind}:{ident}"
+
+
+def authorize_library_write(identity, action, entry):
+    """The library write policy: any authenticated identity may create, edit
+    and delete every saved shape (owner decision of 2026-11-12).
+
+    Called inside the library transaction with the current entry (None on
+    create), only once an identity is present. Replace it through
+    ``ShapeLibrary(authorize=...)`` to restrict writes, e.g. to ``entry["owner"]``.
+    """
+    return True
+
+
 class ShapeLibrary:
     def __init__(
         self,
@@ -111,10 +140,13 @@ class ShapeLibrary:
         writes_enabled=False,
         writers=None,
         invalidate=None,
+        authorize=authorize_library_write,
     ):
         self.backend = backend
         self.sessions = sessions
         self.writes_enabled = writes_enabled
+        # ``authorize(identity, action, entry)``; False refuses the write.
+        self.authorize = authorize
         # The SessionStore holding the live sessions (``is_writing``).
         self.writers = writers
         # ``invalidate(key, revision, session_ids)`` after each commit.
@@ -228,6 +260,15 @@ class ShapeLibrary:
                     raise LibraryConflict()
             elif entry["deleted"] or expected_revision != entry["revision"]:
                 raise LibraryConflict()
+            action = (
+                LIBRARY_CREATE
+                if entry is None
+                else LIBRARY_DELETE
+                if delete
+                else LIBRARY_EDIT
+            )
+            if not self.authorize(identity, action, copy.deepcopy(entry)):
+                raise LibraryForbidden()
             if entry is not None and (
                 expected_usage is None or expected_usage != self.usage(key)
             ):

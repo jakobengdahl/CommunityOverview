@@ -573,6 +573,40 @@ export async function getShapeLibrary() {
   return apiFetch(`${API_BASE}/shape-library`);
 }
 
+const savedShapeUrl = (key) => `${API_BASE}/shape-library/${encodeURIComponent(key)}`;
+
+/** How many sessions reference a saved shape: `{revision, usage}`. */
+export async function getSavedShapeUsage(key) {
+  return apiFetch(`${savedShapeUrl(key)}/usage`);
+}
+
+/** Create a saved shape; the server records the signed-in user as owner. */
+export async function createSavedShape(key, name, definition) {
+  return apiFetch(`${API_BASE}/shape-library`, {
+    method: 'POST',
+    body: JSON.stringify({ key, name, definition }),
+  });
+}
+
+/** Edit the reviewed revision of a saved shape; a stale review is a 409. */
+export async function updateSavedShape(key, name, definition, revision, usage) {
+  return apiFetch(savedShapeUrl(key), {
+    method: 'PUT',
+    body: JSON.stringify({
+      name,
+      definition,
+      expected_revision: revision,
+      expected_usage: usage,
+    }),
+  });
+}
+
+/** Delete (tombstone) a saved shape; its users fall back to the built-in card. */
+export async function deleteSavedShape(key, revision, usage) {
+  const query = new URLSearchParams({ expected_revision: revision, expected_usage: usage });
+  return apiFetch(`${savedShapeUrl(key)}?${query}`, { method: 'DELETE' });
+}
+
 // ============================================================
 // Node attachments (ADR 0008)
 // ============================================================
