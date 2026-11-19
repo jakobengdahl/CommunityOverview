@@ -12,6 +12,7 @@ import copy
 import errno
 import json
 import os
+import threading
 
 import pytest
 
@@ -932,12 +933,81 @@ class TestAppearanceOperations:
             assert session.to_dict() == before
 
 
+def _in_thread(fn):
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(value=fn()), daemon=True)
+    thread.start()
+    return thread, result
+
+
+class TestTransactionCoversReads:
+    """A second backend over the same directory stands in for another process:
+    it shares only the ``.sessions.lock`` file, not the in-process lock."""
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda store, sid: store.get(sid).name,
+            lambda store, sid: store._backend.load(sid)["name"],
+        ],
+        ids=["store_get_miss", "backend_load"],
+    )
+    def test_read_waits_for_a_transaction_and_sees_its_end_state(self, tmp_path, read):
+        writer = FileSessionPersistenceBackend(tmp_path)
+        raw = Session(id="1111-2222", name="before").to_dict()
+        writer.save(raw)
+        store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+        with writer.transaction():
+            writer.save({**raw, "name": "partial"})
+            reader, result = _in_thread(lambda: read(store, raw["id"]))
+            reader.join(0.3)
+            assert reader.is_alive()
+            writer.delete(raw["id"])
+            writer.save({**raw, "name": "after"})
+        reader.join(5)
+        assert result["value"] == "after"
+
+    def test_cache_hit_returns_the_cached_session_without_the_lock(self, tmp_path):
+        writer = FileSessionPersistenceBackend(tmp_path)
+        writer.save(Session(id="1111-2222", name="before").to_dict())
+        store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+        cached = store.get("1111-2222")
+        with writer.transaction():
+            writer.save(Session(id="1111-2222", name="after").to_dict())
+            reader, result = _in_thread(lambda: store.get("1111-2222"))
+            reader.join(5)
+        assert result["value"] is cached
+        assert cached.name == "before"
+
+    @pytest.mark.parametrize("case", ["missing", "invalid_id", "corrupt"])
+    def test_failed_read_releases_the_lock_and_caches_nothing(self, tmp_path, case):
+        backend = FileSessionPersistenceBackend(tmp_path)
+        store = SessionStore(backend)
+        if case == "invalid_id":
+            with pytest.raises(OpError):
+                backend.load("../etc")
+        elif case == "corrupt":
+            (tmp_path / "1111-2222.json").write_text("{", encoding="utf-8")
+            with pytest.raises(ValueError):
+                store.get("1111-2222")
+        else:
+            assert store.get("1111-2222") is None
+        other = FileSessionPersistenceBackend(tmp_path)
+        writer, _ = _in_thread(
+            lambda: other.save(Session(id="1111-2222", name="later").to_dict())
+        )
+        writer.join(5)
+        assert not writer.is_alive()
+        assert store.get("1111-2222").name == "later"
+
+
 @pytest.mark.parametrize("module", [session_store, storage_backends])
 def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
     """On Windows ``_lock_file`` retries a timed-out lock until it is held,
     for shared and exclusive requests alike, and raises any other error. Lock
     and unlock always target byte 0, whatever the handle's position, and leave
-    that position as it was."""
+    that position as it was. The session backend's transaction lock takes the
+    same waiting path."""
     calls = []
     positions = []
     outcomes = []
@@ -971,3 +1041,9 @@ def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
         assert calls == [FakeMsvcrt.LK_UNLCK]
         assert set(positions) == {0}
         assert os.lseek(f.fileno(), 0, os.SEEK_CUR) == eof > 0
+    if module is session_store:
+        calls.clear()
+        outcomes[:] = [errno.EDEADLOCK, None, None]
+        with FileSessionPersistenceBackend(tmp_path / "s").transaction():
+            pass
+        assert calls == [FakeMsvcrt.LK_LOCK] * 2 + [FakeMsvcrt.LK_UNLCK]
