@@ -224,8 +224,11 @@ authentication off, the REST routes refuse it, and actor headers or body owner
 fields are never read. The permission check is `authorize_library_write` in
 the same file, called by `ShapeLibrary` inside the library transaction with
 the identity, the action (`create`, `edit`, `delete`) and the current entry for
-every write; a deployment passes its own function as `ShapeLibrary(authorize=…)`
-to restrict writes without changing the routes.
+every write. The API host builds the library in `backend/api_host/server.py`
+with that default; changing the policy means passing another function as
+`ShapeLibrary(authorize=…)` there, which governs every library route without
+changing the routes. Runtime extensions cannot supply it, and the graph
+authorization hook can only refuse a library write before the policy runs.
 
 On edit/delete, show the count of referencing sessions, including inactive
 persisted ones, without exposing their names to unauthorized users. Recheck
