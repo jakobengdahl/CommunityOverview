@@ -211,9 +211,14 @@ describe('App handler wiring', () => {
     }
   });
 
-  it.each(['node', 'type'])(
-    'sends one revision-checked appearance operation for %s',
-    async (scope) => {
+  it.each(
+    ['node', 'type'].flatMap((scope) => [
+      [scope, false],
+      [scope, true],
+    ])
+  )(
+    'sends one revision-checked appearance operation for %s (edited after apply: %s)',
+    async (scope, edited) => {
       const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
       await renderApp();
       act(() => canvas().onSaveView({ nodes: [] }));
@@ -240,6 +245,12 @@ describe('App handler wiring', () => {
       fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
       expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
       expect(send).toHaveBeenCalledTimes(1);
+      if (edited) {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.shape }));
+        fireEvent.change(screen.getByLabelText(en.node_appearance.scale), {
+          target: { value: '2' },
+        });
+      }
       const op = send.mock.calls[0][0][0];
       const acknowledged = {
         ...op,
@@ -251,25 +262,58 @@ describe('App handler wiring', () => {
         return false;
       };
       await act(async () => captured.syncHandlersRef.current.onRemoteOps([acknowledged], meta));
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-      expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor']).toBe(1);
+      await waitFor(() =>
+        expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor']).toBe(1)
+      );
+      if (edited) {
+        expect(screen.getByLabelText(en.node_appearance.scale)).toHaveValue(2);
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0]).toEqual(
+          expect.objectContaining({
+            base_revision: 1,
+            selection: { inline: expect.objectContaining({ scale: 2 }) },
+          })
+        );
+      } else {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      }
     }
   );
 
-  it('keeps the draft open when the server refuses an appearance write', async () => {
-    const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
-    await renderApp();
-    act(() => canvas().onSaveView({ nodes: [] }));
-    act(() => canvas().onAppearance('a'));
-    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
-    const op = send.mock.calls[0][0][0];
-    await act(async () =>
-      captured.syncHandlersRef.current.onDropped([op], 409, {
-        detail: { error: 'shape_revision_conflict' },
-      })
-    );
-    expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
-  });
+  it.each([false, true])(
+    'scopes a refused appearance write to its dialog (reopened: %s)',
+    async (reopened) => {
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      const op = send.mock.calls[0][0][0];
+      api.getSession.mockResolvedValueOnce({
+        state: {},
+        resolved: { nodes: [NODE_A, NODE_B], edges: [EDGE_1] },
+        roster: [],
+      });
+      if (reopened) {
+        fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+        act(() => canvas().onAppearance('b'));
+      }
+      await act(async () =>
+        captured.syncHandlersRef.current.onDropped([op], 409, {
+          detail: { error: 'shape_revision_conflict' },
+        })
+      );
+      if (reopened) {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].node_id).toBe('b');
+      } else {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+      }
+    }
+  );
 
   it('refuses a changed revision inside the dialog and guards double Escape', async () => {
     const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps');

@@ -2686,14 +2686,15 @@ function App() {
   const applyAppearance = useCallback(
     (scope, selection) => {
       const client = syncRef.current;
-      if (appearanceError === 'changed') return;
+      if (appearanceError?.dialog === appearanceDialog && appearanceError.code === 'changed')
+        return;
       if (
         appearancePendingRef.current ||
         client
           ?.getPendingOps()
           .some((op) => op.op === 'node_shape_set' || op.op === 'type_shape_set')
       ) {
-        setAppearanceError('pending');
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
       const { node, revisions } = appearanceDialog;
@@ -2704,15 +2705,19 @@ function App() {
         !state.nodes.some((item) => item.id === node.id) ||
         keys.some((key) => (state.shapeRevisions[key] || 0) !== (revisions[key] || 0))
       ) {
-        setAppearanceError('changed');
+        setAppearanceError({ dialog: appearanceDialog, code: 'changed' });
         return;
       }
       if (!client || client.sessionId !== sessionId) {
-        setAppearanceError('pending');
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
       const op = appearanceOperation(scope, node, selection, revisions, crypto.randomUUID());
-      appearancePendingRef.current = { id: op.operation_id, dialog: appearanceDialog };
+      appearancePendingRef.current = {
+        id: op.operation_id,
+        dialog: appearanceDialog,
+        edited: false,
+      };
       setAppearanceError(null);
       applyRemoteOp(op);
       client.sendOps([op]);
@@ -3016,8 +3021,13 @@ function App() {
               if (meta.ownAppearance && appearancePendingRef.current?.id === op.operation_id) {
                 const pending = appearancePendingRef.current;
                 appearancePendingRef.current = null;
-                setAppearanceDialog((current) => (current === pending.dialog ? null : current));
-                setAppearanceError(null);
+                setAppearanceDialog((current) => {
+                  if (current !== pending.dialog) return current;
+                  return pending.edited
+                    ? { ...current, revisions: { ...current.revisions, ...op.revisions } }
+                    : null;
+                });
+                setAppearanceError((error) => (error?.dialog === pending.dialog ? null : error));
               }
               if (baselineResult === false && !meta.currentAppearance) {
                 release?.();
@@ -3157,9 +3167,15 @@ function App() {
         (batch || []).forEach((op) => {
           recentlyDroppedOpsRef.current.add(op);
           if (op.operation_id && op.operation_id === appearancePendingRef.current?.id) {
+            const pending = appearancePendingRef.current;
             appearancePendingRef.current = null;
-            setAppearanceError(
-              body?.detail?.error === 'shape_revision_conflict' ? 'changed' : 'failed'
+            setAppearanceError((error) =>
+              error && error.dialog !== pending.dialog
+                ? error
+                : {
+                    dialog: pending.dialog,
+                    code: body?.detail?.error === 'shape_revision_conflict' ? 'changed' : 'failed',
+                  }
             );
           }
         });
@@ -4333,7 +4349,11 @@ function App() {
           shapeOverrides={shapeOverrides}
           typeShapes={typeShapes}
           nodes={nodes}
-          error={appearanceError}
+          error={appearanceError?.dialog === appearanceDialog ? appearanceError.code : null}
+          onDraftChange={() => {
+            const pending = appearancePendingRef.current;
+            if (pending?.dialog === appearanceDialog) pending.edited = true;
+          }}
           onApply={applyAppearance}
           onClose={() => setAppearanceDialog(null)}
         />

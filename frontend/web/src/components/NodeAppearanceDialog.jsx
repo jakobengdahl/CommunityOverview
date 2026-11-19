@@ -129,6 +129,7 @@ export default function NodeAppearanceDialog({
   typeShapes,
   nodes,
   onApply,
+  onDraftChange,
   onClose,
   error,
 }) {
@@ -291,7 +292,7 @@ export default function NodeAppearanceDialog({
     return () => window.removeEventListener('keydown', isolateKeys, true);
   });
   return (
-    <div className="mme-overlay appearance-overlay" ref={overlay}>
+    <div className="mme-overlay appearance-overlay" ref={overlay} onChange={onDraftChange}>
       <div
         className="mme-dialog appearance-dialog"
         role="dialog"
