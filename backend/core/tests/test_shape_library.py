@@ -764,6 +764,28 @@ def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
     )
     assert edited.status_code == 200 and edited.json()["revision"] == 2
     assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
+    # A delete reviewed at an old revision, or against a usage count that has
+    # changed since, conflicts with the current state and deletes nothing.
+    stale_usage = client.put(
+        "/shape-library/card",
+        json={**edit, "expected_revision": 2, "expected_usage": 1},
+        headers={"x-test-user": "bob"},
+    )
+    for params in (
+        {"expected_revision": 1, "expected_usage": 2},
+        {"expected_revision": 2, "expected_usage": 3},
+    ):
+        stale_delete = client.delete(
+            "/shape-library/card", params=params, headers={"x-test-user": "bob"}
+        )
+        for refused in (stale_usage, stale_delete):
+            assert refused.status_code == 409
+            assert (
+                refused.json()["detail"]["revision"],
+                refused.json()["detail"]["usage"],
+            ) == (2, 2)
+    assert library.snapshot()["entries"]["card"]["deleted"] is False
+    assert library.revision() == 2
     deleted = client.delete(
         "/shape-library/card",
         params={"expected_revision": 2, "expected_usage": 2},
