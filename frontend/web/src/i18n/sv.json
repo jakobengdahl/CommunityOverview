@@ -1087,26 +1087,6 @@
     "field_name": "Namn",
     "field_summary": "Sammanfattning",
     "field_description": "Beskrivning",
-    "field_tags": "Taggar",
-    "saved_shape": "Sparad form",
-    "library": "Formbibliotek",
-    "shape_name": "Namn på sparad form",
-    "save_named": "Spara som namngiven form",
-    "saved_source": "Utgår från den sparade formen {name}. Sparade former delas: en ändring påverkar alla sessioner som använder den.",
-    "edit_saved": "Redigera sparad form",
-    "save_copy": "Spara kopia",
-    "copy_name": "{name} kopia",
-    "delete_saved": "Ta bort sparad form",
-    "edit_warning": "Den sparade formen används i {count} sessioner, även stängda. En uppdatering ändrar alla.",
-    "delete_warning": "Den sparade formen används i {count} sessioner, även stängda. Efter borttagning visar de standardkortet.",
-    "confirm_edit": "Uppdatera sparad form",
-    "confirm_delete": "Ta bort och använd standardkortet",
-    "back": "Tillbaka",
-    "library_saved": "Sparad i biblioteket. Välj Använd för att använda den i sessionen.",
-    "library_updated": "Den sparade formen är uppdaterad. Välj Använd för att använda den i sessionen.",
-    "library_deleted": "Den sparade formen är borttagen. Dess användare visar nu standardkortet.",
-    "library_conflict": "Den sparade formen eller dess användning har ändrats. Granska den igen innan du sparar.",
-    "library_forbidden": "Du måste vara inloggad för att spara former.",
-    "library_failed": "Formbiblioteket kunde inte ändras. Ditt utkast finns kvar; försök igen."
+    "field_tags": "Taggar"
   }
 }

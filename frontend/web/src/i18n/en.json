@@ -1087,26 +1087,6 @@
     "field_name": "Name",
     "field_summary": "Summary",
     "field_description": "Description",
-    "field_tags": "Tags",
-    "saved_shape": "Saved shape",
-    "library": "Shape library",
-    "shape_name": "Name for a saved shape",
-    "save_named": "Save as named shape",
-    "saved_source": "Started from the saved shape {name}. Saved shapes are shared: an edit changes every session that uses it.",
-    "edit_saved": "Edit saved shape",
-    "save_copy": "Save copy",
-    "copy_name": "{name} copy",
-    "delete_saved": "Delete saved shape",
-    "edit_warning": "This saved shape is used in {count} sessions, including closed ones. Updating it changes them all.",
-    "delete_warning": "This saved shape is used in {count} sessions, including closed ones. After deletion they show the built-in card.",
-    "confirm_edit": "Update saved shape",
-    "confirm_delete": "Delete and use the built-in card",
-    "back": "Back",
-    "library_saved": "Saved to the library. Apply to use it in this session.",
-    "library_updated": "Saved shape updated. Apply to use it in this session.",
-    "library_deleted": "Saved shape deleted. Its users now show the built-in card.",
-    "library_conflict": "The saved shape or its usage changed. Review it again before saving.",
-    "library_forbidden": "Saving shapes needs a signed-in user.",
-    "library_failed": "The shape library could not be changed. Your draft is kept; try again."
+    "field_tags": "Tags"
   }
 }

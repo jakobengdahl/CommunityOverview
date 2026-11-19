@@ -37,7 +37,7 @@ const sameDefinition = (a, b) =>
  * selection the canvas cannot resolve falls back to the built-in card, so
  * the source is then 'fallback' rather than the level that holds it.
  */
-export function currentAppearance(node, schema, shapeOverrides, typeShapes, savedShapes = {}) {
+export function currentAppearance(node, schema, shapeOverrides, typeShapes) {
   const type = node.nodeType || node.type;
   const configShape = Object.hasOwn(schema?.node_types || {}, type)
     ? schema.node_types[type]?.shape
@@ -52,7 +52,6 @@ export function currentAppearance(node, schema, shapeOverrides, typeShapes, save
   const resolved = createNodeShapeResolver({
     nodeTypes: schema?.node_types,
     nodeShapes: schema?.node_shapes,
-    savedShapes,
     shapeOverrides,
     typeShapes,
   })({ ...node, type });
@@ -102,37 +101,6 @@ export function appearanceDraft(original, edits, resolve) {
   };
 }
 
-/**
- * A key no entry has used: keys are never reused, since a deleted key keeps
- * its tombstone (NODE_SHAPES.md § Resolution and deletion).
- */
-export function freshShapeKey(name) {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^[^a-z]+|-+$/g, '')
-    .slice(0, 50);
-  return `${slug || 'shape'}-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-/**
- * The fetched library with this dialog's own committed writes laid over it,
- * so a saved entry previews before the session's fetch catches up; the
- * higher revision of an entry wins and a deletion removes it. A fetch read at
- * or after a write's revision already holds that write, or its deletion
- * elsewhere, so the write no longer applies.
- */
-export function mergeSavedShapes(fetched, written, fetchedRevision = null) {
-  const merged = { ...(fetched || {}) };
-  for (const [key, entry] of Object.entries(written)) {
-    if (fetchedRevision != null && fetchedRevision >= entry.revision) continue;
-    if (merged[key] && merged[key].revision > entry.revision) continue;
-    if (entry.deleted) delete merged[key];
-    else merged[key] = entry;
-  }
-  return merged;
-}
-
 export function appearanceOperation(scope, node, selection, revisions, operationId) {
   const type = node.nodeType || node.type;
   const common = { version: 1, selection, operation_id: operationId };
@@ -160,9 +128,6 @@ export default function NodeAppearanceDialog({
   shapeOverrides,
   typeShapes,
   nodes,
-  savedShapes,
-  savedShapesRevision = null,
-  library,
   onApply,
   onDraftChange,
   onClose,
@@ -174,29 +139,18 @@ export default function NodeAppearanceDialog({
   const overlay = useRef(null);
   const type = node.nodeType || node.type;
   const entity = { ...node, type };
-  const [written, setWritten] = useState({});
-  const saved = mergeSavedShapes(savedShapes, written, savedShapesRevision);
-  const [original] = useState(() =>
-    currentAppearance(node, schema, shapeOverrides, typeShapes, saved)
-  );
+  const [original] = useState(() => currentAppearance(node, schema, shapeOverrides, typeShapes));
   const [edits, setEdits] = useState({});
   const [tab, setTab] = useState(0);
   const [scope, setScope] = useState('node');
   const [status, setStatus] = useState({ message: '', slot: 0 });
   const [theme, setTheme] = useState('light');
   const [longText, setLongText] = useState(false);
-  const [shapeName, setShapeName] = useState('');
-  // The edit or delete awaiting confirmation, with the usage it warned of
-  // and the entry and content it was started for.
-  const [pending, setReview] = useState(null);
-  const [libraryBusy, setLibraryBusy] = useState(false);
-  const [libraryStatus, setLibraryStatus] = useState(null);
   const tabs = ['shape', 'text', 'apply'];
   const resolve = (selection) =>
     createNodeShapeResolver({
       nodeTypes: schema?.node_types,
       nodeShapes: schema?.node_shapes,
-      savedShapes: saved,
       shapeOverrides: { [node.id]: selection },
     })(entity)?.definition || null;
   const draft = appearanceDraft(original.selection, edits, resolve);
@@ -233,16 +187,6 @@ export default function NodeAppearanceDialog({
     typeof draft.selection?.ref === 'string' && draft.selection.ref.startsWith('config:')
       ? draft.selection.ref.slice('config:'.length)
       : '';
-  const savedOf = (selection) =>
-    typeof selection?.ref === 'string' && selection.ref.startsWith('saved:')
-      ? selection.ref.slice('saved:'.length)
-      : '';
-  // The saved entry the draft started from, while it still exists.
-  const savedKey = savedOf(edits.ref ? edits : original.selection);
-  const savedEntry = Object.hasOwn(saved, savedKey) ? saved[savedKey] : null;
-  // Any draft change after the warning ends the review, so a confirm never
-  // writes content or a target the warning was not shown for.
-  const review = pending?.edits === edits ? pending : null;
   const retained = nodes.filter(
     (n) =>
       n.id !== node.id && (n.nodeType || n.type) === type && Object.hasOwn(shapeOverrides, n.id)
@@ -299,79 +243,6 @@ export default function NodeAppearanceDialog({
       { base, ...(reset ? { placement } : {}) },
       reset ? 'placement_reset' : 'preview_updated'
     );
-  }
-  function libraryFailed(error) {
-    setReview(null);
-    if (error?.status === 409) library.refresh?.();
-    setLibraryStatus(
-      error?.status === 409
-        ? 'library_conflict'
-        : error?.status === 403
-          ? 'library_forbidden'
-          : 'library_failed'
-    );
-  }
-  // A library write commits on its own: the session changes only on Apply.
-  async function libraryWrite(write, message) {
-    setLibraryBusy(true);
-    try {
-      const entry = await write();
-      setWritten((previous) => ({ ...previous, [entry.key]: entry }));
-      setReview(null);
-      setLibraryStatus(message);
-      return entry;
-    } catch (error) {
-      libraryFailed(error);
-      return null;
-    } finally {
-      setLibraryBusy(false);
-    }
-  }
-  async function saveNew(name) {
-    const entry = await libraryWrite(
-      () => library.create(freshShapeKey(name), name, structuredClone(shown)),
-      'library_saved'
-    );
-    if (entry) {
-      setEdits({ ref: `saved:${entry.key}` });
-      setShapeName('');
-    }
-  }
-  // Edit and delete first show the current usage, then commit only if
-  // neither the entry nor its usage changed since that warning.
-  async function startReview(action) {
-    const started = { action, key: savedKey, name: savedEntry.name, edits };
-    if (action === 'edit') started.definition = structuredClone(shown);
-    setLibraryBusy(true);
-    try {
-      const { revision, usage } = await library.usage(savedKey);
-      if (revision !== savedEntry.revision) libraryFailed({ status: 409 });
-      else {
-        setLibraryStatus(null);
-        setReview({ ...started, revision, usage });
-      }
-    } catch (error) {
-      libraryFailed(error?.status === 404 ? { status: 409 } : error);
-    } finally {
-      setLibraryBusy(false);
-    }
-  }
-  async function confirmReview() {
-    const { action, key, name, definition, revision, usage } = review;
-    if (action === 'delete') {
-      const entry = await libraryWrite(
-        () => library.remove(key, revision, usage),
-        'library_deleted'
-      );
-      // Its users, this draft included, now show the built-in card.
-      if (entry && edits.ref) setEdits({});
-      return;
-    }
-    const entry = await libraryWrite(
-      () => library.update(key, name, definition, revision, usage),
-      'library_updated'
-    );
-    if (entry) setEdits({ ref: `saved:${key}` });
   }
   function handleKey(e) {
     if (e.key === 'Escape') {
@@ -504,27 +375,6 @@ export default function NodeAppearanceDialog({
                     </select>
                   </label>
                 )}
-                {Object.keys(saved).length > 0 && (
-                  <label>
-                    {t('node_appearance.saved_shape')}
-                    <select
-                      value={savedOf(draft.selection)}
-                      onChange={(e) => {
-                        if (Object.hasOwn(saved, e.target.value)) {
-                          setEdits({ ref: `saved:${e.target.value}` });
-                          announce('preview_updated');
-                        }
-                      }}
-                    >
-                      <option value="">{t('node_appearance.choose_shape')}</option>
-                      {Object.entries(saved).map(([key, entry]) => (
-                        <option key={key} value={key}>
-                          {entry.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
                 <p>{t('node_appearance.config_readonly')}</p>
                 <label>
                   {t('node_appearance.scale')}
@@ -616,64 +466,6 @@ export default function NodeAppearanceDialog({
                     </label>
                   ))}
                 </fieldset>
-                {library && (
-                  <fieldset className="appearance-library">
-                    <legend>{t('node_appearance.library')}</legend>
-                    <label>
-                      {t('node_appearance.shape_name')}
-                      <input
-                        value={shapeName}
-                        maxLength={128}
-                        onChange={(e) => setShapeName(e.target.value)}
-                      />
-                    </label>
-                    <button
-                      disabled={!valid || libraryBusy || !shapeName.trim()}
-                      onClick={() => saveNew(shapeName.trim())}
-                    >
-                      {t('node_appearance.save_named')}
-                    </button>
-                    {savedEntry && (
-                      <>
-                        <p>{t('node_appearance.saved_source', { name: savedEntry.name })}</p>
-                        <button
-                          disabled={!valid || libraryBusy || !draft.selection.inline}
-                          onClick={() => startReview('edit')}
-                        >
-                          {t('node_appearance.edit_saved')}
-                        </button>
-                        <button
-                          disabled={!valid || libraryBusy}
-                          onClick={() =>
-                            saveNew(
-                              shapeName.trim() ||
-                                t('node_appearance.copy_name', { name: savedEntry.name })
-                            )
-                          }
-                        >
-                          {t('node_appearance.save_copy')}
-                        </button>
-                        <button disabled={libraryBusy} onClick={() => startReview('delete')}>
-                          {t('node_appearance.delete_saved')}
-                        </button>
-                      </>
-                    )}
-                    {review && (
-                      <div role="alert">
-                        <p>
-                          {t(`node_appearance.${review.action}_warning`, {
-                            count: review.usage,
-                          })}
-                        </p>
-                        <button disabled={libraryBusy} onClick={confirmReview}>
-                          {t(`node_appearance.confirm_${review.action}`)}
-                        </button>
-                        <button onClick={() => setReview(null)}>{t('node_appearance.back')}</button>
-                      </div>
-                    )}
-                    {libraryStatus && <p role="status">{t(`node_appearance.${libraryStatus}`)}</p>}
-                  </fieldset>
-                )}
               </>
             )}
             {!valid && <p role="alert">{t('node_appearance.invalid')}</p>}
