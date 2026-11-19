@@ -66,6 +66,19 @@ else:
     msvcrt = None
 
 
+def _msvcrt_lock_byte_zero(fd: int, mode: int) -> None:
+    # msvcrt.locking acts on the byte at the current file position. Handles
+    # opened for append sit at EOF while readers sit at 0, so without pinning
+    # the byte two contenders would lock different bytes and never wait for
+    # each other, and an unlock after a write would target an unlocked byte.
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, mode, 1)
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
+
+
 def _lock_file(f, exclusive: bool = True) -> None:
     """Acquire a file lock, waiting however long another holder keeps it."""
     if msvcrt is None:
@@ -73,7 +86,7 @@ def _lock_file(f, exclusive: bool = True) -> None:
         return
     while True:
         try:
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_LOCK)
             return
         except OSError as exc:
             if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
@@ -85,7 +98,7 @@ def _unlock_file(f) -> None:
     if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
     else:
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
 
 
 @dataclass(frozen=True)

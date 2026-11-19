@@ -11,6 +11,7 @@ dropped-update rule, and the ring buffer catch-up continuity check.
 import copy
 import errno
 import json
+import os
 
 import pytest
 
@@ -934,8 +935,11 @@ class TestAppearanceOperations:
 @pytest.mark.parametrize("module", [session_store, storage_backends])
 def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
     """On Windows ``_lock_file`` retries a timed-out lock until it is held,
-    for shared and exclusive requests alike, and raises any other error."""
+    for shared and exclusive requests alike, and raises any other error. Lock
+    and unlock always target byte 0, whatever the handle's position, and leave
+    that position as it was."""
     calls = []
+    positions = []
     outcomes = []
 
     class FakeMsvcrt:
@@ -944,12 +948,15 @@ def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
         @staticmethod
         def locking(fileno, mode, nbytes):
             calls.append(mode)
+            positions.append(os.lseek(fileno, 0, os.SEEK_CUR))
             outcome = outcomes.pop(0)
             if outcome is not None:
                 raise OSError(outcome, "locked")
 
     monkeypatch.setattr(module, "msvcrt", FakeMsvcrt)
-    with open(tmp_path / "lock", "a+") as f:
+    (tmp_path / "lock").write_text("existing")
+    with open(tmp_path / "lock", "ab") as f:
+        eof = os.lseek(f.fileno(), 0, os.SEEK_END)
         for exclusive in (True, False):
             calls.clear()
             outcomes[:] = [errno.EDEADLOCK, errno.EACCES, None]
@@ -962,3 +969,5 @@ def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
         calls.clear()
         module._unlock_file(f)
         assert calls == [FakeMsvcrt.LK_UNLCK]
+        assert set(positions) == {0}
+        assert os.lseek(f.fileno(), 0, os.SEEK_CUR) == eof > 0
