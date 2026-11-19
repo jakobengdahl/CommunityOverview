@@ -21,6 +21,7 @@ stays a pure state layer with no asyncio dependency.
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import math
 import os
@@ -372,23 +373,49 @@ class SessionPersistenceBackend(Protocol):
 
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
-# the same guarantees as graph writes.
+# the same guarantees as graph writes. msvcrt has no shared mode, so every
+# Windows lock is exclusive, and no mode that waits indefinitely (LK_NBLCK
+# fails at once, LK_LOCK gives up after about ten seconds), so LK_LOCK is
+# retried until it succeeds, as flock would block.
 if sys.platform == "win32":  # pragma: no cover - platform specific
     import msvcrt
-
-    def _lock_file(f, exclusive: bool = True) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
 
-    def _lock_file(f, exclusive: bool = True) -> None:
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    msvcrt = None
 
-    def _unlock_file(f) -> None:
+
+def _msvcrt_lock_byte_zero(fd: int, mode: int) -> None:
+    # msvcrt.locking acts on the byte at the current file position. Handles
+    # opened for append sit at EOF while readers sit at 0, so without pinning
+    # the byte two contenders would lock different bytes and never wait for
+    # each other, and an unlock after a write would target an unlocked byte.
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, mode, 1)
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
+
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    if msvcrt is None:
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    while True:
+        try:
+            _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_LOCK)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
+                raise
+
+
+def _unlock_file(f) -> None:
+    if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
 
 
 class FileSessionPersistenceBackend:
