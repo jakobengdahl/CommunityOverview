@@ -439,6 +439,36 @@ def _unlock_file(f) -> None:
         _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
 
 
+def _fsync_directory(directory: str | Path) -> None:
+    """Make the renames in ``directory`` durable.
+
+    Windows cannot open a directory, and some filesystems refuse to fsync one;
+    there the rename stands as before rather than failing a write it completed.
+    """
+    if sys.platform == "win32":  # pragma: no cover - platform specific
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+    finally:
+        os.close(fd)
+
+
+def _make_directory(directory: Path) -> None:
+    """Create ``directory`` and make each new entry durable in its parent."""
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        _fsync_directory(created.parent)
+
+
 class FileSessionPersistenceBackend:
     """One JSON file per session under ``directory`` with atomic writes.
 
@@ -464,7 +494,7 @@ class FileSessionPersistenceBackend:
                 finally:
                     self._depth -= 1
                 return
-            self.directory.mkdir(parents=True, exist_ok=True)
+            _make_directory(self.directory)
             with open(self.directory / ".sessions.lock", "a+") as lock:
                 _lock_file(lock, exclusive=True)
                 self._depth = 1
@@ -505,6 +535,20 @@ class FileSessionPersistenceBackend:
             self._save_locked(path, session)
 
     def _save_locked(self, path: Path, session: Dict[str, Any]) -> None:
+        # A failed save leaves the previous file in place, even when only the
+        # directory fsync after the rename fails.
+        previous = path.read_bytes() if path.exists() else None
+        self._replace_locked(path, json.dumps(session, indent=2, ensure_ascii=False))
+        try:
+            _fsync_directory(self.directory)
+        except Exception:
+            if previous is None:
+                os.unlink(path)
+            else:
+                self._replace_locked(path, previous.decode("utf-8"))
+            raise
+
+    def _replace_locked(self, path: Path, text: str) -> None:
         temp_fd, temp_path = tempfile.mkstemp(
             suffix=".json", prefix="session_", dir=self.directory
         )
@@ -512,7 +556,7 @@ class FileSessionPersistenceBackend:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 _lock_file(f, exclusive=True)
                 try:
-                    json.dump(session, f, indent=2, ensure_ascii=False)
+                    f.write(text)
                     f.flush()
                     os.fsync(f.fileno())
                 finally:
