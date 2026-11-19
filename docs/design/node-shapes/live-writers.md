@@ -95,14 +95,21 @@ Slice 6c tells clients when a saved shape they render has changed.
   session that references the entry, and of no other. Like a summon it is
   ephemeral: not sequenced, not replayed, subject to the same subscriber queue
   bound. It names no definition and no other session. A failure to publish is
-  logged; the commit stands.
+  logged; the commit stands. A session under the writing marker may reference
+  the entry only in memory, so it is judged again once its outermost write
+  section exits, on its persisted or rolled-back state, and notified if it
+  then references the entry.
 - **Fetch:** `GET /api/shape-library` returns the current entries (no
   tombstones, no owners) and the library revision. A deleted key is absent,
   so its references resolve to the built-in card, never to a lower-priority
   shape or the old definition.
 - **Reconnect ordering:** every snapshot and catch-up carries
-  `library_revision`. The browser sync client hands that revision, or an
-  invalidation's, to the host before it handles the event; while the host
+  `library_revision`, read off the event loop before the payload is built;
+  `null` when the library cannot be read, which the stream survives. The
+  browser sync client hands that revision, or an invalidation's, to the host
+  before it handles the event; so does a shape operation adding a `saved:`
+  reference, as `null`, since the entry may have changed while the session
+  did not reference it. A `null` revision always fetches; while the host
   fetches a newer library, that event and every later stream event wait, in
   order. So the snapshot or missed operations are resolved against the
   fetched library, never the one from before the disconnect. A failed fetch

@@ -144,18 +144,7 @@ class ShapeLibrary:
             session = self.sessions.load(sid)
             if not session:
                 continue
-            state = session.get("state", {})
-            refs = set()
-            for name in ("shape_overrides", "type_shapes"):
-                mapping = state.get(name, {})
-                if not isinstance(mapping, dict):
-                    continue
-                for selection in mapping.values():
-                    if isinstance(selection, dict):
-                        ref = selection.get("ref")
-                        if isinstance(ref, str) and ref.startswith("saved:"):
-                            refs.add(ref[6:])
-            for ref in refs:
+            for ref in _saved_refs(session.get("state", {})):
                 index.setdefault(ref, set()).add(sid)
         return index
 
@@ -282,6 +271,12 @@ class ShapeLibrary:
                 session.state.update(snapshot["state"])
                 session.updated_at = snapshot["updated_at"]
             users = sorted(self.references().get(key, ())) if self.invalidate else []
+            if self.invalidate and self.writers is not None:
+                # A session mid-write may reference the key only in memory; it
+                # is judged on its state once that write persists or rolls back.
+                self.writers.after_writes(
+                    lambda live: self._invalidate_late(live, key, result, users)
+                )
         if users:
             # The commit stands either way; a client that misses the notice
             # still fetches the revision on its next connect.
@@ -290,3 +285,22 @@ class ShapeLibrary:
             except Exception:
                 logger.exception("library invalidation failed for %s", key)
         return result
+
+    def _invalidate_late(self, session, key, result, notified):
+        if session.id in notified or key not in _saved_refs(session.state):
+            return
+        self.invalidate(key, result["revision"], [session.id])
+
+
+def _saved_refs(state):
+    refs = set()
+    for name in ("shape_overrides", "type_shapes"):
+        mapping = state.get(name, {})
+        if not isinstance(mapping, dict):
+            continue
+        for selection in mapping.values():
+            if isinstance(selection, dict):
+                ref = selection.get("ref")
+                if isinstance(ref, str) and ref.startswith("saved:"):
+                    refs.add(ref[6:])
+    return refs

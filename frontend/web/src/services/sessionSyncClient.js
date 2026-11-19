@@ -367,6 +367,25 @@ function withGroupTextColor(ann) {
  * the baseline, the next local snapshot no longer looks like it added it.
  * Pure — exported for unit testing. Returns a new mirror.
  */
+// The shape library revision an event needs fetched before it is handled:
+// a number, null for "fetch the current one" (the server could not read it, or
+// an op adds a saved reference whose entry may have changed while this session
+// did not reference it, so no invalidation reached it), else undefined.
+function libraryRevisionOf(event) {
+  if (event.type === 'library_invalidated') {
+    return typeof event.revision === 'number' ? event.revision : null;
+  }
+  if (event.type === 'snapshot' || event.type === 'catch_up') {
+    if (!('library_revision' in event)) return undefined;
+    return typeof event.library_revision === 'number' ? event.library_revision : null;
+  }
+  const op = event.type === 'op' ? event.op : null;
+  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
+  const saved = (selection) =>
+    typeof selection?.ref === 'string' && selection.ref.startsWith('saved:');
+  return saved(op.selection) || saved(op.restore_selection) ? null : undefined;
+}
+
 // A type change and its optional node override change have separate revisions.
 function currentAppearanceOp(baseline, op, requireRevision = false) {
   const revisions = op.revisions || {};
@@ -2269,12 +2288,9 @@ export class SessionSyncClient {
     if (data) this._eventBacklog.push(data);
     while (!this._libraryWait && !this._closed && this._eventBacklog.length) {
       const event = this._eventBacklog.shift();
-      const revision =
-        event.type === 'library_invalidated' ? event.revision : event.library_revision;
+      const revision = libraryRevisionOf(event);
       const pending =
-        typeof revision === 'number'
-          ? this.handlers.onLibraryRevision?.(revision, this.sessionId)
-          : null;
+        revision !== undefined ? this.handlers.onLibraryRevision?.(revision, this.sessionId) : null;
       if (typeof pending?.then === 'function') {
         // Stream order is kept: nothing after this event is handled before it.
         this._libraryWait = true;

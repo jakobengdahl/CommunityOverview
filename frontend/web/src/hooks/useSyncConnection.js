@@ -84,11 +84,13 @@ export function useSyncConnection(sessionId) {
         syncHandlersRef.current.onRemoteOps?.(...args);
       };
       // Returns a promise while the library is fetched; the client holds
-      // this session's stream events until it settles.
+      // this session's stream events until it settles. A null revision (the
+      // server could not read it, or an op adds a saved reference the cache
+      // may predate) always fetches.
       const confirmLibrary = (revision) => {
         if (!isCurrentClient()) return null;
         const cached = libraryRef.current;
-        if (cached && cached.revision >= revision) {
+        if (cached && revision != null && cached.revision >= revision) {
           setSavedShapes(cached.entries);
           return null;
         }
@@ -99,7 +101,7 @@ export function useSyncConnection(sessionId) {
               const entries =
                 library?.entries && typeof library.entries === 'object' ? library.entries : {};
               const revisionNow =
-                typeof library?.revision === 'number' ? library.revision : revision;
+                typeof library?.revision === 'number' ? library.revision : (revision ?? -1);
               if (!libraryRef.current || libraryRef.current.revision <= revisionNow) {
                 libraryRef.current = { revision: revisionNow, entries };
               }

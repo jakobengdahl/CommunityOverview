@@ -265,8 +265,9 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(stale.handlers.onLibraryRevision(3)).toBeNull();
     act(() => expect(current.handlers.onLibraryRevision(2)).toBeNull());
     expect(result.current.savedShapes).toEqual(entries);
-    // A failed fetch drops what may now be stale instead of keeping it.
-    await act(() => current.handlers.onLibraryRevision(3));
+    // An unknown revision bypasses the cache; a failed fetch drops what may
+    // now be stale instead of keeping it.
+    await act(() => current.handlers.onLibraryRevision(null));
     expect(result.current.savedShapes).toBeNull();
     expect(api.getShapeLibrary).toHaveBeenCalledTimes(2);
   });

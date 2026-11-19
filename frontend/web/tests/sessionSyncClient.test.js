@@ -496,13 +496,25 @@ describe('SessionSyncClient', () => {
     await flush();
     expect(onResync).toHaveBeenCalledTimes(1);
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    // An op adding a saved reference fetches the current library first: the
+    // entry may have changed while this session did not reference it.
+    es.emit({
+      type: 'op',
+      seq: 8,
+      client_id: 'client-other',
+      op: { op: 'type_shape_set', type: 'Actor', selection: { ref: 'saved:card' } },
+    });
+    expect(onLibraryRevision).toHaveBeenLastCalledWith(null, '1234-5678');
+    settle();
+    await flush();
     es.emit({ type: 'library_invalidated', key: 'card', revision: 5 });
-    es.emit(added(8));
+    es.emit(added(9));
     expect(onLibraryRevision).toHaveBeenLastCalledWith(5, '1234-5678');
     client.close();
     settle();
     await flush();
-    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(onRemoteOps).toHaveBeenCalledTimes(2);
+    expect(onLibraryRevision).toHaveBeenCalledTimes(3);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

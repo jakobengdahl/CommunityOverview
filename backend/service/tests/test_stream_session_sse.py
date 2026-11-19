@@ -1,3 +1,4 @@
+# covers: backend/service/rest_api.py
 """
 Edge paths of the shared-session SSE generator (``GET /sessions/{id}/stream``).
 
@@ -307,7 +308,7 @@ async def test_unexpected_error_propagates_and_still_unsubscribes(
 
     await _next_chunk(body)  # catch-up snapshot
 
-    def _boom(event, session_manager, sid):
+    def _boom(*args):
         raise RuntimeError("translation failed")
 
     monkeypatch.setattr(rest_api_module, "_resolve_stream_event", _boom)

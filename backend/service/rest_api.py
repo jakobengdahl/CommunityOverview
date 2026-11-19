@@ -620,8 +620,18 @@ class IngestSessionImageRequest(BaseModel):
     expected_revision: Optional[int] = None
 
 
+async def _stream_library_revision(session_manager) -> Optional[int]:
+    """Read the shape library revision off the event loop (catch_up carries it)."""
+    if getattr(session_manager, "shape_library", None) is None:
+        return None
+    return await asyncio.to_thread(session_manager.library_revision)
+
+
 def _resolve_stream_event(
-    event: Dict[str, Any], session_manager, session_id: str
+    event: Dict[str, Any],
+    session_manager,
+    session_id: str,
+    library_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Translate a slow-consumer resync sentinel into a fresh full snapshot.
 
@@ -634,7 +644,7 @@ def _resolve_stream_event(
     needed.
     """
     if event.get("type") == "resync":
-        return session_manager.catch_up(session_id, None)
+        return session_manager.catch_up(session_id, None, library_revision)
     return event
 
 
@@ -2043,7 +2053,11 @@ def _register_session_endpoints(
         async def event_generator():
             try:
                 try:
-                    catch_up = session_manager.catch_up(session_id, since_seq)
+                    catch_up = session_manager.catch_up(
+                        session_id,
+                        since_seq,
+                        await _stream_library_revision(session_manager),
+                    )
                 except SessionNotFound:
                     # Deleted between the handshake above and the first body
                     # iteration. Without the notice a direct-mode client's
@@ -2062,9 +2076,14 @@ def _register_session_endpoints(
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"
                         continue
+                    library_revision = (
+                        await _stream_library_revision(session_manager)
+                        if event.get("type") == "resync"
+                        else None
+                    )
                     try:
                         event = _resolve_stream_event(
-                            event, session_manager, session_id
+                            event, session_manager, session_id, library_revision
                         )
                     except SessionNotFound:
                         # The session was deleted in the window between this
