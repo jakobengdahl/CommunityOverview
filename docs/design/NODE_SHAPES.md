@@ -6,8 +6,9 @@ renderer with accessible text are implemented. A node whose type names a
 configured shape (or whose session selection resolves to a config or inline
 definition) renders that shape; saved library references resolve to the
 entry the client fetched for the session's confirmed library revision, else to
-the built-in card. Library writes stay disabled; minimum hit targets, editing
-and shared appearance operations remain future work.
+the built-in card. Library writes are enabled for authenticated users through
+the REST library routes; the appearance editor does not write to the library
+yet, and minimum hit targets remain future work.
 Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
@@ -215,6 +216,19 @@ check in one replaceable function. Never trust client owner fields.
 Until a trustworthy identity/permission boundary is available, disable library
 writes rather than treating a client ID as an owner. Config changes remain an
 operator file workflow. The ownership decision is recorded below.
+
+As implemented, a library write needs the principal the authentication
+middleware recorded in the request scope (`library_identity` in
+`backend/core/shape_library.py`); without one, including on an instance with
+authentication off, the REST routes refuse it, and actor headers or body owner
+fields are never read. The permission check is `authorize_library_write` in
+the same file, called by `ShapeLibrary` inside the library transaction with
+the identity, the action (`create`, `edit`, `delete`) and the current entry for
+every write. The API host builds the library in `backend/api_host/server.py`
+with that default; changing the policy means passing another function as
+`ShapeLibrary(authorize=…)` there, which governs every library route without
+changing the routes. Runtime extensions cannot supply it, and the graph
+authorization hook can only refuse a library write before the policy runs.
 
 On edit/delete, show the count of referencing sessions, including inactive
 persisted ones, without exposing their names to unauthorized users. Recheck

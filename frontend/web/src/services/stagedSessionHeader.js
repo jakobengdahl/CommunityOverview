@@ -14,7 +14,8 @@
  *   it with `session_not_supported` instead of writing to the graph.
  *
  * Session routes are left out: they name their session in the path, and
- * creating a session is not a write in one. A few POSTs that never change the
+ * creating a session is not a write in one. Nor are the saved shape library
+ * routes, which never touch the graph. A few POSTs that never change the
  * graph (teleport resolution, document text extraction) are left out too,
  * or the backend would refuse them in a staged session for no reason.
  */
@@ -65,6 +66,10 @@ const NON_GRAPH_POSTS = [
 
 const SESSION_ROUTES = /^\/(api\/)?sessions(\/.*)?$/;
 
+// The saved shape library is runtime config outside the graph and not
+// session-aware, so the backend would refuse the header on every verb.
+const SHAPE_LIBRARY_ROUTES = /^\/api\/shape-library(\/.*)?$/;
+
 // Session-aware POSTs that only read the graph.
 const READ_POSTS = [
   /^\/api\/search$/,
@@ -84,7 +89,7 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  */
 export function needsSessionHeader(method, path) {
   const verb = (method || 'GET').toUpperCase();
-  if (SESSION_ROUTES.test(path)) return false;
+  if (SESSION_ROUTES.test(path) || SHAPE_LIBRARY_ROUTES.test(path)) return false;
   if (isSessionAware(verb, path)) return true;
   if (!MUTATING.has(verb)) return false;
   return !(verb === 'POST' && NON_GRAPH_POSTS.some((re) => re.test(path)));

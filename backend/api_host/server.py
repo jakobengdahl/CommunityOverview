@@ -452,11 +452,12 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         staged_status=write_modes.staged_status,
     )
     session_manager = SessionManager(session_store, write_modes=write_modes)
-    # Read-only until library writes are enabled; a commit then invalidates
-    # the sessions that reference the entry.
+    # Writes need the identity the auth middleware authenticated (the REST
+    # routes refuse without one); a commit invalidates the referencing sessions.
     session_manager.shape_library = ShapeLibrary(
         FileShapeLibraryPersistenceBackend(Path(sessions_dir) / "shape-library"),
         session_backend,
+        writes_enabled=True,
         writers=session_store,
         invalidate=session_manager.publish_library_invalidation,
     )

@@ -115,6 +115,23 @@ def _lookup_rate_key(http_request: Request) -> str:
 # ==================== Request/Response Models ====================
 
 
+class ShapeLibraryCreateRequest(BaseModel):
+    """A new saved shape; an owner or identity field is ignored."""
+
+    key: str
+    name: str
+    definition: Dict[str, Any]
+
+
+class ShapeLibraryEditRequest(BaseModel):
+    """An edit of the reviewed revision, whose usage the user was warned of."""
+
+    name: str
+    definition: Dict[str, Any]
+    expected_revision: int
+    expected_usage: int
+
+
 class SearchRequest(BaseModel):
     """Request model for search operations."""
 
@@ -1466,6 +1483,122 @@ def _register_session_endpoints(
                 for key, entry in snapshot["entries"].items()
             },
         }
+
+    def _library():
+        if session_manager.shape_library is None:
+            raise HTTPException(status_code=404, detail="no shape library")
+        return session_manager.shape_library
+
+    def _library_write(
+        http_request: Request, target: str, key: str, write
+    ) -> Dict[str, Any]:
+        """Run ``write(identity)`` as the request's authenticated identity.
+
+        A saved shape restyles every session referencing it, so the graph
+        authorization hook must allow the mutation as for any session change.
+        The identity is only ever the principal the auth middleware recorded in
+        the request scope; with none, the library refuses the write.
+        """
+        from backend.api_host.middleware import AUTHENTICATED_PRINCIPAL_SCOPE_KEY
+        from backend.core.shape_library import (
+            LibraryConflict,
+            LibraryForbidden,
+            library_identity,
+        )
+
+        library = _library()
+        _authorize_session_change(http_request, target, None)
+        identity = library_identity(
+            http_request.scope.get(AUTHENTICATED_PRINCIPAL_SCOPE_KEY)
+        )
+        try:
+            entry = write(library, identity)
+        except LibraryForbidden:
+            raise _session_refusal(
+                "library_forbidden", "Saving shapes needs a signed-in user.", 403
+            )
+        except LibraryConflict:
+            # The current revision and usage let the client show the review.
+            current = library.snapshot()["entries"].get(key)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "library_conflict",
+                    "message": "The saved shape or its usage has changed.",
+                    "revision": current["revision"] if current else None,
+                    "usage": library.usage(key) if current else None,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "key": entry["key"],
+            "name": entry["name"],
+            "definition": entry["definition"],
+            "revision": entry["revision"],
+            "deleted": entry["deleted"],
+        }
+
+    @router.get("/shape-library/{key}/usage")
+    def get_shape_library_usage(key: str) -> Dict[str, Any]:
+        """How many persisted sessions, open or closed, reference the entry;
+        never which ones."""
+        library = _library()
+        entry = library.snapshot()["entries"].get(key)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="saved shape not found")
+        return {"revision": entry["revision"], "usage": library.usage(key)}
+
+    @router.post("/shape-library", status_code=201)
+    def create_shape_library_entry(
+        request: ShapeLibraryCreateRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        return _library_write(
+            http_request,
+            "create_shape_library_entry",
+            request.key,
+            lambda library, identity: library.put(
+                request.key, request.name, request.definition, identity=identity
+            ),
+        )
+
+    @router.put("/shape-library/{key}")
+    def update_shape_library_entry(
+        key: str, request: ShapeLibraryEditRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        return _library_write(
+            http_request,
+            "update_shape_library_entry",
+            key,
+            lambda library, identity: library.put(
+                key,
+                request.name,
+                request.definition,
+                identity=identity,
+                expected_revision=request.expected_revision,
+                expected_usage=request.expected_usage,
+            ),
+        )
+
+    @router.delete("/shape-library/{key}")
+    def delete_shape_library_entry(
+        key: str,
+        http_request: Request,
+        expected_revision: int = Query(...),
+        expected_usage: int = Query(...),
+    ) -> Dict[str, Any]:
+        """Tombstone the entry; references resolve to the built-in card."""
+        return _library_write(
+            http_request,
+            "delete_shape_library_entry",
+            key,
+            lambda library, identity: library.delete(
+                key,
+                identity=identity,
+                expected_revision=expected_revision,
+                expected_usage=expected_usage,
+            ),
+        )
 
     @router.get("/sessions")
     async def list_sessions() -> Dict[str, Any]:
