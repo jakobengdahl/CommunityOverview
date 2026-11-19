@@ -32,9 +32,20 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Deque,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+)
 
 from backend.config.node_shapes import ShapeSelection
 from pydantic import ValidationError
@@ -371,6 +382,16 @@ class SessionPersistenceBackend(Protocol):
 
     def list_ids(self) -> List[str]: ...
 
+    def transaction(self) -> ContextManager[None]:
+        """Hold the backend's exclusive lock; reentrant within one thread.
+
+        ``load``, ``save`` and ``delete`` each run inside one, so a caller that
+        groups several of them in an outer transaction is never observed half
+        done by a reader in another thread or process. A no-op context does
+        not conform, even when each single call is atomic on its own.
+        """
+        ...
+
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
 # the same guarantees as graph writes. msvcrt has no shared mode, so every
@@ -428,28 +449,62 @@ class FileSessionPersistenceBackend:
 
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
+        self._lock = threading.RLock()
+        self._depth = 0
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            if self._depth:
+                # flock and msvcrt locks are per handle: a second handle in the
+                # same thread would wait on the lock it already holds.
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with open(self.directory / ".sessions.lock", "a+") as lock:
+                _lock_file(lock, exclusive=True)
+                self._depth = 1
+                try:
+                    yield
+                finally:
+                    self._depth = 0
+                    _unlock_file(lock)
 
     def _path(self, session_id: str) -> Path:
         # session_id is always validated before it reaches here, so it cannot
         # contain path separators — but guard anyway to keep this a hard boundary.
         if not is_valid_session_id(session_id):
             raise OpError(f"invalid session id: {session_id!r}")
-        return self.directory / f"{session_id}.json"
+        # Containment check in a form static analysis recognises as a path
+        # sanitiser; the id regex above already rules out separators.
+        base = os.path.normpath(os.path.abspath(self.directory))
+        full = os.path.normpath(os.path.join(base, f"{session_id}.json"))
+        if not full.startswith(base.rstrip(os.sep) + os.sep):
+            raise OpError(f"invalid session id: {session_id!r}")
+        return Path(full)
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
         path = self._path(session_id)
-        if not path.exists():
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            _lock_file(f, exclusive=False)
-            try:
-                return json.load(f)
-            finally:
-                _unlock_file(f)
+        with self.transaction():
+            if not path.exists():
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                _lock_file(f, exclusive=False)
+                try:
+                    return json.load(f)
+                finally:
+                    _unlock_file(f)
 
     def save(self, session: Dict[str, Any]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(session["id"])
+        with self.transaction():
+            self._save_locked(path, session)
+
+    def _save_locked(self, path: Path, session: Dict[str, Any]) -> None:
         temp_fd, temp_path = tempfile.mkstemp(
             suffix=".json", prefix="session_", dir=self.directory
         )
@@ -473,8 +528,9 @@ class FileSessionPersistenceBackend:
 
     def delete(self, session_id: str) -> None:
         path = self._path(session_id)
-        if path.exists():
-            os.unlink(path)
+        with self.transaction():
+            if path.exists():
+                os.unlink(path)
 
     def list_ids(self) -> List[str]:
         # Enumerate without decoding so erasure cannot silently skip a damaged
@@ -514,16 +570,25 @@ class InMemorySessionPersistenceBackend:
 
     def __init__(self) -> None:
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            yield
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
-        raw = self._data.get(session_id)
-        return json.loads(json.dumps(raw)) if raw is not None else None
+        with self._lock:
+            raw = self._data.get(session_id)
+            return json.loads(json.dumps(raw)) if raw is not None else None
 
     def save(self, session: Dict[str, Any]) -> None:
-        self._data[session["id"]] = json.loads(json.dumps(session))
+        with self._lock:
+            self._data[session["id"]] = json.loads(json.dumps(session))
 
     def delete(self, session_id: str) -> None:
-        self._data.pop(session_id, None)
+        with self._lock:
+            self._data.pop(session_id, None)
 
     def list_ids(self) -> List[str]:
         return list(self._data)
@@ -876,10 +941,13 @@ class SessionStore:
             session = self._sessions.get(session_id)
             if session is not None:
                 return session
-            raw = self._backend.load(session_id)
-            if raw is None:
-                return None
-            session = Session.from_dict(raw)
+            # Decode under the backend's lock too, so the session cached here
+            # is the one persisted before or after a concurrent transaction.
+            with self._backend.transaction():
+                raw = self._backend.load(session_id)
+                if raw is None:
+                    return None
+                session = Session.from_dict(raw)
             self._sessions[session_id] = session
             self._rings.setdefault(session_id, deque(maxlen=self._ring_size))
             return session
