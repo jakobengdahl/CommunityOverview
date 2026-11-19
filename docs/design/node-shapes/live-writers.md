@@ -8,7 +8,9 @@ mutates it, persists it and on failure restores the snapshot. If a library
 commit adopted its state between that snapshot and the rollback, the rollback
 would erase a change the library file already holds. Slice 6b-4a marks the
 synchronous writers, which run their whole span on the calling thread; 6b-4b
-marks `apply_ops`, whose persist runs on a worker thread behind an await.
+marks `apply_ops`, whose persist runs on a worker thread behind an await;
+6b-4c marks the staging and layer writers, whose op follows a graph layer
+change.
 
 ## The marker
 
@@ -42,9 +44,29 @@ span, so the writer changes no live session state outside it:
 | `_apply_op_sync` (every synchronous op path: layout, node refs, annotations, groups, rename, describe, write mode, pushed results) | snapshot, apply, persist and rollback |
 | `_replay_action` (undo/redo) | from the record lookup and conflict checks through the record flag, history revision and deleted-id changes, the nested `_apply_op_sync`, and their restore on failure |
 | `apply_ops` (browser batches, REST `/ops`, async rename) | from the rollback snapshot through the batch's ops, budget check, off-thread persist and rollback |
+| `stage_graph_change` (staged graph writes) | from the session lookup and sequence check through the layer commit, the op and its persist |
+| `announce_layer_change` (discard and merge of staged changes) | the op and its persist |
 
 Broadcasts and lease or claim bookkeeping after a commit stay outside the
 marker: they do not change persisted session state.
+
+## Staging and layer writers
+
+A staging or layer writer applies its op after a graph layer change has
+committed, so a failure after that commit point must not be reported as if
+nothing had changed. Each writer takes one of two strategies:
+
+- **`stage_graph_change` takes the marker before the commit point.** The
+  layer commit is a callback it runs itself and stamps with the next session
+  sequence number, so the sequence check, the commit and the op that takes
+  that number are one section. A marker that cannot be taken raises before
+  the layer is touched. After the commit, a failed persist is logged and the
+  op still fans out, as before.
+- **`announce_layer_change` catches and logs a post-commit failure.** Its
+  callers change the layer (discard, merge) before calling it, so the marker
+  cannot precede that commit. It takes the marker around the op and its
+  persist; failing to take the marker is caught and logged like a failed op,
+  and the call returns no op instead of raising.
 
 ## Cancellation in `apply_ops`
 
@@ -64,9 +86,6 @@ into the session and then be overwritten by it.
 
 ## Out of scope
 
-- `stage_graph_change` and `announce_layer_change` (6b-4c): their op is
-  applied after the graph layer change has committed, so a failure to take
-  the marker must not propagate from there.
 - The marker is per process, like the live sessions it protects; another
   process has its own in-memory sessions and reads files under
   `.sessions.lock` (6b-2).
