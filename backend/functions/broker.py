@@ -155,6 +155,12 @@ TOOLS: Dict[str, ToolSpec] = {
             {"metadata_merge", "expected_updated_at", "expected_revision"}
         ),
     ),
+    "graph.attach_run_file": ToolSpec(
+        "add_node_attachment",
+        GRANT_GRAPH_WRITE,
+        GRAPH_ACTION_MUTATE,
+        required=frozenset({"node_id", "file_id"}),
+    ),
 }
 
 
@@ -183,6 +189,7 @@ class BrokerContext:
     max_message_bytes: int = MAX_MESSAGE_BYTES
     # backend.functions.run_files.RunFiles of a webhook call with files.
     run_files: Any = None
+    contract_version: str = "1"
 
 
 @dataclass
@@ -311,6 +318,8 @@ class FunctionBroker:
         spec = TOOLS.get(name)
         if spec is None:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
+        if name == "graph.attach_run_file" and ctx.contract_version != "3":
+            raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
         if spec.grant is not None and (
             spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant)
@@ -321,7 +330,7 @@ class FunctionBroker:
 
         self._validate_arguments(spec, arguments)
         call_args = dict(arguments)
-        if spec.action == GRAPH_ACTION_MUTATE:
+        if spec.action == GRAPH_ACTION_MUTATE and name != "graph.attach_run_file":
             call_args["event_origin"] = function_origin(
                 ctx.function_id, ctx.function_version
             )
@@ -375,12 +384,26 @@ class FunctionBroker:
                 # Run files need no grant, but the actor's access is still
                 # checked so revoking it stops reads mid-run (§7.2).
                 return self._call_run_file_tool(spec, call_args)
-            try:
-                result = getattr(self._service, spec.method)(**call_args)
-            except Exception:
-                # Never forward internal exception text to function code.
-                logger.exception("Function run %s: tool %s raised", ctx.run_id, name)
-                raise BrokerError(ERR_TOOL_FAILED, "The operation failed.")
+            if name == "graph.attach_run_file":
+                from backend.runtime.extensions import (
+                    bind_execution_context,
+                    runtime_context,
+                )
+                from backend.service.attachment_tools import attach_run_file
+
+                with bind_execution_context(
+                    runtime_context(spec.method, correlation_id=ctx.correlation_id)
+                ):
+                    result = attach_run_file(self._service, ctx.run_files, **call_args)
+            else:
+                try:
+                    result = getattr(self._service, spec.method)(**call_args)
+                except Exception:
+                    # Never forward internal exception text to function code.
+                    logger.exception(
+                        "Function run %s: tool %s raised", ctx.run_id, name
+                    )
+                    raise BrokerError(ERR_TOOL_FAILED, "The operation failed.")
 
         if spec.method == "find_similar_nodes":
             # The service applies no visibility narrowing to similarity search;
@@ -468,6 +491,12 @@ class FunctionBroker:
                     ERR_INVALID_ARGUMENTS,
                     "Updating metadata requires metadata_merge: true.",
                 )
+        if spec.method == "add_node_attachment":
+            if not all(
+                isinstance(arguments.get(k), str) for k in ("node_id", "file_id")
+            ):
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "Expected string identifiers.")
+            _refuse_reserved_id(arguments["node_id"])
 
     @staticmethod
     def _validate_keys(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:

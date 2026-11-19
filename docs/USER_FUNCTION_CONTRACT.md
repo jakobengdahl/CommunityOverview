@@ -1,6 +1,6 @@
 # User Function Contract
 
-**Contract versions:** 1 and 2
+**Contract versions:** 1, 2 and 3
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
@@ -182,7 +182,7 @@ of a function that is enabled (§4.4).
 
 | Field | Required | Meaning |
 |---|---|---|
-| `contract_version` | yes | The version of this contract the manifest targets. `"1"` or `"2"` for this document. |
+| `contract_version` | yes | The version of this contract the manifest targets: `"1"`, `"2"` or `"3"`. |
 | `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
 | `version` | yes | Semantic version of the function. Recorded on every run. |
 | `name` | yes | Human-readable name. |
@@ -623,6 +623,22 @@ still apply. A function accepts at most 60 webhook requests per minute. The rout
 uses `Idempotency-Key` and the normal single-run and timeout limits. Uploaded
 attachment references in input do not grant access to attachments. Multipart
 upload and HMAC authentication are not supported by this version.
+
+### Version 3: webhook files and attachment writes
+
+Version 3 adds multipart webhook inputs and the `run_files.list` and
+`run_files.read` tools. These expose only the current run's files, as untrusted
+content, without requiring a graph grant; actor authorization still applies.
+Files are temporary and are removed when the run ends. `run_files.read` uses
+the attachment type policy and extraction limits.
+
+`graph.attach_run_file(node_id, file_id)` attaches a current run file to a
+node through the normal attachment upload path, including its authorization,
+type policy and limits. It requires `graph:write`, including the webhook's
+per-function write switch, and is recorded in the run's tool calls and the
+attachment audit. Attachment content remains untrusted. File ids are scoped
+to the run; filesystem paths and files belonging to another run are not accepted.
+Accepting files into a run does not require the write switch.
 
 ## 13. Reserved for later versions
 

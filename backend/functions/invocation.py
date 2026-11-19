@@ -700,6 +700,7 @@ class FunctionInvocationService:
                 ),
                 max_tool_calls=limits.get("max_tool_calls", 200),
                 run_files=run_files,
+                contract_version=manifest["contract_version"],
             )
             envelope = {
                 "schema_version": "1.0",

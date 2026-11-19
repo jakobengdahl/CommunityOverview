@@ -762,6 +762,32 @@ def add_attachment(
         _audit_write("add_node_attachment", node_id, result, resolved)
 
 
+def attach_run_file(service, run_files, node_id, file_id):
+    """Attach only a file owned by this run through the normal upload path."""
+    result = error("failed")
+    try:
+        found = run_files.get(file_id) if run_files is not None else None
+        if found is None:
+            result = error("invalid_arguments")
+            return result
+        record, data = found
+        upload = service.add_node_attachment(
+            node_id,
+            filename=record.filename,
+            declared_content_type=record.declared_content_type,
+            content=data,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = _write_result(
+                pool.submit(copy_context().run, asyncio.run, upload).result()
+            )
+        return result
+    except Exception:
+        return result
+    finally:
+        _audit_write("add_node_attachment", node_id, result)
+
+
 def delete_attachment(service, node_id, attachment_id):
     result = error("failed")
     try:
