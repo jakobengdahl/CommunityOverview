@@ -952,9 +952,13 @@ lock and reentrant within one thread; `load`, `save` and `delete` each run
 inside one. `SessionStore.get` loads and decodes a session that is not yet in
 memory inside a transaction, so a reader in another thread or process sees a
 session as it was before or after a concurrent transaction, never part-way.
-The file adapter locks `.sessions.lock` in its session directory. An adapter
-whose single-document reads and writes are already atomic can return
-`contextlib.nullcontext()` to keep its current behaviour.
+The file adapter locks `.sessions.lock` in its session directory. Atomic
+single-document reads and writes are not enough: a caller may group several
+`load`/`save`/`delete` calls in one outer transaction, and a reader elsewhere
+must not observe that group half done. An adapter therefore cannot return a
+no-op context such as `contextlib.nullcontext()`; it must hold a lock (or an
+equivalent database transaction) that excludes concurrent `load`, `save` and
+`delete` from other threads and processes until the outer transaction exits.
 
 Contract obligations the core commits to, so hosted slices can depend on them:
 

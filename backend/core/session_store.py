@@ -387,7 +387,8 @@ class SessionPersistenceBackend(Protocol):
 
         ``load``, ``save`` and ``delete`` each run inside one, so a caller that
         groups several of them in an outer transaction is never observed half
-        done by a reader in another thread or process.
+        done by a reader in another thread or process. A no-op context does
+        not conform, even when each single call is atomic on its own.
         """
         ...
 

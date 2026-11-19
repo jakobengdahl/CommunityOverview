@@ -962,6 +962,7 @@ class TestTransactionCoversReads:
             reader, result = _in_thread(lambda: read(store, raw["id"]))
             reader.join(0.3)
             assert reader.is_alive()
+            writer.delete(raw["id"])
             writer.save({**raw, "name": "after"})
         reader.join(5)
         assert result["value"] == "after"
