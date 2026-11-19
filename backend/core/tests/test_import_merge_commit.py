@@ -1,9 +1,11 @@
+# covers: backend/core/storage.py
 """GraphStorage.apply_import_merge (docs/adr/0013-graph-import-merge-mode.md §4).
 
 The commit's locked unit, held to the same clauses on the file backend (the
 default, one journal record per batch) and on the in-memory reference
-backend; a store that assigns revisions (PostgreSQL mode) is refused until
-slice 3. The plan and digest that produce the writes are the service's
+backend; a store that assigns revisions without verifying a plan's reads
+(``batch_conditions``) is refused. PostgreSQL mode is in
+test_entity_revisions_postgres.py. The plan and digest that produce the writes are the service's
 (backend/service/tests/test_import_merge_commit.py).
 """
 
@@ -457,7 +459,8 @@ def test_a_batch_lost_after_hand_over_is_an_unknown_outcome_without_events(
 
 
 class _EnforcingBackend(InMemoryGraphPersistenceBackend):
-    """Declares what PostgreSQL mode declares: the store assigns revisions."""
+    """The store assigns revisions, as in PostgreSQL mode, but declares no
+    ``batch_conditions``."""
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(

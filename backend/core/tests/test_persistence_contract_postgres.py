@@ -2443,6 +2443,7 @@ class TestPostgresDeclaresWhatItImplements:
             change_notification=True,
             store_traversal=True,
             revision_enforcement=True,
+            batch_conditions=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):

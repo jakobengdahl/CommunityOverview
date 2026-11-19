@@ -10,18 +10,18 @@ the plain shapes it produces, so the storage layer depends on nothing there.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .models import Edge, Node
 
 
 class ImportMergeUnsupported(RuntimeError):
-    """The persistence backend cannot take a merge yet (ADR 0013 §6).
+    """The persistence backend cannot take a merge (ADR 0013 §3).
 
-    A store that assigns revisions is shared by several instances, and the
-    embedding commit a merge needs there is slice 3's; until it exists a
-    merge is refused rather than let the embedding job's whole-graph save
-    overwrite other instances' writes.
+    A store that assigns revisions may be shared by several instances, whose
+    writes the instance's lock does not hold back. One that cannot verify
+    the plan's reads inside the write (``batch_conditions``) is refused
+    rather than merged on a model that may be behind it.
     """
 
     code = "import_merge_not_supported"
@@ -51,12 +51,17 @@ class MergeWrites:
 
     A create expects its id absent and an overwrite expects the revision the
     plan read; every node an edge here names exists live or is created here.
+    ``reads`` maps (kind, id) to the revision of every live entity the plan
+    read, None where it relied on absence; ``triples`` maps each
+    (source, target, type) it listed to the ids of the live edges found.
     """
 
     node_creates: List[Node] = field(default_factory=list)
     node_overwrites: List[NodeOverwrite] = field(default_factory=list)
     edge_creates: List[Edge] = field(default_factory=list)
     edge_overwrites: List[EdgeOverwrite] = field(default_factory=list)
+    reads: Dict[Tuple[str, str], Optional[int]] = field(default_factory=dict)
+    triples: Dict[Tuple[str, str, str], Tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass

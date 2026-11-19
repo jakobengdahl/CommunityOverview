@@ -455,9 +455,13 @@ for the first commit's record before retrying any commit. One commit runs
 at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —
 502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
-the backup path. Merging is refused in PostgreSQL mode (501
-`import_merge_not_supported`) until its embedding commit exists. There is no
-MCP tool that commits a merge.
+the backup path. In PostgreSQL mode, where other instances keep writing,
+the store also verifies inside the commit's transaction that every live
+entity the plan read is still at the revision read and that the graph was
+not replaced since; a move this instance had not yet seen is answered as
+`import_plan_stale`, and a retry after a moment, once the instance has
+caught up, sees the current plan. The backup and the audit record are this
+instance's. There is no MCP tool that commits a merge.
 
 ## Importing a vector-aware archive
 

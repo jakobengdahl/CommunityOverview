@@ -339,6 +339,10 @@ class PlannedWrites:
     edge_renames: List[Edge] = field(default_factory=list)
     # (document edge, live revision read)
     edge_overwrites: List[Tuple[Edge, int]] = field(default_factory=list)
+    # (kind, id) -> live revision read, None for absence; see _Planner.reads.
+    reads: Dict[Tuple[str, str], Optional[int]] = field(default_factory=dict)
+    # (source, target, type) -> live edge ids listed; see _Planner.triples.
+    triples: Dict[Tuple[str, str, str], Tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def nodes_to_embed(self) -> int:
@@ -398,6 +402,8 @@ def mint_writes(planned: PlannedWrites) -> MintedWrites:
             )
             for edge, revision in planned.edge_overwrites
         ],
+        reads=dict(planned.reads),
+        triples=dict(planned.triples),
     )
     return MintedWrites(writes, renamed_nodes, renamed_edges)
 
@@ -546,6 +552,10 @@ class _Planner:
         self.conflicts: List[Dict[str, str]] = []
         # (kind, id) -> live revision, or None when the plan relied on absence.
         self.reads: Dict[Tuple[str, str], Optional[int]] = {}
+        # (source, target, type) -> ids of every live edge a duplicate check
+        # listed: a store other instances write to must still hold exactly
+        # these, as no by-id read covers an edge that was not there.
+        self.triples: Dict[Tuple[str, str, str], Tuple[str, ...]] = {}
         self.nodes: Dict[str, _NodeDecision] = {}
         self.edges: List[_EdgeDecision] = []
         self.archived_attach_edges: List[str] = []
@@ -915,6 +925,7 @@ class _Planner:
             same_type = self._pair_index(source.node_id, target.node_id).get(
                 edge.type_str, ()
             )
+            self.triples[key] = tuple(live.id for live in same_type)
             match = next((live for live in same_type if live.id not in exclude), None)
             if exclude:
                 self.first_unexcluded[key] = match
@@ -1061,7 +1072,7 @@ class _Planner:
         return MergePlan(report=report, digest=digest, committable=committable)
 
     def _writes(self) -> PlannedWrites:
-        writes = PlannedWrites()
+        writes = PlannedWrites(reads=dict(self.reads), triples=dict(self.triples))
         for d in sorted(self.nodes.values(), key=lambda d: d.node.id):
             if d.outcome == "create":
                 writes.node_creates.append(d.node)
