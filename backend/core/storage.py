@@ -1415,7 +1415,11 @@ class GraphStorage:
 
         if not changes:
             return
-        operations = self._operations(changes, expectations, undo=undo)
+        try:
+            operations = self._operations(changes, expectations, undo=undo)
+        except Exception:
+            self._undo(undo)
+            raise
         token = uuid.uuid4().hex
         future = self._io_executor.submit(
             self._do_apply, tuple(operations), token=token, conditions=conditions
@@ -3627,6 +3631,11 @@ class GraphStorage:
                 **previous_metadata,
                 "graph_generation": previous_generation + 1,
             }
+            if self._store_assigns_revisions:
+                # Two instances replacing from one generation store the same
+                # number; this tells them apart, so a merge planned on the
+                # replace that lost is refused (ADR 0013 §3).
+                new_metadata["graph_replace_token"] = uuid.uuid4().hex
 
             # From here on every assignment is a single atomic pointer swap —
             # see the docstring above and `_restore` for why that matters.
@@ -3944,6 +3953,13 @@ class GraphStorage:
                         if (kind, entity_id) not in expectations
                     ),
                     generation=self._generation,
+                    replace_token=self.graph_metadata.get("graph_replace_token"),
+                    triples=tuple(
+                        (source, target, type_name, ids)
+                        for (source, target, type_name), ids in sorted(
+                            writes.triples.items()
+                        )
+                    ),
                 )
             try:
                 self._commit(
@@ -3961,8 +3977,11 @@ class GraphStorage:
                 raise
             except Exception as exc:
                 if self._store_assigns_revisions:
-                    # _commit resolved every store failure itself; a re-save
-                    # of this instance's graph would overwrite other writers.
+                    # _commit resolved every store failure itself, memory
+                    # undone; a re-save of this instance's graph would
+                    # overwrite other writers.
+                    if not isinstance(exc, ExternalChangeRefused):
+                        undone()
                     raise
                 # The batch reached the store and neither it nor the
                 # whole-graph re-save landed: memory keeps the merge, and the

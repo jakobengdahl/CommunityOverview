@@ -251,13 +251,19 @@ class BatchConditions:
 
     `reads` is `(kind, id, revision)` for each such entity, revision None for
     one read as absent; `generation` is the `graph_generation` the decision
-    was taken at. A backend declaring `batch_conditions` verifies both inside
-    the batch's unit and raises EntityRevisionConflict (kind "graph" for the
-    generation) when one does not hold, applying nothing.
+    was taken at and `replace_token` the `graph_replace_token` beside it,
+    which tells apart two replaces that raced from one generation.
+    `triples` is `(source, target, type, edge ids)` for each pair and type the
+    decision listed, with every edge it found. A backend declaring
+    `batch_conditions` verifies all of them inside the batch's unit and
+    raises EntityRevisionConflict (kind "graph" for the generation, token
+    and triples) when one does not hold, applying nothing.
     """
 
     reads: Tuple[Tuple[str, str, Optional[int]], ...] = ()
     generation: Optional[int] = None
+    replace_token: Optional[str] = None
+    triples: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -1081,17 +1081,21 @@ def test_another_scopes_replace_does_not_supersede_a_merge_job(
     assert _stored(schema, "graph_nodes", "x") is not None
 
 
-@pytest.mark.parametrize("move", [None, "update", "delete", "replace"])
+@pytest.mark.parametrize(
+    "move", [None, "update", "delete", "replace", "racing_replace", "duplicate"]
+)
 def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
     instances, schema, monkeypatch, tmp_path, move
 ):
     """POST /import/merge commits in PostgreSQL mode. A move this instance
-    never saw - the node a skip kept updated or deleted, or the graph
-    replaced at the same revisions - refuses it as stale, writing nothing."""
+    never saw - the node a skip kept updated or deleted, the graph replaced
+    at the same revisions or from the same generation, or the edge a
+    duplicate check would have found created - refuses it as stale, writing
+    nothing."""
     monkeypatch.setattr(import_service, "_start_embedding_drain", lambda *a: None)
     one = instances(deaf=True)
     monkeypatch.setattr(one, "json_path", tmp_path / "graph.json")
-    one.replace_all_nodes_and_edges([_node("kept")], [])
+    one.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
     two = instances(deaf=True)
     if move == "update":
         two.update_node("kept", {"name": "moved"})
@@ -1099,6 +1103,12 @@ def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
         two.delete_nodes(["kept"], confirmed=True)
     elif move == "replace":
         two.replace_all_nodes_and_edges([_node("kept", "other")], [])
+    elif move == "racing_replace":
+        one.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
+        two.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
+        assert one.generation == two.generation
+    elif move == "duplicate":
+        two.add_edge(Edge(id="theirs", source="kept", target="peer"))
     app = FastAPI()
     app.include_router(
         create_rest_router(
@@ -1111,9 +1121,10 @@ def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
         "document": {
             "nodes": [
                 {"id": "kept", "type": "Actor", "name": "kept"},
+                {"id": "peer", "type": "Actor", "name": "peer"},
                 {"id": "new", "type": "Actor", "name": "new"},
             ],
-            "edges": [],
+            "edges": [{"id": "ours", "source": "kept", "target": "peer"}],
         },
         "policy": {"default": "skip"},
     }
@@ -1131,7 +1142,30 @@ def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
         assert response.status_code == 409
         assert response.json()["detail"]["error_code"] == "import_plan_stale"
         assert _stored(schema, "graph_nodes", "new") is None
+        assert _stored(schema, "graph_edges", "ours") is None
         assert "new" not in one.nodes
+
+
+@pytest.mark.parametrize("failure", ["mutation_check", "operations"])
+def test_a_merge_failing_before_the_store_puts_a_stray_vector_back(
+    instances, monkeypatch, failure
+):
+    one = instances()
+    one.vector_store.absorb_embeddings({"n": [4.0, 0.0]})
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(failure)
+
+    if failure == "mutation_check":
+        monkeypatch.setattr(one.runtime_extensions, "evaluate_mutation", fail)
+    else:
+        monkeypatch.setattr(one, "_operations", fail)
+
+    with pytest.raises(RuntimeError):
+        one.apply_import_merge(lambda: MergeWrites(node_creates=[_node("n")]))
+
+    assert "n" not in one.nodes
+    assert one.vector_store.get_vector_list("n") == [4.0, 0.0]
 
 
 def test_a_merge_changing_subtypes_and_drawing_an_edge_to_that_node_lands(

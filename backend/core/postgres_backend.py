@@ -1673,13 +1673,17 @@ class PostgresGraphPersistenceBackend:
         row read as present is held FOR SHARE until commit, so another
         instance's update or delete of it waits for this batch or is seen
         here; one read as absent can only be checked, and an insert after
-        this point is an ordinary concurrent write (ADR 0013 §4).
+        this point is an ordinary concurrent write (ADR 0013 §4). A listed
+        pair's endpoints are held FOR UPDATE, which the FOR KEY SHARE every
+        edge write takes on its endpoints waits for, so the edges listed
+        between them hold until commit.
         """
         if conditions.generation is not None:
             row = conn.execute(
-                sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(
-                    self._table("graph_metadata")
-                )
+                sql.SQL(
+                    "SELECT doc->>'graph_generation', doc->>'graph_replace_token'"
+                    " FROM {} LIMIT 1"
+                ).format(self._table("graph_metadata"))
             ).fetchone()
             try:
                 stored = int(row[0]) if row and row[0] is not None else 0
@@ -1690,7 +1694,37 @@ class PostgresGraphPersistenceBackend:
                 raise EntityRevisionConflict(
                     "graph", "generation", conditions.generation, stored
                 )
+            stored_token = row[1] if row else None
+            if stored_token != conditions.replace_token:
+                raise EntityRevisionConflict("graph", "replace_token", None, None)
         scope, scope_params = self._and_scope()
+        endpoints = sorted(
+            {
+                end
+                for source, target, _, _ in conditions.triples
+                for end in (source, target)
+            }
+        )
+        if endpoints:
+            conn.execute(
+                sql.SQL(
+                    "SELECT 1 FROM {} WHERE id = ANY(%s::text[]){} ORDER BY id"
+                    " FOR UPDATE"
+                ).format(self._table("graph_nodes"), scope),
+                (endpoints, *scope_params),
+            )
+        for source, target, type_name, listed in conditions.triples:
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id FROM {} WHERE doc->>'source' = %s"
+                    " AND doc->>'target' = %s AND doc->>'type' = %s{}"
+                ).format(self._table("graph_edges"), scope),
+                (source, target, type_name, *scope_params),
+            ).fetchall()
+            # Compared as sorted in Python, as the server's collation need not
+            # order ids the way the listing did.
+            if sorted(row[0] for row in rows) != sorted(listed):
+                raise EntityRevisionConflict("graph", "triples", None, None)
         for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
             read = {
                 entity_id: revision

@@ -52,7 +52,8 @@ class MergeWrites:
     A create expects its id absent and an overwrite expects the revision the
     plan read; every node an edge here names exists live or is created here.
     ``reads`` maps (kind, id) to the revision of every live entity the plan
-    read, None where it relied on absence.
+    read, None where it relied on absence; ``triples`` maps each
+    (source, target, type) it listed to the ids of the live edges found.
     """
 
     node_creates: List[Node] = field(default_factory=list)
@@ -60,6 +61,7 @@ class MergeWrites:
     edge_creates: List[Edge] = field(default_factory=list)
     edge_overwrites: List[EdgeOverwrite] = field(default_factory=list)
     reads: Dict[Tuple[str, str], Optional[int]] = field(default_factory=dict)
+    triples: Dict[Tuple[str, str, str], Tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass

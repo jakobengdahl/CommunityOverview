@@ -280,14 +280,18 @@ embedding commit are unchanged. Choices it made inside the decisions above:
   incident-edge check for a node whose subtypes change (`FOR UPDATE`, which
   excludes concurrent edge inserts). What was missing goes with the batch as
   `BatchConditions`: every entity the locked plan read and does not write,
-  at the revision read (absent included), and the `generation` read under
-  the same lock. PostgreSQL verifies them first in the batch's transaction:
+  at the revision read (absent included), the `generation` read under the
+  same lock with the `graph_replace_token` beside it, and, for every pair
+  and type the duplicate-triple check listed, the ids of the live edges it
+  found. PostgreSQL verifies them first in the batch's transaction:
   a row read as present under `FOR SHARE`, so another instance's update or
   delete of it waits for the commit or is seen; one read as absent only by
   lookup, so an insert after it is an ordinary concurrent write (§4); and
   `graph_generation` from `graph_metadata`, which needs no row lock because
   a replace's whole-graph save takes the save lock the batch holds in SHARE
-  mode. A failed condition rolls the batch back and answers
+  mode; each listed pair by its edges between the two endpoints, held
+  `FOR UPDATE` so no edge insert lands between them before the commit, as
+  PostgreSQL has no uniqueness rule on a triple. A failed condition rolls the batch back and answers
   `import_plan_stale`. Its plan is recomputed from this instance's memory,
   which may still lag, so the same digest can come back; a retry once the
   instance has caught up sees the current plan.
@@ -302,16 +306,17 @@ embedding commit are unchanged. Choices it made inside the decisions above:
 - **No whole-graph re-save on a shared store.** A failure `_commit` does not
   classify is re-raised rather than arming the re-save that follows a file
   backend's lost batch, which would write this instance's graph over other
-  instances' writes.
+  instances' writes. Memory is undone by then, and the vectors the merge
+  dropped from ids its creates take are put back with it.
 - **Generation limits.** The generation sits in the metadata row every scope
   in a schema shares, so another scope's replace refuses this scope's merges
   as stale until this instance reloads on that replace's announcement, which
   every instance on the schema receives: fail-safe, and brief. Two replaces
-  racing from one generation store the same value; a merge on the instance
-  whose replace lost, in the window before it reloads, compares revision 0
-  with revision 0 and the same generation, and is not refused. Closing that
-  needs a replace to take its generation from the store, a change to replace
-  this slice does not make.
+  racing from one generation store the same value, so a replace in a store
+  that assigns revisions also stamps a fresh `graph_replace_token` into the
+  metadata; a merge on the instance whose replace lost, before it reloads,
+  is refused on that token rather than matching revision 0 with revision 0.
+  Other writes in that window are not merges and are outside this slice.
 - **Per instance.** The backup is this instance's memory, which for every
   entity the merge overwrites equals the store (its expectation held), and
   the audit record is in this instance's `import_jobs.db` (§7).
