@@ -3,6 +3,11 @@
 Storage core only: mutations stay refused until ``writes_enabled`` is set, which
 no caller does yet. The identity passed to a write is recorded as the owner; it
 must come from an authenticated boundary, never a browser client ID.
+
+A mutation that also changes a session holds the session backend's transaction
+throughout and makes the library durable before the session is written, so a
+crash in between leaves at worst an unreferenced entry, never a session that
+references one missing from disk.
 """
 
 import copy
@@ -18,7 +23,9 @@ from pydantic import TypeAdapter
 
 from backend.config.node_shapes import ShapeDefinition, ShapeName
 from backend.core.session_store import (
+    Session,
     SessionPersistenceBackend,
+    _fsync_directory,
     _lock_file,
     _unlock_file,
 )
@@ -27,7 +34,9 @@ from backend.core.session_store import (
 class ShapeLibraryPersistenceBackend(Protocol):
     def read(self) -> dict: ...
 
-    def update(self, change: Callable[[dict], object]) -> object: ...
+    def update(self, change: Callable[[dict], object]) -> object:
+        """Apply ``change`` and write; return only once the write is durable."""
+        ...
 
 
 class FileShapeLibraryPersistenceBackend:
@@ -61,6 +70,7 @@ class FileShapeLibraryPersistenceBackend:
                             output.flush()
                             os.fsync(output.fileno())
                         os.replace(temporary, path)
+                        _fsync_directory(self.directory)
                     finally:
                         if os.path.exists(temporary):
                             os.unlink(temporary)
@@ -137,6 +147,8 @@ class ShapeLibrary:
         identity,
         expected_revision=None,
         expected_usage=None,
+        session: Session | None = None,
+        apply=None,
     ):
         TypeAdapter(ShapeName).validate_python(key)
         if not isinstance(name, str) or not name.strip() or len(name) > 128:
@@ -149,11 +161,28 @@ class ShapeLibrary:
             expected_usage,
             name=name,
             definition=definition,
+            session=session,
+            apply=apply,
         )
 
-    def delete(self, key, *, identity, expected_revision, expected_usage):
+    def delete(
+        self,
+        key,
+        *,
+        identity,
+        expected_revision,
+        expected_usage,
+        session: Session | None = None,
+        apply=None,
+    ):
         return self._mutate(
-            key, identity, expected_revision, expected_usage, delete=True
+            key,
+            identity,
+            expected_revision,
+            expected_usage,
+            delete=True,
+            session=session,
+            apply=apply,
         )
 
     def _mutate(
@@ -166,9 +195,21 @@ class ShapeLibrary:
         name=None,
         definition=None,
         delete=False,
+        session=None,
+        apply=None,
     ):
+        """Commit the entry and, when ``apply`` is given, a change to ``session``.
+
+        ``apply(state, entry)`` edits a staged copy of the session state before
+        anything is written. The library is made durable first, then the staged
+        session; only then does the live session adopt the staged state as
+        written. A failure at any step leaves the live session untouched.
+        """
         if not self.writes_enabled or not identity:
             raise LibraryForbidden()
+        if (apply is None) != (session is None):
+            raise ValueError("session and apply go together")
+        staged = {}
 
         def change(data):
             entry = data["entries"].get(key)
@@ -194,6 +235,21 @@ class ShapeLibrary:
                 "deleted": delete,
             }
             data["entries"][key] = result
+            if session is not None:
+                snapshot = copy.deepcopy(session.to_dict())
+                apply(snapshot["state"], copy.deepcopy(result))
+                snapshot["updated_at"] = now
+                staged["session"] = snapshot
             return copy.deepcopy(result)
 
-        return self.backend.update(change)
+        # Sessions first, then the library, on every path: usage() inside
+        # change() takes the session lock, so the reverse order could deadlock.
+        with self.sessions.transaction():
+            result = self.backend.update(change)
+            if session is not None:
+                snapshot = staged["session"]
+                self.sessions.save(snapshot)
+                session.state.clear()
+                session.state.update(snapshot["state"])
+                session.updated_at = snapshot["updated_at"]
+            return result

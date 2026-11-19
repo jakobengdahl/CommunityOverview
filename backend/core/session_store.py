@@ -439,6 +439,24 @@ def _unlock_file(f) -> None:
         _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
 
 
+def _fsync_directory(directory: str | Path) -> None:
+    """Make the renames in ``directory`` durable.
+
+    Windows cannot open a directory, and some filesystems refuse to fsync one;
+    there the rename stands as before rather than failing a write it completed.
+    """
+    if sys.platform == "win32":  # pragma: no cover - platform specific
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+    finally:
+        os.close(fd)
+
+
 class FileSessionPersistenceBackend:
     """One JSON file per session under ``directory`` with atomic writes.
 
@@ -521,6 +539,7 @@ class FileSessionPersistenceBackend:
                 os.replace(temp_path, path)
             else:
                 os.rename(temp_path, path)
+            _fsync_directory(self.directory)
         except Exception:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
