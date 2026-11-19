@@ -210,15 +210,25 @@ export default function NodeAppearanceDialog({
   // A library that arrives after open is the start of a draft not yet edited.
   if (!pinned && savedEntry && !SHAPE_EDITS.some((key) => Object.hasOwn(edits, key)))
     setBase({ ...savedEntry, key: savedKey });
+  // A pin without a revision is a draft edited before its entry was known:
+  // it starts from the built-in card, and the entry arriving is a conflict.
+  const unknownStart = pinned?.revision == null;
   // Only a known library can show a conflict: a failed fetch is no evidence.
   const conflict = Boolean(
-    savedShapes != null && pinned && (!savedEntry || savedEntry.revision !== pinned.revision)
+    savedShapes != null &&
+    pinned &&
+    (savedEntry ? savedEntry.revision !== pinned.revision : !unknownStart)
   );
+  const pinnedLibrary = () => {
+    if (!pinned) return saved;
+    const { [pinned.key]: _latest, ...rest } = saved;
+    return unknownStart ? rest : { ...rest, [pinned.key]: pinned };
+  };
   const resolve = (selection) =>
     createNodeShapeResolver({
       nodeTypes: schema?.node_types,
       nodeShapes: schema?.node_shapes,
-      savedShapes: pinned ? { ...saved, [pinned.key]: pinned } : saved,
+      savedShapes: pinnedLibrary(),
       shapeOverrides: { [node.id]: selection },
     })(entity)?.definition || null;
   const draft = appearanceDraft(original.selection, edits, resolve);
@@ -291,6 +301,9 @@ export default function NodeAppearanceDialog({
     }));
   }
   function update(patch, message = 'preview_updated') {
+    // A saved start not yet read is pinned as unknown, so a library arriving
+    // later never moves these edits onto the entry unreviewed.
+    if (!pinned && savedKey && !savedEntry) setBase({ key: savedKey, revision: null });
     setEdits((previous) => {
       const next = { ...previous, ...patch };
       if (patch.areas) next.areas = { ...previous.areas, ...patch.areas };
@@ -665,9 +678,13 @@ export default function NodeAppearanceDialog({
                     >
                       {t('node_appearance.save_named')}
                     </button>
-                    {pinned && (
+                    {pinned && (!unknownStart || conflict) && (
                       <>
-                        <p>{t('node_appearance.saved_source', { name: pinned.name })}</p>
+                        <p>
+                          {t('node_appearance.saved_source', {
+                            name: pinned.name ?? savedEntry.name,
+                          })}
+                        </p>
                         {conflict && (
                           <div role="alert">
                             <p>{t('node_appearance.library_stale')}</p>
@@ -689,7 +706,9 @@ export default function NodeAppearanceDialog({
                           onClick={() =>
                             saveNew(
                               shapeName.trim() ||
-                                t('node_appearance.copy_name', { name: pinned.name })
+                                t('node_appearance.copy_name', {
+                                  name: pinned.name ?? savedEntry.name,
+                                })
                             )
                           }
                         >

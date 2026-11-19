@@ -828,46 +828,50 @@ describe('NodeAppearanceDialog', () => {
     expect(document.querySelector('.graph-custom-node')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
   });
-  it('keeps a draft on its starting revision when the library moves, until the user reviews', async () => {
-    const apply = vi.fn();
-    const library = {
-      usage: vi.fn(async () => ({ revision: 4, usage: 2 })),
-      update: vi.fn(async (key, name, definition) => ({ key, name, definition, revision: 7 })),
-      refresh: vi.fn(),
-    };
-    const view = (card, revision) => (
-      <NodeAppearanceDialog
-        {...props}
-        shapeOverrides={{ a: { ref: 'saved:card' } }}
-        savedShapes={{ card }}
-        savedShapesRevision={revision}
-        library={library}
-        onApply={apply}
-      />
-    );
-    const { rerender } = render(view({ name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 }, 3));
-    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
-    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
-    // A stale server revision at the warning commits nothing.
-    await click('node_appearance.edit_saved');
-    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
-    expect(library.refresh).toHaveBeenCalled();
-    // The refreshed library holds another edit: the draft stays on revision 3.
-    rerender(view({ name: 'Card', definition: DEFAULT_SHAPE, revision: 4 }, 4));
-    const edit = () => screen.getByRole('button', { name: 'node_appearance.edit_saved' });
-    expect(edit().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
-    expect(apply).toHaveBeenLastCalledWith('node', { inline: { ...EXAMPLE_SHAPE, scale: 3 } });
-    // Only the user's review moves the draft's own change onto revision 4.
-    await click('node_appearance.review_latest');
-    await click('node_appearance.edit_saved');
-    await click('node_appearance.confirm_edit');
-    expect(library.update).toHaveBeenCalledWith(
-      'card',
-      'Card',
-      { ...DEFAULT_SHAPE, scale: 3 },
-      4,
-      2
-    );
-  });
+  it.each([
+    ['a known', { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 }, DEFAULT_SHAPE],
+    ['a not yet fetched', null, EXAMPLE_SHAPE],
+  ])(
+    'keeps a draft started from %s entry on its start when the library moves, until the user reviews',
+    async (_, start, latest) => {
+      const apply = vi.fn();
+      const library = {
+        usage: vi.fn(async () => ({ revision: 4, usage: 2 })),
+        update: vi.fn(async (key, name, definition) => ({ key, name, definition, revision: 7 })),
+        refresh: vi.fn(),
+      };
+      const view = (card, revision) => (
+        <NodeAppearanceDialog
+          {...props}
+          shapeOverrides={{ a: { ref: 'saved:card' } }}
+          savedShapes={card && { card }}
+          savedShapesRevision={revision}
+          library={library}
+          onApply={apply}
+        />
+      );
+      const { rerender } = render(view(start, start?.revision ?? null));
+      fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+      fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+      if (start) {
+        // A stale server revision at the warning commits nothing.
+        await click('node_appearance.edit_saved');
+        expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+        expect(library.refresh).toHaveBeenCalled();
+      }
+      // The library now holds revision 4: the draft stays on what it started from.
+      rerender(view({ name: 'Card', definition: latest, revision: 4 }, 4));
+      const edit = () => screen.getByRole('button', { name: 'node_appearance.edit_saved' });
+      expect(edit().disabled).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+      expect(apply).toHaveBeenLastCalledWith('node', {
+        inline: { ...(start?.definition ?? DEFAULT_SHAPE), scale: 3 },
+      });
+      // Only the user's review moves the draft's own change onto revision 4.
+      await click('node_appearance.review_latest');
+      await click('node_appearance.edit_saved');
+      await click('node_appearance.confirm_edit');
+      expect(library.update).toHaveBeenCalledWith('card', 'Card', { ...latest, scale: 3 }, 4, 2);
+    }
+  );
 });
