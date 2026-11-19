@@ -80,6 +80,7 @@ from psycopg_pool import ConnectionPool
 from backend.core import layer_store
 from backend.core.storage_backends import (
     BackendCapabilities,
+    BatchConditions,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
@@ -1098,6 +1099,7 @@ class PostgresGraphPersistenceBackend:
             store_traversal=True,
             revision_enforcement=True,
             staged_sessions=self._staged_sessions,
+            batch_conditions=True,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -1530,6 +1532,7 @@ class PostgresGraphPersistenceBackend:
         self,
         operations: Sequence[EntityOperation],
         write_token: Optional[str] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> List[Optional[int]]:
         """Apply the operations in order, in one transaction.
 
@@ -1580,12 +1583,15 @@ class PostgresGraphPersistenceBackend:
         condition of that same statement; one that does not hold raises
         EntityRevisionConflict and the transaction rolls back, so nothing in
         the batch lands and nothing is announced. `write_token` is stored in
-        every entity written - see `read_write_evidence`.
+        every entity written - see `read_write_evidence`. `conditions` are
+        verified first, in the same transaction - see `_verify_conditions`.
         """
         self._ensure_schema()
         for attempt in range(self.DEADLOCK_RETRIES + 1):
             try:
-                return self._apply_batch_once(operations, write_token)
+                if conditions is None:
+                    return self._apply_batch_once(operations, write_token)
+                return self._apply_batch_once(operations, write_token, conditions)
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
@@ -1608,7 +1614,10 @@ class PostgresGraphPersistenceBackend:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _apply_batch_once(
-        self, operations: Sequence[EntityOperation], write_token: Optional[str]
+        self,
+        operations: Sequence[EntityOperation],
+        write_token: Optional[str],
+        conditions: Optional[BatchConditions] = None,
     ) -> List[Optional[int]]:
         with self._pool.connection() as conn:
             with conn.transaction():
@@ -1623,6 +1632,8 @@ class PostgresGraphPersistenceBackend:
                     (SAVE_LOCK_KEY, self.schema),
                 )
                 self._claim_or_check_graph_identity(conn)
+                if conditions is not None:
+                    self._verify_conditions(conn, conditions)
                 checks = [
                     layer_store.MergeCheck.incident_edges(
                         op.entity_id,
@@ -1653,6 +1664,57 @@ class PostgresGraphPersistenceBackend:
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
                 return revisions
+
+    def _verify_conditions(self, conn, conditions: BatchConditions) -> None:
+        """Refuse the batch unless what its decision read still holds.
+
+        The generation needs no row lock: a replace is a whole-graph save,
+        which takes the save lock this batch already holds in SHARE mode. A
+        row read as present is held FOR SHARE until commit, so another
+        instance's update or delete of it waits for this batch or is seen
+        here; one read as absent can only be checked, and an insert after
+        this point is an ordinary concurrent write (ADR 0013 §4).
+        """
+        if conditions.generation is not None:
+            row = conn.execute(
+                sql.SQL("SELECT doc->>'graph_generation' FROM {} LIMIT 1").format(
+                    self._table("graph_metadata")
+                )
+            ).fetchone()
+            try:
+                stored = int(row[0]) if row and row[0] is not None else 0
+            except ValueError:
+                # As GraphStorage.load() reads it.
+                stored = 0
+            if stored != conditions.generation:
+                raise EntityRevisionConflict(
+                    "graph", "generation", conditions.generation, stored
+                )
+        scope, scope_params = self._and_scope()
+        for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
+            read = {
+                entity_id: revision
+                for read_kind, entity_id, revision in conditions.reads
+                if read_kind == kind
+            }
+            if not read:
+                continue
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                    " WHERE id = ANY(%s::text[]){} ORDER BY id FOR SHARE"
+                ).format(self._table(table), scope),
+                (sorted(read), *scope_params),
+            ).fetchall()
+            stored_revisions = {row[0]: int(row[1]) for row in rows}
+            for entity_id in sorted(read):
+                if stored_revisions.get(entity_id) != read[entity_id]:
+                    raise EntityRevisionConflict(
+                        kind,
+                        entity_id,
+                        read[entity_id],
+                        stored_revisions.get(entity_id),
+                    )
 
     def _refuse_dangling_edges_on_create(
         self, conn, created_nodes, operations: Sequence[EntityOperation]

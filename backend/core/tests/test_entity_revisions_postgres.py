@@ -20,6 +20,8 @@ import uuid
 from typing import Any, List
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from backend.agents.execution import (
     ExecutionJob,
@@ -54,7 +56,10 @@ from backend.core.storage_backends import (  # noqa: E402
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
 )
+from backend.core.storage_merge import MergeWrites, NodeOverwrite  # noqa: E402
 from backend.core.tests.layer_store_contract import A, entry  # noqa: E402
+from backend.service import GraphService, create_rest_router  # noqa: E402
+from backend.service import import_service  # noqa: E402
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
@@ -1074,3 +1079,78 @@ def test_another_scopes_replace_does_not_supersede_a_merge_job(
     assert store.get(job.id).state == ExecutionState.SUCCEEDED
     assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
     assert _stored(schema, "graph_nodes", "x") is not None
+
+
+@pytest.mark.parametrize("move", [None, "update", "delete", "replace"])
+def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
+    instances, schema, monkeypatch, tmp_path, move
+):
+    """POST /import/merge commits in PostgreSQL mode. A move this instance
+    never saw - the node a skip kept updated or deleted, or the graph
+    replaced at the same revisions - refuses it as stale, writing nothing."""
+    monkeypatch.setattr(import_service, "_start_embedding_drain", lambda *a: None)
+    one = instances(deaf=True)
+    monkeypatch.setattr(one, "json_path", tmp_path / "graph.json")
+    one.replace_all_nodes_and_edges([_node("kept")], [])
+    two = instances(deaf=True)
+    if move == "update":
+        two.update_node("kept", {"name": "moved"})
+    elif move == "delete":
+        two.delete_nodes(["kept"], confirmed=True)
+    elif move == "replace":
+        two.replace_all_nodes_and_edges([_node("kept", "other")], [])
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(
+            GraphService(one), import_job_store=InMemoryExecutionStore()
+        ),
+        prefix="/api/graph",
+    )
+    client = TestClient(app)
+    body = {
+        "document": {
+            "nodes": [
+                {"id": "kept", "type": "Actor", "name": "kept"},
+                {"id": "new", "type": "Actor", "name": "new"},
+            ],
+            "edges": [],
+        },
+        "policy": {"default": "skip"},
+    }
+    preview = client.post("/api/graph/import/merge/preview", json=body)
+    response = client.post(
+        "/api/graph/import/merge",
+        json={**body, "plan_digest": preview.json()["plan_digest"]},
+    )
+
+    if move is None:
+        assert response.status_code == 200
+        stored = _stored(schema, "graph_nodes", "new")
+        assert stored["revision"] == one.nodes["new"].revision
+    else:
+        assert response.status_code == 409
+        assert response.json()["detail"]["error_code"] == "import_plan_stale"
+        assert _stored(schema, "graph_nodes", "new") is None
+        assert "new" not in one.nodes
+
+
+def test_a_merge_changing_subtypes_and_drawing_an_edge_to_that_node_lands(
+    instances, schema
+):
+    """The incident edges the store checks for a subtype change leave out
+    the edges the same merge creates, which it does not hold yet."""
+    one = instances()
+    one.add_nodes([_node("a"), _node("b")], [])
+
+    applied = one.apply_import_merge(
+        lambda: MergeWrites(
+            node_overwrites=[
+                NodeOverwrite("a", one.nodes["a"].revision, {"subtypes": ["x"]}, False)
+            ],
+            edge_creates=[Edge(id="new", source="b", target="a")],
+        )
+    )
+
+    assert _stored(schema, "graph_nodes", "a")["subtypes"] == ["x"]
+    edge = _stored(schema, "graph_edges", "new")
+    assert edge["revision"] == applied.revisions[("edge", "new")]

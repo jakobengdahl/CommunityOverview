@@ -263,6 +263,62 @@ later replace: it embeds whatever still lacks a vector, which after a replace
 in its own scope overlaps that replace's job. Every vector it writes still
 matches its node's text.
 
+### Slice 3b as implemented
+
+3b lifts the PostgreSQL refusal: `POST /import/merge` runs there through the
+same `commit_merge_import` and `apply_import_merge` path as in file mode,
+with the same authorization (`GRAPH_ACTION_MUTATE` and `GRAPH_ACTION_READ`,
+narrowed callers refused), digest binding, `import_merge_blocked` and
+`import_plan_stale` answers, backup and audit record. Replace and the 3a
+embedding commit are unchanged. Choices it made inside the decisions above:
+
+- **§3's checks reach the store as batch conditions.** Slice 2's comparison
+  under `_lock` verifies the plan against this instance's memory, which in
+  PostgreSQL mode can be behind another instance's writes. The expectations
+  on every write were already the store's (`revision_enforcement`), as were
+  an edge create's endpoint type and subtype checks (`FOR KEY SHARE`) and the
+  incident-edge check for a node whose subtypes change (`FOR UPDATE`, which
+  excludes concurrent edge inserts). What was missing goes with the batch as
+  `BatchConditions`: every entity the locked plan read and does not write,
+  at the revision read (absent included), and the `generation` read under
+  the same lock. PostgreSQL verifies them first in the batch's transaction:
+  a row read as present under `FOR SHARE`, so another instance's update or
+  delete of it waits for the commit or is seen; one read as absent only by
+  lookup, so an insert after it is an ordinary concurrent write (§4); and
+  `graph_generation` from `graph_metadata`, which needs no row lock because
+  a replace's whole-graph save takes the save lock the batch holds in SHARE
+  mode. A failed condition rolls the batch back and answers
+  `import_plan_stale`. Its plan is recomputed from this instance's memory,
+  which may still lag, so the same digest can come back; a retry once the
+  instance has caught up sees the current plan.
+- **A capability, not a removed check.** A backend declares
+  `batch_conditions`; PostgreSQL does. One that assigns revisions without it
+  would ignore the conditions, so it is still refused with 501
+  `import_merge_not_supported`.
+- **The incident-edge list leaves out the batch's own edge creates.** It is
+  built from memory after the merge is applied there, so it named edges the
+  store did not hold yet and refused every merge that changes a node's
+  subtypes and draws an edge to it.
+- **No whole-graph re-save on a shared store.** A failure `_commit` does not
+  classify is re-raised rather than arming the re-save that follows a file
+  backend's lost batch, which would write this instance's graph over other
+  instances' writes.
+- **Generation limits.** The generation sits in the metadata row every scope
+  in a schema shares, so another scope's replace refuses this scope's merges
+  as stale until this instance reloads on that replace's announcement, which
+  every instance on the schema receives: fail-safe, and brief. Two replaces
+  racing from one generation store the same value; a merge on the instance
+  whose replace lost, in the window before it reloads, compares revision 0
+  with revision 0 and the same generation, and is not refused. Closing that
+  needs a replace to take its generation from the store, a change to replace
+  this slice does not make.
+- **Per instance.** The backup is this instance's memory, which for every
+  entity the merge overwrites equals the store (its expectation held), and
+  the audit record is in this instance's `import_jobs.db` (§7).
+- **No schema or migration change.**
+- **Not measured.** §8's multi-instance figures need a PostgreSQL server
+  under load and are not part of this slice.
+
 ## Context
 
 ### What exists today

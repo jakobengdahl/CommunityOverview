@@ -78,6 +78,7 @@ class BackendCapabilities:
     store_traversal: bool = False
     revision_enforcement: bool = False
     staged_sessions: bool = False
+    batch_conditions: bool = False
 ```
 
 | Flag | Means | Consequence in `GraphStorage` |
@@ -88,6 +89,7 @@ class BackendCapabilities:
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
 | `revision_enforcement` | the store assigns entity revisions and checks expectations itself; `apply_batch` takes a write token and returns revisions, and `read_write_evidence` is implemented | every write waits for the store; one the store refused outright fails at once, any other failed one is resolved on its own evidence; see *Entity revisions* |
 | `staged_sessions` | the layer store is implemented: session layers, staged-session records and merge records live next to the graph | nothing yet — the slices that stage and merge build on it; see *The layer store* |
+| `batch_conditions` | `apply_batch` takes `conditions` (`BatchConditions`: entities read at a revision, or as absent, and a `graph_generation`) and refuses the batch with `EntityRevisionConflict` unless they hold in the store | a merge import (`POST /import/merge`) may run on a backend that also declares `revision_enforcement`; without it such a backend refuses merges with 501 `import_merge_not_supported`; see [ADR 0013](adr/0013-graph-import-merge-mode.md) |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -100,7 +102,8 @@ the in-memory graph has already changed. `change_notification`,
 `store_traversal`, `revision_enforcement` and `staged_sessions` are checked
 the same way (the last two also require `incremental_writes` and
 `transactions`, and `staged_sessions` beside `change_notification` also
-requires `revision_enforcement`), and for the same reason stated
+requires `revision_enforcement`; `batch_conditions` requires
+`revision_enforcement`), and for the same reason stated
 twice over: a missing `start_change_notification` would fail at first use, and
 a missing `traverse` would not fail at all — every traversal would warn and fall back
 to the walk, quietly, for the life of the process.

@@ -43,6 +43,7 @@ from .models import (
 )
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
+    BatchConditions,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
@@ -1354,6 +1355,7 @@ class GraphStorage:
         expectations: Optional[Dict[Tuple[str, str], Any]] = None,
         *,
         event_context: Optional[EventContext] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> None:
         """Stamp revisions on a write already applied to memory, and persist it.
 
@@ -1368,7 +1370,9 @@ class GraphStorage:
         expectation waits for the store. A store that enforces revisions is
         always waited for: it assigns the revisions, may refuse the
         expectation (memory is undone, EntityRevisionConflict raised), and a
-        failure is resolved on the write's own evidence (§4.4).
+        failure is resolved on the write's own evidence (§4.4). `conditions`
+        go with that write, to a store declaring `batch_conditions`; a refused
+        one is answered as a refused expectation.
         """
         try:
             self.runtime_extensions.evaluate_mutation(
@@ -1414,7 +1418,7 @@ class GraphStorage:
         operations = self._operations(changes, expectations, undo=undo)
         token = uuid.uuid4().hex
         future = self._io_executor.submit(
-            self._do_apply, tuple(operations), token=token
+            self._do_apply, tuple(operations), token=token, conditions=conditions
         )
         self._last_write = future
         try:
@@ -1485,6 +1489,8 @@ class GraphStorage:
                             sorted(
                                 (e.id, e.revision)
                                 for e in self.get_edges_for_node(entity_id)
+                                # One this same write creates is not stored yet.
+                                if not (e.id in undo.edges and undo.edges[e.id] is None)
                             )
                         )
                         if undo is not None
@@ -2201,6 +2207,7 @@ class GraphStorage:
         vectors: Optional[Dict[str, Any]] = None,
         vector_revision: Optional[int] = None,
         token: Optional[str] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> Optional[List[Optional[int]]]:
         """Hand entity operations to the backend, on the executor thread.
 
@@ -2221,6 +2228,10 @@ class GraphStorage:
 
         backend = self._persistence_backend
         if self._store_assigns_revisions:
+            if conditions is not None:
+                return backend.apply_batch(  # type: ignore[call-arg]
+                    operations, write_token=token, conditions=conditions
+                )
             return backend.apply_batch(operations, write_token=token)  # type: ignore[call-arg]
         try:
             if len(operations) > 1:
@@ -3772,8 +3783,12 @@ class GraphStorage:
     @property
     def supports_import_merge(self) -> bool:
         """Whether ``apply_import_merge`` can run on this backend (ADR 0013
-        §6): not on a store that assigns revisions, until slice 3."""
-        return not self._store_assigns_revisions
+        §3): a store that assigns revisions may be written by other instances,
+        so it must verify the plan's reads itself (``batch_conditions``)."""
+        return (
+            not self._store_assigns_revisions
+            or self._backend_capabilities.batch_conditions
+        )
 
     def apply_import_merge(
         self,
@@ -3795,6 +3810,11 @@ class GraphStorage:
         written before the journal record, as for every write that moves a
         vector.
 
+        On a store that assigns revisions, other instances keep writing
+        behind this lock: the batch also carries every entity the plan read
+        and does not write, at the revision read, and ``generation``, and the
+        store refuses it unless they still hold (``BatchConditions``).
+
         A refused expectation, or any failure before the batch is handed to
         the store, puts memory back and fires nothing. A batch that failed
         after hand-over and could not be re-saved keeps the merge in memory
@@ -3802,16 +3822,17 @@ class GraphStorage:
         ordinary create or update event fires per written entity.
 
         Raises:
-            ImportMergeUnsupported: the store assigns revisions.
+            ImportMergeUnsupported: the store assigns revisions and cannot
+                verify the plan's reads.
             EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
                 as for every direct write (§4.4).
             Whatever ``prepare`` raises, with nothing changed.
         """
         with self._lock:
-            if self._store_assigns_revisions:
+            if not self.supports_import_merge:
                 raise ImportMergeUnsupported(
                     "merge import is not supported on a store that assigns "
-                    "revisions yet"
+                    "revisions and cannot verify a plan's reads"
                 )
             writes = prepare()
 
@@ -3912,8 +3933,26 @@ class GraphStorage:
                 undone()
                 raise
 
+            conditions = None
+            if self._store_assigns_revisions:
+                conditions = BatchConditions(
+                    reads=tuple(
+                        (kind, entity_id, revision)
+                        for (kind, entity_id), revision in sorted(
+                            writes.reads.items(), key=lambda item: item[0]
+                        )
+                        if (kind, entity_id) not in expectations
+                    ),
+                    generation=self._generation,
+                )
             try:
-                self._commit(changes, undo, expectations, event_context=event_context)
+                self._commit(
+                    changes,
+                    undo,
+                    expectations,
+                    event_context=event_context,
+                    conditions=conditions,
+                )
             except (EntityRevisionConflict, GraphWriteFailed):
                 # _commit has undone memory.
                 undone()
@@ -3921,6 +3960,10 @@ class GraphStorage:
             except GraphWriteOutcomeUnknown:
                 raise
             except Exception as exc:
+                if self._store_assigns_revisions:
+                    # _commit resolved every store failure itself; a re-save
+                    # of this instance's graph would overwrite other writers.
+                    raise
                 # The batch reached the store and neither it nor the
                 # whole-graph re-save landed: memory keeps the merge, and the
                 # next write carries the whole graph again.
