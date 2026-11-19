@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
@@ -360,6 +361,8 @@ class Session:
 class SessionPersistenceBackend(Protocol):
     """Storage seam for sessions. Core ships the file impl; SaaS swaps a DB."""
 
+    def transaction(self): ...
+
     def load(self, session_id: str) -> Optional[Dict[str, Any]]: ...
 
     def save(self, session: Dict[str, Any]) -> None: ...
@@ -402,6 +405,17 @@ class FileSessionPersistenceBackend:
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
 
+    @contextmanager
+    def transaction(self):
+        """Exclude session writes across processes while inspecting references."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with (self.directory / ".sessions.lock").open("a+") as lock:
+            _lock_file(lock)
+            try:
+                yield
+            finally:
+                _unlock_file(lock)
+
     def _path(self, session_id: str) -> Path:
         # session_id is always validated before it reaches here, so it cannot
         # contain path separators — but guard anyway to keep this a hard boundary.
@@ -421,6 +435,10 @@ class FileSessionPersistenceBackend:
                 _unlock_file(f)
 
     def save(self, session: Dict[str, Any]) -> None:
+        with self.transaction():
+            self._save(session)
+
+    def _save(self, session: Dict[str, Any]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(session["id"])
         temp_fd, temp_path = tempfile.mkstemp(
@@ -445,9 +463,10 @@ class FileSessionPersistenceBackend:
             raise
 
     def delete(self, session_id: str) -> None:
-        path = self._path(session_id)
-        if path.exists():
-            os.unlink(path)
+        with self.transaction():
+            path = self._path(session_id)
+            if path.exists():
+                os.unlink(path)
 
     def list_ids(self) -> List[str]:
         # Enumerate without decoding so erasure cannot silently skip a damaged
@@ -487,16 +506,22 @@ class InMemorySessionPersistenceBackend:
 
     def __init__(self) -> None:
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    def transaction(self):
+        return self._lock
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
         raw = self._data.get(session_id)
         return json.loads(json.dumps(raw)) if raw is not None else None
 
     def save(self, session: Dict[str, Any]) -> None:
-        self._data[session["id"]] = json.loads(json.dumps(session))
+        with self.transaction():
+            self._data[session["id"]] = json.loads(json.dumps(session))
 
     def delete(self, session_id: str) -> None:
-        self._data.pop(session_id, None)
+        with self.transaction():
+            self._data.pop(session_id, None)
 
     def list_ids(self) -> List[str]:
         return list(self._data)

@@ -96,3 +96,56 @@ def test_revision_usage_tombstones_and_restart(tmp_path):
     )
     assert result["definition"] is None
     assert result["diagnostic"]["code"] == "missing_shape"
+
+
+def test_confirmation_excludes_concurrent_session_write(tmp_path):
+    import threading
+
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(FileSessionPersistenceBackend(tmp_path / "sessions"))
+    session = store.create()
+    library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"), sessions,
+        writes_enabled=True,
+    )
+    entry = library.put("card", "Card", DEFINITION, identity="owner")
+    checked = threading.Event()
+    release = threading.Event()
+    saved = threading.Event()
+    original_usage = library.usage
+
+    def paused_usage(key):
+        count = original_usage(key)
+        checked.set()
+        assert release.wait(5)
+        return count
+
+    library.usage = paused_usage
+    errors = []
+
+    def delete():
+        try:
+            library.delete("card", identity="owner", expected_revision=entry["revision"], expected_usage=0)
+        except Exception as exc:
+            errors.append(exc)
+
+    def save():
+        session.state["shape_overrides"] = {"a": {"ref": "saved:card"}}
+        store.persist(session)
+        saved.set()
+
+    mutation = threading.Thread(target=delete)
+    mutation.start()
+    assert checked.wait(5)
+    writer = threading.Thread(target=save)
+    writer.start()
+    try:
+        assert not saved.wait(0.1)
+    finally:
+        release.set()
+        mutation.join(5)
+        writer.join(5)
+    assert not mutation.is_alive() and not writer.is_alive()
+    assert not errors and saved.is_set()
+    assert library.usage("card") == 1
+    assert library.snapshot()["entries"] == {}

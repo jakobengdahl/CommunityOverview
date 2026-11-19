@@ -204,4 +204,5 @@ class ShapeLibrary:
             data["entries"][key] = result
             return copy.deepcopy(result)
 
-        return self.backend.update(change)
+        with self.sessions.transaction():
+            return self.backend.update(change)
