@@ -493,6 +493,91 @@ def test_attachment_defaults_require_explicit_opt_in(service, monkeypatch):
     assert AppConfig().assistant_attachment_access == "off"
 
 
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "members",
+        "total",
+        "ratio",
+        "member_ratio",
+        "method",
+        "valid",
+        "busy",
+        "size",
+        "failed",
+        "timeout",
+    ],
+)
+def test_run_file_sniffing_runs_only_in_the_slotted_child(service, monkeypatch, limit):
+    """The server inflates no member; the size check and the slot come first,
+    the child applies the ZIP limits before it sniffs, and a sniff the worker
+    did not finish is refused as an unsupported type."""
+    import io
+    import zipfile
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from backend.core import attachment_extract as ae
+
+    data = io.BytesIO()
+    method = zipfile.ZIP_BZIP2 if limit == "method" else zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(data, "w", method) as archive:
+        archive.writestr("mimetype", ae.ODT)
+        archive.writestr("content.xml", b"x" * 10000)
+        if limit == "member_ratio":
+            archive.writestr(
+                "padding", bytes(range(256)) * 40, compress_type=zipfile.ZIP_STORED
+            )
+    tools = service._attachment_read_tools
+    settings = service.attachment_settings
+    monkeypatch.setattr(
+        service,
+        "_attachment_settings",
+        replace(
+            settings,
+            limits=replace(
+                settings.limits, max_file_bytes=100 if limit == "size" else 100_000
+            ),
+        ),
+    )
+    changes = {
+        "members": {"max_zip_members": 1},
+        "total": {"max_zip_uncompressed_bytes": 100},
+        "ratio": {"max_zip_ratio": 2},
+        "member_ratio": {"max_zip_ratio": 10, "zip_ratio_floor_bytes": 100},
+    }
+    monkeypatch.setattr(
+        tools,
+        "extraction_limits",
+        replace(tools.extraction_limits, **changes.get(limit, {})),
+    )
+    record = SimpleNamespace(file_id="file-1", filename="doc.odt")
+    files = SimpleNamespace(get=lambda file_id: (record, data.getvalue()))
+    opened = []
+    original = zipfile.ZipFile.open
+
+    def open_member(archive, *args, **kwargs):
+        opened.append(args[0])
+        return original(archive, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
+    if limit in ("failed", "timeout"):
+        monkeypatch.setattr(ae, "_run_worker", lambda *args: ae.ExtractionResult(limit))
+    acquired = []
+    if limit in ("busy", "size"):
+        slots = SimpleNamespace(acquire=lambda timeout: acquired.append(1) and False)
+        monkeypatch.setattr(tools, "slots", slots)
+    result = tools.read_run_file(files, "file-1")
+    assert not opened
+    if limit == "valid":
+        assert result["content_type"] == ae.ODT
+    elif limit == "busy":
+        assert result["error_code"] == "busy" and acquired
+    elif limit == "size":
+        assert result["error_code"] == "attachment_too_large" and not acquired
+    else:
+        assert result["error_code"] == "unsupported_attachment_type"
+
+
 @pytest.mark.parametrize("kind", ["xlsx", "ods"])
 def test_nameless_sheets_have_distinct_locators(kind):
     from backend.core import attachment_extract as ae

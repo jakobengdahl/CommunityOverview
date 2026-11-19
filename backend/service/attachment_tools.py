@@ -23,6 +23,8 @@ from types import SimpleNamespace
 
 from backend.core import attachment_extract as extraction
 from backend.core.attachment_retrieval import Segment, rank_passages
+from backend.core.attachment_types import parse_allowed_types
+from backend.core.attachment_store import AttachmentLimits
 from backend.core.attachment_store import (
     AttachmentIndexCorrupt,
     AttachmentNotFound,
@@ -377,6 +379,88 @@ class AttachmentReadTools:
         finally:
             self.slots.release()
 
+    def list_run_files(self, run_files):
+        return {
+            **ENVELOPE,
+            "files": [
+                {
+                    "file_id": f.file_id,
+                    "filename": attachments.sanitize_filename(f.filename),
+                    "size": f.size,
+                }
+                for f in (run_files.list() if run_files is not None else [])
+            ],
+        }
+
+    def read_run_file(
+        self, run_files, file_id, offset=0, max_chars=ATTACHMENT_READ_DEFAULT_CHARS
+    ):
+        if (
+            not isinstance(file_id, str)
+            or type(offset) is not int
+            or offset < 0
+            or type(max_chars) is not int
+            or max_chars < 1
+        ):
+            return error("invalid_arguments")
+        found = run_files.get(file_id) if run_files is not None else None
+        if found is None:
+            return error("not_found")
+        record, data = found
+        settings = self.service.attachment_settings
+        limits = settings.limits if settings else AttachmentLimits()
+        allowed = (
+            settings.allowed_types
+            if settings
+            else parse_allowed_types(os.getenv("ATTACHMENT_ALLOWED_TYPES"))
+        )
+        if len(data) > limits.max_file_bytes:
+            return error("attachment_too_large")
+        if not self.slots.acquire(timeout=self.limits.extract_timeout_seconds):
+            return error("busy")
+        try:
+            # Sniffing may decompress an ODF member, so it runs in the
+            # isolated child with the extraction (ADR 0010 section 3).
+            result = extraction.detect_and_extract(
+                data,
+                record.filename,
+                allowed,
+                replace(self.extraction_limits, max_input_bytes=limits.max_file_bytes),
+            )
+        finally:
+            self.slots.release()
+        content_type = result.content_type
+        # A worker failure or timeout leaves the type check unfinished, so
+        # no content type means the file was not shown to be allowed.
+        if content_type is None or content_type not in allowed:
+            return error("unsupported_attachment_type")
+        return {
+            **ENVELOPE,
+            "file_id": record.file_id,
+            "filename": attachments.sanitize_filename(record.filename),
+            "content_type": content_type,
+            **self._read_result(result, offset, max_chars),
+        }
+
+    def _read_result(self, result, offset, max_chars):
+        segments, position = [], 0
+        end = offset + min(max_chars, self.limits.read_max_chars)
+        for segment in result.segments if result.status == "ok" else ():
+            text = segment.text[max(0, offset - position) : max(0, end - position)]
+            if text:
+                segments.append({"locator": segment.locator, "text": text})
+            position += len(segment.text)
+        count = sum(len(s["text"]) for s in segments)
+        return {
+            "extraction_status": result.status,
+            "truncated": result.truncated,
+            "total_chars": position,
+            "offset": offset,
+            "returned_chars": count,
+            "next_offset": offset + count if offset + count < position else None,
+            "segments": segments,
+        }
+
     @guarded
     def list(self, node_id):
         if not isinstance(node_id, str):
@@ -423,15 +507,8 @@ class AttachmentReadTools:
         if found is None:
             return error("busy")
         result, _ = found
-        segments, position = [], 0
-        end = offset + min(max_chars, self.limits.read_max_chars)
-        for segment in result.segments if result.status == "ok" else ():
-            text = segment.text[max(0, offset - position) : max(0, end - position)]
-            if text:
-                segments.append({"locator": segment.locator, "text": text})
-            position += len(segment.text)
-        count = sum(len(s["text"]) for s in segments)
-        self.audit("read", node_id, record, count, result.status)
+        content = self._read_result(result, offset, max_chars)
+        self.audit("read", node_id, record, content["returned_chars"], result.status)
         return {
             **ENVELOPE,
             "node_id": node_id,
@@ -439,13 +516,7 @@ class AttachmentReadTools:
             "filename": record.filename,
             "content_type": record.content_type,
             "sha256": record.sha256,
-            "extraction_status": result.status,
-            "truncated": result.truncated,
-            "total_chars": position,
-            "offset": offset,
-            "returned_chars": count,
-            "next_offset": offset + count if offset + count < position else None,
-            "segments": segments,
+            **content,
         }
 
     @guarded
@@ -641,12 +712,45 @@ def add_attachment(
     content_type=None,
 ):
     """Store one file through the same service path as the REST upload."""
+    return _store_attachment(
+        service,
+        node_id,
+        filename,
+        content_type,
+        _content_length(content_text, content_base64),
+        lambda: _decoded_content(content_text, content_base64),
+        in_arguments=True,
+    )
+
+
+def attach_run_file(service, run_files, node_id, file_id):
+    """Attach only a file owned by this run, through add_attachment's path."""
+    try:
+        found = run_files.get(file_id) if run_files is not None else None
+    except Exception:
+        found = None
+    # An unknown id fails argument validation after the write ceiling.
+    record, data = found if found is not None else (None, None)
+    return _store_attachment(
+        service,
+        node_id,
+        record.filename if record else None,
+        record.declared_content_type if record else None,
+        len(data) if data is not None else None,
+        lambda: data,
+        in_arguments=False,
+    )
+
+
+def _store_attachment(
+    service, node_id, filename, content_type, size, content, in_arguments
+):
+    """The single attachment write path for tools; audits every outcome."""
     result, resolved = error("failed"), False
     try:
         result = _write_refusal(service, "add_node_attachment")
         if result is not None:
             return result
-        size = _content_length(content_text, content_base64)
         if (
             not isinstance(node_id, str)
             or not isinstance(filename, str)
@@ -663,10 +767,15 @@ def add_attachment(
             result = _write_result(refused)
             return result
         resolved = True
-        if size > service._attachment_read_tools.limits.mcp_max_decoded_bytes:
+        # The message-size limit applies only to content carried in tool
+        # arguments; run files never pass through a tool message.
+        if (
+            in_arguments
+            and size > service._attachment_read_tools.limits.mcp_max_decoded_bytes
+        ):
             result = error("attachment_too_large_for_tool")
             return result
-        data = _decoded_content(content_text, content_base64)
+        data = content()
         if data is None:
             result = error("invalid_arguments")
             return result
