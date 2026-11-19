@@ -701,4 +701,173 @@ describe('NodeAppearanceDialog', () => {
       clear_base_revision: 2,
     });
   });
+  const click = (name) => act(async () => fireEvent.click(screen.getByRole('button', { name })));
+  it('saves a named shape and copies apart from Apply, and a failed Apply keeps both for retry', async () => {
+    const apply = vi.fn();
+    const create = vi.fn(async (key, name, definition) => ({
+      key,
+      name,
+      definition,
+      revision: create.mock.calls.length,
+      deleted: false,
+    }));
+    const view = render(
+      <NodeAppearanceDialog {...props} savedShapes={{}} library={{ create }} onApply={apply} />
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.change(screen.getByLabelText('node_appearance.shape_name'), {
+      target: { value: 'My card!' },
+    });
+    await click('node_appearance.save_named');
+    const [key, name, definition] = create.mock.calls[0];
+    expect(key).toMatch(/^my-card-[0-9a-f]{8}$/);
+    expect([name, definition]).toEqual(['My card!', DEFAULT_SHAPE]);
+    expect(apply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    view.rerender(
+      <NodeAppearanceDialog
+        {...props}
+        savedShapes={{}}
+        library={{ create }}
+        onApply={apply}
+        error="failed"
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply.mock.calls).toEqual([
+      ['node', { ref: `saved:${key}` }],
+      ['node', { ref: `saved:${key}` }],
+    ]);
+    await click('node_appearance.save_copy');
+    expect(create.mock.calls[1][0]).not.toBe(key);
+    expect(create.mock.calls[1][2]).toEqual(DEFAULT_SHAPE);
+    expect(screen.getByRole('button', { name: 'node_appearance.delete_saved' })).toBeTruthy();
+    // A fetch read after both writes omits them: they were deleted elsewhere.
+    view.rerender(
+      <NodeAppearanceDialog
+        {...props}
+        savedShapes={{}}
+        savedShapesRevision={2}
+        library={{ create }}
+        onApply={apply}
+      />
+    );
+    expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+    await click('node_appearance.review_latest');
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+  });
+  it('edits and deletes a saved shape only after a usage warning on the reviewed revision', async () => {
+    const apply = vi.fn();
+    const library = {
+      usage: vi.fn(async () => ({
+        revision: library.usage.mock.calls.length < 4 ? 3 : 5,
+        usage: 4,
+      })),
+      update: vi
+        .fn()
+        .mockRejectedValueOnce(Object.assign(new Error('stale'), { status: 409 }))
+        .mockImplementation(async (key, name, definition) => ({
+          key,
+          name,
+          definition,
+          revision: 5,
+          deleted: false,
+        })),
+      remove: vi.fn(async (key) => ({ key, revision: 6, deleted: true })),
+      refresh: vi.fn(),
+    };
+    render(
+      <NodeAppearanceDialog
+        {...props}
+        shapeOverrides={{ a: { ref: 'saved:card' } }}
+        savedShapes={{
+          card: { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 },
+          other: { name: 'Other', definition: DEFAULT_SHAPE, revision: 1 },
+        }}
+        library={library}
+        onApply={apply}
+      />
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    await click('node_appearance.edit_saved');
+    expect(screen.getByText('node_appearance.edit_warning')).toBeTruthy();
+    expect(library.update).not.toHaveBeenCalled();
+    // Switching shapes ends the review: it can never write Other's content into Card.
+    const pickSaved = (value) => {
+      fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.shape' }));
+      fireEvent.change(screen.getByLabelText('node_appearance.saved_shape'), {
+        target: { value },
+      });
+    };
+    pickSaved('other');
+    pickSaved('card');
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    await click('node_appearance.edit_saved');
+    await click('node_appearance.confirm_edit');
+    // A stale review commits nothing and must be reviewed again.
+    expect(screen.getByText('node_appearance.library_conflict')).toBeTruthy();
+    expect(library.refresh).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    await click('node_appearance.edit_saved');
+    await click('node_appearance.confirm_edit');
+    const edited = { ...EXAMPLE_SHAPE, scale: 3 };
+    expect(library.update.mock.calls.map((call) => call.slice(0, 5))).toEqual([
+      ['card', 'Card', edited, 3, 4],
+      ['card', 'Card', edited, 3, 4],
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { ref: 'saved:card' });
+    await click('node_appearance.delete_saved');
+    expect(screen.getByText('node_appearance.delete_warning')).toBeTruthy();
+    await click('node_appearance.confirm_delete');
+    expect(library.remove).toHaveBeenCalledWith('card', 5, 4);
+    // The deleted reference previews as the built-in card.
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+  });
+  it('keeps a draft on its starting revision when the library moves, until the user reviews', async () => {
+    const apply = vi.fn();
+    const library = {
+      usage: vi.fn(async () => ({ revision: 4, usage: 2 })),
+      update: vi.fn(async (key, name, definition) => ({ key, name, definition, revision: 7 })),
+      refresh: vi.fn(),
+    };
+    const view = (card, revision) => (
+      <NodeAppearanceDialog
+        {...props}
+        shapeOverrides={{ a: { ref: 'saved:card' } }}
+        savedShapes={{ card }}
+        savedShapesRevision={revision}
+        library={library}
+        onApply={apply}
+      />
+    );
+    const { rerender } = render(view({ name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 }, 3));
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    // A stale server revision at the warning commits nothing.
+    await click('node_appearance.edit_saved');
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    expect(library.refresh).toHaveBeenCalled();
+    // The refreshed library holds another edit: the draft stays on revision 3.
+    rerender(view({ name: 'Card', definition: DEFAULT_SHAPE, revision: 4 }, 4));
+    const edit = () => screen.getByRole('button', { name: 'node_appearance.edit_saved' });
+    expect(edit().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { inline: { ...EXAMPLE_SHAPE, scale: 3 } });
+    // Only the user's review moves the draft's own change onto revision 4.
+    await click('node_appearance.review_latest');
+    await click('node_appearance.edit_saved');
+    await click('node_appearance.confirm_edit');
+    expect(library.update).toHaveBeenCalledWith(
+      'card',
+      'Card',
+      { ...DEFAULT_SHAPE, scale: 3 },
+      4,
+      2
+    );
+  });
 });

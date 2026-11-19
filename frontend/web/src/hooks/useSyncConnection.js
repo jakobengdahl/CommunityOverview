@@ -39,7 +39,11 @@ export function useSyncConnection(sessionId) {
   // resolves a saved reference against a definition edited or deleted since.
   // The fetched library itself outlives the connection.
   const [savedShapes, setSavedShapes] = useState(null);
+  // The library revision ``savedShapes`` was read at (null with it).
+  const [savedShapesRevision, setSavedShapesRevision] = useState(null);
   const libraryRef = useRef(null);
+  // The connected client's library fetch, for a refresh after a local write.
+  const confirmLibraryRef = useRef(null);
 
   // Clear everything scoped to a single connected client, so a stale roster /
   // remote positions from the previous session never bleed into the next one.
@@ -52,6 +56,7 @@ export function useSyncConnection(sessionId) {
     setRemoteLeases({});
     setOpStreamReady(false);
     setSavedShapes(null);
+    setSavedShapesRevision(null);
   }, []);
 
   // Lazily create + connect the sync client for a session. Called on the first
@@ -92,6 +97,7 @@ export function useSyncConnection(sessionId) {
         const cached = libraryRef.current;
         if (cached && revision != null && cached.revision >= revision) {
           setSavedShapes(cached.entries);
+          setSavedShapesRevision(cached.revision);
           return null;
         }
         return Promise.resolve()
@@ -105,16 +111,23 @@ export function useSyncConnection(sessionId) {
               if (!libraryRef.current || libraryRef.current.revision <= revisionNow) {
                 libraryRef.current = { revision: revisionNow, entries };
               }
-              if (isCurrentClient()) setSavedShapes(libraryRef.current.entries);
+              if (isCurrentClient()) {
+                setSavedShapes(libraryRef.current.entries);
+                setSavedShapesRevision(libraryRef.current.revision);
+              }
             },
             () => {
               // Unknown state: saved references fall back to the built-in card
               // rather than a definition that may have been edited or deleted.
               libraryRef.current = null;
-              if (isCurrentClient()) setSavedShapes(null);
+              if (isCurrentClient()) {
+                setSavedShapes(null);
+                setSavedShapesRevision(null);
+              }
             }
           );
       };
+      confirmLibraryRef.current = confirmLibrary;
       client = new SessionSyncClient({
         sessionId: targetId,
         deferRemoteOps: true,
@@ -177,6 +190,13 @@ export function useSyncConnection(sessionId) {
     };
   }, [sessionId, resetConnectionState]);
 
+  // Fetch the library unless the cache already holds ``revision`` (null:
+  // always), so a library write made here shows without a stream notice.
+  const refreshSavedShapes = useCallback(
+    (revision = null) => confirmLibraryRef.current?.(revision) ?? null,
+    []
+  );
+
   return {
     syncRef,
     syncHandlersRef,
@@ -196,5 +216,7 @@ export function useSyncConnection(sessionId) {
     opStreamReady,
     setOpStreamReady,
     savedShapes,
+    savedShapesRevision,
+    refreshSavedShapes,
   };
 }
