@@ -18,6 +18,7 @@ export { default as ArrowNode } from './components/ArrowNode';
 export { default as GenericAnnotationNode } from './components/GenericAnnotationNode';
 export { default as FreehandAnnotationNode } from './components/FreehandAnnotationNode';
 export { default as AnnotationToolbox } from './components/AnnotationToolbox';
+export { default as NodePreview } from './components/NodePreview';
 
 // Layout utilities
 export {
@@ -80,3 +81,9 @@ export { originGraphId, isFederatedNode, originGraphName } from './utils/nodePro
 
 // Shared body geometry for custom renderers and layout consumers.
 export { createNodeShapeGeometry } from './utils/nodeShapeGeometry';
+export {
+  createNodeShapeResolver,
+  nodeShapeAreaValues,
+  nodeShapeGeometry,
+  nodeShapeTextBox,
+} from './utils/nodeShapes';

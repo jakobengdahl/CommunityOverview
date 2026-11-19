@@ -1,0 +1,59 @@
+.appearance-dialog {
+  height: auto;
+  max-height: 90vh;
+  color: #eee;
+}
+.appearance-dialog h2,
+.appearance-dialog p {
+  margin: 0;
+}
+.appearance-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 20px;
+  overflow: auto;
+}
+.appearance-fields,
+.appearance-preview,
+.appearance-preview-controls {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+.appearance-fields label,
+.appearance-preview-controls label {
+  display: grid;
+  gap: 4px;
+}
+.appearance-fields fieldset label {
+  display: block;
+  margin: 8px 0;
+}
+.appearance-warning {
+  margin-top: 4px;
+  color: #fbbf24;
+}
+/* Room for a triangle's outside label above the body at larger scales. */
+.appearance-preview-stage.graph-canvas-container {
+  height: 240px;
+  padding: 40px 16px 16px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  overflow: auto;
+}
+.appearance-footer {
+  display: flex;
+  gap: 10px;
+  padding: 16px;
+  border-top: 1px solid #444;
+}
+.appearance-footer span {
+  flex: 1;
+}
+@media (max-width: 600px) {
+  .appearance-body {
+    grid-template-columns: 1fr;
+  }
+}
