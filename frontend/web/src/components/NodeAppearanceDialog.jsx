@@ -226,7 +226,10 @@ export default function NodeAppearanceDialog({
       return next;
     });
     const next = { ...edits, ...patch, areas: { ...edits.areas, ...patch.areas } };
-    if (appearanceDraft(original.selection, next, resolve).valid) announce(message);
+    // Only the preview claim depends on validity; a placement reset happens
+    // regardless and is always announced.
+    if (message !== 'preview_updated' || appearanceDraft(original.selection, next, resolve).valid)
+      announce(message);
     else setStatus({ message: '', slot: 0 });
   }
   function changeBase(base) {

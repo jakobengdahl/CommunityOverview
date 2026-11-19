@@ -2679,8 +2679,15 @@ function App() {
     const state = useGraphStore.getState();
     const node = state.nodes.find((item) => item.id === id);
     if (!node) return;
+    const keys = [`node:${id}`, `type:${node.nodeType || node.type}`];
     setAppearanceError(null);
-    setAppearanceDialog({ node });
+    // The dialog's original appearance is fixed at open, so its revisions are
+    // too: Apply refuses once the store moves past them (NODE_SHAPES.md §
+    // Editor flow), and only this dialog's own settled write advances them.
+    setAppearanceDialog({
+      node,
+      revisions: Object.fromEntries(keys.map((key) => [key, state.shapeRevisions[key] || 0])),
+    });
   }, []);
 
   const applyAppearance = useCallback(
@@ -2695,11 +2702,14 @@ function App() {
         setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
-      const { node } = appearanceDialog;
-      // The store is the only revision source: a settled write or a reconnect
-      // reload advances it, and the server refuses a stale base revision.
+      const { node, revisions } = appearanceDialog;
       const state = useGraphStore.getState();
-      if (!state.nodes.some((item) => item.id === node.id)) {
+      if (
+        !state.nodes.some((item) => item.id === node.id) ||
+        Object.entries(revisions).some(
+          ([key, revision]) => (state.shapeRevisions[key] || 0) !== revision
+        )
+      ) {
         setAppearanceError({ dialog: appearanceDialog, code: 'changed' });
         return;
       }
@@ -2707,13 +2717,7 @@ function App() {
         setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
         return;
       }
-      const op = appearanceOperation(
-        scope,
-        node,
-        selection,
-        state.shapeRevisions,
-        crypto.randomUUID()
-      );
+      const op = appearanceOperation(scope, node, selection, revisions, crypto.randomUUID());
       appearancePendingRef.current = {
         id: op.operation_id,
         dialog: appearanceDialog,
@@ -3022,6 +3026,11 @@ function App() {
               if (meta.ownAppearance && appearancePendingRef.current?.id === op.operation_id) {
                 const pending = appearancePendingRef.current;
                 appearancePendingRef.current = null;
+                // A dialog kept open for further edits now builds on this write.
+                for (const key of Object.keys(pending.dialog.revisions)) {
+                  if (op.revisions?.[key] != null)
+                    pending.dialog.revisions[key] = op.revisions[key];
+                }
                 setAppearanceDialog((current) =>
                   current === pending.dialog && !pending.edited ? null : current
                 );

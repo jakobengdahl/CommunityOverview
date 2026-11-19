@@ -554,11 +554,17 @@ describe('NodeAppearanceDialog', () => {
     expect(screen.getByRole('button', { name: 'node_appearance.apply' }).disabled).toBe(true);
     const statuses = screen.getAllByRole('status');
     expect(statuses.every((status) => !status.textContent)).toBe(true);
-    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
-    expect(statuses.some((status) => status.textContent)).toBe(true);
+    // A placement reset is announced even while the scale is invalid.
     fireEvent.change(screen.getByLabelText('node_appearance.base'), {
       target: { value: 'triangle-up' },
     });
+    expect(statuses.map((status) => status.textContent)).toContain(
+      'node_appearance.placement_reset'
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
+    expect(statuses.map((status) => status.textContent)).toContain(
+      'node_appearance.preview_updated'
+    );
     fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
     fireEvent.click(screen.getByLabelText('node_appearance.scope_type'));
     expect(screen.getByText(/Second/)).toBeTruthy();
