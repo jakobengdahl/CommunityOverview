@@ -37,7 +37,8 @@ span, so no live session state is changed outside it:
 | Writer | Covered span |
 |---|---|
 | `apply_ops` | from the appearance checks through the persist await and rollback |
-| `_apply_op_sync` (every synchronous op path: layout, node refs, annotations, groups, rename, describe, write mode, undo/redo, pushed results) | snapshot, apply, persist and rollback |
+| `_apply_op_sync` (every synchronous op path: layout, node refs, annotations, groups, rename, describe, write mode, pushed results) | snapshot, apply, persist and rollback |
+| `_replay_action` (undo/redo) | from the record lookup and conflict checks through the record flag, history revision and deleted-id changes, the nested `_apply_op_sync`, and their restore on failure |
 | `stage_graph_change` | the staged op's apply and persist |
 | `announce_layer_change` | the layer op's apply and persist |
 

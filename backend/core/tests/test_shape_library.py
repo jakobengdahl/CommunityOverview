@@ -293,6 +293,8 @@ def _live_writer(writer, manager, session):
         asyncio.run(manager.apply_ops(session.id, "c1", None, ops))
     elif writer == "apply_op_sync":
         manager.rename_session_sync(session.id, "Renamed", "c1")
+    elif writer == "undo":
+        manager.undo_last_action(session.id, "c1")
     elif writer == "staging":
         manager.stage_graph_change(
             session.id,
@@ -304,7 +306,9 @@ def _live_writer(writer, manager, session):
         manager.announce_layer_change(session.id, op)
 
 
-@pytest.mark.parametrize("writer", ["apply_ops", "apply_op_sync", "staging", "layer"])
+@pytest.mark.parametrize(
+    "writer", ["apply_ops", "apply_op_sync", "undo", "staging", "layer"]
+)
 def test_live_writers_are_marked_through_persist_and_refuse_a_commit(
     tmp_path, monkeypatch, writer
 ):
@@ -334,10 +338,21 @@ def test_live_writers_are_marked_through_persist_and_refuse_a_commit(
                 apply=_reference,
             )
 
+    if writer == "undo":
+        manager.upsert_annotation(session.id, "c1", {"id": "a", "type": "note"})
+        replay = manager._apply_op_sync
+
+        def commit_before_replay(*args, **kwargs):
+            commit_during_persist()
+            return replay(*args, **kwargs)
+
+        # Undo flips the record's flags before the replay's own section.
+        monkeypatch.setattr(manager, "_apply_op_sync", commit_before_replay)
     monkeypatch.setattr(store, "persist", commit_during_persist)
     monkeypatch.setattr(store, "persist_snapshot", commit_during_persist)
     _live_writer(writer, manager, session)
-    assert seen == [True] and not store.is_writing(session.id)
+    assert seen == [True] * (2 if writer == "undo" else 1)
+    assert not store.is_writing(session.id)
     assert library.snapshot()["entries"] == {}
     assert "X" not in session.state["type_shapes"]
 
