@@ -255,8 +255,8 @@ because another instance moved it is dropped, re-enqueued, and the rest
 re-issued. A failed commit leaves no vector behind for its nodes and does not
 regenerate one: undoing the write would otherwise re-embed the restored node
 in memory only, where the store lacks it and the next pass would take it as
-embedded. A commit of unknown outcome re-reads the graph from the store, which
-then decides whether the vector is there.
+embedded. A commit of unknown outcome drops its pending vectors from memory
+too, whatever the store holds; a later pass encodes those nodes again.
 
 Because the generation no longer decides, a merge job is not `superseded` by a
 later replace: it embeds whatever still lacks a vector, which after a replace
