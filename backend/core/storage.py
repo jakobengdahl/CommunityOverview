@@ -3717,8 +3717,8 @@ class GraphStorage:
         whose text changed, and those an entity store refused because another
         instance moved them. A store that applies entity batches receives only
         the committed nodes, each expecting the revision held here. A failed
-        commit raises with none of its vectors in memory, or, if its outcome
-        is unknown, with the graph re-read from the store.
+        commit raises with none of its vectors in memory, also when its
+        outcome is unknown and the graph was re-read from the store.
         """
         with self._lock:
             requeue: List[str] = []
@@ -3759,11 +3759,12 @@ class GraphStorage:
                     if pending.pop(exc.entity_id, None) is None:
                         raise
                     requeue.append(exc.entity_id)
-                except GraphWriteOutcomeUnknown:
-                    # The graph was re-read: the store says what landed.
-                    raise
                 except Exception:
-                    # A single-writer store keeps a failed write in memory.
+                    # A single-writer store keeps a failed write in memory, and
+                    # the re-read after an unknown outcome may itself have
+                    # failed: dropping the vectors costs at most a re-encode,
+                    # keeping them could hide from every later pass a vector
+                    # the store never got.
                     self.vector_store.remove_nodes_embeddings(list(pending))
                     raise
             return 0, requeue

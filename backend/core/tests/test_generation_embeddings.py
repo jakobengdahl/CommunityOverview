@@ -265,7 +265,7 @@ def test_a_metadata_only_change_while_encoded_keeps_the_computed_vector(
     assert storage.vector_store.get_vector_list("a") == [1.0, 0.0]
 
 
-@pytest.mark.parametrize("failure", ["failed", "refused"])
+@pytest.mark.parametrize("failure", ["failed", "refused", "unknown"])
 def test_a_failed_or_refused_merge_commit_leaves_no_vector_and_regenerates_none(
     storage, monkeypatch, failure
 ):
@@ -284,17 +284,20 @@ def test_a_failed_or_refused_merge_commit_leaves_no_vector_and_regenerates_none(
     def refuse(*args, **kwargs):
         raise RuntimeError("refused")
 
+    if failure != "failed" and not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
     if failure == "refused":
-        if not storage._store_assigns_revisions:
-            pytest.skip("requires revision enforcement")
         # Another instance moved b; this one has not heard of it.
         storage._persistence_backend._store["nodes"]["b"]["revision"] = 100
     # Undone before the teardown's flush, which writes.
     with monkeypatch.context() as failing:
-        if failure == "failed":
+        if failure != "refused":
             backend = storage._persistence_backend
             failing.setattr(backend, "apply_batch", refuse)
             failing.setattr(backend, "save_graph_data", refuse)
+        if failure == "unknown":
+            # Outcome unknown, and the re-read that should settle it fails.
+            failing.setattr(backend, "load_graph_data", refuse)
         drain_import_jobs(store, storage)
 
     failed = store.get(job.id)
