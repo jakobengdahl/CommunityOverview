@@ -802,6 +802,10 @@ export class SessionSyncClient {
    *   onStreamRefused (the stream answered 404 before it ever opened: the
    *   session id is retired), onHeldSaveReleased (a snapshot arrived while a
    *   broadcast held autosave; the host takes a fresh one now),
+   *   onLibraryRevision (the shape library revision a snapshot, catch-up or
+   *   library invalidation carries; a returned promise holds that event and
+   *   every later one until it settles, so the host fetches the library
+   *   before it resolves session state),
    *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -884,6 +888,9 @@ export class SessionSyncClient {
     this._retryTimer = null;
     this._reconnectTimer = null;
     this._closed = false;
+    // Stream events held while the host fetches the shape library.
+    this._eventBacklog = [];
+    this._libraryWait = false;
     this._flushing = false;
     this._forceSingle = false;
 
@@ -1449,7 +1456,7 @@ export class SessionSyncClient {
       } catch {
         return;
       }
-      this._handleEvent(data);
+      this._receive(data);
     };
     source.onerror = () => {
       this._ready = false;
@@ -2258,6 +2265,32 @@ export class SessionSyncClient {
     );
   }
 
+  _receive(data) {
+    if (data) this._eventBacklog.push(data);
+    while (!this._libraryWait && !this._closed && this._eventBacklog.length) {
+      const event = this._eventBacklog.shift();
+      const revision =
+        event.type === 'library_invalidated' ? event.revision : event.library_revision;
+      const pending =
+        typeof revision === 'number'
+          ? this.handlers.onLibraryRevision?.(revision, this.sessionId)
+          : null;
+      if (typeof pending?.then === 'function') {
+        // Stream order is kept: nothing after this event is handled before it.
+        this._libraryWait = true;
+        const resume = () => {
+          this._libraryWait = false;
+          if (this._closed) return;
+          this._handleEvent(event);
+          this._receive(null);
+        };
+        pending.then(resume, resume);
+        return;
+      }
+      this._handleEvent(event);
+    }
+  }
+
   _handleEvent(data) {
     switch (data.type) {
       case 'snapshot':
@@ -2494,6 +2527,10 @@ export class SessionSyncClient {
           });
         }
         break;
+      case 'library_invalidated':
+        // Only the host's library fetch (onLibraryRevision, in _receive)
+        // follows; nothing is sent back as a session operation.
+        break;
       case 'command':
         // MCP visualization push, broadcast to every subscriber (design §3.8),
         // unlike the legacy single-consumer push stream it superseded (R5).
@@ -2540,6 +2577,7 @@ export class SessionSyncClient {
     }
     this._queue = [];
     this._appearanceAcks = [];
+    this._eventBacklog = [];
     // A close() before the client ever became ready (e.g. a session switch
     // while whenReady() is still pending) must still resolve any waiter, or
     // its awaiter hangs forever holding this whole client alive. Resolving

@@ -471,6 +471,41 @@ describe('SessionSyncClient', () => {
     expect(client.membershipVersion).toBe(6);
   });
 
+  it('handles nothing after a library revision until its fetch settles, nor once closed', async () => {
+    let settle;
+    const onLibraryRevision = vi.fn(() => new Promise((resolve) => (settle = resolve)));
+    const onResync = vi.fn();
+    const onRemoteOps = vi.fn();
+    const { client, fetchImpl } = makeClient({
+      handlers: { onLibraryRevision, onResync, onRemoteOps },
+    });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const added = (seq) => ({
+      type: 'op',
+      seq,
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: [`n${seq}`] },
+    });
+    es.emit({ type: 'catch_up', seq: 6, ops: [added(6).op], library_revision: 4 });
+    es.emit(added(7));
+    expect(onLibraryRevision).toHaveBeenLastCalledWith(4, '1234-5678');
+    expect(onResync).not.toHaveBeenCalled();
+    expect(onRemoteOps).not.toHaveBeenCalled();
+    settle();
+    await flush();
+    expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    es.emit({ type: 'library_invalidated', key: 'card', revision: 5 });
+    es.emit(added(8));
+    expect(onLibraryRevision).toHaveBeenLastCalledWith(5, '1234-5678');
+    client.close();
+    settle();
+    await flush();
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
   // only adopts its seq, so ops that landed between the host's initial load
   // and the stream subscribe must be recovered through onResync.

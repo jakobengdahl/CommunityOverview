@@ -1,4 +1,4 @@
-# Node shapes phase 6b-4: live session writers under the writing marker
+# Node shapes phase 6b-4 and 6c: live session writers and library invalidation
 
 Part of phase 6 in [NODE_SHAPES.md](../NODE_SHAPES.md#migration-and-small-implementation-phases).
 A shape library commit that also changes a session (6b-3) adopts its staged
@@ -84,6 +84,41 @@ land after the rollback, leaving memory behind disk, and the marker would
 clear while that write was in flight, so a library commit could adopt state
 into the session and then be overwritten by it.
 
+## Library invalidation and reconnect
+
+Slice 6c tells clients when a saved shape they render has changed.
+
+- **Invalidation:** after a library commit, `ShapeLibrary` rebuilds the
+  reference index from the persisted sessions and calls its `invalidate`
+  callback, which `SessionManager.publish_library_invalidation` publishes as
+  `{"type": "library_invalidated", "key", "revision"}` on the stream of each
+  session that references the entry, and of no other. Like a summon it is
+  ephemeral: not sequenced, not replayed, subject to the same subscriber queue
+  bound. It names no definition and no other session. A failure to publish is
+  logged; the commit stands.
+- **Fetch:** `GET /api/shape-library` returns the current entries (no
+  tombstones, no owners) and the library revision. A deleted key is absent,
+  so its references resolve to the built-in card, never to a lower-priority
+  shape or the old definition.
+- **Reconnect ordering:** every snapshot and catch-up carries
+  `library_revision`. The browser sync client hands that revision, or an
+  invalidation's, to the host before it handles the event; while the host
+  fetches a newer library, that event and every later stream event wait, in
+  order. So the snapshot or missed operations are resolved against the
+  fetched library, never the one from before the disconnect. A failed fetch
+  drops the cached library: saved references render the built-in card until
+  the next revision arrives.
+- **Loading and switching:** the host shows saved shapes only once the
+  current session's stream has confirmed their revision, so a closed session
+  loaded later resolves the current library. Closing the client on a session
+  switch drops its held events and any fetch that settles afterwards. The
+  fetched library only updates the canvas; nothing is sent back as a session
+  operation.
+
+The bus is per process, like the marker: with several instances sharing
+session storage, a commit invalidates only streams on its own instance, and
+others learn the revision on their next connect.
+
 ## Out of scope
 
 - The marker is per process, like the live sessions it protects; another
@@ -91,10 +126,9 @@ into the session and then be overwritten by it.
   `.sessions.lock` (6b-2).
 - Session creation, copying and deletion: they replace whole documents
   rather than mutate a live one under a rollback snapshot.
-- Revision invalidation and reconnect (6c); the API, editor wiring and
-  permissions that turn library mutations on (6d), which pass the store as
-  `writers`; performance and accessibility gates (6e). Library mutations stay
-  disabled.
+- The API, editor wiring and permissions that turn library mutations on
+  (6d), which pass the store as `writers`; performance and accessibility
+  gates (6e). Library mutations stay disabled.
 - No change to phase 4 operation semantics, sync ordering or resync rebase,
   the blocking Windows lock (6b-1), read locking (6b-2), or commit order and
   staged-state adoption (6b-3).

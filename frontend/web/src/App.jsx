@@ -359,6 +359,7 @@ function App() {
     remoteLeases,
     setRemoteLeases,
     opStreamReady,
+    savedShapes,
   } = useSyncConnection(sessionId);
   // The active session's write mode and staged changes
   // (docs/SESSION_OVERLAY_CONTRACT.md §17).
@@ -4008,6 +4009,7 @@ function App() {
           compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
+          savedShapes={savedShapes}
           shapeOverrides={shapeOverrides}
           typeShapes={typeShapes}
           onContextMenuAction={handleContextMenuAction}

@@ -568,6 +568,11 @@ export async function getSchema() {
   return apiFetch(`${API_BASE}/schema`);
 }
 
+/** Saved node shapes: `{revision, entries: {key: {name, definition, revision}}}`. */
+export async function getShapeLibrary() {
+  return apiFetch(`${API_BASE}/shape-library`);
+}
+
 // ============================================================
 // Node attachments (ADR 0008)
 // ============================================================

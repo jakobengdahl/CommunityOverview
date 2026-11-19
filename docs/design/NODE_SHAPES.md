@@ -5,8 +5,9 @@ session maps, semantic appearance tokens, shared base geometry and the canvas
 renderer with accessible text are implemented. A node whose type names a
 configured shape (or whose session selection resolves to a config or inline
 definition) renders that shape; saved library references resolve to the
-built-in card until library persistence exists. Minimum hit targets, editing,
-shared appearance operations and library persistence remain future work.
+entry the client fetched for the session's confirmed library revision, else to
+the built-in card. Library writes stay disabled; minimum hit targets, editing
+and shared appearance operations remain future work.
 Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
@@ -411,7 +412,9 @@ Each phase is a proposed PR boundary, not a separate project status tracker:
    index and invalidations. Test unauthorized mutation, stale edit, deletion in
    active/closed sessions, restart and tombstone non-resurrection. Run the focused
    performance scenes and accessibility review before enabling library writes.
-   Live session writers and library commits exclude each other as described in
+   Live session writers and library commits exclude each other, and a commit
+   invalidates the streams of referencing sessions, which fetch the library
+   before resolving session state on reconnect, as described in
    [node-shapes/live-writers.md](node-shapes/live-writers.md).
 
 Use normally one test per guarantee, a second only to falsify a distinct failure;

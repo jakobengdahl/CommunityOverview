@@ -48,6 +48,7 @@ from backend.core.session_auto_add import (
 from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.core.shape_library import FileShapeLibraryPersistenceBackend, ShapeLibrary
 from backend.ui.conversation_state import FileTaintRegistry
 from backend.core.session_manager import SessionManager
 from backend.core.write_modes import WriteModes
@@ -445,11 +446,20 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         )
         merge_record_retention.start()
     sessions_dir = str(config.resolve_sessions_dir())
+    session_backend = FileSessionPersistenceBackend(sessions_dir)
     session_store = SessionStore(
-        FileSessionPersistenceBackend(sessions_dir),
+        session_backend,
         staged_status=write_modes.staged_status,
     )
     session_manager = SessionManager(session_store, write_modes=write_modes)
+    # Read-only until library writes are enabled; a commit then invalidates
+    # the sessions that reference the entry.
+    session_manager.shape_library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(Path(sessions_dir) / "shape-library"),
+        session_backend,
+        writers=session_store,
+        invalidate=session_manager.publish_library_invalidation,
+    )
     app.state.session_store = session_store
     app.state.session_manager = session_manager
 

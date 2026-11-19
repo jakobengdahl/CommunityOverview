@@ -1,3 +1,4 @@
+// covers: frontend/web/src/hooks/useSyncConnection.js
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
@@ -10,6 +11,7 @@ vi.mock('../services/api', () => ({
   getDisplayName: vi.fn(() => 'Tester'),
   getSessionStreamUrl: vi.fn((id) => `/stream/${id}`),
   getSessionOpsUrl: vi.fn((id) => `/ops/${id}`),
+  getShapeLibrary: vi.fn(),
 }));
 
 // A minimal fake client whose connect/flush/close are observable. `connectImpl`
@@ -240,6 +242,33 @@ describe('useSyncConnection.ensureSyncConnected', () => {
       currentEdge: { clientId: 'current-client' },
     });
     expect(appOnReady).toHaveBeenCalledWith('current-ready');
+  });
+
+  it('resolves saved shapes only once the current session confirms the library revision', async () => {
+    const entries = { card: { name: 'Card', definition: {}, revision: 2 } };
+    api.getShapeLibrary.mockResolvedValueOnce({ revision: 2, entries });
+    api.getShapeLibrary.mockRejectedValueOnce(new Error('offline'));
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    let stale;
+    act(() => {
+      stale = result.current.ensureSyncConnected('1111-2222');
+    });
+    expect(result.current.savedShapes).toBeNull();
+    await act(() => stale.handlers.onLibraryRevision(2));
+    expect(result.current.savedShapes).toEqual(entries);
+    let current;
+    act(() => {
+      current = result.current.ensureSyncConnected('3333-4444');
+    });
+    // A switched-to session renders no saved shape until its stream confirms.
+    expect(result.current.savedShapes).toBeNull();
+    expect(stale.handlers.onLibraryRevision(3)).toBeNull();
+    act(() => expect(current.handlers.onLibraryRevision(2)).toBeNull());
+    expect(result.current.savedShapes).toEqual(entries);
+    // A failed fetch drops what may now be stale instead of keeping it.
+    await act(() => current.handlers.onLibraryRevision(3));
+    expect(result.current.savedShapes).toBeNull();
+    expect(api.getShapeLibrary).toHaveBeenCalledTimes(2);
   });
 
   it('ignores stale app-level session callbacks after switching sessions', () => {

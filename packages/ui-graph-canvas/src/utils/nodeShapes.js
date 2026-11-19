@@ -32,12 +32,14 @@ function validDefinition(definition) {
 /**
  * Build `(node) => {definition, fields} | null` resolving one whole selection:
  * node override → session type default → config type default → built-in card.
- * A selection that cannot be resolved (saved shapes are not loaded here, or it
- * is invalid) yields the built-in card instead of a lower-priority shape.
+ * `savedShapes` holds the current library entries by key. A selection that
+ * cannot be resolved (a saved shape missing, deleted or not yet fetched, or an
+ * invalid one) yields the built-in card instead of a lower-priority shape.
  */
 export function createNodeShapeResolver({
   nodeTypes = {},
   nodeShapes = {},
+  savedShapes = {},
   shapeOverrides = {},
   typeShapes = {},
 } = {}) {
@@ -57,6 +59,8 @@ export function createNodeShapeResolver({
       const match = SELECTION_REF.exec(selection.ref);
       if (match?.[1] === 'config' && Object.hasOwn(nodeShapes || {}, match[2])) {
         definition = nodeShapes[match[2]];
+      } else if (match?.[1] === 'saved' && Object.hasOwn(savedShapes || {}, match[2])) {
+        definition = savedShapes[match[2]]?.definition;
       }
     }
     definition = validDefinition(definition);

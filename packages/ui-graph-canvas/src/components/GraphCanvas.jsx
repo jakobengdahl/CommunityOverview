@@ -533,6 +533,8 @@ function GraphCanvasInner({
   // shapes come from `schema`. A node with no resolved shape keeps the card.
   shapeOverrides = null,
   typeShapes = null,
+  // Saved library entries by key, as the host last fetched them.
+  savedShapes = null,
   onAppearance = null,
   onContextMenuAction = null,
   nodeColorResolver = null,
@@ -1549,10 +1551,11 @@ function GraphCanvasInner({
       createNodeShapeResolver({
         nodeTypes: schema?.node_types,
         nodeShapes: schema?.node_shapes,
+        savedShapes: savedShapes || {},
         shapeOverrides: shapeOverrides || {},
         typeShapes: typeShapes || {},
       }),
-    [schema, shapeOverrides, typeShapes]
+    [schema, savedShapes, shapeOverrides, typeShapes]
   );
 
   // Convert to React Flow node format with layout

@@ -1438,6 +1438,25 @@ def _register_session_endpoints(
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
 
+    @router.get("/shape-library")
+    def get_shape_library() -> Dict[str, Any]:
+        """Current saved shapes; tombstoned entries and owners are withheld."""
+        library = session_manager.shape_library
+        if library is None:
+            return {"revision": 0, "entries": {}}
+        snapshot = library.snapshot()
+        return {
+            "revision": snapshot["revision"],
+            "entries": {
+                key: {
+                    "name": entry["name"],
+                    "definition": entry["definition"],
+                    "revision": entry["revision"],
+                }
+                for key, entry in snapshot["entries"].items()
+            },
+        }
+
     @router.get("/sessions")
     async def list_sessions() -> Dict[str, Any]:
         return {"sessions": session_manager.list_sessions()}
