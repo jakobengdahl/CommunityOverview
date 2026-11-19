@@ -1,4 +1,4 @@
-# Node shapes phase 6b-4: live session writers under the writing marker
+# Node shapes phase 6b-4a: synchronous live session writers under the writing marker
 
 Part of phase 6 in [NODE_SHAPES.md](../NODE_SHAPES.md#migration-and-small-implementation-phases).
 A shape library commit that also changes a session (6b-3) adopts its staged
@@ -6,8 +6,8 @@ state into the live `Session` while it holds the session backend's
 transaction. A live writer in `session_manager.py` snapshots the session,
 mutates it, persists it and on failure restores the snapshot. If a library
 commit adopted its state between that snapshot and the rollback, the rollback
-would erase a change the library file already holds. `apply_ops` awaits its
-persist on a worker thread, so this window spans an await.
+would erase a change the library file already holds. This slice marks the
+synchronous writers, which run their whole span on the calling thread.
 
 ## The marker
 
@@ -32,21 +32,23 @@ whether any such section is open.
 ## Which writers take it
 
 Each section covers the writer's whole read-check-mutate-persist-rollback
-span, so no live session state is changed outside it:
+span, so the writer changes no live session state outside it:
 
 | Writer | Covered span |
 |---|---|
-| `apply_ops` | from the appearance checks through the persist await and rollback |
 | `_apply_op_sync` (every synchronous op path: layout, node refs, annotations, groups, rename, describe, write mode, pushed results) | snapshot, apply, persist and rollback |
 | `_replay_action` (undo/redo) | from the record lookup and conflict checks through the record flag, history revision and deleted-id changes, the nested `_apply_op_sync`, and their restore on failure |
-| `stage_graph_change` | the staged op's apply and persist |
-| `announce_layer_change` | the layer op's apply and persist |
 
 Broadcasts and lease or claim bookkeeping after a commit stay outside the
 marker: they do not change persisted session state.
 
 ## Out of scope
 
+- `apply_ops` (6b-4b): its persist runs on a worker thread behind an await,
+  so a cancellation there needs its own handling before the marker can clear.
+- `stage_graph_change` and `announce_layer_change` (6b-4c): their op is
+  applied after the graph layer change has committed, so a failure to take
+  the marker must not propagate from there.
 - The marker is per process, like the live sessions it protects; another
   process has its own in-memory sessions and reads files under
   `.sessions.lock` (6b-2).

@@ -1,5 +1,4 @@
 # covers: backend/core/shape_library.py, backend/core/session_store.py, backend/core/session_manager.py
-import asyncio
 import copy
 import errno
 import json
@@ -9,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend.config.node_shapes import resolve_shape
+from backend.core import session_manager
 from backend.core.session_manager import SessionManager
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
@@ -288,31 +288,17 @@ def test_directory_fsync_tolerates_only_unsupported(tmp_path, monkeypatch, code,
 
 
 def _live_writer(writer, manager, session):
-    if writer == "apply_ops":
-        ops = [{"op": "nodes_added", "node_ids": ["n"]}]
-        asyncio.run(manager.apply_ops(session.id, "c1", None, ops))
-    elif writer == "apply_op_sync":
+    if writer == "apply_op_sync":
         manager.rename_session_sync(session.id, "Renamed", "c1")
-    elif writer == "undo":
-        manager.undo_last_action(session.id, "c1")
-    elif writer == "staging":
-        manager.stage_graph_change(
-            session.id,
-            expected_session_seq=None,
-            commit=lambda seq: {"entries": [], "removals": []},
-        )
     else:
-        op = {"op": "graph_changes_discarded", "removals": [["node", "n1"]]}
-        manager.announce_layer_change(session.id, op)
+        manager.undo_last_action(session.id, "c1")
 
 
-@pytest.mark.parametrize(
-    "writer", ["apply_ops", "apply_op_sync", "undo", "staging", "layer"]
-)
+@pytest.mark.parametrize("writer", ["apply_op_sync", "undo"])
 def test_live_writers_are_marked_through_persist_and_refuse_a_commit(
     tmp_path, monkeypatch, writer
 ):
-    """Every live session writer holds the writing marker across its persist, a
+    """A synchronous live writer holds the writing marker across its persist, a
     library commit for that session is refused meanwhile, and the marker clears."""
     sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
     store = SessionStore(sessions)
@@ -355,6 +341,58 @@ def test_live_writers_are_marked_through_persist_and_refuse_a_commit(
     assert not store.is_writing(session.id)
     assert library.snapshot()["entries"] == {}
     assert "X" not in session.state["type_shapes"]
+
+
+@pytest.mark.parametrize("writer", ["apply_op_sync", "undo"])
+def test_live_writers_hold_the_marker_from_snapshot_through_rollback(
+    tmp_path, monkeypatch, writer
+):
+    """The marker is held when the writer snapshots, applies and, after a
+    failed persist, rolls back, and clears once the rollback is done."""
+    store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+    manager = SessionManager(store)
+    session = manager.create_session()
+    if writer == "undo":
+        manager.upsert_annotation(session.id, "c1", {"id": "a", "type": "note"})
+    seen = []
+
+    def observe(name, original):
+        def wrapper(*args, **kwargs):
+            seen.append((name, store.is_writing(session.id)))
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    def fail_persist(*args):
+        seen.append(("persist", store.is_writing(session.id)))
+        raise OSError(errno.EIO, "disk")
+
+    for name in ("ring", "find_latest_undoable", "apply_state_op", "restore_ring"):
+        monkeypatch.setattr(store, name, observe(name, getattr(store, name)))
+    monkeypatch.setattr(store, "persist", fail_persist)
+    monkeypatch.setattr(
+        session_manager,
+        "_restore_deleted_ids",
+        observe("restore_deleted_ids", session_manager._restore_deleted_ids),
+    )
+    with pytest.raises(OSError):
+        _live_writer(writer, manager, session)
+    names = [name for name, _ in seen]
+    rollback = ["persist", "restore_deleted_ids", "restore_ring"]
+    if writer == "undo":
+        # The replay's own restore of record flags and deleted ids runs last.
+        assert names[0] == "find_latest_undoable"
+        assert names[-4:] == rollback + ["restore_deleted_ids"]
+    else:
+        assert names[-3:] == rollback
+    assert {"ring", "apply_state_op"} <= set(names)
+    assert all(marked for _, marked in seen)
+    assert not store.is_writing(session.id)
+    if writer == "undo":
+        assert not session.activity_log[-1].get("undone")
+        assert [a["id"] for a in session.state["annotations"]] == ["a"]
+    else:
+        assert session.name != "Renamed"
 
 
 def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):

@@ -1187,15 +1187,14 @@ class SessionManager:
             "removals": payload.get("removals", []),
             "client_id": GRAPH_STAGING_CLIENT_ID,
         }
-        with self.store.writing(session_id):
-            applied = self.store.apply_state_op(session, op, record_activity=False)
-            try:
-                self.store.persist(session)
-            except Exception:
-                logger.exception(
-                    "staged change in session %s landed; persisting its seq failed",
-                    session_id,
-                )
+        applied = self.store.apply_state_op(session, op, record_activity=False)
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "staged change in session %s landed; persisting its seq failed",
+                session_id,
+            )
         self.bus.publish(
             session_id,
             {
@@ -1248,25 +1247,21 @@ class SessionManager:
                 session_id,
             )
             return None
-        with self.store.writing(session_id):
-            try:
-                applied = self.store.apply_state_op(
-                    session,
-                    {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
-                    record_activity=True,
-                )
-            except Exception:
-                logger.exception(
-                    "layer of session %s changed; its op failed", session_id
-                )
-                return None
-            try:
-                self.store.persist(session)
-            except Exception:
-                logger.exception(
-                    "layer of session %s changed; persisting its seq failed",
-                    session_id,
-                )
+        try:
+            applied = self.store.apply_state_op(
+                session,
+                {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
+                record_activity=True,
+            )
+        except Exception:
+            logger.exception("layer of session %s changed; its op failed", session_id)
+            return None
+        try:
+            self.store.persist(session)
+        except Exception:
+            logger.exception(
+                "layer of session %s changed; persisting its seq failed", session_id
+            )
         self.bus.publish(
             session_id,
             {
@@ -1583,149 +1578,141 @@ class SessionManager:
             if session is None:
                 raise SessionNotFound()
 
-            # Held from the first state read through the rollback, across the
-            # persist await: a shape library commit landing in between would be
-            # erased by the rollback (SessionStore.writing).
-            with self.store.writing(session_id):
-                if authorize_appearance and (
-                    session.state.get("shape_overrides")
-                    or session.state.get("type_shapes")
-                    or session.state.get("shape_operation_ids")
-                    or any(
-                        op["op"] in {"node_shape_set", "type_shape_set"} for op in ops
-                    )
-                ):
-                    authorize_appearance()
+            if authorize_appearance and (
+                session.state.get("shape_overrides")
+                or session.state.get("type_shapes")
+                or session.state.get("shape_operation_ids")
+                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
+            ):
+                authorize_appearance()
 
-                if (
-                    session.state.get("shape_overrides")
-                    or session.state.get("type_shapes")
-                    or session.state.get("shape_operation_ids")
-                    or any(
-                        op["op"] in {"node_shape_set", "type_shape_set"} for op in ops
-                    )
-                ) and (type(appearance_version) is not int or appearance_version != 1):
-                    raise AppearanceVersionRequired("appearance version 1 required")
+            if (
+                session.state.get("shape_overrides")
+                or session.state.get("type_shapes")
+                or session.state.get("shape_operation_ids")
+                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
+            ) and (type(appearance_version) is not int or appearance_version != 1):
+                raise AppearanceVersionRequired("appearance version 1 required")
 
-                # Snapshot for rollback. persist() is inside the protected region so
-                # a persistence-layer failure (disk full, IO error) rolls back too —
-                # otherwise in-memory state/seq/ring would advance while disk and all
-                # subscribers stayed behind, duplicating non-idempotent ops on retry.
-                # The activity log is copied shallowly: inside this region it is
-                # only appended to and pruned (``apply_state_op``), never edited in
-                # place, so a list copy restores it exactly. Deep-copying it here
-                # and again in the snapshot below cost ~28 ms of event-loop time
-                # per batch at the default 500-record cap.
-                saved_state = copy.deepcopy(session.state)
-                saved_seq = session.seq
-                saved_name = session.name
-                saved_description = session.description
-                saved_updated_at = session.updated_at
-                saved_activity_log = list(session.activity_log)
-                saved_deleted_ids = list(session._deleted_annotation_ids)
-                ring = self.store.ring(session_id)
-                saved_ring = list(ring) if ring is not None else None
+            # Snapshot for rollback. persist() is inside the protected region so
+            # a persistence-layer failure (disk full, IO error) rolls back too —
+            # otherwise in-memory state/seq/ring would advance while disk and all
+            # subscribers stayed behind, duplicating non-idempotent ops on retry.
+            # The activity log is copied shallowly: inside this region it is
+            # only appended to and pruned (``apply_state_op``), never edited in
+            # place, so a list copy restores it exactly. Deep-copying it here
+            # and again in the snapshot below cost ~28 ms of event-loop time
+            # per batch at the default 500-record cap.
+            saved_state = copy.deepcopy(session.state)
+            saved_seq = session.seq
+            saved_name = session.name
+            saved_description = session.description
+            saved_updated_at = session.updated_at
+            saved_activity_log = list(session.activity_log)
+            saved_deleted_ids = list(session._deleted_annotation_ids)
+            ring = self.store.ring(session_id)
+            saved_ring = list(ring) if ring is not None else None
 
-                # Read once, before this batch applies anything: acquire()/release()
-                # for this session only ever commit to the real map later in this
-                # same critical section (below, under this same lock; see the
-                # "commit succeeded" block) — so a fresh copy taken here is a
-                # consistent view of who held what when the batch started, matching
-                # apply_ops' own all-or-nothing semantics (see LeaseConflict's
-                # docstring for what this does not cover yet). Walked as a mutable
-                # working copy (not re-read) so that an `edit_lease_acquired`/
-                # `edit_lease_released` op earlier in *this* batch is visible to a
-                # mutating op — or another lease op — later in the same batch,
-                # exactly the way `self.store.apply_state_op` below sees each
-                # state op's effect on `session.state` as it walks the same list.
-                working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
+            # Read once, before this batch applies anything: acquire()/release()
+            # for this session only ever commit to the real map later in this
+            # same critical section (below, under this same lock; see the
+            # "commit succeeded" block) — so a fresh copy taken here is a
+            # consistent view of who held what when the batch started, matching
+            # apply_ops' own all-or-nothing semantics (see LeaseConflict's
+            # docstring for what this does not cover yet). Walked as a mutable
+            # working copy (not re-read) so that an `edit_lease_acquired`/
+            # `edit_lease_released` op earlier in *this* batch is visible to a
+            # mutating op — or another lease op — later in the same batch,
+            # exactly the way `self.store.apply_state_op` below sees each
+            # state op's effect on `session.state` as it walks the same list.
+            working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
 
-                # ("state", applied) | ("claim", op_type, element_ids)
-                # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
-                # in arrival order
-                pending: List[Tuple[Any, ...]] = []
-                state_changed = False
-                try:
-                    for op in ops:
-                        op_type = op["op"]
-                        if op_type in CLAIM_OPS:
-                            pending.append(("claim", op_type, list(op["element_ids"])))
-                        elif op_type == "edit_lease_acquired":
-                            granted: List[str] = []
-                            denied: Dict[str, str] = {}
-                            # De-duplicated so a caller listing the same id twice in
-                            # one request cannot inflate `granted`/broadcast it twice.
-                            for eid in dict.fromkeys(op["element_ids"]):
-                                holder = working_leases.get(eid)
-                                if holder is not None and holder != client_id:
-                                    denied[eid] = holder
-                                else:
-                                    working_leases[eid] = client_id
-                                    granted.append(eid)
-                            pending.append(("lease_acquire", granted, denied))
-                        elif op_type == "edit_lease_released":
-                            released: List[str] = []
-                            for eid in dict.fromkeys(op["element_ids"]):
-                                if working_leases.get(eid) == client_id:
-                                    del working_leases[eid]
-                                    released.append(eid)
-                            pending.append(("lease_release", released))
-                        else:
-                            conflict_id = _claimed_annotation_target(op, session)
-                            if conflict_id is not None:
-                                holder = working_leases.get(conflict_id)
-                                if holder is not None and holder != client_id:
-                                    raise LeaseConflict(conflict_id, holder)
-                            for target in self.store.replaced_annotation_targets(
-                                session, op
-                            ):
-                                holder = working_leases.get(target)
-                                if holder is not None and holder != client_id:
-                                    raise LeaseConflict(target, holder)
-                            result = self.store.apply_state_op(
-                                session, {**op, "client_id": client_id}
-                            )
-                            if result is None:
-                                continue  # legitimate no-op (e.g. update on deleted annotation)
-                            state_changed = True
-                            pending.append(("state", result))
-                    if state_changed:
-                        # Snapshot on the loop thread, persist the copy off-thread:
-                        # the worker must never read ``session.state`` while a
-                        # loop-thread writer (the synchronous ``apply_layout`` path)
-                        # may be mutating it during this await. See persist_snapshot.
-                        snapshot = _detached_snapshot(session)
-
-                        # Cumulative budget check (smallfix-session-ops-path-ignores-
-                        # image-budgets): the per-batch caps above only bound *one*
-                        # request. Without this, many small batches — each legally
-                        # under the flat cap, or each carrying one budget-legal
-                        # image — can still walk the session's total document size
-                        # (and total embedded-image bytes) arbitrarily far past the
-                        # configured budgets over time. Checked against the
-                        # *resulting* state (the snapshot, after every op in this
-                        # batch has been applied in-memory) rather than the
-                        # arriving ops, so it catches growth from any op type —
-                        # not just images — before that snapshot is persisted; the
-                        # `except Exception` below rolls it back like any other
-                        # mid-batch failure.
-                        _check_session_totals(
-                            session,
-                            snapshot,
-                            max_session_image_bytes=max_session_image_bytes,
-                            max_session_document_bytes=max_session_document_bytes,
+            # ("state", applied) | ("claim", op_type, element_ids)
+            # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
+            # in arrival order
+            pending: List[Tuple[Any, ...]] = []
+            state_changed = False
+            try:
+                for op in ops:
+                    op_type = op["op"]
+                    if op_type in CLAIM_OPS:
+                        pending.append(("claim", op_type, list(op["element_ids"])))
+                    elif op_type == "edit_lease_acquired":
+                        granted: List[str] = []
+                        denied: Dict[str, str] = {}
+                        # De-duplicated so a caller listing the same id twice in
+                        # one request cannot inflate `granted`/broadcast it twice.
+                        for eid in dict.fromkeys(op["element_ids"]):
+                            holder = working_leases.get(eid)
+                            if holder is not None and holder != client_id:
+                                denied[eid] = holder
+                            else:
+                                working_leases[eid] = client_id
+                                granted.append(eid)
+                        pending.append(("lease_acquire", granted, denied))
+                    elif op_type == "edit_lease_released":
+                        released: List[str] = []
+                        for eid in dict.fromkeys(op["element_ids"]):
+                            if working_leases.get(eid) == client_id:
+                                del working_leases[eid]
+                                released.append(eid)
+                        pending.append(("lease_release", released))
+                    else:
+                        conflict_id = _claimed_annotation_target(op, session)
+                        if conflict_id is not None:
+                            holder = working_leases.get(conflict_id)
+                            if holder is not None and holder != client_id:
+                                raise LeaseConflict(conflict_id, holder)
+                        for target in self.store.replaced_annotation_targets(
+                            session, op
+                        ):
+                            holder = working_leases.get(target)
+                            if holder is not None and holder != client_id:
+                                raise LeaseConflict(target, holder)
+                        result = self.store.apply_state_op(
+                            session, {**op, "client_id": client_id}
                         )
-                        await asyncio.to_thread(self.store.persist_snapshot, snapshot)
-                except Exception:
-                    session.state = saved_state
-                    session.seq = saved_seq
-                    session.name = saved_name
-                    session.description = saved_description
-                    session.updated_at = saved_updated_at
-                    session.activity_log = saved_activity_log
-                    _restore_deleted_ids(session, saved_deleted_ids)
-                    self.store.restore_ring(session_id, saved_ring)
-                    raise
+                        if result is None:
+                            continue  # legitimate no-op (e.g. update on deleted annotation)
+                        state_changed = True
+                        pending.append(("state", result))
+                if state_changed:
+                    # Snapshot on the loop thread, persist the copy off-thread:
+                    # the worker must never read ``session.state`` while a
+                    # loop-thread writer (the synchronous ``apply_layout`` path)
+                    # may be mutating it during this await. See persist_snapshot.
+                    snapshot = _detached_snapshot(session)
+
+                    # Cumulative budget check (smallfix-session-ops-path-ignores-
+                    # image-budgets): the per-batch caps above only bound *one*
+                    # request. Without this, many small batches — each legally
+                    # under the flat cap, or each carrying one budget-legal
+                    # image — can still walk the session's total document size
+                    # (and total embedded-image bytes) arbitrarily far past the
+                    # configured budgets over time. Checked against the
+                    # *resulting* state (the snapshot, after every op in this
+                    # batch has been applied in-memory) rather than the
+                    # arriving ops, so it catches growth from any op type —
+                    # not just images — before that snapshot is persisted; the
+                    # `except Exception` below rolls it back like any other
+                    # mid-batch failure.
+                    _check_session_totals(
+                        session,
+                        snapshot,
+                        max_session_image_bytes=max_session_image_bytes,
+                        max_session_document_bytes=max_session_document_bytes,
+                    )
+                    await asyncio.to_thread(self.store.persist_snapshot, snapshot)
+            except Exception:
+                session.state = saved_state
+                session.seq = saved_seq
+                session.name = saved_name
+                session.description = saved_description
+                session.updated_at = saved_updated_at
+                session.activity_log = saved_activity_log
+                _restore_deleted_ids(session, saved_deleted_ids)
+                self.store.restore_ring(session_id, saved_ring)
+                raise
 
             # Commit succeeded: apply ephemeral claim/lease effects and broadcast
             # every op in arrival order (originator included; clients apply
