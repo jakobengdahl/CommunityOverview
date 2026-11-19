@@ -733,7 +733,8 @@ def commit_merge_import(
     live entity, ADR §3); then the whole graph is backed up as v1 does; then
     ``GraphStorage.apply_import_merge`` recomputes the plan once more under
     its lock, refuses the commit if the digest moved, and applies it
-    all-or-nothing. Afterwards, best-effort: an embeddings job for the nodes
+    all-or-nothing; a shared store also verifies the plan's reads and
+    generation in the write itself. Afterwards, best-effort: an embeddings job for the nodes
     left without a vector, and an audit record in the import job store.
     """
     refusal = _authorize_merge(hook)
@@ -744,8 +745,8 @@ def commit_merge_import(
             "success": False,
             "error_code": ImportMergeUnsupported.code,
             "message": (
-                "Merge import is not supported on a shared (PostgreSQL) graph "
-                "store yet; nothing was changed."
+                "Merge import is not supported on this graph store; nothing "
+                "was changed."
             ),
         }
     try:
@@ -899,8 +900,9 @@ def _commit_merge(
     minted: Dict[str, Any] = {}
 
     def prepare() -> "MergeWrites":
-        # Under the storage lock: nothing can move between this plan and the
-        # writes it yields, so its digest covers every read the writes rely on.
+        # Under the storage lock: nothing on this instance can move between
+        # this plan and the writes it yields, so its digest covers every read
+        # the writes rely on; a shared store re-checks those reads itself.
         try:
             locked = graph_merge_plan.compute_merge_plan(
                 document, parameters, view, for_commit=True

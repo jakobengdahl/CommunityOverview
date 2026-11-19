@@ -137,6 +137,10 @@ class BackendCapabilities:
         unit. Needs `incremental_writes` and `transactions`, and a backend
         that also declares `change_notification` - a shared store - must
         declare `revision_enforcement` too (§4.4).
+    batch_conditions: `apply_batch` takes `conditions` (BatchConditions) and
+        verifies them inside its unit, so a merge import can be committed
+        against a store other instances write to (ADR 0013 §3). Needs
+        `revision_enforcement`.
     """
 
     incremental_writes: bool = False
@@ -145,6 +149,7 @@ class BackendCapabilities:
     store_traversal: bool = False
     revision_enforcement: bool = False
     staged_sessions: bool = False
+    batch_conditions: bool = False
 
 
 SNAPSHOT_ONLY = BackendCapabilities()
@@ -238,6 +243,27 @@ class EntityOperation:
     @classmethod
     def delete_edge(cls, edge_id: str) -> "EntityOperation":
         return cls("edge", "delete", edge_id)
+
+
+@dataclass(frozen=True)
+class BatchConditions:
+    """What a batch's decision read and does not write (ADR 0013 §3).
+
+    `reads` is `(kind, id, revision)` for each such entity, revision None for
+    one read as absent; `generation` is the `graph_generation` the decision
+    was taken at and `replace_token` the `graph_replace_token` beside it,
+    which tells apart two replaces that raced from one generation.
+    `triples` is `(source, target, type, edge ids)` for each pair and type the
+    decision listed, with every edge it found. A backend declaring
+    `batch_conditions` verifies all of them inside the batch's unit and
+    raises EntityRevisionConflict (kind "graph" for the generation, token
+    and triples) when one does not hold, applying nothing.
+    """
+
+    reads: Tuple[Tuple[str, str, Optional[int]], ...] = ()
+    generation: Optional[int] = None
+    replace_token: Optional[str] = None
+    triples: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -705,6 +731,11 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
                 f"{type(backend).__name__} declares revision_enforcement but "
                 f"does not implement: {', '.join(missing)}"
             )
+    if caps.batch_conditions and not caps.revision_enforcement:
+        raise TypeError(
+            f"{type(backend).__name__} declares batch_conditions without "
+            f"revision_enforcement"
+        )
     if caps.staged_sessions:
         # A merge is graph writes plus a layer removal as one unit, which a
         # backend that cannot apply an atomic batch has no way to offer.
