@@ -484,14 +484,18 @@ body.graph-menu-open .graph-node-tooltip {
   overflow: visible;
 }
 
-/* Only the painted body and the visible text labels are hit, including a
-   triangle's outside label; the state badges pass the pointer through. */
+/* Body text can grow beyond its geometric box at larger root font sizes.
+   Let the painted body receive its events, even where that text overflows. */
 .graph-shape-body,
 .graph-shape-band,
 .graph-shape-label-chip,
-.graph-shape-text > *,
 .graph-shaped-node button {
   pointer-events: auto;
+}
+
+.graph-shape-text,
+.graph-shape-text > * {
+  pointer-events: none;
 }
 
 /* The connection handles sit at the bbox top and bottom centre, on the body

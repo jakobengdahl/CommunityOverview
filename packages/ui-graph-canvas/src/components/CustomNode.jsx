@@ -293,8 +293,11 @@ function CustomNode({ data, id, selected }) {
             top: box.y,
             width: box.width,
             height: box.height,
+            // Keep at least one title line visible when rem text outgrows the pixel box.
+            minHeight: values.second ? `${geometry.text.title * 1.2}rem` : undefined,
             justifyContent:
-              { top: 'flex-start', middle: 'center', centre: 'center' }[vertical] || 'flex-end',
+              { top: 'flex-start', middle: 'safe center', centre: 'safe center' }[vertical] ||
+              'safe flex-end',
             alignItems: align,
             textAlign: horizontal === 'centre' ? 'center' : horizontal,
             paddingRight: actions.inset,
