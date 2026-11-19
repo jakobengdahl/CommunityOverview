@@ -22,6 +22,7 @@ contract a third-party backend has to meet.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import logging
 import os
@@ -53,28 +54,38 @@ from .actor_attribution import validate_erasure
 logger = logging.getLogger(__name__)
 
 
-# Cross-platform file locking
-if sys.platform == "win32":
+# Cross-platform file locking. msvcrt has no shared mode, so every Windows lock
+# is exclusive, and no mode that waits indefinitely (LK_NBLCK fails at once,
+# LK_LOCK gives up after about ten seconds), so LK_LOCK is retried until it
+# succeeds, as flock would block.
+if sys.platform == "win32":  # pragma: no cover - platform specific
     import msvcrt
-
-    def _lock_file(f, exclusive: bool = True) -> None:
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f) -> None:
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-
 else:
     import fcntl
 
-    def _lock_file(f, exclusive: bool = True) -> None:
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    msvcrt = None
 
-    def _unlock_file(f) -> None:
-        """Release file lock on Unix."""
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    """Acquire a file lock, waiting however long another holder keeps it."""
+    if msvcrt is None:
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    while True:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
+                raise
+
+
+def _unlock_file(f) -> None:
+    """Release a file lock."""
+    if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @dataclass(frozen=True)

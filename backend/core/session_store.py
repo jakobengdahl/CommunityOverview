@@ -21,6 +21,7 @@ stays a pure state layer with no asyncio dependency.
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import math
 import os
@@ -372,23 +373,36 @@ class SessionPersistenceBackend(Protocol):
 
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
-# the same guarantees as graph writes.
+# the same guarantees as graph writes. msvcrt has no shared mode, so every
+# Windows lock is exclusive, and no mode that waits indefinitely (LK_NBLCK
+# fails at once, LK_LOCK gives up after about ten seconds), so LK_LOCK is
+# retried until it succeeds, as flock would block.
 if sys.platform == "win32":  # pragma: no cover - platform specific
     import msvcrt
-
-    def _lock_file(f, exclusive: bool = True) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
 
-    def _lock_file(f, exclusive: bool = True) -> None:
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    msvcrt = None
 
-    def _unlock_file(f) -> None:
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    if msvcrt is None:
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    while True:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
+                raise
+
+
+def _unlock_file(f) -> None:
+    if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 class FileSessionPersistenceBackend:

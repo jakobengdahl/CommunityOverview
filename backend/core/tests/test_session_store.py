@@ -9,10 +9,12 @@ dropped-update rule, and the ring buffer catch-up continuity check.
 """
 
 import copy
+import errno
 import json
 
 import pytest
 
+from backend.core import session_store, storage_backends
 from backend.core.session_store import (
     AnnotationFieldConflict,
     FileSessionPersistenceBackend,
@@ -927,3 +929,36 @@ class TestAppearanceOperations:
                     ),
                 )
             assert session.to_dict() == before
+
+
+@pytest.mark.parametrize("module", [session_store, storage_backends])
+def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
+    """On Windows ``_lock_file`` retries a timed-out lock until it is held,
+    for shared and exclusive requests alike, and raises any other error."""
+    calls = []
+    outcomes = []
+
+    class FakeMsvcrt:
+        LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+        @staticmethod
+        def locking(fileno, mode, nbytes):
+            calls.append(mode)
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise OSError(outcome, "locked")
+
+    monkeypatch.setattr(module, "msvcrt", FakeMsvcrt)
+    with open(tmp_path / "lock", "a+") as f:
+        for exclusive in (True, False):
+            calls.clear()
+            outcomes[:] = [errno.EDEADLOCK, errno.EACCES, None]
+            module._lock_file(f, exclusive=exclusive)
+            assert calls == [FakeMsvcrt.LK_LOCK] * 3
+        outcomes[:] = [errno.EBADF]
+        with pytest.raises(OSError):
+            module._lock_file(f)
+        outcomes[:] = [None]
+        calls.clear()
+        module._unlock_file(f)
+        assert calls == [FakeMsvcrt.LK_UNLCK]
