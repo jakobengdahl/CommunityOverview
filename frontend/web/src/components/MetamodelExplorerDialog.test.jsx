@@ -759,7 +759,7 @@ describe('NodeAppearanceDialog', () => {
     const apply = vi.fn();
     const library = {
       usage: vi.fn(async () => ({
-        revision: library.usage.mock.calls.length < 3 ? 3 : 5,
+        revision: library.usage.mock.calls.length < 4 ? 3 : 5,
         usage: 4,
       })),
       update: vi
@@ -779,7 +779,10 @@ describe('NodeAppearanceDialog', () => {
       <NodeAppearanceDialog
         {...props}
         shapeOverrides={{ a: { ref: 'saved:card' } }}
-        savedShapes={{ card: { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 } }}
+        savedShapes={{
+          card: { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 },
+          other: { name: 'Other', definition: DEFAULT_SHAPE, revision: 1 },
+        }}
         library={library}
         onApply={apply}
       />
@@ -789,6 +792,19 @@ describe('NodeAppearanceDialog', () => {
     await click('node_appearance.edit_saved');
     expect(screen.getByText('node_appearance.edit_warning')).toBeTruthy();
     expect(library.update).not.toHaveBeenCalled();
+    // Switching shapes ends the review: it can never write Other's content into Card.
+    const pickSaved = (value) => {
+      fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.shape' }));
+      fireEvent.change(screen.getByLabelText('node_appearance.saved_shape'), {
+        target: { value },
+      });
+    };
+    pickSaved('other');
+    pickSaved('card');
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    await click('node_appearance.edit_saved');
     await click('node_appearance.confirm_edit');
     // A stale review commits nothing and must be reviewed again.
     expect(screen.getByText('node_appearance.library_conflict')).toBeTruthy();

@@ -186,8 +186,9 @@ export default function NodeAppearanceDialog({
   const [theme, setTheme] = useState('light');
   const [longText, setLongText] = useState(false);
   const [shapeName, setShapeName] = useState('');
-  // The edit or delete awaiting confirmation, with the usage it warned of.
-  const [review, setReview] = useState(null);
+  // The edit or delete awaiting confirmation, with the usage it warned of
+  // and the entry and content it was started for.
+  const [pending, setReview] = useState(null);
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [libraryStatus, setLibraryStatus] = useState(null);
   const tabs = ['shape', 'text', 'apply'];
@@ -239,6 +240,9 @@ export default function NodeAppearanceDialog({
   // The saved entry the draft started from, while it still exists.
   const savedKey = savedOf(edits.ref ? edits : original.selection);
   const savedEntry = Object.hasOwn(saved, savedKey) ? saved[savedKey] : null;
+  // Any draft change after the warning ends the review, so a confirm never
+  // writes content or a target the warning was not shown for.
+  const review = pending?.edits === edits ? pending : null;
   const retained = nodes.filter(
     (n) =>
       n.id !== node.id && (n.nodeType || n.type) === type && Object.hasOwn(shapeOverrides, n.id)
@@ -336,13 +340,15 @@ export default function NodeAppearanceDialog({
   // Edit and delete first show the current usage, then commit only if
   // neither the entry nor its usage changed since that warning.
   async function startReview(action) {
+    const started = { action, key: savedKey, name: savedEntry.name, edits };
+    if (action === 'edit') started.definition = structuredClone(shown);
     setLibraryBusy(true);
     try {
       const { revision, usage } = await library.usage(savedKey);
       if (revision !== savedEntry.revision) libraryFailed({ status: 409 });
       else {
         setLibraryStatus(null);
-        setReview({ action, key: savedKey, revision, usage });
+        setReview({ ...started, revision, usage });
       }
     } catch (error) {
       libraryFailed(error?.status === 404 ? { status: 409 } : error);
@@ -351,7 +357,7 @@ export default function NodeAppearanceDialog({
     }
   }
   async function confirmReview() {
-    const { action, key, revision, usage } = review;
+    const { action, key, name, definition, revision, usage } = review;
     if (action === 'delete') {
       const entry = await libraryWrite(
         () => library.remove(key, revision, usage),
@@ -362,7 +368,7 @@ export default function NodeAppearanceDialog({
       return;
     }
     const entry = await libraryWrite(
-      () => library.update(key, savedEntry.name, structuredClone(shown), revision, usage),
+      () => library.update(key, name, definition, revision, usage),
       'library_updated'
     );
     if (entry) setEdits({ ref: `saved:${key}` });
