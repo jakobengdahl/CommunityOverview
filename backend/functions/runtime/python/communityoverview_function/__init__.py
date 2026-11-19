@@ -101,11 +101,23 @@ class _Graph:
         return self._channel.call("graph.update_node", arguments)
 
 
+class _RunFiles:
+    def __init__(self, channel):
+        self._channel = channel
+
+    def list(self, **arguments):
+        return self._channel.call("run_files.list", arguments)
+
+    def read(self, **arguments):
+        return self._channel.call("run_files.read", arguments)
+
+
 class Tools:
     """The tools a handler receives; ``tools.graph.<tool>(**arguments)``."""
 
     def __init__(self, channel):
         self.graph = _Graph(channel)
+        self.run_files = _RunFiles(channel)
 
 
 def _error(code, message):

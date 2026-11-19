@@ -81,7 +81,7 @@ _MAX_ERROR_MESSAGE_CHARS = 500
 @dataclass(frozen=True)
 class ToolSpec:
     method: str  # GraphService method, also the authorization target
-    grant: str
+    grant: str | None
     action: str  # GRAPH_ACTION_READ or GRAPH_ACTION_MUTATE
     required: FrozenSet[str]
     optional: FrozenSet[str] = frozenset()
@@ -92,6 +92,14 @@ class ToolSpec:
 
 
 TOOLS: Dict[str, ToolSpec] = {
+    "run_files.list": ToolSpec("list_run_files", None, GRAPH_ACTION_READ, frozenset()),
+    "run_files.read": ToolSpec(
+        "read_run_file",
+        None,
+        GRAPH_ACTION_READ,
+        frozenset({"file_id"}),
+        frozenset({"offset", "max_chars"}),
+    ),
     "graph.search": ToolSpec(
         "search_graph",
         GRANT_GRAPH_READ,
@@ -304,7 +312,9 @@ class FunctionBroker:
         if spec is None:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
 
-        if spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant):
+        if spec.grant is not None and (
+            spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant)
+        ):
             raise BrokerError(
                 ERR_GRANT_DENIED, f"The function's grants do not cover {name}."
             )
@@ -361,6 +371,10 @@ class FunctionBroker:
                 graph_id=ctx.authorization_inputs.get("graph_id") or ""
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
+            if spec.grant is None:
+                # Run files need no grant, but the actor's access is still
+                # checked so revoking it stops reads mid-run (§7.2).
+                return self._call_run_file_tool(spec, call_args)
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:
@@ -385,6 +399,21 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
+
+    def _call_run_file_tool(
+        self, spec: ToolSpec, call_args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        result = getattr(self._service._attachment_read_tools, spec.method)(
+            self._context.run_files, **call_args
+        )
+        if result.get("success") is False:
+            code = (
+                ERR_INVALID_ARGUMENTS
+                if result.get("error_code") == "invalid_arguments"
+                else ERR_TOOL_FAILED
+            )
+            raise BrokerError(code, "The operation failed.")
+        return result
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
