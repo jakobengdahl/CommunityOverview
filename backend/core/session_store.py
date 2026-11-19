@@ -478,7 +478,13 @@ class FileSessionPersistenceBackend:
         # contain path separators — but guard anyway to keep this a hard boundary.
         if not is_valid_session_id(session_id):
             raise OpError(f"invalid session id: {session_id!r}")
-        return self.directory / f"{session_id}.json"
+        # Containment check in a form static analysis recognises as a path
+        # sanitiser; the id regex above already rules out separators.
+        base = os.path.normpath(os.path.abspath(self.directory))
+        full = os.path.normpath(os.path.join(base, f"{session_id}.json"))
+        if not full.startswith(base.rstrip(os.sep) + os.sep):
+            raise OpError(f"invalid session id: {session_id!r}")
+        return Path(full)
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
         path = self._path(session_id)
