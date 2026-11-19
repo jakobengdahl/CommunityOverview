@@ -1,7 +1,8 @@
 """Persistent named node shapes and their session references.
 
-The caller must supply a verified identity and explicitly enable writes after the
-release gates have passed. Browser client IDs are not verified identities.
+Storage core only: mutations stay refused until ``writes_enabled`` is set, which
+no caller does yet. The identity passed to a write is recorded as the owner; it
+must come from an authenticated boundary, never a browser client ID.
 """
 
 import copy
@@ -79,12 +80,7 @@ class LibraryConflict(Exception):
 
 
 class LibraryForbidden(Exception):
-    """Library mutation is unavailable or the actor is not authorized."""
-
-
-def may_edit_shape(identity, entry):
-    """Replaceable authorization policy for a verified identity."""
-    return bool(identity)
+    """Library mutation is disabled or no identity was supplied."""
 
 
 class ShapeLibrary:
@@ -94,12 +90,10 @@ class ShapeLibrary:
         sessions: SessionPersistenceBackend,
         *,
         writes_enabled=False,
-        authorize=may_edit_shape,
     ):
         self.backend = backend
         self.sessions = sessions
         self.writes_enabled = writes_enabled
-        self.authorize = authorize
 
     def snapshot(self):
         data = self.backend.read()
@@ -178,8 +172,6 @@ class ShapeLibrary:
 
         def change(data):
             entry = data["entries"].get(key)
-            if not self.authorize(identity, entry):
-                raise LibraryForbidden()
             if entry is None:
                 if delete or expected_revision is not None:
                     raise LibraryConflict()
@@ -204,5 +196,4 @@ class ShapeLibrary:
             data["entries"][key] = result
             return copy.deepcopy(result)
 
-        with self.sessions.transaction():
-            return self.backend.update(change)
+        return self.backend.update(change)
