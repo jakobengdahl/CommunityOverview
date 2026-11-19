@@ -81,6 +81,13 @@ subtypes already in the graph, helping maintain consistent terminology across th
 You can also drag a node type icon from the toolbar and drop it anywhere on the canvas
 to create a node at that position.
 
+**Node appearance:** Right-click a node and choose **Node appearance** to preview
+its shape, scale, text fields and placement. Apply the draft to the selected node
+or as the session default for its type; other nodes with their own overrides keep
+them. Cancel discards the draft. If another appearance change is still pending or
+the appearance changes while the editor is open, follow the notice in the dialog
+before applying again. The light and dark preview options do not change the page theme.
+
 ### 2.2 Creating edges
 
 Hover over a node until the connection handle appears on its border, then drag to a target

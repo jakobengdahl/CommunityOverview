@@ -55,6 +55,7 @@ import {
   nodeShapeAreaValues,
   nodeShapeGeometry,
 } from '../utils/nodeShapes';
+import { nodeCardData } from '../utils/nodeCardData';
 import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
@@ -532,6 +533,7 @@ function GraphCanvasInner({
   // shapes come from `schema`. A node with no resolved shape keeps the card.
   shapeOverrides = null,
   typeShapes = null,
+  onAppearance = null,
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
@@ -600,6 +602,7 @@ function GraphCanvasInner({
 }) {
   const cml = {
     edit: 'Edit',
+    appearance: 'Node appearance',
     hide: 'Hide',
     expand: 'Find related nodes',
     delete: 'Delete',
@@ -1586,11 +1589,7 @@ function GraphCanvasInner({
         type: 'custom',
         ...shaped?.node,
         data: {
-          ...node,
-          label: node.name,
-          summary: node.summary || node.description?.slice(0, 100),
-          nodeType: node.type,
-          color: (nodeColorResolver || getNodeColor)(node.type),
+          ...nodeCardData(node, (nodeColorResolver || getNodeColor)(node.type)),
           isHighlighted: highlightedNodeIds.includes(node.id),
           isDimmed: dimmedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
@@ -5849,6 +5848,7 @@ function GraphCanvasInner({
           labels={cml}
           schema={schema}
           onEdit={onEdit}
+          onAppearance={onAppearance}
           onHide={onHide}
           onExpand={onExpand}
           onDelete={onDelete}

@@ -125,6 +125,7 @@ global.EventSource = FakeEventSource;
 global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
+import { SessionSyncClient } from '../src/services/sessionSyncClient';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
@@ -208,6 +209,152 @@ describe('App handler wiring', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each(
+    ['node', 'type'].flatMap((scope) => [
+      [scope, 'none'],
+      [scope, 'edited'],
+      [scope, 'reconnect'],
+    ])
+  )(
+    'sends one appearance operation for %s at the dialog revision (after apply: %s)',
+    async (scope, after) => {
+      const edited = after !== 'none';
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(
+        true
+      );
+      if (scope === 'type') {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.apply }));
+        fireEvent.click(screen.getByLabelText(en.node_appearance.scope_type));
+      }
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][0]).toEqual([
+        expect.objectContaining({
+          op: scope === 'node' ? 'node_shape_set' : 'type_shape_set',
+          selection: { builtin: true },
+          base_revision: 0,
+          ...(scope === 'node'
+            ? { node_id: 'a' }
+            : { type: 'Actor', clear_node_id: 'a', clear_base_revision: 0 }),
+        }),
+      ]);
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+      expect(send).toHaveBeenCalledTimes(1);
+      if (edited) {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.shape }));
+        fireEvent.change(screen.getByLabelText(en.node_appearance.scale), {
+          target: { value: '2' },
+        });
+      }
+      const op = send.mock.calls[0][0][0];
+      const acknowledged = {
+        ...op,
+        revisions: scope === 'node' ? { 'node:a': 1 } : { 'type:Actor': 1, 'node:a': 1 },
+      };
+      // A reconnect settles the write before its reload reaches the store.
+      const meta = { ownAppearance: true, sessionId: canvas().sessionKey };
+      meta.applyBaseline = () => {
+        if (after !== 'reconnect') meta.currentAppearance = acknowledged;
+        return false;
+      };
+      await act(async () => captured.syncHandlersRef.current.onRemoteOps([acknowledged], meta));
+      const revision = after === 'reconnect' ? 0 : 1;
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')?.querySelector('[role="alert"]') ?? null).toBeNull()
+      );
+      expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor'] || 0).toBe(
+        revision
+      );
+      if (edited) {
+        expect(screen.getByLabelText(en.node_appearance.scale)).toHaveValue(2);
+        if (after === 'reconnect') {
+          // The dialog builds on its own write, so it waits for the reload.
+          fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+          expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+          act(() => useGraphStore.setState({ shapeRevisions: acknowledged.revisions }));
+        }
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0]).toEqual(
+          expect.objectContaining({
+            base_revision: 1,
+            selection: { inline: expect.objectContaining({ scale: 2 }) },
+          })
+        );
+      } else {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      }
+    }
+  );
+
+  it.each([false, true])(
+    'scopes a refused appearance write to its dialog (reopened: %s)',
+    async (reopened) => {
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      const op = send.mock.calls[0][0][0];
+      api.getSession.mockResolvedValueOnce({
+        state: {},
+        resolved: { nodes: [NODE_A, NODE_B], edges: [EDGE_1] },
+        roster: [],
+      });
+      if (reopened) {
+        fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+        act(() => canvas().onAppearance('b'));
+      }
+      await act(async () =>
+        captured.syncHandlersRef.current.onDropped([op], 409, {
+          detail: { error: 'shape_revision_conflict' },
+        })
+      );
+      if (reopened) {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].node_id).toBe('b');
+      } else {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+        // A reload (or a collaborator's write) moving the revision past the
+        // open dialog keeps Apply refused; reopening builds on the new state.
+        act(() => useGraphStore.setState({ shapeRevisions: { 'node:a': 1 } }));
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+        expect(send).toHaveBeenCalledTimes(1);
+        fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+        act(() => canvas().onAppearance('a'));
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].base_revision).toBe(1);
+      }
+    }
+  );
+
+  it('refuses a node gone from the store inside the dialog and guards double Escape', async () => {
+    const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps');
+    await renderApp();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => canvas().onAppearance('a'));
+    const nodes = store().nodes;
+    act(() => useGraphStore.setState({ nodes: nodes.filter((node) => node.id !== 'a') }));
+    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+    expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
+    act(() => useGraphStore.setState({ nodes }));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual(['a', 'b']);
+    expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(false);
   });
 
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {

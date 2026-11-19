@@ -15,6 +15,7 @@ import GuideOverlay from './components/GuideOverlay';
 import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
+import NodeAppearanceDialog, { appearanceOperation } from './components/NodeAppearanceDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
@@ -216,6 +217,10 @@ function App() {
   );
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const lastEscapeRef = useRef(0);
+  const [appearanceDialog, setAppearanceDialog] = useState(null);
+  const [appearanceError, setAppearanceError] = useState(null);
+  const appearancePendingRef = useRef(null);
   const appRef = useRef(null);
   const canvasContainerRef = useRef(null);
   // Image annotation ids this browser has already rendered optimistically
@@ -277,6 +282,9 @@ function App() {
   const setSessionId = useCallback((id) => {
     if (id !== sessionIdRef.current) {
       sessionGenerationRef.current += 1;
+      appearancePendingRef.current = null;
+      setAppearanceDialog(null);
+      setAppearanceError(null);
       remoteOpsChainRef.current = Promise.resolve();
     }
     sessionIdRef.current = id;
@@ -1292,8 +1300,10 @@ function App() {
   // the next paint — closing the window where a rapid double-Escape right after a
   // dialog opens could slip past the guard and clear the canvas.
   useLayoutEffect(() => {
+    if (appearanceDialog) lastEscapeRef.current = 0;
     dialogOpenRef.current = !!(
       createNodeType ||
+      appearanceDialog ||
       editingNode ||
       detailNode ||
       editingEdge ||
@@ -1318,6 +1328,7 @@ function App() {
     );
   }, [
     createNodeType,
+    appearanceDialog,
     editingNode,
     detailNode,
     editingEdge,
@@ -1385,17 +1396,16 @@ function App() {
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
-    let lastEscape = 0;
     const handleKeyDown = (e) => {
       if (e.key !== 'Escape') return;
       if (e.repeat) return;
       if (dialogOpenRef.current) return;
       const now = Date.now();
-      if (now - lastEscape < 400) {
+      if (now - lastEscapeRef.current < 400) {
         requestClearRef.current('keyboard');
-        lastEscape = 0;
+        lastEscapeRef.current = 0;
       } else {
-        lastEscape = now;
+        lastEscapeRef.current = now;
       }
     };
     // Capture phase so it fires even when focus is inside an input/textarea
@@ -2665,6 +2675,61 @@ function App() {
     [addNodesToVisualization, updateVisualization, showNotification]
   );
 
+  const openAppearance = useCallback((id) => {
+    const state = useGraphStore.getState();
+    const node = state.nodes.find((item) => item.id === id);
+    if (!node) return;
+    const keys = [`node:${id}`, `type:${node.nodeType || node.type}`];
+    setAppearanceError(null);
+    // The dialog's original appearance is fixed at open, so its revisions are
+    // too: Apply refuses once the store moves past them (NODE_SHAPES.md §
+    // Editor flow), and only this dialog's own settled write advances them.
+    setAppearanceDialog({
+      node,
+      revisions: Object.fromEntries(keys.map((key) => [key, state.shapeRevisions[key] || 0])),
+    });
+  }, []);
+
+  const applyAppearance = useCallback(
+    (scope, selection) => {
+      const client = syncRef.current;
+      if (
+        appearancePendingRef.current ||
+        client
+          ?.getPendingOps()
+          .some((op) => op.op === 'node_shape_set' || op.op === 'type_shape_set')
+      ) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
+        return;
+      }
+      const { node, revisions } = appearanceDialog;
+      const state = useGraphStore.getState();
+      if (
+        !state.nodes.some((item) => item.id === node.id) ||
+        Object.entries(revisions).some(
+          ([key, revision]) => (state.shapeRevisions[key] || 0) !== revision
+        )
+      ) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'changed' });
+        return;
+      }
+      if (!client || client.sessionId !== sessionId) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
+        return;
+      }
+      const op = appearanceOperation(scope, node, selection, revisions, crypto.randomUUID());
+      appearancePendingRef.current = {
+        id: op.operation_id,
+        dialog: appearanceDialog,
+        edited: false,
+      };
+      setAppearanceError(null);
+      applyRemoteOp(op);
+      client.sendOps([op]);
+    },
+    [appearanceDialog, syncRef, sessionId, applyRemoteOp]
+  );
+
   // Callback: Context menu action triggered from schema-defined callback items
   const handleContextMenuAction = useCallback(
     (actionName, nodeId, nodeData) => {
@@ -2953,7 +3018,25 @@ function App() {
               // continuation runs: re-check after every await, then apply
               // synchronously with the last check.
               while (client?.hasLocalEdits()) await client.waitForLocalEdits();
-              if (generation !== sessionGenerationRef.current || meta.applyBaseline?.() === false) {
+              if (generation !== sessionGenerationRef.current) {
+                release?.();
+                return;
+              }
+              const baselineResult = meta.applyBaseline?.();
+              if (meta.ownAppearance && appearancePendingRef.current?.id === op.operation_id) {
+                const pending = appearancePendingRef.current;
+                appearancePendingRef.current = null;
+                // A dialog kept open for further edits now builds on this write.
+                for (const key of Object.keys(pending.dialog.revisions)) {
+                  if (op.revisions?.[key] != null)
+                    pending.dialog.revisions[key] = op.revisions[key];
+                }
+                setAppearanceDialog((current) =>
+                  current === pending.dialog && !pending.edited ? null : current
+                );
+                setAppearanceError((error) => (error?.dialog === pending.dialog ? null : error));
+              }
+              if (baselineResult === false && !meta.currentAppearance) {
                 release?.();
                 return;
               }
@@ -2961,7 +3044,11 @@ function App() {
               try {
                 if (!handleStagedSessionOp(op)) {
                   deferredRelease = op.op === 'nodes_added' || op.op === 'nodes_replaced';
-                  await applyRemoteOp(op, release, generation);
+                  await applyRemoteOp(
+                    meta.ownAppearance ? meta.currentAppearance : op,
+                    release,
+                    generation
+                  );
                 } else if (op.op === 'graph_change_staged') {
                   refreshStagedEntities(op);
                 } else if (
@@ -3084,7 +3171,21 @@ function App() {
       // "someone else is editing this annotation" text the direct-acquire
       // denial already uses (GraphCanvas.jsx's annotationRemoteLocked).
       onDropped: (batch, status, body) => {
-        (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
+        (batch || []).forEach((op) => {
+          recentlyDroppedOpsRef.current.add(op);
+          if (op.operation_id && op.operation_id === appearancePendingRef.current?.id) {
+            const pending = appearancePendingRef.current;
+            appearancePendingRef.current = null;
+            setAppearanceError((error) =>
+              error && error.dialog !== pending.dialog
+                ? error
+                : {
+                    dialog: pending.dialog,
+                    code: body?.detail?.error === 'shape_revision_conflict' ? 'changed' : 'failed',
+                  }
+            );
+          }
+        });
         if (status === 409) {
           const detail = body && typeof body.detail === 'object' ? body.detail : null;
           if (detail && detail.error === 'field_conflict') {
@@ -3827,6 +3928,7 @@ function App() {
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
+          onAppearance={openAppearance}
           onDelete={handleDelete}
           onHide={handleHide}
           onDeleteMultiple={handleDeleteMultiple}
@@ -3913,6 +4015,7 @@ function App() {
           stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
             edit: t('context_menu.edit'),
+            appearance: t('node_appearance.title'),
             hide: t('context_menu.hide'),
             expand: t('context_menu.expand'),
             delete: t('context_menu.delete'),
@@ -4245,6 +4348,23 @@ function App() {
         </div>
       )}
 
+      {appearanceDialog && (
+        <NodeAppearanceDialog
+          node={appearanceDialog.node}
+          schema={schema}
+          color={getNodeColor(appearanceDialog.node.nodeType || appearanceDialog.node.type)}
+          shapeOverrides={shapeOverrides}
+          typeShapes={typeShapes}
+          nodes={nodes}
+          error={appearanceError?.dialog === appearanceDialog ? appearanceError.code : null}
+          onDraftChange={() => {
+            const pending = appearancePendingRef.current;
+            if (pending?.dialog === appearanceDialog) pending.edited = true;
+          }}
+          onApply={applyAppearance}
+          onClose={() => setAppearanceDialog(null)}
+        />
+      )}
       <AppDialogs
         dialogs={dialogs}
         t={t}
