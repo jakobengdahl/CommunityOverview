@@ -2622,149 +2622,159 @@ class SessionManager:
         if self._lock(session_id).locked():
             raise LayoutBusy()
 
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-        if expected_revision is not None and expected_revision != session.seq:
-            raise RevisionConflict(expected_revision, session.seq)
+        # The whole lookup-check-mutate-restore span is one live write: the
+        # record flags, history revisions and deleted-id memory change here,
+        # before and after the nested _apply_op_sync section.
+        with self.store.writing(session_id):
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+            if expected_revision is not None and expected_revision != session.seq:
+                raise RevisionConflict(expected_revision, session.seq)
 
-        if redo:
-            record = max(
-                (
-                    r
-                    for r in session.activity_log
-                    if r.get("actor") == client_id
-                    and r.get("undone")
-                    and r.get("redo_seq")
-                    and r.get("forward_op")
-                ),
-                key=lambda r: r["redo_seq"],
-                default=None,
+            if redo:
+                record = max(
+                    (
+                        r
+                        for r in session.activity_log
+                        if r.get("actor") == client_id
+                        and r.get("undone")
+                        and r.get("redo_seq")
+                        and r.get("forward_op")
+                    ),
+                    key=lambda r: r["redo_seq"],
+                    default=None,
+                )
+            else:
+                record = self.store.find_latest_undoable(session, client_id)
+            if record is None:
+                raise NoUndoableAction(client_id)
+            expected_record = record
+            if redo:
+                expected_record = {**record, "after": record["before"]}
+                if record["affected"].get("kind") == "node_position":
+                    expected_record["after"] = record["inverse_op"]["position"]
+                elif record["affected"].get("kind") == "layout":
+                    expected_record["after"] = record["inverse_op"]["positions"]
+            conflict_reason = self.store.undo_conflict_reason(session, expected_record)
+            if conflict_reason is not None:
+                raise UndoConflict(record["id"], conflict_reason)
+
+            # Deep, so the replay never shares objects with the record: state an
+            # op later edits in place must not reach back into the activity log,
+            # whose rollback copies are shallow.
+            inverse_op = copy.deepcopy(record["forward_op" if redo else "inverse_op"])
+            # Undo is a browser write like any other, so it answers to the same
+            # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
+            # undo reverts *your own* past action, but the annotation it touches
+            # may be under someone else's live edit lease since you made it —
+            # participating in the *new* lease semantics rather than the old
+            # advisory ClaimMap is exactly the point of this check (PR #456
+            # originally gated undo on the claim map; the mechanism underneath
+            # changed, not this call site's intent). Placed ahead of every
+            # mutation below so a refusal leaves the session as it found it; the
+            # two do not actually overlap today (the _deleted_annotation_ids
+            # branch runs only for an annotation_created inverse, whose id
+            # undo_conflict_reason has already rejected if it still exists), but
+            # the ordering should not rely on that.
+            conflict_id = _claimed_annotation_target(inverse_op, session)
+            if conflict_id is not None:
+                holder = self.leases.snapshot(session_id).get(conflict_id)
+                if holder is not None and holder != client_id:
+                    raise LeaseConflict(conflict_id, holder)
+
+            saved_deleted_ids = list(session._deleted_annotation_ids)
+            if inverse_op.get("op") == "annotation_created":
+                ann_id = (inverse_op.get("annotation") or {}).get("id")
+                if isinstance(ann_id, str):
+                    try:
+                        session._deleted_annotation_ids.remove(ann_id)
+                    except ValueError:
+                        pass
+            # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
+            # docstring. Every check above (claim conflict included) has already
+            # used the real client_id; only the op that goes to _apply_op_sync
+            # (and therefore the SSE event's client_id) is re-attributed here, so
+            # the requesting browser's own subscription does not drop it as a
+            # self-echo.
+            inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
+
+            # Marked before the replay so its one persist writes the reverted state
+            # and the flag together; a second write afterwards could fail and leave
+            # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
+            # back the state on failure; the record is not part of its (shallow)
+            # log copy, so its flags are restored here — but only while seq shows
+            # nothing was committed: a broadcast that fails after the persist
+            # landed must leave memory matching what is now on disk.
+            flag_keys = ("undone", "undone_at", "redo_seq")
+            saved_flags = {k: record[k] for k in flag_keys if k in record}
+            seq_before = session.seq
+            record["undone"] = not redo
+            record["undone_at"] = (
+                None if redo else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             )
-        else:
-            record = self.store.find_latest_undoable(session, client_id)
-        if record is None:
-            raise NoUndoableAction(client_id)
-        expected_record = record
-        if redo:
-            expected_record = {**record, "after": record["before"]}
-            if record["affected"].get("kind") == "node_position":
-                expected_record["after"] = record["inverse_op"]["position"]
-            elif record["affected"].get("kind") == "layout":
-                expected_record["after"] = record["inverse_op"]["positions"]
-        conflict_reason = self.store.undo_conflict_reason(session, expected_record)
-        if conflict_reason is not None:
-            raise UndoConflict(record["id"], conflict_reason)
+            record["redo_seq"] = None if redo else session.seq + 1
+            # Replays create fresh target revisions. Carry those revisions into
+            # history snapshots that describe the restored version, so successive
+            # undo/redo remains possible without accepting a collaborator's write.
+            saved_appearance_snapshots = []
+            if record["affected"].get("kind") == "appearance":
+                destination = record["after" if redo else "before"].get("revisions", {})
+                fresh = {
+                    k: session.state["shape_revisions"].get(k, 0) + 1
+                    for k in destination
+                }
+                for history in session.activity_log:
+                    for field in ("before", "after"):
+                        snapshot = history.get(field)
+                        if (
+                            not isinstance(snapshot, dict)
+                            or "revisions" not in snapshot
+                        ):
+                            continue
+                        updated = {
+                            k: fresh[k]
+                            if k in destination and v == destination[k]
+                            else v
+                            for k, v in snapshot["revisions"].items()
+                        }
+                        saved_appearance_snapshots.append((history, field, snapshot))
+                        session._activity_record_bytes.pop(id(history), None)
+                        history[field] = {**snapshot, "revisions": updated}
+            applied = None
+            try:
+                applied = self._apply_op_sync(
+                    session,
+                    session_id,
+                    _UNDO_REPLAY_CLIENT_ID,
+                    inverse_op,
+                    record_activity=False,
+                    trusted_replay=True,
+                    enforce_session_budgets=True,
+                )
+            finally:
+                if session.seq == seq_before:
+                    for history, field, snapshot in saved_appearance_snapshots:
+                        history[field] = snapshot
+                        session._activity_record_bytes.pop(id(history), None)
+                    session._activity_record_bytes.pop(id(record), None)
+                    for key in flag_keys:
+                        record.pop(key, None)
+                    record.update(saved_flags)
+                    _restore_deleted_ids(session, saved_deleted_ids)
+            if applied is None:
+                # The conflict check above passed but the replay still turned out
+                # to be a no-op (e.g. the store dropped it as an update on a
+                # since-deleted annotation) — surface it the same way any other
+                # unsafe-to-undo state does, rather than marking the record undone.
+                raise UndoConflict(record["id"], "action could not be reverted")
 
-        # Deep, so the replay never shares objects with the record: state an
-        # op later edits in place must not reach back into the activity log,
-        # whose rollback copies are shallow.
-        inverse_op = copy.deepcopy(record["forward_op" if redo else "inverse_op"])
-        # Undo is a browser write like any other, so it answers to the same
-        # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
-        # undo reverts *your own* past action, but the annotation it touches
-        # may be under someone else's live edit lease since you made it —
-        # participating in the *new* lease semantics rather than the old
-        # advisory ClaimMap is exactly the point of this check (PR #456
-        # originally gated undo on the claim map; the mechanism underneath
-        # changed, not this call site's intent). Placed ahead of every
-        # mutation below so a refusal leaves the session as it found it; the
-        # two do not actually overlap today (the _deleted_annotation_ids
-        # branch runs only for an annotation_created inverse, whose id
-        # undo_conflict_reason has already rejected if it still exists), but
-        # the ordering should not rely on that.
-        conflict_id = _claimed_annotation_target(inverse_op, session)
-        if conflict_id is not None:
-            holder = self.leases.snapshot(session_id).get(conflict_id)
-            if holder is not None and holder != client_id:
-                raise LeaseConflict(conflict_id, holder)
-
-        saved_deleted_ids = list(session._deleted_annotation_ids)
-        if inverse_op.get("op") == "annotation_created":
-            ann_id = (inverse_op.get("annotation") or {}).get("id")
-            if isinstance(ann_id, str):
-                try:
-                    session._deleted_annotation_ids.remove(ann_id)
-                except ValueError:
-                    pass
-        # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
-        # docstring. Every check above (claim conflict included) has already
-        # used the real client_id; only the op that goes to _apply_op_sync
-        # (and therefore the SSE event's client_id) is re-attributed here, so
-        # the requesting browser's own subscription does not drop it as a
-        # self-echo.
-        inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
-
-        # Marked before the replay so its one persist writes the reverted state
-        # and the flag together; a second write afterwards could fail and leave
-        # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
-        # back the state on failure; the record is not part of its (shallow)
-        # log copy, so its flags are restored here — but only while seq shows
-        # nothing was committed: a broadcast that fails after the persist
-        # landed must leave memory matching what is now on disk.
-        flag_keys = ("undone", "undone_at", "redo_seq")
-        saved_flags = {k: record[k] for k in flag_keys if k in record}
-        seq_before = session.seq
-        record["undone"] = not redo
-        record["undone_at"] = (
-            None if redo else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        )
-        record["redo_seq"] = None if redo else session.seq + 1
-        # Replays create fresh target revisions. Carry those revisions into
-        # history snapshots that describe the restored version, so successive
-        # undo/redo remains possible without accepting a collaborator's write.
-        saved_appearance_snapshots = []
-        if record["affected"].get("kind") == "appearance":
-            destination = record["after" if redo else "before"].get("revisions", {})
-            fresh = {
-                k: session.state["shape_revisions"].get(k, 0) + 1 for k in destination
+            return {
+                ("redone_activity_id" if redo else "undone_activity_id"): record["id"],
+                ("redone_op" if redo else "undone_op"): record["op"],
+                "applied": applied,
+                "revision": session.seq,
             }
-            for history in session.activity_log:
-                for field in ("before", "after"):
-                    snapshot = history.get(field)
-                    if not isinstance(snapshot, dict) or "revisions" not in snapshot:
-                        continue
-                    updated = {
-                        k: fresh[k] if k in destination and v == destination[k] else v
-                        for k, v in snapshot["revisions"].items()
-                    }
-                    saved_appearance_snapshots.append((history, field, snapshot))
-                    session._activity_record_bytes.pop(id(history), None)
-                    history[field] = {**snapshot, "revisions": updated}
-        applied = None
-        try:
-            applied = self._apply_op_sync(
-                session,
-                session_id,
-                _UNDO_REPLAY_CLIENT_ID,
-                inverse_op,
-                record_activity=False,
-                trusted_replay=True,
-                enforce_session_budgets=True,
-            )
-        finally:
-            if session.seq == seq_before:
-                for history, field, snapshot in saved_appearance_snapshots:
-                    history[field] = snapshot
-                    session._activity_record_bytes.pop(id(history), None)
-                session._activity_record_bytes.pop(id(record), None)
-                for key in flag_keys:
-                    record.pop(key, None)
-                record.update(saved_flags)
-                _restore_deleted_ids(session, saved_deleted_ids)
-        if applied is None:
-            # The conflict check above passed but the replay still turned out
-            # to be a no-op (e.g. the store dropped it as an update on a
-            # since-deleted annotation) — surface it the same way any other
-            # unsafe-to-undo state does, rather than marking the record undone.
-            raise UndoConflict(record["id"], "action could not be reverted")
-
-        return {
-            ("redone_activity_id" if redo else "undone_activity_id"): record["id"],
-            ("redone_op" if redo else "undone_op"): record["op"],
-            "applied": applied,
-            "revision": session.seq,
-        }
 
     def _reject_if_leased(
         self, session: Session, session_id: str, client_id: str, op: Dict[str, Any]
@@ -2825,42 +2835,43 @@ class SessionManager:
         ``enforce_session_budgets`` applies apply_ops' session image/document
         budgets to the result, for an op that can carry embedded images.
         """
-        saved_state = copy.deepcopy(session.state)
-        saved_seq = session.seq
-        saved_name = session.name
-        saved_description = session.description
-        saved_updated_at = session.updated_at
-        # Shallow, as in apply_ops: an op only appends to and prunes the log.
-        saved_activity_log = list(session.activity_log)
-        saved_deleted_ids = list(session._deleted_annotation_ids)
-        ring = self.store.ring(session_id)
-        saved_ring = list(ring) if ring is not None else None
-        try:
-            applied = self.store.apply_state_op(
-                session,
-                op,
-                record_activity=record_activity,
-                trusted_replay=trusted_replay,
-            )
-            if applied is not None:
-                if enforce_session_budgets:
-                    _check_session_totals(
-                        session,
-                        _detached_snapshot(session),
-                        max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
-                        max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
-                    )
-                self.store.persist(session)
-        except Exception:
-            session.state = saved_state
-            session.seq = saved_seq
-            session.name = saved_name
-            session.description = saved_description
-            session.updated_at = saved_updated_at
-            session.activity_log = saved_activity_log
-            _restore_deleted_ids(session, saved_deleted_ids)
-            self.store.restore_ring(session_id, saved_ring)
-            raise
+        with self.store.writing(session_id):
+            saved_state = copy.deepcopy(session.state)
+            saved_seq = session.seq
+            saved_name = session.name
+            saved_description = session.description
+            saved_updated_at = session.updated_at
+            # Shallow, as in apply_ops: an op only appends to and prunes the log.
+            saved_activity_log = list(session.activity_log)
+            saved_deleted_ids = list(session._deleted_annotation_ids)
+            ring = self.store.ring(session_id)
+            saved_ring = list(ring) if ring is not None else None
+            try:
+                applied = self.store.apply_state_op(
+                    session,
+                    op,
+                    record_activity=record_activity,
+                    trusted_replay=trusted_replay,
+                )
+                if applied is not None:
+                    if enforce_session_budgets:
+                        _check_session_totals(
+                            session,
+                            _detached_snapshot(session),
+                            max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                            max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                        )
+                    self.store.persist(session)
+            except Exception:
+                session.state = saved_state
+                session.seq = saved_seq
+                session.name = saved_name
+                session.description = saved_description
+                session.updated_at = saved_updated_at
+                session.activity_log = saved_activity_log
+                _restore_deleted_ids(session, saved_deleted_ids)
+                self.store.restore_ring(session_id, saved_ring)
+                raise
 
         if applied is None:
             return None
