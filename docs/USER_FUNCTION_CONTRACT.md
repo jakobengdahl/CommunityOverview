@@ -334,6 +334,7 @@ listed in §11.
 | `graph.find_similar` | `graph:read` | `find_similar_nodes` |
 | `graph.add` | `graph:write` | `add_nodes` (nodes and edges) |
 | `graph.update_node` | `graph:write` | `update_node` |
+| `graph.attach_run_file` | `graph:write` | `add_node_attachment` (version 3 only, §12) |
 
 Arguments and results follow the mapped MCP tool, with these restrictions.
 Argument validation failures return `invalid_arguments`; endpoint resolution
@@ -634,7 +635,8 @@ the attachment type policy and extraction limits.
 
 `graph.attach_run_file(node_id, file_id)` attaches a current run file to a
 node through the normal attachment upload path, including its authorization,
-type policy and limits. It requires `graph:write`, including the webhook's
+type policy and limits, and is refused unless the instance allows attachment
+writes (`ATTACHMENT_CONTENT_ACCESS=read_write`). It requires `graph:write`, including the webhook's
 per-function write switch, and is recorded in the run's tool calls and the
 attachment audit. Attachment content remains untrusted. File ids are scoped
 to the run; filesystem paths and files belonging to another run are not accepted.

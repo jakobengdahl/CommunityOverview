@@ -1228,7 +1228,10 @@ def test_attach_run_file_uses_upload_authorization_and_audits(
             {**args, "path": "/tmp/note.txt"},
         ):
             assert "error" in call(broker, "graph.attach_run_file", bad)
+        # The instance ceiling binds this tool like every attachment write.
+        assert "error" in call(broker, "graph.attach_run_file", args)
         assert service.list_node_attachments(node_id)["attachments"] == []
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
         with caplog.at_level("INFO", logger="attachments.audit"):
             result = call(broker, "graph.attach_run_file", args)["result"]
         attachment = result["attachment"]
