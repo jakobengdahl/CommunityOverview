@@ -518,3 +518,86 @@ async def test_cancelled_apply_ops_keeps_the_marker_until_the_save_finishes(
     expected = name_before if save_fails else "Renamed"
     assert session.name == on_disk.get(session.id).name == expected
     assert [op["op"] for op in published] == ([] if save_fails else ["session_renamed"])
+
+
+def _staging_writer(writer, manager, session_id, commit):
+    if writer == "stage":
+        return manager.stage_graph_change(
+            session_id, expected_session_seq=None, commit=commit
+        )
+    # The layer change has already committed when this is called.
+    return manager.announce_layer_change(
+        session_id, {"op": "graph_changes_discarded", "removals": []}
+    )
+
+
+@pytest.mark.parametrize("writer", ["stage", "announce"])
+def test_staging_and_layer_writers_apply_their_op_under_the_marker(
+    tmp_path, monkeypatch, writer
+):
+    """The staging commit, the op and its persist run under the marker; a call
+    nested in another section neither deadlocks nor ends it, and it clears."""
+    store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+    manager = SessionManager(store)
+    session = manager.create_session()
+    seen = []
+
+    def commit(seq):
+        seen.append(("commit", store.is_writing(session.id)))
+        return {"entries": [], "removals": []}
+
+    def observe(name, original):
+        def wrapper(*args, **kwargs):
+            seen.append((name, store.is_writing(session.id)))
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name in ("apply_state_op", "persist"):
+        monkeypatch.setattr(store, name, observe(name, getattr(store, name)))
+    first = _staging_writer(writer, manager, session.id, commit)
+    with store.writing(session.id):
+        nested = _staging_writer(writer, manager, session.id, commit)
+        assert store.is_writing(session.id)
+    assert not store.is_writing(session.id)
+    assert (first["seq"], nested["seq"], session.seq) == (1, 2, 2)
+    span = ["apply_state_op", "persist"]
+    assert [name for name, _ in seen] == (["commit"] * (writer == "stage") + span) * 2
+    assert all(marked for _, marked in seen)
+
+
+@pytest.mark.parametrize(
+    "writer, failure",
+    [("stage", "marker"), ("stage", "commit"), ("announce", "marker")],
+)
+def test_staging_and_layer_writers_release_the_marker_on_failure(
+    tmp_path, monkeypatch, writer, failure
+):
+    """A marker that cannot be taken stops staging before its commit point and,
+    after a layer change, is caught with no op; a failed commit releases it."""
+    sessions = FileSessionPersistenceBackend(tmp_path)
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    session = manager.create_session()
+    committed, published = [], []
+    monkeypatch.setattr(manager.bus, "publish", lambda *args: published.append(args))
+
+    def commit(seq):
+        committed.append(seq)
+        if failure == "commit":
+            raise OSError(errno.EIO, "layer")
+        return {"entries": [], "removals": []}
+
+    def broken_transaction():
+        raise OSError(errno.EIO, "lock")
+
+    if failure == "marker":
+        monkeypatch.setattr(sessions, "transaction", broken_transaction)
+    if writer == "announce":
+        assert _staging_writer(writer, manager, session.id, commit) is None
+    else:
+        with pytest.raises(OSError):
+            _staging_writer(writer, manager, session.id, commit)
+        assert committed == ([] if failure == "marker" else [1])
+    assert session.seq == 0 and published == []
+    assert not store.is_writing(session.id)

@@ -1170,33 +1170,37 @@ class SessionManager:
             raise SessionNotFound()
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-        if expected_session_seq is not None and expected_session_seq != session.seq:
-            raise SessionSeqConflict(expected_session_seq, session.seq)
-        payload = commit(session.seq + 1)
-        op = {
-            "op": "graph_change_staged",
-            # What changed, not the main-graph snapshot each entry keeps as
-            # its base nor the writer's resolved actor id: the stream reaches
-            # anyone holding the session id, and those are the diff's, read
-            # with authorization.
-            "entries": [
-                {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
-                for entry in payload.get("entries", [])
-            ],
-            "removals": payload.get("removals", []),
-            "client_id": GRAPH_STAGING_CLIENT_ID,
-        }
-        applied = self.store.apply_state_op(session, op, record_activity=False)
-        try:
-            self.store.persist(session)
-        except Exception:
-            logger.exception(
-                "staged change in session %s landed; persisting its seq failed",
-                session_id,
-            )
+        # The marker is taken before the commit point, so failing to take it
+        # leaves the layer untouched; the seq check, the commit stamped with
+        # the next seq and the op that takes that seq are one live write.
+        with self.store.writing(session_id):
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+            if expected_session_seq is not None and expected_session_seq != session.seq:
+                raise SessionSeqConflict(expected_session_seq, session.seq)
+            payload = commit(session.seq + 1)
+            op = {
+                "op": "graph_change_staged",
+                # What changed, not the main-graph snapshot each entry keeps as
+                # its base nor the writer's resolved actor id: the stream reaches
+                # anyone holding the session id, and those are the diff's, read
+                # with authorization.
+                "entries": [
+                    {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
+                    for entry in payload.get("entries", [])
+                ],
+                "removals": payload.get("removals", []),
+                "client_id": GRAPH_STAGING_CLIENT_ID,
+            }
+            applied = self.store.apply_state_op(session, op, record_activity=False)
+            try:
+                self.store.persist(session)
+            except Exception:
+                logger.exception(
+                    "staged change in session %s landed; persisting its seq failed",
+                    session_id,
+                )
         self.bus.publish(
             session_id,
             {
@@ -1249,21 +1253,25 @@ class SessionManager:
                 session_id,
             )
             return None
+        # The commit point is behind us, so a failure to take the marker is
+        # caught and logged like a failed op, never raised.
         try:
-            applied = self.store.apply_state_op(
-                session,
-                {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
-                record_activity=True,
-            )
+            with self.store.writing(session_id):
+                applied = self.store.apply_state_op(
+                    session,
+                    {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
+                    record_activity=True,
+                )
+                try:
+                    self.store.persist(session)
+                except Exception:
+                    logger.exception(
+                        "layer of session %s changed; persisting its seq failed",
+                        session_id,
+                    )
         except Exception:
             logger.exception("layer of session %s changed; its op failed", session_id)
             return None
-        try:
-            self.store.persist(session)
-        except Exception:
-            logger.exception(
-                "layer of session %s changed; persisting its seq failed", session_id
-            )
         self.bus.publish(
             session_id,
             {
