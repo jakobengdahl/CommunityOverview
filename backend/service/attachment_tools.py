@@ -430,9 +430,9 @@ class AttachmentReadTools:
         finally:
             self.slots.release()
         content_type = result.content_type
-        if (
-            content_type is None and result.status == extraction.STATUS_UNSUPPORTED_TYPE
-        ) or (content_type is not None and content_type not in allowed):
+        # A worker failure or timeout leaves the type check unfinished, so
+        # no content type means the file was not shown to be allowed.
+        if content_type is None or content_type not in allowed:
             return error("unsupported_attachment_type")
         return {
             **ENVELOPE,

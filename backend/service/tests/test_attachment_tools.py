@@ -495,11 +495,23 @@ def test_attachment_defaults_require_explicit_opt_in(service, monkeypatch):
 
 @pytest.mark.parametrize(
     "limit",
-    ["members", "total", "ratio", "member_ratio", "method", "valid", "busy", "size"],
+    [
+        "members",
+        "total",
+        "ratio",
+        "member_ratio",
+        "method",
+        "valid",
+        "busy",
+        "size",
+        "failed",
+        "timeout",
+    ],
 )
 def test_run_file_sniffing_runs_only_in_the_slotted_child(service, monkeypatch, limit):
     """The server inflates no member; the size check and the slot come first,
-    and the child applies the ZIP limits before it sniffs."""
+    the child applies the ZIP limits before it sniffs, and a sniff the worker
+    did not finish is refused as an unsupported type."""
     import io
     import zipfile
     from dataclasses import replace
@@ -548,6 +560,8 @@ def test_run_file_sniffing_runs_only_in_the_slotted_child(service, monkeypatch, 
         return original(archive, *args, **kwargs)
 
     monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
+    if limit in ("failed", "timeout"):
+        monkeypatch.setattr(ae, "_run_worker", lambda *args: ae.ExtractionResult(limit))
     acquired = []
     if limit in ("busy", "size"):
         slots = SimpleNamespace(acquire=lambda timeout: acquired.append(1) and False)
