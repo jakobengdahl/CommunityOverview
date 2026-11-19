@@ -162,18 +162,23 @@ describe('GraphCanvas', () => {
       },
       node_types: { Risk: { shape: 'risk', fields: ['risk_level'] }, Actor: { shape: 'risk' } },
     };
-    render(
+    const canvas = (savedShapes) => (
       <GraphCanvas
         nodes={[
           { id: 'r1', name: 'Supply delay', type: 'Risk', risk_level: 'high' },
+          { id: 'r2', name: 'Saved', type: 'Risk' },
           { id: 'a1', name: 'Agency', type: 'Actor' },
         ]}
         edges={[]}
         schema={schema}
+        savedShapes={savedShapes}
+        shapeOverrides={{ r2: { ref: 'saved:flat' } }}
         // A session type default outranks the configured one.
         typeShapes={{ Actor: { builtin: true } }}
       />
     );
+    const flat = { ...schema.node_shapes.risk, base: 'rectangle-flat', placement: 'middle-centre' };
+    const { rerender } = render(canvas({ flat: { name: 'Flat', definition: flat, revision: 1 } }));
     const risk = screen.getByTestId('node-r1');
     expect(risk.dataset.shapeBase).toBe('triangle-down');
     expect(risk.className).toBe('graph-shaped-flow-node');
@@ -181,6 +186,10 @@ describe('GraphCanvas', () => {
     const actor = screen.getByTestId('node-a1');
     expect(actor.dataset.shapeBase).toBeUndefined();
     expect(actor.getAttribute('aria-label')).toBeNull();
+    expect(screen.getByTestId('node-r2').dataset.shapeBase).toBe('rectangle-flat');
+    // A deleted library entry falls back to the card, not the configured type shape.
+    rerender(canvas({}));
+    expect(screen.getByTestId('node-r2').dataset.shapeBase).toBeUndefined();
   });
 
   it('renders graph container and react-flow', () => {

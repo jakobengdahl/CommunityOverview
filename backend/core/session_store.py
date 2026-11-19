@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import errno
 import json
+import logging
 import math
 import os
 import re
@@ -64,6 +65,8 @@ from .session_activity import (
     undo_conflict_reason as _undo_conflict_reason,
 )
 from .session_annotations import image_annotation_error, reference_annotation_error
+
+logger = logging.getLogger(__name__)
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -875,6 +878,8 @@ class SessionStore:
         self._lock = threading.RLock()
         # Session id -> number of open ``writing`` sections.
         self._writers: Dict[str, int] = {}
+        # Session id -> callbacks run once its outermost section exits.
+        self._after_write: Dict[str, List[Callable[[Session], None]]] = {}
         self._writers_lock = threading.Lock()
         # Cache of the backend's persisted meta list (R13): a full disk scan
         # otherwise runs on every drawer-open GET /api/sessions *and* every
@@ -1076,15 +1081,37 @@ class SessionStore:
         try:
             yield
         finally:
+            callbacks: List[Callable[[Session], None]] = []
             with self._writers_lock:
                 if self._writers[session_id] == 1:
                     del self._writers[session_id]
+                    callbacks = self._after_write.pop(session_id, [])
                 else:
                     self._writers[session_id] -= 1
+            session = self._sessions.get(session_id) if callbacks else None
+            for callback in callbacks:
+                if session is None:
+                    break
+                try:
+                    callback(session)
+                except Exception:
+                    logger.exception("after-write callback failed for %s", session_id)
 
     def is_writing(self, session_id: str) -> bool:
         with self._writers_lock:
             return session_id in self._writers
+
+    def after_writes(self, callback: Callable[[Session], None]) -> None:
+        """Run ``callback(session)`` once each session now being written has
+        persisted or rolled back, on that writer's own thread.
+
+        Its live state may differ from disk until then, so a reader of persisted
+        sessions defers to this for those sessions instead of reading the state
+        mid-write.
+        """
+        with self._writers_lock:
+            for session_id in self._writers:
+                self._after_write.setdefault(session_id, []).append(callback)
 
     def session_count(self) -> int:
         """Number of sessions that exist, on disk or in memory (R13).

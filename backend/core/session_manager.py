@@ -752,6 +752,8 @@ class SessionManager:
         self._pending_pushes: set[asyncio.Task] = set()
         # The app's loop, so a push from a worker thread is applied there.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # The ShapeLibrary whose revision catch-up carries, when one is wired.
+        self.shape_library = None
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -3004,11 +3006,32 @@ class SessionManager:
                 session_id, {"type": "presence_left", "client_id": client_id}
             )
 
-    def catch_up(self, session_id: str, since_seq: Optional[int]) -> Dict[str, Any]:
+    def library_revision(self) -> Optional[int]:
+        """The shape library revision, or ``None`` when it cannot be read.
+
+        Blocks on the library lock and disk, so the stream reads it off the
+        event loop; a client receiving ``None`` fetches the library anyway.
+        """
+        if self.shape_library is None:
+            return None
+        try:
+            return self.shape_library.revision()
+        except Exception:
+            logger.exception("shape library revision unreadable")
+            return None
+
+    def catch_up(
+        self,
+        session_id: str,
+        since_seq: Optional[int],
+        library_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Return the initial payload for a (re)connecting stream.
 
         With a usable ``since_seq`` and an intact ring buffer, returns the missed
         ops; otherwise returns a full snapshot the client applies wholesale.
+        ``library_revision`` comes from ``library_revision()``, read by the
+        caller before this call so no library I/O runs here.
         """
         session = self.store.get(session_id)
         if session is None:
@@ -3016,25 +3039,46 @@ class SessionManager:
         roster = self.presence.roster(session_id)
         claims = self.claims.snapshot(session_id)
         leases = self.leases.snapshot(session_id)
+        missed = None
         if since_seq is not None:
             missed = self.store.ops_since(session_id, since_seq)
-            if missed is not None:
-                return {
-                    "type": "catch_up",
-                    "seq": session.seq,
-                    "ops": missed,
-                    "roster": roster,
-                    "claims": claims,
-                    "leases": leases,
-                }
-        return {
-            "type": "snapshot",
-            "seq": session.seq,
-            "session": session.to_dict(),
-            "roster": roster,
-            "claims": claims,
-            "leases": leases,
-        }
+        if missed is not None:
+            payload: Dict[str, Any] = {
+                "type": "catch_up",
+                "seq": session.seq,
+                "ops": missed,
+                "roster": roster,
+                "claims": claims,
+                "leases": leases,
+            }
+        else:
+            payload = {
+                "type": "snapshot",
+                "seq": session.seq,
+                "session": session.to_dict(),
+                "roster": roster,
+                "claims": claims,
+                "leases": leases,
+            }
+        if self.shape_library is not None:
+            # The client fetches the library at this revision before it
+            # resolves the session state, so saved references never render a
+            # definition an edit or delete missed while it was disconnected.
+            payload["library_revision"] = library_revision
+        return payload
+
+    def publish_library_invalidation(
+        self, key: str, revision: int, session_ids: List[str]
+    ) -> None:
+        """Tell each session referencing library entry ``key`` it changed.
+
+        Ephemeral like a summon: never sequenced or replayed, since catch-up
+        carries the library revision instead. The event names only the entry
+        and revision, never the definition or the other sessions using it.
+        """
+        event = {"type": "library_invalidated", "key": key, "revision": revision}
+        for session_id in session_ids:
+            self.bus.publish(session_id, dict(event))
 
     # ---------------- MCP push ----------------
 

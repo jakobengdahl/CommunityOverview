@@ -8,10 +8,16 @@ A mutation that also changes a session holds the session backend's transaction
 throughout and makes the library durable before the session is written, so a
 crash in between leaves at worst an unreferenced entry, never a session that
 references one missing from disk.
+
+A committed mutation is announced through ``invalidate(key, revision,
+session_ids)`` to the sessions that reference the entry; the notice carries no
+definition, so a client fetches the current one (see
+docs/design/node-shapes/live-writers.md).
 """
 
 import copy
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -30,6 +36,8 @@ from backend.core.session_store import (
     _make_directory,
     _unlock_file,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ShapeLibraryPersistenceBackend(Protocol):
@@ -102,12 +110,18 @@ class ShapeLibrary:
         *,
         writes_enabled=False,
         writers=None,
+        invalidate=None,
     ):
         self.backend = backend
         self.sessions = sessions
         self.writes_enabled = writes_enabled
         # The SessionStore holding the live sessions (``is_writing``).
         self.writers = writers
+        # ``invalidate(key, revision, session_ids)`` after each commit.
+        self.invalidate = invalidate
+
+    def revision(self):
+        return self.backend.read()["revision"]
 
     def snapshot(self):
         data = self.backend.read()
@@ -121,26 +135,18 @@ class ShapeLibrary:
         }
 
     def usage(self, key):
-        """Rebuild the reverse index from persisted session snapshots."""
+        return len(self.references().get(key, ()))
+
+    def references(self):
+        """Rebuild the reverse index (key to session ids) from persisted sessions."""
         index = {}
         for sid in self.sessions.list_ids():
             session = self.sessions.load(sid)
             if not session:
                 continue
-            state = session.get("state", {})
-            refs = set()
-            for name in ("shape_overrides", "type_shapes"):
-                mapping = state.get(name, {})
-                if not isinstance(mapping, dict):
-                    continue
-                for selection in mapping.values():
-                    if isinstance(selection, dict):
-                        ref = selection.get("ref")
-                        if isinstance(ref, str) and ref.startswith("saved:"):
-                            refs.add(ref[6:])
-            for ref in refs:
+            for ref in _saved_refs(session.get("state", {})):
                 index.setdefault(ref, set()).add(sid)
-        return len(index.get(key, ()))
+        return index
 
     def put(
         self,
@@ -264,4 +270,37 @@ class ShapeLibrary:
                 session.state.clear()
                 session.state.update(snapshot["state"])
                 session.updated_at = snapshot["updated_at"]
-            return result
+            users = sorted(self.references().get(key, ())) if self.invalidate else []
+            if self.invalidate and self.writers is not None:
+                # A session mid-write may reference the key only in memory; it
+                # is judged on its state once that write persists or rolls back.
+                self.writers.after_writes(
+                    lambda live: self._invalidate_late(live, key, result, users)
+                )
+        if users:
+            # The commit stands either way; a client that misses the notice
+            # still fetches the revision on its next connect.
+            try:
+                self.invalidate(key, result["revision"], users)
+            except Exception:
+                logger.exception("library invalidation failed for %s", key)
+        return result
+
+    def _invalidate_late(self, session, key, result, notified):
+        if session.id in notified or key not in _saved_refs(session.state):
+            return
+        self.invalidate(key, result["revision"], [session.id])
+
+
+def _saved_refs(state):
+    refs = set()
+    for name in ("shape_overrides", "type_shapes"):
+        mapping = state.get(name, {})
+        if not isinstance(mapping, dict):
+            continue
+        for selection in mapping.values():
+            if isinstance(selection, dict):
+                ref = selection.get("ref")
+                if isinstance(ref, str) and ref.startswith("saved:"):
+                    refs.add(ref[6:])
+    return refs

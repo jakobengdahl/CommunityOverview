@@ -1,4 +1,4 @@
-# covers: backend/core/shape_library.py, backend/core/session_store.py, backend/core/session_manager.py
+# covers: backend/core/shape_library.py, backend/core/session_store.py, backend/core/session_manager.py, backend/service/rest_api.py
 import asyncio
 import copy
 import errno
@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.config.node_shapes import resolve_shape
+from backend.core import GraphStorage
 from backend.core import session_manager
 from backend.core.session_manager import SessionManager
 from backend.core.session_store import (
@@ -22,6 +23,8 @@ from backend.core.shape_library import (
     LibraryForbidden,
     ShapeLibrary,
 )
+from backend.service import GraphService
+from backend.service.rest_api import create_rest_router
 
 
 DEFINITION = {
@@ -601,3 +604,76 @@ def test_staging_and_layer_writers_release_the_marker_on_failure(
         assert committed == ([] if failure == "marker" else [1])
     assert session.seq == 0 and published == []
     assert not store.is_writing(session.id)
+
+
+def test_commits_invalidate_referencing_streams_and_reconnect_reads_the_revision(
+    tmp_path,
+):
+    """An edit or delete reaches only the streams of sessions referencing the
+    entry, in memory mid-write or on disk, naming key and revision only;
+    catch-up carries the current revision, None once unreadable, and the read
+    endpoint serves no tombstone or owner."""
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    manager.shape_library = library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
+        writes_enabled=True,
+        writers=store,
+        invalidate=manager.publish_library_invalidation,
+    )
+    using, other, plain, adding, idle = (manager.create_session() for _ in range(5))
+    using.state["shape_overrides"] = {"a": {"ref": "saved:card"}}
+    other.state["type_shapes"] = {"X": {"ref": "saved:other"}}
+    all_sessions = (using, other, plain, adding, idle)
+    for session in all_sessions:
+        store.persist(session)
+    streams = {s.id: manager.bus.subscribe(s.id) for s in all_sessions}
+    library.put("card", "Card", DEFINITION, identity="owner")
+    library.put("keep", "Keep", DEFINITION, identity="owner")
+    with store.writing(adding.id), store.writing(idle.id):
+        # Referenced only in memory until this write persists.
+        adding.state["type_shapes"] = {"X": {"ref": "saved:card"}}
+        library.put(
+            "card",
+            "Card",
+            {**DEFINITION, "scale": 2.0},
+            identity="editor",
+            expected_revision=1,
+            expected_usage=1,
+        )
+        assert streams[adding.id].queue.empty()
+        store.persist(adding)
+    library.delete("card", identity="editor", expected_revision=3, expected_usage=2)
+    received = {}
+    for sid, subscription in streams.items():
+        received[sid] = []
+        while not subscription.queue.empty():
+            received[sid].append(subscription.queue.get_nowait())
+    expected = [
+        {"type": "library_invalidated", "key": "card", "revision": revision}
+        for revision in (1, 3, 4)
+    ]
+    assert received == {
+        using.id: expected,
+        adding.id: expected[1:],
+        other.id: [],
+        plain.id: [],
+        idle.id: [],
+    }
+    payloads = [
+        manager.catch_up(using.id, since, manager.library_revision())
+        for since in (None, using.seq)
+    ]
+    assert [p["type"] for p in payloads] == ["snapshot", "catch_up"]
+    assert all(p["library_revision"] == 4 for p in payloads)
+    service = GraphService(GraphStorage(json_path=str(tmp_path / "g.json")))
+    router = create_rest_router(service, session_manager=manager)
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/shape-library")
+    assert json.loads(endpoint().body) == {
+        "revision": 4,
+        "entries": {"keep": {"name": "Keep", "definition": DEFINITION, "revision": 2}},
+    }
+    (tmp_path / "library" / "library.json").write_text("{", encoding="utf-8")
+    assert manager.library_revision() is None
