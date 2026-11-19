@@ -1131,13 +1131,15 @@ def test_run_file_read_applies_type_policy_and_extraction_limits(
         monkeypatch.delenv("ATTACHMENT_ALLOWED_TYPES")
         monkeypatch.setattr(tools, "limits", replace(tools.limits, read_max_chars=2))
         observed = []
-        original = attachment_extract.extract
+        original = attachment_extract.detect_and_extract
 
-        def extract(data, content_type, limits):
+        def detect_and_extract(data, filename, allowed, limits):
             observed.append(limits)
-            return original(data, content_type, limits)
+            return original(data, filename, allowed, limits)
 
-        monkeypatch.setattr(attachment_extract, "extract", extract)
+        monkeypatch.setattr(
+            attachment_extract, "detect_and_extract", detect_and_extract
+        )
         result = call(broker, "run_files.read", {"file_id": text_id, "max_chars": 100})[
             "result"
         ]

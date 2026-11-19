@@ -14,7 +14,6 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, fields, replace
 import functools
 import inspect
-import io
 import json
 import logging
 import os
@@ -24,13 +23,7 @@ from types import SimpleNamespace
 
 from backend.core import attachment_extract as extraction
 from backend.core.attachment_retrieval import Segment, rank_passages
-from backend.core.attachment_types import (
-    UnsupportedAttachmentType,
-    _central_directory_is_bounded,
-    check_allowed,
-    detect_attachment_type,
-    parse_allowed_types,
-)
+from backend.core.attachment_types import parse_allowed_types
 from backend.core.attachment_store import AttachmentLimits
 from backend.core.attachment_store import (
     AttachmentIndexCorrupt,
@@ -423,31 +416,24 @@ class AttachmentReadTools:
         )
         if len(data) > limits.max_file_bytes:
             return error("attachment_too_large")
-        try:
-            if data.startswith(b"PK\x03\x04"):
-                # Type sniffing may read an ODF member, so apply the same ZIP
-                # checks as the extractor before any member is decompressed.
-                if not _central_directory_is_bounded(io.BytesIO(data)):
-                    raise UnsupportedAttachmentType("unreadable ZIP directory")
-                try:
-                    with extraction._open_zip(data, self.extraction_limits):
-                        pass
-                except Exception as exc:
-                    raise UnsupportedAttachmentType("ZIP preflight failed") from exc
-            content_type = detect_attachment_type(io.BytesIO(data), record.filename)
-            check_allowed(content_type, allowed)
-        except UnsupportedAttachmentType:
-            return error("unsupported_attachment_type")
         if not self.slots.acquire(timeout=self.limits.extract_timeout_seconds):
             return error("busy")
         try:
-            result = extraction.extract(
+            # Sniffing may decompress an ODF member, so it runs in the
+            # isolated child with the extraction (ADR 0010 section 3).
+            result = extraction.detect_and_extract(
                 data,
-                content_type,
+                record.filename,
+                allowed,
                 replace(self.extraction_limits, max_input_bytes=limits.max_file_bytes),
             )
         finally:
             self.slots.release()
+        content_type = result.content_type
+        if (
+            content_type is None and result.status == extraction.STATUS_UNSUPPORTED_TYPE
+        ) or (content_type is not None and content_type not in allowed):
+            return error("unsupported_attachment_type")
         return {
             **ENVELOPE,
             "file_id": record.file_id,

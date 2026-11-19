@@ -494,9 +494,12 @@ def test_attachment_defaults_require_explicit_opt_in(service, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "limit", ["members", "total", "ratio", "member_ratio", "method", "valid"]
+    "limit",
+    ["members", "total", "ratio", "member_ratio", "method", "valid", "busy", "size"],
 )
-def test_run_file_zip_limits_precede_odf_sniffing(service, monkeypatch, limit):
+def test_run_file_sniffing_runs_only_in_the_slotted_child(service, monkeypatch, limit):
+    """The server inflates no member; the size check and the slot come first,
+    and the child applies the ZIP limits before it sniffs."""
     import io
     import zipfile
     from dataclasses import replace
@@ -517,7 +520,12 @@ def test_run_file_zip_limits_precede_odf_sniffing(service, monkeypatch, limit):
     monkeypatch.setattr(
         service,
         "_attachment_settings",
-        replace(settings, limits=replace(settings.limits, max_file_bytes=100_000)),
+        replace(
+            settings,
+            limits=replace(
+                settings.limits, max_file_bytes=100 if limit == "size" else 100_000
+            ),
+        ),
     )
     changes = {
         "members": {"max_zip_members": 1},
@@ -540,12 +548,20 @@ def test_run_file_zip_limits_precede_odf_sniffing(service, monkeypatch, limit):
         return original(archive, *args, **kwargs)
 
     monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
-    monkeypatch.setattr(ae, "extract", lambda *args: ae.ExtractionResult("ok"))
+    acquired = []
+    if limit in ("busy", "size"):
+        slots = SimpleNamespace(acquire=lambda timeout: acquired.append(1) and False)
+        monkeypatch.setattr(tools, "slots", slots)
     result = tools.read_run_file(files, "file-1")
+    assert not opened
     if limit == "valid":
-        assert result["content_type"] == ae.ODT and opened == ["mimetype"]
+        assert result["content_type"] == ae.ODT
+    elif limit == "busy":
+        assert result["error_code"] == "busy" and acquired
+    elif limit == "size":
+        assert result["error_code"] == "attachment_too_large" and not acquired
     else:
-        assert result["error_code"] == "unsupported_attachment_type" and not opened
+        assert result["error_code"] == "unsupported_attachment_type"
 
 
 @pytest.mark.parametrize("kind", ["xlsx", "ods"])

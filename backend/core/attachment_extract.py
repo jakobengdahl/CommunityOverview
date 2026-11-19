@@ -21,8 +21,12 @@ threads or descriptors past the call (a process that leaves the group on
 purpose is outside what a process group can kill). ZIP-based
 formats are checked against declared member sizes and compression ratios
 before anything is decompressed, and XML is parsed without DTDs, entity
-expansion or network access. Dispatch is by the sniffed content type alone:
-there is no file name parameter, so an extension cannot pick the parser.
+expansion or network access. Dispatch is by the sniffed content type alone; a
+file name only tells CSV from plain text, which share a parser.
+
+``detect_and_extract`` serves bytes whose type is not yet known: the child
+sniffs them (``attachment_types``) and then extracts, so the sniffing, which
+may decompress an ODF ``mimetype`` member, runs under the same limits.
 
 ``extract`` blocks for up to the timeout and each call holds one child
 process: a caller on an event loop runs it in a worker thread and bounds how
@@ -45,7 +49,7 @@ import sys
 import threading
 import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 STATUS_OK = "ok"
 STATUS_NO_TEXT_LAYER = "no_text_layer"
@@ -118,6 +122,8 @@ class ExtractionResult:
     truncated: bool = False
     # A short machine-readable reason for a non-ok status; never file content.
     detail: str | None = None
+    # Set by detect_and_extract when the child sniffed an allowed type.
+    content_type: str | None = None
 
 
 def extract(
@@ -131,6 +137,21 @@ def extract(
     if len(data) > limits.max_input_bytes:
         return ExtractionResult(STATUS_TOO_LARGE, detail="input_bytes")
     return _run_worker(data, ctype, limits, _worker_argv())
+
+
+def detect_and_extract(
+    data: bytes, filename: str, allowed, limits: ExtractionLimits | None = None
+) -> ExtractionResult:
+    """Sniff ``data`` and extract it, both in the child process.
+
+    A file whose type is unreadable or not in ``allowed`` comes back as
+    ``unsupported_type`` without a ``content_type``.
+    """
+    limits = limits or ExtractionLimits()
+    if len(data) > limits.max_input_bytes:
+        return ExtractionResult(STATUS_TOO_LARGE, detail="input_bytes")
+    detect = {"filename": filename, "allowed": sorted(allowed)}
+    return _run_worker(data, None, limits, _worker_argv(), detect)
 
 
 def _worker_argv() -> list[str]:
@@ -147,9 +168,15 @@ def _max_reply_bytes(limits: ExtractionLimits) -> int:
 
 
 def _run_worker(
-    data: bytes, ctype: str, limits: ExtractionLimits, argv: list[str]
+    data: bytes,
+    ctype: str | None,
+    limits: ExtractionLimits,
+    argv: list[str],
+    detect: dict | None = None,
 ) -> ExtractionResult:
-    header = json.dumps({"content_type": ctype, "limits": asdict(limits)}).encode()
+    header = json.dumps(
+        {"content_type": ctype, "limits": asdict(limits), "detect": detect}
+    ).encode()
     payload = len(header).to_bytes(4, "big") + header + data
     try:
         proc = subprocess.Popen(
@@ -351,6 +378,7 @@ def _to_wire(result: ExtractionResult) -> dict:
         "segments": [{"text": s.text, "locator": s.locator} for s in result.segments],
         "truncated": result.truncated,
         "detail": result.detail,
+        "content_type": result.content_type,
     }
 
 
@@ -369,11 +397,13 @@ def _from_wire(obj: dict, limits: ExtractionLimits) -> ExtractionResult:
     if sum(len(s.text) for s in segments) > limits.max_chars:
         raise ValueError("worker exceeded the character cap")
     detail = obj.get("detail")
+    ctype = obj.get("content_type")
     return ExtractionResult(
         status,
         tuple(segments),
         bool(obj["truncated"]),
         detail if isinstance(detail, str) else None,
+        ctype if isinstance(ctype, str) else None,
     )
 
 
@@ -452,6 +482,34 @@ def _extract_in_process(
     except Exception as exc:  # noqa: BLE001 — any parser error is a failed file
         return ExtractionResult(STATUS_FAILED, detail=type(exc).__name__)
     return ExtractionResult(status, tuple(out.segments), out.truncated)
+
+
+def _detect_in_process(
+    data: bytes, filename: str, allowed, limits: ExtractionLimits
+) -> str | None:
+    """The sniffed type of ``data`` if it is in ``allowed``, else None."""
+    # The child runs outside the backend package, so the stdlib-only sniffer
+    # is loaded from beside this file.
+    import importlib.util
+
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "attachment_types.py"
+    )
+    spec = importlib.util.spec_from_file_location("_attachment_types", path)
+    types = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(types)
+    try:
+        if data.startswith(b"PK\x03\x04"):
+            # Sniffing may inflate the ODF mimetype member, so the archive
+            # first passes the same checks as an extraction would.
+            if not types._central_directory_is_bounded(io.BytesIO(data)):
+                return None
+            _open_zip(data, limits).close()
+        ctype = types.detect_attachment_type(io.BytesIO(data), filename)
+        types.check_allowed(ctype, allowed)
+    except Exception:  # noqa: BLE001 — any refusal means an unsupported file
+        return None
+    return ctype
 
 
 # --- Plain text --------------------------------------------------------------
@@ -1029,7 +1087,18 @@ def _worker_main() -> int:
     # not turn that into unbounded output.
     logging.disable(logging.CRITICAL)
     warnings.simplefilter("ignore")
-    result = _extract_in_process(data, header["content_type"], limits)
+    detect = header.get("detect")
+    if detect is None:
+        result = _extract_in_process(data, header["content_type"], limits)
+    else:
+        ctype = _detect_in_process(data, detect["filename"], detect["allowed"], limits)
+        if ctype is None:
+            result = ExtractionResult(STATUS_UNSUPPORTED_TYPE, detail="detect")
+        elif ctype not in SUPPORTED_CONTENT_TYPES:
+            result = ExtractionResult(STATUS_UNSUPPORTED_TYPE, detail=ctype)
+        else:
+            result = _extract_in_process(data, ctype, limits)
+        result = replace(result, content_type=ctype)
     sys.stdout.buffer.write(
         json.dumps(_to_wire(result), ensure_ascii=False).encode("utf-8")
     )
