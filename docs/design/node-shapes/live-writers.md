@@ -53,7 +53,9 @@ for that thread to finish before it leaves its section: the marker and the
 per-session lock stay held until the outcome of the save is known. A save that
 lands is then committed like any other batch (claims, leases and broadcasts)
 and the task ends in `CancelledError`; a save that fails rolls the session back
-and raises the save's error, as without a cancellation.
+and raises the save's error, as without a cancellation. The save is awaited
+as an executor future, not a task, so loop teardown that cancels every task
+cannot end the wait early either.
 
 Rolling back on `CancelledError` instead was rejected: the save may still
 land after the rollback, leaving memory behind disk, and the marker would

@@ -34,7 +34,9 @@ the single entry point used by the REST/SSE endpoints and by MCP pushes:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
+import functools
 import json
 import logging
 import time
@@ -1824,10 +1826,16 @@ class SessionManager:
         or another batch interleave with a write whose outcome is unknown,
         and rolling back memory could contradict a save that then lands.
         Waiting keeps memory, disk and the marker in step; a failed save
-        still raises and rolls back as before.
+        still raises and rolls back as before. The save is a bare executor
+        future rather than a Task, so loop teardown (``asyncio.run`` cancelling
+        every task) cannot mark it done while its thread still writes.
         """
-        save = asyncio.ensure_future(
-            asyncio.to_thread(self.store.persist_snapshot, snapshot)
+        loop = asyncio.get_running_loop()
+        save = loop.run_in_executor(
+            None,
+            functools.partial(
+                contextvars.copy_context().run, self.store.persist_snapshot, snapshot
+            ),
         )
         cancelled = False
         while not save.done():

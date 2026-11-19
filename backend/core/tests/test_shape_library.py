@@ -450,9 +450,10 @@ def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):
 async def test_cancelled_apply_ops_keeps_the_marker_until_the_save_finishes(
     tmp_path, monkeypatch, save_fails
 ):
-    """A batch applies and persists under the marker; if its task is cancelled
-    mid-save, marker and lock stay held until the save thread finishes, then
-    the batch commits (or rolls back on a failed save) and the marker clears."""
+    """A batch applies and persists under the marker; if its task (or every
+    task, as at loop teardown) is cancelled mid-save, marker and lock stay held
+    until the save thread finishes, then the batch commits (or rolls back on a
+    failed save) and the marker clears."""
     sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
     store = SessionStore(sessions)
     manager = SessionManager(store)
@@ -491,7 +492,9 @@ async def test_cancelled_apply_ops_keeps_the_marker_until_the_save_finishes(
         )
     )
     await asyncio.to_thread(started.wait, 5)
-    task.cancel()
+    # Cancel every task, as asyncio.run's teardown does, not only the caller.
+    for pending in asyncio.all_tasks() - {asyncio.current_task()}:
+        pending.cancel()
     for _ in range(5):
         await asyncio.sleep(0)
     assert not task.done()
