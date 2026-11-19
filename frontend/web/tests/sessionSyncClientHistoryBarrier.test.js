@@ -138,6 +138,27 @@ describe('appearance ordering', () => {
     }
   );
 
+  it('settles a resent write the server refuses as a duplicate after a reconnect skipped its echo', async () => {
+    const deliveries = [];
+    const { client } = makeClient({
+      deferRemoteOps: true,
+      fetchImpl: makeFetch([
+        new Error('response lost'),
+        { ok: true, json: async () => ({ seq: 3, applied: [] }) },
+      ]),
+      handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+    });
+    client.sendOps([{ op: 'node_shape_set', node_id: 'a', operation_id: 'one', selection: null }]);
+    await client.flush();
+    client._handleEvent({ type: 'snapshot', seq: 3, ops: [] });
+    expect(deliveries).toHaveLength(0);
+    await client.flush();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({ op: { operation_id: 'one' }, ownAppearance: true });
+    expect(deliveries[0].applyBaseline()).toBe(false);
+    client.close();
+  });
+
   it('replays only captured writes with server receipts and rechecks each target in the queue', async () => {
     const deliveries = [];
     let respond;
@@ -181,8 +202,8 @@ describe('appearance ordering', () => {
       shape_revisions: { 'type:Thing': 3, 'node:a': 7 },
       shape_overrides: { a: { builtin: 'new' } },
     });
-    expect(deliveries[0].applyBaseline()).toBe(true);
-    expect(deliveries[0].op.clear_node_id).toBeUndefined();
+    expect(deliveries.at(-1).applyBaseline()).toBe(true);
+    expect(deliveries.at(-1).op.clear_node_id).toBeUndefined();
     expect(client._baseline).toMatchObject({
       type_shapes: { Thing: { builtin: 'mine' } },
       shape_overrides: { a: { builtin: 'new' } },

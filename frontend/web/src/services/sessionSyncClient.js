@@ -2052,6 +2052,27 @@ export class SessionSyncClient {
             });
           }
         }
+        // A resend whose first response was lost is refused as a duplicate
+        // receipt and comes back without an applied entry; if a reconnect also
+        // skipped its echo, nothing else would settle the host's pending write.
+        // The write already landed, and the resync carried its state.
+        for (const op of batch) {
+          if (
+            (op.op === 'node_shape_set' || op.op === 'type_shape_set') &&
+            op.operation_id &&
+            !this._appearanceEchoes.has(op) &&
+            !(body.applied || []).some((entry) => entry?.operation_id === op.operation_id) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([op], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
+        }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
           if (
