@@ -396,8 +396,9 @@ def test_live_writers_hold_the_marker_from_snapshot_through_rollback(
 
 
 def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):
-    """A writer inside another writer's section neither deadlocks nor ends the
-    marker, entry waits for a running transaction, and the outermost exit
+    """A writer inside another writer's section, on any thread, neither
+    deadlocks nor ends the marker (the transaction is not held across a
+    section), entry waits for a running transaction, and the outermost exit
     clears the marker, on error too."""
     sessions = FileSessionPersistenceBackend(tmp_path)
     store = SessionStore(sessions)
@@ -407,6 +408,17 @@ def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):
         with store.writing(session.id):
             manager.rename_session_sync(session.id, "Inner", "c1")
             assert store.is_writing(session.id) and session.name == "Inner"
+            inner_done = []
+
+            def nested_elsewhere():
+                with store.writing(session.id):
+                    pass
+                inner_done.append(True)
+
+            other = threading.Thread(target=nested_elsewhere, daemon=True)
+            other.start()
+            other.join(5)
+            assert inner_done == [True] and store.is_writing(session.id)
             raise RuntimeError
     assert not store.is_writing(session.id)
     held, release, marked = threading.Event(), threading.Event(), []

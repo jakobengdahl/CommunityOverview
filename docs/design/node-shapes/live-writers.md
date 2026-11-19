@@ -24,10 +24,12 @@ whether any such section is open.
 - **Refusal:** `ShapeLibrary`, given the store as `writers`, refuses a
   mutation for a session that is being written with `LibraryConflict`,
   before the library or the session is touched. The caller retries.
-- **Nesting:** sections count per session. A writer called inside another
-  writer's section, on the same thread, re-enters the reentrant transaction,
-  so it neither deadlocks nor ends the marker; the marker clears only when
-  the outermost section exits, on success or on error.
+- **Nesting:** sections count per session. Since entry has released the
+  transaction before the section body runs, a writer called inside another
+  writer's section takes the transaction afresh and only raises the count, so
+  it does not deadlock; its exit only lowers the count, so it does not end the
+  marker. The marker clears only when the count reaches zero, at the
+  outermost section's exit, on success or on error.
 
 ## Which writers take it
 
