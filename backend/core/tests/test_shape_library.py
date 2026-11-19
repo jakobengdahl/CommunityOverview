@@ -176,8 +176,9 @@ def _reference(state, entry):
 def test_commit_writes_library_then_session_and_adopts_staged_state(
     tmp_path, monkeypatch
 ):
-    """The library is durable before the session is saved, both directories are
-    fsynced, and the live session adopts the written state without re-applying."""
+    """The library, including its new directory entry, is durable before the
+    session is saved, both directories are fsynced, and the live session adopts
+    the written state without re-applying."""
     library, sessions, session = _committing_library(tmp_path)
     live_state = session.state
     events = []
@@ -206,7 +207,12 @@ def test_commit_writes_library_then_session_and_adopts_staged_state(
     entry = library.put(
         "card", "Card", DEFINITION, identity="owner", session=session, apply=apply
     )
-    assert events == [("fsync", "library"), ("save", True), ("fsync", "sessions")]
+    assert events == [
+        ("fsync", tmp_path.name),
+        ("fsync", "library"),
+        ("save", True),
+        ("fsync", "sessions"),
+    ]
     assert calls == [entry["revision"]]
     persisted = sessions.load(session.id)
     assert session.state is live_state
@@ -215,12 +221,13 @@ def test_commit_writes_library_then_session_and_adopts_staged_state(
     assert library.usage("card") == 1
 
 
-@pytest.mark.parametrize("failing", ["library", "session"])
+@pytest.mark.parametrize("failing", ["library", "session", "session-directory"])
 def test_failed_commit_adopts_nothing_and_releases_the_lock(
     tmp_path, monkeypatch, failing
 ):
-    """A failed library or session write leaves the live and persisted session as
-    before, never persists a reference ahead of the library, and unlocks."""
+    """A failed library write, session write or session directory fsync leaves
+    the live and persisted session as before, never persists a reference ahead
+    of the library, and unlocks."""
     library, sessions, session = _committing_library(tmp_path)
     before = copy.deepcopy(session.to_dict())
 
@@ -229,8 +236,11 @@ def test_failed_commit_adopts_nothing_and_releases_the_lock(
 
     if failing == "library":
         monkeypatch.setattr("backend.core.shape_library.os.replace", fail)
-    else:
+    elif failing == "session":
         monkeypatch.setattr(sessions, "save", fail)
+    else:
+        library.backend.read()  # the library directory exists before the patch
+        monkeypatch.setattr("backend.core.session_store._fsync_directory", fail)
     with pytest.raises(OSError):
         library.put(
             "card",
@@ -242,7 +252,7 @@ def test_failed_commit_adopts_nothing_and_releases_the_lock(
         )
     assert session.to_dict() == before
     assert sessions.load(session.id) == before
-    assert ("card" in library.backend.read()["entries"]) is (failing == "session")
+    assert ("card" in library.backend.read()["entries"]) is (failing != "library")
     monkeypatch.undo()
     acquired = []
 

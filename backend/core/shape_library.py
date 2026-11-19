@@ -27,6 +27,7 @@ from backend.core.session_store import (
     SessionPersistenceBackend,
     _fsync_directory,
     _lock_file,
+    _make_directory,
     _unlock_file,
 )
 
@@ -48,7 +49,7 @@ class FileShapeLibraryPersistenceBackend:
 
     def _transaction(self, change=None):
         with self._lock:
-            self.directory.mkdir(parents=True, exist_ok=True)
+            _make_directory(self.directory)
             with (self.directory / "library.lock").open("a+") as lock:
                 _lock_file(lock)
                 try:
