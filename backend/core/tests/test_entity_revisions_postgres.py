@@ -1,3 +1,4 @@
+# covers: backend/core/storage.py, backend/core/postgres_backend.py
 """Entity revisions in a shared store (docs/SESSION_OVERLAY_CONTRACT.md §4.4).
 
 PostgreSQL assigns every revision from one sequence, checks each expectation
@@ -20,6 +21,13 @@ from typing import Any, List
 
 import pytest
 
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    InMemoryExecutionStore,
+)
+from backend.agents.execution.import_worker import drain_import_jobs
 from backend.core.models import Edge, Node, NodeType
 
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
@@ -993,3 +1001,76 @@ def test_a_stale_rename_cannot_remove_subtypes_required_by_a_new_edge(
     assert events == []
     assert _stored(schema, "graph_nodes", "a") == stored
     assert _stored(schema, "graph_edges", "ab")["type"] == "SUBTYPE_LINK"
+
+
+def _merge_job_encoded_as_ones(storage, monkeypatch, during=lambda: None):
+    """A merge's embeddings job for `storage`, encoding every node as [1, 0]
+    with no model loaded, and running `during` inside the first encode."""
+
+    def no_model(self):
+        raise ImportError("no model in this test")
+
+    def compute(nodes):
+        during()
+        return {node.id: [1.0, 0.0] for node in nodes}
+
+    monkeypatch.setattr("backend.core.vector_store.VectorStore._load_model", no_model)
+    monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", compute)
+    store = InMemoryExecutionStore()
+    job = store.enqueue(
+        ExecutionJob(
+            agent_id="system:graph-import",
+            kind=ExecutionKind.IMPORT,
+            idempotency_key="import:merge",
+            payload={"mode": "merge", "graph_generation": storage.generation},
+        )
+    )
+    return store, job
+
+
+def test_a_merge_embedding_commit_writes_only_its_unmoved_nodes(
+    instances, schema, monkeypatch
+):
+    one = instances(deaf=True)
+    one.add_nodes([_node("a"), _node("b")], [])
+    two = instances(deaf=True)
+
+    def elsewhere():
+        two.update_node("b", {"metadata": {"by": "two"}})
+        two.add_nodes([_node("c")], [])
+
+    store, job = _merge_job_encoded_as_ones(one, monkeypatch, elsewhere)
+
+    def whole_graph_save(data):
+        raise AssertionError("a merge's embedding commit saved the whole graph")
+
+    monkeypatch.setattr(one._persistence_backend, "save_graph_data", whole_graph_save)
+
+    drain_import_jobs(store, one)
+
+    # b, moved by two, is refused on every pass and the job retries later.
+    assert store.get(job.id).state == ExecutionState.PENDING
+    assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
+    b = _stored(schema, "graph_nodes", "b")
+    assert b["metadata"] == {"by": "two"}
+    assert not b.get("embedding")
+    assert not one.vector_store.has_embedding("b")
+    assert _stored(schema, "graph_nodes", "c") is not None
+
+
+def test_another_scopes_replace_does_not_supersede_a_merge_job(
+    instances, schema, monkeypatch
+):
+    one = instances(deaf=True, scope="scope-a")
+    one.add_nodes([_node("a")], [])
+    store, job = _merge_job_encoded_as_ones(one, monkeypatch)
+    other = instances(deaf=True, scope="scope-b")
+    other.replace_all_nodes_and_edges([_node("x")], [])
+    one.reload()
+    assert one.generation != job.payload["graph_generation"]
+
+    drain_import_jobs(store, one)
+
+    assert store.get(job.id).state == ExecutionState.SUCCEEDED
+    assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
+    assert _stored(schema, "graph_nodes", "x") is not None

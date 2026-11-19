@@ -409,6 +409,10 @@ What happens, in order:
    node without a vector (`embeddings_status: "queued"`, `job_id` set); a
    merge that changed no embedded text queues nothing (`"not_needed"`). If
    the job cannot be started the merge still stands (`"not_started"`).
+   The job gives a node its vector only if the node still has none and its
+   embedding text is still the text encoded; a node edited meanwhile is
+   encoded again, and the job retries later if nodes keep changing. A later
+   replace does not supersede a merge's job (ADR 0013, "Slice 3a").
 7. **Audit record.** A terminal record under the `import_id` in the same
    job store (`GET /api/import/{import_id}`, and listed by `GET /api/import`
    with `mode: "merge"`) keeps the digest, the parameters, the counts, the
