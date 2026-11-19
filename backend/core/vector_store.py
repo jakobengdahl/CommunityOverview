@@ -14,6 +14,7 @@ Imports are deferred (lazy) so the module loads fast and so the absence of the
 optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
+import hashlib
 import logging
 import threading
 from typing import List, Dict, Optional, Tuple, Any
@@ -282,6 +283,11 @@ class VectorStore:
         # two. The epsilon keeps a zero row at zero instead of dividing by it.
         matrix /= np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12
         self.unit_matrix = matrix
+
+    def embedding_fingerprint(self, node: Node) -> str:
+        """A digest of the text ``node``'s vector is computed from."""
+        text = self._get_text_representation(node)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
