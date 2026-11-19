@@ -101,10 +101,13 @@ class ShapeLibrary:
         sessions: SessionPersistenceBackend,
         *,
         writes_enabled=False,
+        writers=None,
     ):
         self.backend = backend
         self.sessions = sessions
         self.writes_enabled = writes_enabled
+        # The SessionStore holding the live sessions (``is_writing``).
+        self.writers = writers
 
     def snapshot(self):
         data = self.backend.read()
@@ -246,6 +249,14 @@ class ShapeLibrary:
         # Sessions first, then the library, on every path: usage() inside
         # change() takes the session lock, so the reverse order could deadlock.
         with self.sessions.transaction():
+            # A live writer's rollback would erase the adopted state; the
+            # marker is only taken under this transaction, so the check holds.
+            if (
+                session is not None
+                and self.writers is not None
+                and self.writers.is_writing(session.id)
+            ):
+                raise LibraryConflict()
             result = self.backend.update(change)
             if session is not None:
                 snapshot = staged["session"]

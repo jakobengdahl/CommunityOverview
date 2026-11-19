@@ -873,6 +873,9 @@ class SessionStore:
         self._sessions: Dict[str, Session] = {}
         self._rings: Dict[str, Deque[Dict[str, Any]]] = {}
         self._lock = threading.RLock()
+        # Session id -> number of open ``writing`` sections.
+        self._writers: Dict[str, int] = {}
+        self._writers_lock = threading.Lock()
         # Cache of the backend's persisted meta list (R13): a full disk scan
         # otherwise runs on every drawer-open GET /api/sessions *and* every
         # session_count() cap check, and session_count() previously counted
@@ -1057,6 +1060,31 @@ class SessionStore:
         with self._lock:
             self._backend.save(snapshot)
             self._meta_cache = None
+
+    @contextmanager
+    def writing(self, session_id: str) -> Iterator[None]:
+        """Mark a live mutation of ``session_id`` that ends in persist or
+        rollback, possibly after an await (docs/design/node-shapes/live-writers.md).
+
+        Entry waits for a backend transaction in flight, so a shape library
+        commit that checks ``is_writing`` under one never adopts state into a
+        session whose rollback snapshot is already taken. Sections nest; the
+        marker clears when the outermost one exits.
+        """
+        with self._backend.transaction(), self._writers_lock:
+            self._writers[session_id] = self._writers.get(session_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._writers_lock:
+                if self._writers[session_id] == 1:
+                    del self._writers[session_id]
+                else:
+                    self._writers[session_id] -= 1
+
+    def is_writing(self, session_id: str) -> bool:
+        with self._writers_lock:
+            return session_id in self._writers
 
     def session_count(self) -> int:
         """Number of sessions that exist, on disk or in memory (R13).

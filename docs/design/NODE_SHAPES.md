@@ -411,6 +411,8 @@ Each phase is a proposed PR boundary, not a separate project status tracker:
    index and invalidations. Test unauthorized mutation, stale edit, deletion in
    active/closed sessions, restart and tombstone non-resurrection. Run the focused
    performance scenes and accessibility review before enabling library writes.
+   Live session writers and library commits exclude each other as described in
+   [node-shapes/live-writers.md](node-shapes/live-writers.md).
 
 Use normally one test per guarantee, a second only to falsify a distinct failure;
 extend sibling suites and keep repo test-volume limits. No broad test suite or

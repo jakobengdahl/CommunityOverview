@@ -1,4 +1,5 @@
-# covers: backend/core/shape_library.py
+# covers: backend/core/shape_library.py, backend/core/session_store.py, backend/core/session_manager.py
+import asyncio
 import copy
 import errno
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.config.node_shapes import resolve_shape
+from backend.core.session_manager import SessionManager
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
     SessionStore,
@@ -283,3 +285,95 @@ def test_directory_fsync_tolerates_only_unsupported(tmp_path, monkeypatch, code,
             _fsync_directory(tmp_path)
     else:
         _fsync_directory(tmp_path)
+
+
+def _live_writer(writer, manager, session):
+    if writer == "apply_ops":
+        ops = [{"op": "nodes_added", "node_ids": ["n"]}]
+        asyncio.run(manager.apply_ops(session.id, "c1", None, ops))
+    elif writer == "apply_op_sync":
+        manager.rename_session_sync(session.id, "Renamed", "c1")
+    elif writer == "staging":
+        manager.stage_graph_change(
+            session.id,
+            expected_session_seq=None,
+            commit=lambda seq: {"entries": [], "removals": []},
+        )
+    else:
+        op = {"op": "graph_changes_discarded", "removals": [["node", "n1"]]}
+        manager.announce_layer_change(session.id, op)
+
+
+@pytest.mark.parametrize("writer", ["apply_ops", "apply_op_sync", "staging", "layer"])
+def test_live_writers_are_marked_through_persist_and_refuse_a_commit(
+    tmp_path, monkeypatch, writer
+):
+    """Every live session writer holds the writing marker across its persist, a
+    library commit for that session is refused meanwhile, and the marker clears."""
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    session = manager.create_session()
+    library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
+        writes_enabled=True,
+        writers=store,
+    )
+    seen = []
+
+    def commit_during_persist(*args):
+        seen.append(store.is_writing(session.id))
+        with pytest.raises(LibraryConflict):
+            library.put(
+                "card",
+                "Card",
+                DEFINITION,
+                identity="owner",
+                session=session,
+                apply=_reference,
+            )
+
+    monkeypatch.setattr(store, "persist", commit_during_persist)
+    monkeypatch.setattr(store, "persist_snapshot", commit_during_persist)
+    _live_writer(writer, manager, session)
+    assert seen == [True] and not store.is_writing(session.id)
+    assert library.snapshot()["entries"] == {}
+    assert "X" not in session.state["type_shapes"]
+
+
+def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):
+    """A writer inside another writer's section neither deadlocks nor ends the
+    marker, entry waits for a running transaction, and the outermost exit
+    clears the marker, on error too."""
+    sessions = FileSessionPersistenceBackend(tmp_path)
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    session = manager.create_session()
+    with pytest.raises(RuntimeError):
+        with store.writing(session.id):
+            manager.rename_session_sync(session.id, "Inner", "c1")
+            assert store.is_writing(session.id) and session.name == "Inner"
+            raise RuntimeError
+    assert not store.is_writing(session.id)
+    held, release, marked = threading.Event(), threading.Event(), []
+
+    def hold():
+        with sessions.transaction():
+            held.set()
+            release.wait(5)
+
+    def write():
+        with store.writing(session.id):
+            marked.append(True)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    writer = threading.Thread(target=write, daemon=True)
+    writer.start()
+    writer.join(0.2)
+    assert writer.is_alive() and not marked and not store.is_writing(session.id)
+    release.set()
+    writer.join(5)
+    assert marked == [True] and not store.is_writing(session.id)
