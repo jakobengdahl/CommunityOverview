@@ -130,6 +130,7 @@ export default function NodeAppearanceDialog({
   nodes,
   onApply,
   onClose,
+  error,
 }) {
   const { t } = useI18n();
   const ref = useRef(null);
@@ -223,7 +224,9 @@ export default function NodeAppearanceDialog({
       if (patch.areas) next.areas = { ...previous.areas, ...patch.areas };
       return next;
     });
-    announce(message);
+    const next = { ...edits, ...patch, areas: { ...edits.areas, ...patch.areas } };
+    if (appearanceDraft(original.selection, next, resolve).valid) announce(message);
+    else setStatus({ message: '', slot: 0 });
   }
   function changeBase(base) {
     const reset = !placements(base).includes(shown.placement);
@@ -525,6 +528,11 @@ export default function NodeAppearanceDialog({
               </span>
             ))}
           </span>
+          {error && (
+            <p role="alert">
+              {t(error === 'failed' ? 'sessions.change_not_saved' : `node_appearance.${error}`)}
+            </p>
+          )}
           <button onClick={onClose}>{t('node_appearance.cancel')}</button>
           <button
             disabled={!valid}

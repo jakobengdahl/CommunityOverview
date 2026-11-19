@@ -400,6 +400,7 @@ export function NodeContextMenu({
   labels: cml,
   schema,
   onEdit,
+  onAppearance,
   onHide,
   onExpand,
   onDelete,
@@ -447,6 +448,18 @@ export function NodeContextMenu({
           }}
         >
           ✏️ {cml.edit}
+        </button>
+      )}
+      {onAppearance && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onAppearance(menu.node.id);
+            onClose();
+          }}
+        >
+          {cml.appearance}
         </button>
       )}
       {onHide && (

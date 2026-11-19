@@ -2159,17 +2159,16 @@ export class SessionSyncClient {
    * its place among them. Baseline only: the edit is already on the canvas.
    */
   _foldOwnAppearance(entry) {
+    const meta = { ownAppearance: true, clientId: this.clientId, sessionId: this.sessionId };
     const applyBaseline = () => {
       const current = currentAppearanceOp(this._baseline, entry);
       if (current) this._baseline = applyOpToMirror(this._baseline, current);
+      meta.currentAppearance = current;
       return false;
     };
     if (this._deferRemoteOps && this.handlers.onRemoteOps) {
-      this.handlers.onRemoteOps([entry], {
-        clientId: this.clientId,
-        sessionId: this.sessionId,
-        applyBaseline,
-      });
+      meta.applyBaseline = applyBaseline;
+      this.handlers.onRemoteOps([entry], meta);
     } else {
       applyBaseline();
     }

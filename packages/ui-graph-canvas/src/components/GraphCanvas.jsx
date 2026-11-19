@@ -533,6 +533,7 @@ function GraphCanvasInner({
   // shapes come from `schema`. A node with no resolved shape keeps the card.
   shapeOverrides = null,
   typeShapes = null,
+  onAppearance = null,
   onContextMenuAction = null,
   nodeColorResolver = null,
   onViewportChange = null,
@@ -601,6 +602,7 @@ function GraphCanvasInner({
 }) {
   const cml = {
     edit: 'Edit',
+    appearance: 'Node appearance',
     hide: 'Hide',
     expand: 'Find related nodes',
     delete: 'Delete',
@@ -5846,6 +5848,7 @@ function GraphCanvasInner({
           labels={cml}
           schema={schema}
           onEdit={onEdit}
+          onAppearance={onAppearance}
           onHide={onHide}
           onExpand={onExpand}
           onDelete={onDelete}

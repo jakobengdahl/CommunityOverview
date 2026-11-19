@@ -125,6 +125,7 @@ global.EventSource = FakeEventSource;
 global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
+import { SessionSyncClient } from '../src/services/sessionSyncClient';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
@@ -208,6 +209,84 @@ describe('App handler wiring', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each(['node', 'type'])(
+    'sends one revision-checked appearance operation for %s',
+    async (scope) => {
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(
+        true
+      );
+      if (scope === 'type') {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.apply }));
+        fireEvent.click(screen.getByLabelText(en.node_appearance.scope_type));
+      }
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][0]).toEqual([
+        expect.objectContaining({
+          op: scope === 'node' ? 'node_shape_set' : 'type_shape_set',
+          selection: { builtin: true },
+          base_revision: 0,
+          ...(scope === 'node'
+            ? { node_id: 'a' }
+            : { type: 'Actor', clear_node_id: 'a', clear_base_revision: 0 }),
+        }),
+      ]);
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+      expect(send).toHaveBeenCalledTimes(1);
+      const op = send.mock.calls[0][0][0];
+      const acknowledged = {
+        ...op,
+        revisions: scope === 'node' ? { 'node:a': 1 } : { 'type:Actor': 1, 'node:a': 1 },
+      };
+      const meta = { ownAppearance: true, sessionId: canvas().sessionKey };
+      meta.applyBaseline = () => {
+        meta.currentAppearance = acknowledged;
+        return false;
+      };
+      await act(async () => captured.syncHandlersRef.current.onRemoteOps([acknowledged], meta));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor']).toBe(1);
+    }
+  );
+
+  it('keeps the draft open when the server refuses an appearance write', async () => {
+    const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+    await renderApp();
+    act(() => canvas().onSaveView({ nodes: [] }));
+    act(() => canvas().onAppearance('a'));
+    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+    const op = send.mock.calls[0][0][0];
+    await act(async () =>
+      captured.syncHandlersRef.current.onDropped([op], 409, {
+        detail: { error: 'shape_revision_conflict' },
+      })
+    );
+    expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+  });
+
+  it('refuses a changed revision inside the dialog and guards double Escape', async () => {
+    const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps');
+    await renderApp();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => canvas().onAppearance('a'));
+    act(() => useGraphStore.setState({ shapeRevisions: { 'node:a': 1 } }));
+    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+    expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
+    act(() => useGraphStore.setState({ shapeRevisions: {} }));
+    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+    expect(send).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual(['a', 'b']);
+    expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(false);
   });
 
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
