@@ -60,6 +60,11 @@ export function currentAppearance(node, schema, shapeOverrides, typeShapes, save
   return { selection, source: resolved || explicitBuiltin ? level : 'fallback' };
 }
 
+// The selection the draft starts from: a picked reference, the built-in card
+// once the draft's saved entry is deleted, or else the original selection.
+const startOf = (original, edits) =>
+  edits.ref ? { ref: edits.ref } : edits.builtin ? { builtin: true } : original;
+
 /**
  * The draft as a pure function of the original selection and the user's
  * explicit edits: no edit, or edits that land on the starting definition,
@@ -67,7 +72,7 @@ export function currentAppearance(node, schema, shapeOverrides, typeShapes, save
  * inline copy. `resolve(selection)` is the canvas resolver for this node.
  */
 export function appearanceDraft(original, edits, resolve) {
-  const selection = edits.ref ? { ref: edits.ref } : original;
+  const selection = startOf(original, edits);
   const start = resolve(selection);
   const from = start || DEFAULT;
   const scaleText = edits.scale ?? String(from.scale);
@@ -131,6 +136,22 @@ export function mergeSavedShapes(fetched, written, fetchedRevision = null) {
     else merged[key] = entry;
   }
   return merged;
+}
+
+/**
+ * The shape edits in `current` made since `sent` was written to the library:
+ * the rest are now the entry's content, not the draft's own changes.
+ */
+function editsSince(sent, current) {
+  const changed = Object.fromEntries(
+    SHAPE_EDITS.filter(
+      (key) => key !== 'areas' && Object.hasOwn(current, key) && current[key] !== sent[key]
+    ).map((key) => [key, current[key]])
+  );
+  const areas = Object.fromEntries(
+    Object.entries(current.areas || {}).filter(([area, value]) => value !== sent.areas?.[area])
+  );
+  return Object.keys(areas).length ? { ...changed, areas } : changed;
 }
 
 const savedOf = (selection) =>
@@ -204,7 +225,7 @@ export default function NodeAppearanceDialog({
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [libraryStatus, setLibraryStatus] = useState(null);
   const tabs = ['shape', 'text', 'apply'];
-  const savedKey = savedOf(edits.ref ? edits : original.selection);
+  const savedKey = savedOf(startOf(original.selection, edits));
   const savedEntry = Object.hasOwn(saved, savedKey) ? saved[savedKey] : null;
   const pinned = base?.key === savedKey ? base : null;
   // A library that arrives after open is the start of a draft not yet edited.
@@ -356,12 +377,14 @@ export default function NodeAppearanceDialog({
     }
   }
   async function saveNew(name) {
+    const sent = edits;
     const entry = await libraryWrite(
       () => library.create(freshShapeKey(name), name, structuredClone(shown)),
       'library_saved'
     );
+    // Edits made while the request ran stay on top of the saved entry.
     if (entry) {
-      setEdits({ ref: `saved:${entry.key}` });
+      setEdits((current) => ({ ...editsSince(sent, current), ref: `saved:${entry.key}` }));
       setBase(entry);
       setShapeName('');
     }
@@ -392,10 +415,11 @@ export default function NodeAppearanceDialog({
         () => library.remove(key, revision, usage),
         'library_deleted'
       );
-      // Its users, this draft included, now show the built-in card.
+      // Its users, this draft included, now show the built-in card; the
+      // draft's own changes stay on top of it.
       if (entry) {
         setBase(null);
-        if (edits.ref) setEdits({});
+        setEdits(({ ref: _ref, ...rest }) => ({ ...rest, builtin: true }));
       }
       return;
     }
@@ -404,7 +428,7 @@ export default function NodeAppearanceDialog({
       'library_updated'
     );
     if (entry) {
-      setEdits({ ref: `saved:${key}` });
+      setEdits((current) => ({ ...editsSince(review.edits, current), ref: `saved:${key}` }));
       setBase(entry);
     }
   }
@@ -518,7 +542,11 @@ export default function NodeAppearanceDialog({
               <>
                 <label>
                   {t('node_appearance.base')}
-                  <select value={shown.base} onChange={(e) => changeBase(e.target.value)}>
+                  <select
+                    value={shown.base}
+                    disabled={libraryBusy}
+                    onChange={(e) => changeBase(e.target.value)}
+                  >
                     {BASES.map((base) => (
                       <option key={base} value={base}>
                         {t(`node_appearance.base_${base}`)}
@@ -531,6 +559,7 @@ export default function NodeAppearanceDialog({
                     {t('node_appearance.config_shape')}
                     <select
                       value={configName}
+                      disabled={libraryBusy}
                       onChange={(e) => {
                         if (Object.hasOwn(schema.node_shapes, e.target.value)) {
                           setEdits({ ref: `config:${e.target.value}` });
@@ -553,6 +582,7 @@ export default function NodeAppearanceDialog({
                     {t('node_appearance.saved_shape')}
                     <select
                       value={savedOf(draft.selection)}
+                      disabled={libraryBusy}
                       onChange={(e) => {
                         if (Object.hasOwn(saved, e.target.value)) {
                           setEdits({ ref: `saved:${e.target.value}` });
@@ -579,6 +609,7 @@ export default function NodeAppearanceDialog({
                     max="10"
                     step="0.1"
                     value={draft.scaleText}
+                    disabled={libraryBusy}
                     onChange={(e) => update({ scale: e.target.value })}
                   />
                 </label>
@@ -590,6 +621,7 @@ export default function NodeAppearanceDialog({
                     max="10"
                     step="0.1"
                     value={(draft.definition || shown).scale}
+                    disabled={libraryBusy}
                     onChange={(e) => update({ scale: e.target.value })}
                   />
                 </label>
@@ -601,6 +633,7 @@ export default function NodeAppearanceDialog({
                   {t('node_appearance.placement')}
                   <select
                     value={shown.placement}
+                    disabled={libraryBusy}
                     onChange={(e) => update({ placement: e.target.value })}
                   >
                     {placements(shown.base).map((p) => (

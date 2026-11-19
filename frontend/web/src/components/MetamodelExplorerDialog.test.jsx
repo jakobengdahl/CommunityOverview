@@ -704,13 +704,12 @@ describe('NodeAppearanceDialog', () => {
   const click = (name) => act(async () => fireEvent.click(screen.getByRole('button', { name })));
   it('saves a named shape and copies apart from Apply, and a failed Apply keeps both for retry', async () => {
     const apply = vi.fn();
-    const create = vi.fn(async (key, name, definition) => ({
-      key,
-      name,
-      definition,
-      revision: create.mock.calls.length,
-      deleted: false,
-    }));
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    const create = vi.fn(async (key, name, definition) => {
+      if (create.mock.calls.length === 1) await held;
+      return { key, name, definition, revision: create.mock.calls.length, deleted: false };
+    });
     const view = render(
       <NodeAppearanceDialog {...props} savedShapes={{}} library={{ create }} onApply={apply} />
     );
@@ -719,6 +718,15 @@ describe('NodeAppearanceDialog', () => {
       target: { value: 'My card!' },
     });
     await click('node_appearance.save_named');
+    // While the save runs the shape is locked, and an area edit made meanwhile survives it.
+    const area = () => screen.getByLabelText('node_appearance.area_third');
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    expect(screen.getByLabelText('node_appearance.placement').disabled).toBe(true);
+    fireEvent.change(area(), { target: { value: '' } });
+    await act(async () => release());
+    expect(area().value).toBe('');
+    fireEvent.change(area(), { target: { value: 'summary' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
     const [key, name, definition] = create.mock.calls[0];
     expect(key).toMatch(/^my-card-[0-9a-f]{8}$/);
     expect([name, definition]).toEqual(['My card!', DEFAULT_SHAPE]);
@@ -759,8 +767,8 @@ describe('NodeAppearanceDialog', () => {
   it('edits and deletes a saved shape only after a usage warning on the reviewed revision', async () => {
     const apply = vi.fn();
     const library = {
-      usage: vi.fn(async () => ({
-        revision: library.usage.mock.calls.length < 4 ? 3 : 5,
+      usage: vi.fn(async (key) => ({
+        revision: key === 'other' ? 1 : library.usage.mock.calls.length < 4 ? 3 : 5,
         usage: 4,
       })),
       update: vi
@@ -827,6 +835,20 @@ describe('NodeAppearanceDialog', () => {
     // The deleted reference previews as the built-in card.
     expect(document.querySelector('.graph-custom-node')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+    // Deleting a picked entry keeps the draft's own change, over the built-in card.
+    pickSaved('other');
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    fireEvent.change(screen.getByLabelText('node_appearance.placement'), {
+      target: { value: 'bottom-right' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    await click('node_appearance.delete_saved');
+    await click('node_appearance.confirm_delete');
+    expect(library.remove).toHaveBeenLastCalledWith('other', 1, 4);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', {
+      inline: { ...DEFAULT_SHAPE, placement: 'bottom-right' },
+    });
   });
   it.each([
     ['a known', { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 }, DEFAULT_SHAPE],
