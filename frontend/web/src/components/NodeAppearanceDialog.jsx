@@ -129,7 +129,9 @@ export default function NodeAppearanceDialog({
   typeShapes,
   nodes,
   onApply,
+  onDraftChange,
   onClose,
+  error,
 }) {
   const { t } = useI18n();
   const ref = useRef(null);
@@ -223,7 +225,12 @@ export default function NodeAppearanceDialog({
       if (patch.areas) next.areas = { ...previous.areas, ...patch.areas };
       return next;
     });
-    announce(message);
+    const next = { ...edits, ...patch, areas: { ...edits.areas, ...patch.areas } };
+    // Only the preview claim depends on validity; a placement reset happens
+    // regardless and is always announced.
+    if (message !== 'preview_updated' || appearanceDraft(original.selection, next, resolve).valid)
+      announce(message);
+    else setStatus({ message: '', slot: 0 });
   }
   function changeBase(base) {
     const reset = !placements(base).includes(shown.placement);
@@ -288,7 +295,7 @@ export default function NodeAppearanceDialog({
     return () => window.removeEventListener('keydown', isolateKeys, true);
   });
   return (
-    <div className="mme-overlay appearance-overlay" ref={overlay}>
+    <div className="mme-overlay appearance-overlay" ref={overlay} onChange={onDraftChange}>
       <div
         className="mme-dialog appearance-dialog"
         role="dialog"
@@ -525,6 +532,11 @@ export default function NodeAppearanceDialog({
               </span>
             ))}
           </span>
+          {error && (
+            <p role="alert">
+              {t(error === 'failed' ? 'sessions.change_not_saved' : `node_appearance.${error}`)}
+            </p>
+          )}
           <button onClick={onClose}>{t('node_appearance.cancel')}</button>
           <button
             disabled={!valid}

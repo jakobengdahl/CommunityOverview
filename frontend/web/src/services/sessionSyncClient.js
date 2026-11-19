@@ -898,6 +898,7 @@ export class SessionSyncClient {
     // Captured pending operations keep their own server receipt without retaining
     // settled operations for the lifetime of the session.
     this._appearanceReceipts = new WeakMap();
+    this._appearanceEchoes = new WeakSet();
     // The session's membership version: the stream seq of the last
     // membership op applied, or the seq a loaded baseline, snapshot or
     // catch-up reflects. A hydration read across a change of it is stale
@@ -2032,10 +2033,45 @@ export class SessionSyncClient {
           );
           if (original && entry.revisions) this._appearanceReceipts.set(original, entry);
           const seq = typeof entry.seq === 'number' ? entry.seq : body.seq;
-          // Past the stream position the echo was already folded there (or a
-          // snapshot/catch-up superseded it); ahead of it, wait for the stream.
+          // A reconnect can skip the echo while the POST is still in flight.
+          // Settle the host's pending write without folding an old value over
+          // the newer stream or reconnect state. An already-seen echo makes
+          // this notification harmless: the host matches the operation id.
           if (typeof seq !== 'number') this._foldOwnAppearance(entry);
           else if (seq > this._appliedSeq) this._appearanceAcks.push({ seq, entry });
+          else if (
+            (!original || !this._appearanceEchoes.has(original)) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([entry], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
+        }
+        // A resend whose first response was lost is refused as a duplicate
+        // receipt and comes back without an applied entry; if a reconnect also
+        // skipped its echo, nothing else would settle the host's pending write.
+        // The write already landed, and the resync carried its state.
+        for (const op of batch) {
+          if (
+            (op.op === 'node_shape_set' || op.op === 'type_shape_set') &&
+            op.operation_id &&
+            !this._appearanceEchoes.has(op) &&
+            !(body.applied || []).some((entry) => entry?.operation_id === op.operation_id) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([op], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
         }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
@@ -2159,17 +2195,16 @@ export class SessionSyncClient {
    * its place among them. Baseline only: the edit is already on the canvas.
    */
   _foldOwnAppearance(entry) {
+    const meta = { ownAppearance: true, clientId: this.clientId, sessionId: this.sessionId };
     const applyBaseline = () => {
       const current = currentAppearanceOp(this._baseline, entry);
       if (current) this._baseline = applyOpToMirror(this._baseline, current);
+      meta.currentAppearance = current;
       return false;
     };
     if (this._deferRemoteOps && this.handlers.onRemoteOps) {
-      this.handlers.onRemoteOps([entry], {
-        clientId: this.clientId,
-        sessionId: this.sessionId,
-        applyBaseline,
-      });
+      meta.applyBaseline = applyBaseline;
+      this.handlers.onRemoteOps([entry], meta);
     } else {
       applyBaseline();
     }
@@ -2330,6 +2365,10 @@ export class SessionSyncClient {
           !MEMBERSHIP_OPS.has(op.op)
         ) {
           if (!ackedHere && (op.op === 'node_shape_set' || op.op === 'type_shape_set')) {
+            const original = this._inFlightOps.find(
+              (pending) => pending.operation_id && pending.operation_id === op.operation_id
+            );
+            if (original) this._appearanceEchoes.add(original);
             this._foldOwnAppearance(op);
           }
           return;

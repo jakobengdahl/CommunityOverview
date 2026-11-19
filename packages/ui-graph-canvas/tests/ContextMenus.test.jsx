@@ -11,6 +11,7 @@ import {
 
 const labels = {
   edit: 'Edit',
+  appearance: 'Node appearance',
   hide: 'Hide',
   expand: 'Find related nodes',
   delete: 'Delete',
@@ -83,6 +84,22 @@ describe('NodeContextMenu', () => {
   it('renders nothing when menu is null', () => {
     const { container } = render(<NodeContextMenu menu={null} labels={labels} />);
     expect(container.querySelector('.node-context-menu')).toBeNull();
+  });
+
+  it('opens the selected node appearance and closes the menu', () => {
+    const onAppearance = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onAppearance={onAppearance}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: labels.appearance }));
+    expect(onAppearance).toHaveBeenCalledWith('n1');
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('positions the menu from the descriptor coordinates', () => {
