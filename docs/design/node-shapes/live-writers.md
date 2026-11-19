@@ -1,4 +1,4 @@
-# Node shapes phase 6b-4a: synchronous live session writers under the writing marker
+# Node shapes phase 6b-4: live session writers under the writing marker
 
 Part of phase 6 in [NODE_SHAPES.md](../NODE_SHAPES.md#migration-and-small-implementation-phases).
 A shape library commit that also changes a session (6b-3) adopts its staged
@@ -6,8 +6,9 @@ state into the live `Session` while it holds the session backend's
 transaction. A live writer in `session_manager.py` snapshots the session,
 mutates it, persists it and on failure restores the snapshot. If a library
 commit adopted its state between that snapshot and the rollback, the rollback
-would erase a change the library file already holds. This slice marks the
-synchronous writers, which run their whole span on the calling thread.
+would erase a change the library file already holds. Slice 6b-4a marks the
+synchronous writers, which run their whole span on the calling thread; 6b-4b
+marks `apply_ops`, whose persist runs on a worker thread behind an await.
 
 ## The marker
 
@@ -40,14 +41,27 @@ span, so the writer changes no live session state outside it:
 |---|---|
 | `_apply_op_sync` (every synchronous op path: layout, node refs, annotations, groups, rename, describe, write mode, pushed results) | snapshot, apply, persist and rollback |
 | `_replay_action` (undo/redo) | from the record lookup and conflict checks through the record flag, history revision and deleted-id changes, the nested `_apply_op_sync`, and their restore on failure |
+| `apply_ops` (browser batches, REST `/ops`, async rename) | from the rollback snapshot through the batch's ops, budget check, off-thread persist and rollback |
 
 Broadcasts and lease or claim bookkeeping after a commit stay outside the
 marker: they do not change persisted session state.
 
+## Cancellation in `apply_ops`
+
+A cancelled task cannot stop the save thread it started, so `apply_ops` waits
+for that thread to finish before it leaves its section: the marker and the
+per-session lock stay held until the outcome of the save is known. A save that
+lands is then committed like any other batch (claims, leases and broadcasts)
+and the task ends in `CancelledError`; a save that fails rolls the session back
+and raises the save's error, as without a cancellation.
+
+Rolling back on `CancelledError` instead was rejected: the save may still
+land after the rollback, leaving memory behind disk, and the marker would
+clear while that write was in flight, so a library commit could adopt state
+into the session and then be overwritten by it.
+
 ## Out of scope
 
-- `apply_ops` (6b-4b): its persist runs on a worker thread behind an await,
-  so a cancellation there needs its own handling before the marker can clear.
 - `stage_graph_change` and `announce_layer_change` (6b-4c): their op is
   applied after the graph layer change has committed, so a failure to take
   the marker must not propagate from there.

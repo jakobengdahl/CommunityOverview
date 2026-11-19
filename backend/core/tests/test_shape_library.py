@@ -1,4 +1,5 @@
 # covers: backend/core/shape_library.py, backend/core/session_store.py, backend/core/session_manager.py
+import asyncio
 import copy
 import errno
 import json
@@ -442,3 +443,75 @@ def test_writing_nests_waits_for_a_transaction_and_clears_on_error(tmp_path):
     release.set()
     writer.join(5)
     assert marked == [True] and not store.is_writing(session.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_cancelled_apply_ops_keeps_the_marker_until_the_save_finishes(
+    tmp_path, monkeypatch, save_fails
+):
+    """A batch applies and persists under the marker; if its task is cancelled
+    mid-save, marker and lock stay held until the save thread finishes, then
+    the batch commits (or rolls back on a failed save) and the marker clears."""
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    session = manager.create_session()
+    name_before = session.name
+    library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
+        writes_enabled=True,
+        writers=store,
+    )
+    marked, published = [], []
+    started, release = threading.Event(), threading.Event()
+    save, apply_state_op = store.persist_snapshot, store.apply_state_op
+
+    def observe_apply(*args, **kwargs):
+        marked.append(store.is_writing(session.id))
+        return apply_state_op(*args, **kwargs)
+
+    def blocking_save(snapshot):
+        marked.append(store.is_writing(session.id))
+        started.set()
+        release.wait(5)
+        if save_fails:
+            raise OSError(errno.EIO, "disk")
+        save(snapshot)
+
+    monkeypatch.setattr(store, "apply_state_op", observe_apply)
+    monkeypatch.setattr(store, "persist_snapshot", blocking_save)
+    monkeypatch.setattr(
+        manager.bus, "publish", lambda _sid, event: published.append(event["op"])
+    )
+    task = asyncio.create_task(
+        manager.apply_ops(
+            session.id, "c1", None, [{"op": "session_renamed", "name": "Renamed"}]
+        )
+    )
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert store.is_writing(session.id) and manager._lock(session.id).locked()
+    with pytest.raises(LibraryConflict):
+        library.put(
+            "card",
+            "Card",
+            DEFINITION,
+            identity="owner",
+            session=session,
+            apply=_reference,
+        )
+    release.set()
+    with pytest.raises(OSError if save_fails else asyncio.CancelledError):
+        await task
+    assert marked == [True, True]
+    assert not store.is_writing(session.id)
+    assert not manager._lock(session.id).locked()
+    on_disk = SessionStore(FileSessionPersistenceBackend(tmp_path / "sessions"))
+    expected = name_before if save_fails else "Renamed"
+    assert session.name == on_disk.get(session.id).name == expected
+    assert [op["op"] for op in published] == ([] if save_fails else ["session_renamed"])
