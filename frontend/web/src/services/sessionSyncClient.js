@@ -898,6 +898,7 @@ export class SessionSyncClient {
     // Captured pending operations keep their own server receipt without retaining
     // settled operations for the lifetime of the session.
     this._appearanceReceipts = new WeakMap();
+    this._appearanceEchoes = new WeakSet();
     // The session's membership version: the stream seq of the last
     // membership op applied, or the seq a loaded baseline, snapshot or
     // catch-up reflects. A hydration read across a change of it is stale
@@ -2032,10 +2033,24 @@ export class SessionSyncClient {
           );
           if (original && entry.revisions) this._appearanceReceipts.set(original, entry);
           const seq = typeof entry.seq === 'number' ? entry.seq : body.seq;
-          // Past the stream position the echo was already folded there (or a
-          // snapshot/catch-up superseded it); ahead of it, wait for the stream.
+          // A reconnect can skip the echo while the POST is still in flight.
+          // Settle the host's pending write without folding an old value over
+          // the newer stream or reconnect state. An already-seen echo makes
+          // this notification harmless: the host matches the operation id.
           if (typeof seq !== 'number') this._foldOwnAppearance(entry);
           else if (seq > this._appliedSeq) this._appearanceAcks.push({ seq, entry });
+          else if (
+            (!original || !this._appearanceEchoes.has(original)) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([entry], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
         }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
@@ -2329,6 +2344,10 @@ export class SessionSyncClient {
           !MEMBERSHIP_OPS.has(op.op)
         ) {
           if (!ackedHere && (op.op === 'node_shape_set' || op.op === 'type_shape_set')) {
+            const original = this._inFlightOps.find(
+              (pending) => pending.operation_id && pending.operation_id === op.operation_id
+            );
+            if (original) this._appearanceEchoes.add(original);
             this._foldOwnAppearance(op);
           }
           return;

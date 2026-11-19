@@ -101,6 +101,43 @@ describe('history synchronization barrier', () => {
 });
 
 describe('appearance ordering', () => {
+  it.each(['snapshot', 'catch_up'])(
+    'settles an accepted write when %s passes its echo before the POST response',
+    async (type) => {
+      const deliveries = [];
+      let respond;
+      const { client } = makeClient({
+        deferRemoteOps: true,
+        fetchImpl: () => new Promise((resolve) => (respond = resolve)),
+        handlers: { onRemoteOps: (ops, meta) => deliveries.push({ op: ops[0], ...meta }) },
+      });
+      const write = {
+        op: 'node_shape_set',
+        node_id: 'a',
+        operation_id: 'one',
+        selection: { builtin: 'mine' },
+      };
+      client.sendOps([write]);
+      const sending = client.flush();
+      client._handleEvent({ type, seq: 3, ops: [] });
+      client.setBaseline({
+        shape_overrides: { a: { builtin: 'newer' } },
+        shape_revisions: { 'node:a': 2 },
+      });
+      respond({
+        ok: true,
+        json: async () => ({ seq: 1, applied: [{ ...write, revisions: { 'node:a': 1 } }] }),
+      });
+      await sending;
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({ op: { operation_id: 'one' }, ownAppearance: true });
+      expect(deliveries[0].applyBaseline()).toBe(false);
+      expect(client._baseline.shape_overrides.a).toEqual({ builtin: 'newer' });
+      expect(client._baseline.shape_revisions['node:a']).toBe(2);
+      client.close();
+    }
+  );
+
   it('replays only captured writes with server receipts and rechecks each target in the queue', async () => {
     const deliveries = [];
     let respond;
@@ -275,7 +312,12 @@ describe('appearance ordering', () => {
   ])(
     'folds an appearance acknowledgment at its stream seq when it arrives %s',
     async (_label, [ackSeq, ackRevision], events, ackAt, expected) => {
-      const own = { op: 'node_shape_set', node_id: 'a', selection: { builtin: 'mine' } };
+      const own = {
+        op: 'node_shape_set',
+        node_id: 'a',
+        operation_id: 'one',
+        selection: { builtin: 'mine' },
+      };
       const deliveries = [];
       let respond;
       const fetchImpl = vi.fn(() => new Promise((resolve) => (respond = resolve)));
