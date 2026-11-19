@@ -372,15 +372,17 @@ class _Undo:
     None where the write created it; `vectors` holds the prior vector of each
     touched node. Captured before memory changes, consumed only when a
     write is refused or did not land (§4.4), and applied without events:
-    none has fired for the write yet.
+    none has fired for the write yet. `regenerate` False leaves a restored
+    node that had no vector without one, rather than embedding it in memory.
     """
 
-    __slots__ = ("nodes", "edges", "vectors")
+    __slots__ = ("nodes", "edges", "vectors", "regenerate")
 
     def __init__(self) -> None:
         self.nodes: Dict[str, Optional[Dict[str, Any]]] = {}
         self.edges: Dict[str, Optional[Dict[str, Any]]] = {}
         self.vectors: Dict[str, Optional[List[float]]] = {}
+        self.regenerate = True
 
 
 class GraphStorage:
@@ -1341,7 +1343,7 @@ class GraphStorage:
             self.edges[edge_id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge_id, data=edge)
         try:
-            self._settle_vector_index(touched)
+            self._settle_vector_index(touched, generate_missing=undo.regenerate)
         except Exception as exc:
             logger.warning(f"could not restore vectors after an undone write: {exc}")
 
@@ -2424,13 +2426,17 @@ class GraphStorage:
                 self._reload_from_store()
 
     def _settle_vector_index(
-        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+        self,
+        touched: "Dict[str, Tuple[Optional[Node], Any]]",
+        *,
+        generate_missing: bool = True,
     ) -> None:
         """Bring the vector index in step with one batch, in one pass.
 
         `touched` maps an entity id to the node the batch left there and the
         vector the store carried for it - (None, None) where the batch left
-        nothing. Doing this per entity instead would rebuild the index matrix
+        nothing; a node with neither a vector nor `generate_missing` is left
+        without one. Doing this per entity instead would rebuild the index matrix
         once per operation, and the rebuild is linear in the index, so a batch
         would cost the square of it.
 
@@ -2496,7 +2502,7 @@ class GraphStorage:
         missing = [
             node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
         ]
-        if not missing or not generate(missing):
+        if not generate_missing or not missing or not generate(missing):
             return
 
         # Generating at a width the batch did not adopt reads as a model
@@ -3685,6 +3691,83 @@ class GraphStorage:
                     self.vector_store.absorb_embeddings(vectors)
                     self.save().result()
             return True
+
+    def nodes_without_embedding(self) -> List[Tuple[Node, str]]:
+        """Deep copies of the nodes with no vector, each with its
+        ``embedding_fingerprint``, for ``commit_merge_embeddings``. Copies, so
+        what is encoded is what was fingerprinted however the live node moves."""
+        with self._lock:
+            copies = [
+                node.model_copy(deep=True)
+                for node in self.nodes.values()
+                if not self.vector_store.has_embedding(node.id)
+            ]
+            return [
+                (node, self.vector_store.embedding_fingerprint(node)) for node in copies
+            ]
+
+    def commit_merge_embeddings(
+        self, vectors: Dict[str, Any], fingerprints: Dict[str, str]
+    ) -> Tuple[int, List[str]]:
+        """Commit a merge job's vectors, each only if it still describes its
+        node (ADR 0013, slice 3a): the node exists, has no vector, and its
+        embedding text has the fingerprint recorded before encoding.
+
+        Returns how many vectors landed and the ids to encode again: those
+        whose text changed, and those an entity store refused because another
+        instance moved them. A store that applies entity batches receives only
+        the committed nodes, each expecting the revision held here. A failed
+        commit raises with none of its vectors in memory, also when its
+        outcome is unknown and the graph was re-read from the store.
+        """
+        with self._lock:
+            requeue: List[str] = []
+            pending: Dict[str, Any] = {}
+            for node_id, vector in vectors.items():
+                node = self.nodes.get(node_id)
+                if node is None or self.vector_store.has_embedding(node_id):
+                    continue
+                if self.vector_store.embedding_fingerprint(node) == fingerprints.get(
+                    node_id
+                ):
+                    pending[node_id] = vector
+                else:
+                    requeue.append(node_id)
+            if not self._backend_capabilities.incremental_writes:
+                if pending:
+                    self.vector_store.absorb_embeddings(pending)
+                    try:
+                        self.save().result()
+                    except Exception:
+                        self.vector_store.remove_nodes_embeddings(list(pending))
+                        raise
+                return len(pending), requeue
+            while pending:
+                nodes = [self.nodes[node_id] for node_id in pending]
+                undo = self._capture(node_ids=list(pending))
+                undo.regenerate = False
+                self.vector_store.absorb_embeddings(pending)
+                try:
+                    self._commit(
+                        [("node", "upsert", node) for node in nodes],
+                        undo,
+                        {("node", node.id): node.revision for node in nodes},
+                    )
+                    return len(pending), requeue
+                except EntityRevisionConflict as exc:
+                    # Memory is undone; the rest is re-issued without this one.
+                    if pending.pop(exc.entity_id, None) is None:
+                        raise
+                    requeue.append(exc.entity_id)
+                except Exception:
+                    # A single-writer store keeps a failed write in memory, and
+                    # the re-read after an unknown outcome may itself have
+                    # failed: dropping the vectors costs at most a re-encode,
+                    # keeping them could hide from every later pass a vector
+                    # the store never got.
+                    self.vector_store.remove_nodes_embeddings(list(pending))
+                    raise
+            return 0, requeue
 
     @property
     def supports_import_merge(self) -> bool:

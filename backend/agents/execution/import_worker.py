@@ -19,7 +19,7 @@ job any caller of ``claim_next`` on this seam will ever see today.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 from .models import ExecutionKind
 from .store import ExecutionStore
@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 # model can genuinely take minutes, and a lease that expires mid-encode would
 # let a second worker reclaim and re-run work still legitimately in flight.
 DEFAULT_LEASE_SECONDS = 300.0
+
+# How often one merge job encodes again the nodes that moved while encoded.
+MERGE_EMBEDDING_PASSES = 3
 
 _SUPERSEDED_MESSAGE = (
     "a later graph import replaced the graph before this job's embeddings "
@@ -62,9 +65,35 @@ def _mark_superseded(store: ExecutionStore, job: "ExecutionJob") -> None:
     )
 
 
+def _embed_merged_nodes(storage: "GraphStorage") -> int:
+    """Embed every node without a vector, for a merge's job (ADR 0013, slice
+    3a). Returns how many vectors landed; raises, so the job is retried with
+    backoff, while nodes are still moving after the last pass."""
+    embedded = 0
+    for _ in range(MERGE_EMBEDDING_PASSES):
+        read = storage.nodes_without_embedding()
+        if not read:
+            return embedded
+        vectors = storage.vector_store.compute_node_embeddings(
+            [node for node, _ in read]
+        )
+        committed, requeued = storage.commit_merge_embeddings(
+            vectors, {node.id: fingerprint for node, fingerprint in read}
+        )
+        embedded += committed
+        if not requeued:
+            return embedded
+    raise RuntimeError("nodes kept changing while they were embedded")
+
+
 def _run_one_import_job(
     store: ExecutionStore, storage: "GraphStorage", job: "ExecutionJob"
 ) -> None:
+    if job.payload.get("mode") == "merge":
+        # Not superseded by a generation move: the commit compares each
+        # node's text, and another scope's replace moves the generation too.
+        _run_job(store, job, lambda: _embed_merged_nodes(storage))
+        return
     # The generation the graph was at right after THIS job's import replaced
     # it (see backend/service/import_service.py). A job enqueued before this
     # field existed carries None, which always commits — nothing to compare
@@ -78,12 +107,12 @@ def _run_one_import_job(
         _mark_superseded(store, job)
         return
 
-    nodes = [
-        node
-        for node in storage.nodes.values()
-        if not storage.vector_store.has_embedding(node.id)
-    ]
-    try:
+    def embed() -> Optional[int]:
+        nodes = [
+            node
+            for node in storage.nodes.values()
+            if not storage.vector_store.has_embedding(node.id)
+        ]
         # Encode off to the side — `compute_node_embeddings` never touches the
         # live index — so a replace landing during this (potentially
         # minutes-long) step cannot yet be corrupted by it. The result is only
@@ -93,13 +122,29 @@ def _run_one_import_job(
         # check-then-act here would leave open.
         vectors = storage.vector_store.compute_node_embeddings(nodes) if nodes else {}
         if not storage.commit_generation_embeddings(job_generation, vectors):
+            return None
+        return len(nodes)
+
+    _run_job(store, job, embed)
+
+
+def _run_job(
+    store: ExecutionStore,
+    job: "ExecutionJob",
+    embed: Callable[[], Optional[int]],
+) -> None:
+    """Run ``embed`` and record the job's outcome: it returns how many nodes
+    were embedded, or None when a later replace superseded the job."""
+    try:
+        embedded = embed()
+        if embedded is None:
             _mark_superseded(store, job)
             return
         store.complete(
             job.id,
             result={
                 "embeddings_status": "succeeded",
-                "embedded_count": len(nodes),
+                "embedded_count": embedded,
             },
         )
     except ImportError as exc:

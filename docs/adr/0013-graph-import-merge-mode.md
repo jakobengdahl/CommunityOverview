@@ -227,6 +227,42 @@ delivery-queue depth at return was 0 only because the measurement's
 loopback target is refused at once, so the enqueued count is the depth a
 slower target sees.
 
+### Slice 3a: the merge job's embedding commit
+
+Slice 3 is split. 3a, this section, adds §6's per-node commit for a merge's
+IMPORT job (`mode: "merge"`) on every backend; `POST /import/merge` still
+answers 501 `import_merge_not_supported` in PostgreSQL mode until 3b lifts it.
+A replace's job is unchanged.
+
+**The commit rule**, implemented once in `GraphStorage.commit_merge_embeddings`
+and used by file and PostgreSQL mode alike. The job reads the nodes without a
+vector under `_lock`, as detached copies, and records a fingerprint (SHA-256)
+of each copy's embedding text; it encodes those copies, so the text
+fingerprinted is the text encoded. At commit, under `_lock`, a node gets its
+computed vector only if it still exists, still has no vector, and the
+fingerprint of its current embedding text equals the recorded one. Neither its
+revision nor `generation` decides: a metadata- or subtype-only update moves
+the revision and leaves the text, and a replace — another scope's included,
+since in PostgreSQL mode the generation sits in the metadata row every scope
+in a schema shares — moves the generation and says nothing about whether a
+given node's text still matches. A node whose text changed is re-enqueued: the
+job reads and encodes it again, for at most three passes, and fails if nodes
+are still moving after them, which reschedules it with the store's backoff.
+On a store that applies entity batches (the file journal, PostgreSQL) the
+commit writes only those nodes, as entity upserts each expecting the revision
+this instance holds, and never a whole-graph save; a node the store refuses
+because another instance moved it is dropped, re-enqueued, and the rest
+re-issued. A failed commit leaves no vector behind for its nodes and does not
+regenerate one: undoing the write would otherwise re-embed the restored node
+in memory only, where the store lacks it and the next pass would take it as
+embedded. A commit of unknown outcome drops its pending vectors from memory
+too, whatever the store holds; a later pass encodes those nodes again.
+
+Because the generation no longer decides, a merge job is not `superseded` by a
+later replace: it embeds whatever still lacks a vector, which after a replace
+in its own scope overlaps that replace's job. Every vector it writes still
+matches its node's text.
+
 ## Context
 
 ### What exists today
