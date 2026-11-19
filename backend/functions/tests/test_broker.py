@@ -1065,7 +1065,9 @@ def test_malformed_nodes_and_edges_are_refused(service, arguments):
     assert service.calls == []
 
 
-def test_run_file_tools_are_scoped_and_return_bounded_untrusted_text(service, tmp_path):
+def test_run_file_tools_are_scoped_authorized_and_return_bounded_untrusted_text(
+    service, hook, tmp_path
+):
     from backend.functions.run_files import RunFiles
 
     first, second = RunFiles(tmp_path), RunFiles(tmp_path)
@@ -1089,7 +1091,9 @@ def test_run_file_tools_are_scoped_and_return_bounded_untrusted_text(service, tm
             broker, "run_files.read", {"file_id": file_id, "offset": 1, "max_chars": 2}
         )["result"]
         assert result["untrusted_content"] is True
+        assert result["filename"] == "notes.txt"
         assert result["content_type"] == "text/plain"
+        assert [c.target for c in hook.contexts] == ["list_run_files", "read_run_file"]
         assert result["segments"][0]["text"] == "bc"
         assert result["next_offset"] == 3
         for args in (
@@ -1105,6 +1109,12 @@ def test_run_file_tools_are_scoped_and_return_bounded_untrusted_text(service, tm
             ]
             == []
         )
+        hook.evaluate = lambda context: GraphAuthorizationDecision(
+            allowed=False, reason="revoked", mode="custom", source="test"
+        )
+        assert error_code(call(broker, "run_files.list")) == "access_denied"
+        response = call(broker, "run_files.read", {"file_id": file_id})
+        assert error_code(response) == "access_denied"
     finally:
         first.close()
         second.close()

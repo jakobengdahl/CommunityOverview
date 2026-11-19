@@ -321,18 +321,6 @@ class FunctionBroker:
 
         self._validate_arguments(spec, arguments)
         call_args = dict(arguments)
-        if spec.grant is None:
-            result = getattr(self._service._attachment_read_tools, spec.method)(
-                ctx.run_files, **call_args
-            )
-            if result.get("success") is False:
-                code = (
-                    ERR_INVALID_ARGUMENTS
-                    if result.get("error_code") == "invalid_arguments"
-                    else ERR_TOOL_FAILED
-                )
-                raise BrokerError(code, "The operation failed.")
-            return result
         if spec.action == GRAPH_ACTION_MUTATE:
             call_args["event_origin"] = function_origin(
                 ctx.function_id, ctx.function_version
@@ -383,6 +371,10 @@ class FunctionBroker:
                 graph_id=ctx.authorization_inputs.get("graph_id") or ""
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
+            if spec.grant is None:
+                # Run files need no grant, but the actor's access is still
+                # checked so revoking it stops reads mid-run (§7.2).
+                return self._call_run_file_tool(spec, call_args)
             try:
                 result = getattr(self._service, spec.method)(**call_args)
             except Exception:
@@ -407,6 +399,21 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
+
+    def _call_run_file_tool(
+        self, spec: ToolSpec, call_args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        result = getattr(self._service._attachment_read_tools, spec.method)(
+            self._context.run_files, **call_args
+        )
+        if result.get("success") is False:
+            code = (
+                ERR_INVALID_ARGUMENTS
+                if result.get("error_code") == "invalid_arguments"
+                else ERR_TOOL_FAILED
+            )
+            raise BrokerError(code, "The operation failed.")
+        return result
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
