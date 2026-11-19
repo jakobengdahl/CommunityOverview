@@ -105,7 +105,8 @@ def test_confirmation_excludes_concurrent_session_write(tmp_path):
     store = SessionStore(FileSessionPersistenceBackend(tmp_path / "sessions"))
     session = store.create()
     library = ShapeLibrary(
-        FileShapeLibraryPersistenceBackend(tmp_path / "library"), sessions,
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
         writes_enabled=True,
     )
     entry = library.put("card", "Card", DEFINITION, identity="owner")
@@ -125,7 +126,12 @@ def test_confirmation_excludes_concurrent_session_write(tmp_path):
 
     def delete():
         try:
-            library.delete("card", identity="owner", expected_revision=entry["revision"], expected_usage=0)
+            library.delete(
+                "card",
+                identity="owner",
+                expected_revision=entry["revision"],
+                expected_usage=0,
+            )
         except Exception as exc:
             errors.append(exc)
 
