@@ -763,11 +763,7 @@ export default function App() {
         onConnect={handleConnect}
         busy={creating}
       />
-      <DomeNavigationControls
-        view={domeOptions}
-        onZoom={handleZoom}
-        onReset={handleResetView}
-      />
+      <DomeNavigationControls view={domeOptions} onZoom={handleZoom} onReset={handleResetView} />
       <div className="xr-hint">
         {error !== null ? (
           <span className="xr-error">Could not enter VR: {error}</span>
