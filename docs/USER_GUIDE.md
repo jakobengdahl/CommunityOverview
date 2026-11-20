@@ -859,14 +859,16 @@ images), hidden and dimmed objects, node shapes and appearance choices (per node
 and per type) and visual settings. Graph nodes and connections remain shared and
 are never duplicated. The copy keeps the source's write mode: copying a staged
 session copies its unmerged staged changes into the copy as staged changes of its
-own, so they can be reviewed, merged or discarded there independently of the
-source; making a copy never changes the graph. Participants, presence, activity,
-undo history and edit leases are not copied.
+own, credited to you as the one who made the copy, so they can be reviewed,
+merged or discarded there independently of the source; making a copy never
+changes the graph. Merging them is checked like any other merge. Participants,
+presence, activity, undo history and edit leases are not copied.
 
 Copying requires permission to create a session and to read the source; copying
-a session with staged changes also requires permission to stage changes, so a
-copy never gives you more than you already hold. Who may open or edit the copy is
-decided by the same access rules as for any session you create. Sessions
+a session with staged changes also requires permission to stage changes. If you
+may copy a session, you copy all of it: its staged changes are not checked one
+by one when copied. Who may open or edit the copy is decided by the same access
+rules as for any session you create. Sessions
 exceeding the document size limit are refused with a size-limit error message. A
 session holding an older image that links to a web address instead of carrying
 its own picture cannot be copied; re-add that image first.
