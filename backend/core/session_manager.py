@@ -887,6 +887,7 @@ class SessionManager:
         name: Optional[str] = None,
         authorize_staging: Optional[Callable[[], None]] = None,
         staged_by: str = "anonymous",
+        assign_access: Optional[Callable[[str], None]] = None,
     ) -> Session:
         """Copy a session: its canvas, write mode and staged graph changes.
 
@@ -894,7 +895,9 @@ class SessionManager:
         entries are copied into the copy's own layer, so a copy never changes
         the graph; ``authorize_staging`` runs first when there are any, and
         refuses by raising. The copied entries are staged by ``staged_by``,
-        the copier, at the copy time. Synchronous callers refuse an in-flight state
+        the copier, at the copy time. ``assign_access`` runs with the copy's
+        id before it is saved, so access assignments exist before the copy
+        does; if it raises, nothing is saved. Synchronous callers refuse an in-flight state
         batch. REST holds the same source lock, then calls the internal method
         without yielding. Like create_session, copying allocates through
         store.create without consuming an MCP rate-limit bucket; the session
@@ -902,7 +905,9 @@ class SessionManager:
         """
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        return self._copy_session(session_id, name, authorize_staging, staged_by)
+        return self._copy_session(
+            session_id, name, authorize_staging, staged_by, assign_access
+        )
 
     async def copy_session_async(
         self,
@@ -910,9 +915,12 @@ class SessionManager:
         name: Optional[str] = None,
         authorize_staging: Optional[Callable[[], None]] = None,
         staged_by: str = "anonymous",
+        assign_access: Optional[Callable[[str], None]] = None,
     ) -> Session:
         async with self._lock(session_id):
-            return self._copy_session(session_id, name, authorize_staging, staged_by)
+            return self._copy_session(
+                session_id, name, authorize_staging, staged_by, assign_access
+            )
 
     def _copy_session(
         self,
@@ -920,6 +928,7 @@ class SessionManager:
         name: Optional[str],
         authorize_staging: Optional[Callable[[], None]],
         staged_by: str,
+        assign_access: Optional[Callable[[str], None]],
     ) -> Session:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
@@ -991,6 +1000,18 @@ class SessionManager:
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
 
+        def allocate(copy_id: str) -> None:
+            if mode == WRITE_MODE_STAGED:
+                allocate_staged(copy_id)
+            if assign_access is None:
+                return
+            try:
+                assign_access(copy_id)
+            except BaseException:
+                if mode == WRITE_MODE_STAGED:
+                    self.write_modes.retire(copy_id, require_empty=False)
+                raise
+
         def allocate_staged(copy_id: str) -> None:
             self.write_modes.record_staged(copy_id)
             if not entries:
@@ -1025,7 +1046,7 @@ class SessionManager:
             state=state,
             write_mode=mode,
             write_mode_source="explicit",
-            on_allocate=allocate_staged if mode == WRITE_MODE_STAGED else None,
+            on_allocate=allocate,
         )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:

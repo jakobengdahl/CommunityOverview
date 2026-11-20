@@ -1391,6 +1391,18 @@ def _register_session_endpoints(
         if denied:
             raise HTTPException(status_code=403, detail=denied.get("message"))
 
+    def _assign_copy_access(
+        http_request: Request, source_id: str, copy_id: str
+    ) -> None:
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=source_id,
+                copy_session_id=copy_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
 
@@ -1486,6 +1498,9 @@ def _register_session_endpoints(
                     GRAPH_OPERATION_STAGE,
                 ),
                 staged_by=staged_by,
+                assign_access=lambda copy_id: _assign_copy_access(
+                    http_request, session_id, copy_id
+                ),
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")

@@ -867,8 +867,9 @@ presence, activity, undo history and edit leases are not copied.
 Copying requires permission to create a session and to read the source; copying
 a session with staged changes also requires permission to stage changes. If you
 may copy a session, you copy all of it: its staged changes are not checked one
-by one when copied. Who may open or edit the copy is decided by the same access
-rules as for any session you create. Sessions
+by one when copied. You own the copy. Where sessions have their own roles and
+permissions, the copy gets the source's, each limited to what you may do
+yourself, so a copy never gives anyone more access than you have. Sessions
 exceeding the document size limit are refused with a size-limit error message. A
 session holding an older image that links to a web address instead of carrying
 its own picture cannot be copied; re-add that image first.

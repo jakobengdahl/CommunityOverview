@@ -136,7 +136,8 @@ _INVALID_SESSION_ID_ERROR = (
 
 
 class _CopyDenied(Exception):
-    """The copier may not stage the source's staged changes into a copy."""
+    """The hook refused staging the source's changes into a copy, or the
+    copy's access assignments."""
 
     def __init__(self, result: Dict[str, Any]):
         super().__init__(result.get("message"))
@@ -3270,7 +3271,9 @@ def register_mcp_tools(
 
         Canvas state, appearance choices, write mode and staged graph changes
         are copied, annotations under fresh IDs; graph entities remain shared.
-        Participants, history and leases are excluded.
+        A hook holding per-session roles gives the copy the source's, capped at
+        the copier's rights, with the copier as owner. Participants, history
+        and leases are excluded.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -3299,10 +3302,20 @@ def register_mcp_tools(
             if denied:
                 raise _CopyDenied(denied)
 
+        def assign_access(copy_id: str) -> None:
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=session_id,
+                copy_session_id=copy_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
         try:
             session = session_manager.copy_session(
                 session_id,
                 authorize_staging=authorize_staging,
+                assign_access=assign_access,
                 staged_by=access.build_mutation_actor_id(
                     target="copy_visualization_session"
                 ),

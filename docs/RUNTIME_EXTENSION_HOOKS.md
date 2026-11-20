@@ -28,6 +28,10 @@ app = create_app(
 
 Both new arguments are keyword-only and optional. `authorization_hook` implements
 `GraphAuthorizationHook` and is passed to `GraphService` for reads and writes.
+The core holds no per-session roles; a hook that does also implements
+`assign_copied_session_access` (`SessionCopyAccessHook`), which a session copy
+calls before saving the copy so the copy's assignments are the source's, capped
+at the copier's rights, with the copier as owner. A refusal creates nothing.
 The `/agents/skills` graph lookup also uses this service, including request actor
 and scope context, access denial, and graph visibility narrowing.
 `create_app()` and the existing

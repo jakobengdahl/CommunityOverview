@@ -123,6 +123,30 @@ def authorize_graph_access(
     return build_access_denied_result(action=action, target=target, decision=decision)
 
 
+def assign_copied_session_access(
+    hook: GraphAuthorizationHook, *, source_session_id: str, copy_session_id: str
+) -> Optional[Dict[str, Any]]:
+    """Hand a session copy's access to a hook that holds per-session roles
+    (SessionCopyAccessHook); None when it agrees or has none to carry."""
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    assign = getattr(hook, "assign_copied_session_access", None)
+    if assign is None:
+        return None
+    target = "copy_visualization_session"
+    decision = assign(
+        build_graph_authorization_context(
+            action=GRAPH_ACTION_MUTATE, target=target, session_id=source_session_id
+        ),
+        copy_session_id=copy_session_id,
+    )
+    if decision.allowed:
+        return None
+    return build_access_denied_result(
+        action=GRAPH_ACTION_MUTATE, target=target, decision=decision
+    )
+
+
 # ---------------------------------------------------------------------------
 # Visibility helpers
 # ---------------------------------------------------------------------------

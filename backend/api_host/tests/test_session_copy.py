@@ -124,9 +124,10 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-@pytest.mark.parametrize("denied_action", ["read", "mutate"])
+@pytest.mark.parametrize("denied_action", ["read", "mutate", "assign"])
 def test_copy_requires_source_read_access(test_app, transport, denied_action):
-    """Permission to create alone cannot copy an unreadable source."""
+    """Permission to create alone cannot copy an unreadable source, nor a copy
+    whose access assignments the hook refuses."""
     source = test_app.app.state.session_manager.create_session()
     hook = Mock()
     hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
@@ -134,6 +135,9 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
             ctx.action == denied_action
             and (denied_action == "mutate" or ctx.session_id == source.id)
         )
+    )
+    hook.assign_copied_session_access.return_value = GraphAuthorizationDecision(
+        allowed=denied_action != "assign"
     )
     test_app.app.state.graph_service._authorization_hook = hook
     status, result = invoke(test_app, source, transport)
@@ -161,8 +165,10 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     app_config, mock_llm_provider, transport
 ):
     """A staged copy holds the source's staged changes, staged by the copier,
-    the graph unchanged; a copier the hook refuses staging is refused (REST
-    403, MCP success false) and no session is created."""
+    the graph unchanged; a copier the hook refuses staging, or whose copy's
+    access assignments it refuses, is refused (REST 403, MCP success false)
+    and no session is created. The hook assigns access as the copier, from the
+    source to the copy it returns."""
     from dataclasses import replace
     from unittest.mock import patch
     from fastapi.testclient import TestClient
@@ -238,6 +244,22 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     assert [
         (c.target, c.session_id) for c in asked if c.graph_operation == "stage"
     ] == [("copy_visualization_session", source)]
+
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(allowed=True)
+    assign = hook.assign_copied_session_access
+    assign.return_value = GraphAuthorizationDecision(allowed=False)
+    succeeded, _ = copy_as(source, "copier")
+    assert not succeeded
+    assert manager.store.session_count() == count
+    refused_id = assign.call_args.kwargs["copy_session_id"]
+    assert manager.write_modes.is_retired(refused_id)
+    assign.return_value = GraphAuthorizationDecision(allowed=True)
+    succeeded, result = copy_as(source, "copier")
+    assert succeeded
+    copied = result if transport == "rest" else result["session"]
+    (context,), kwargs = assign.call_args
+    assert (context.actor["actor_id"], context.session_id) == ("copier", source)
+    assert kwargs["copy_session_id"] == copied.get("id", copied.get("session_id"))
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
