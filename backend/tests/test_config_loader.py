@@ -401,6 +401,49 @@ class TestConfigLoader:
         config_loader.reset_loader()
         return config_loader
 
+    @pytest.mark.parametrize(
+        "theme, expected",
+        [
+            (
+                {
+                    "accent": "#0a7f5c",
+                    "accent_hover": "rgb(8, 100, 70)",
+                    "surface": "#000",
+                    "accent_contrast": "#fff;}body{display:none",
+                },
+                {"accent": "#0a7f5c", "accent_hover": "rgb(8, 100, 70)"},
+            ),
+            ("#0a7f5c", {}),
+            (
+                {
+                    "accent": "rgb(10, 20)",
+                    "accent_hover": "#fff\n",
+                    "accent_contrast": "rgb(1., 2, 3)",
+                },
+                {},
+            ),
+            (
+                {"accent": "rgb(\u0661,2,3)"},
+                {},
+            ),
+            ({"accent": 5, "accent_hover": "rgb(" + " " * 60 + "1,2,3)"}, {}),
+            ({"accent": "rgb(1 2 3 / 50%)"}, {"accent": "rgb(1 2 3 / 50%)"}),
+        ],
+    )
+    def test_theme_keeps_only_known_colour_tokens(self, tmp_path, theme, expected):
+        """A bad theme entry is dropped on its own; the rest of the config loads."""
+        config_loader = self._load_capability_config(tmp_path, [])
+        config_path = tmp_path / "schema_config.json"
+        raw = json.loads(config_path.read_text())
+        raw["presentation"]["theme"] = theme
+        config_path.write_text(json.dumps(raw))
+        config_loader.reset_loader()
+
+        presentation = config_loader.get_presentation()
+
+        assert presentation["theme"] == expected
+        assert presentation["title"] == "Capability Test Graph"
+
     @pytest.mark.parametrize("name", ["<absent>", "", None])
     def test_capability_without_name_keeps_schema_and_its_disabled_flag(
         self, tmp_path, name

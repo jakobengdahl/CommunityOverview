@@ -1,0 +1,78 @@
+/*
+ * Design tokens for the web UI.
+ *
+ * Every value here is the literal the stylesheets used before tokens existed,
+ * so swapping a literal for its token changes nothing on screen. Tokens are
+ * semantic: a component asks for "the text on a raised surface", not for a
+ * grey. docs/THEMING.md lists them and explains per-deployment overrides
+ * (`presentation.theme` in the schema config), which set the accent tokens
+ * on :root at load.
+ *
+ * The UI is designed dark; a light system scheme only switches a few base
+ * colours in index.css and the canvas package. A light token set is future
+ * work: it needs every stylesheet on tokens first, or the untokenized parts
+ * would stay dark.
+ */
+:root {
+  /* Surfaces, from the page outwards */
+  --co-surface-app: #1a1a1a;
+  --co-surface-raised: #2a2a2a;
+  --co-surface-menu: rgba(38, 38, 38, 0.98);
+  --co-surface-control: #333;
+  --co-surface-button: #444;
+  --co-surface-button-hover: #555;
+  --co-surface-hover: rgba(255, 255, 255, 0.1);
+  --co-scrim: rgba(0, 0, 0, 0.7);
+  --co-scrim-sheet: rgba(0, 0, 0, 0.55);
+
+  /* Text, from most to least emphasis */
+  --co-text-strong: #fff;
+  --co-text: #ddd;
+  --co-text-soft: #ccc;
+  --co-text-subtle: #bbb;
+  --co-text-muted: #aaa;
+  --co-text-faint: #888;
+  --co-text-disabled: #666;
+
+  /* Lines */
+  --co-border: #444;
+  --co-border-strong: #666;
+  --co-handle: #666;
+
+  /* Accent: primary actions, focus rings, selection */
+  --co-accent: #646cff;
+  --co-accent-hover: #535bf2;
+  --co-accent-contrast: #fff;
+
+  /* Status */
+  --co-danger: #ef4444;
+  --co-danger-hover: #dc2626;
+  --co-danger-soft: #e06c6c;
+  --co-warning: #f59e0b;
+  --co-success: #10b981;
+
+  /* Shape */
+  --co-radius-sm: 4px;
+  --co-radius-md: 6px;
+  --co-radius-lg: 8px;
+  --co-radius-xl: 12px;
+
+  /* Elevation */
+  --co-shadow-dialog: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --co-shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  --co-shadow-menu: 0 6px 24px rgba(0, 0, 0, 0.45);
+
+  /* Spacing scale, for new and migrated layout */
+  --co-space-1: 4px;
+  --co-space-2: 8px;
+  --co-space-3: 12px;
+  --co-space-4: 16px;
+  --co-space-5: 20px;
+  --co-space-6: 24px;
+
+  /* Typography */
+  --co-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --co-font-size-sm: 12px;
+  --co-font-size-md: 14px;
+  --co-font-size-lg: 16px;
+}

@@ -363,6 +363,26 @@ class RestInterfaceConfig(BaseModel):
         return entity
 
 
+# presentation.theme keys a deployment may set; the web UI maps each onto the
+# design token of the same name (accent -> --co-accent). Values must be plain
+# CSS colours: anything else could smuggle another declaration into the page.
+THEME_KEYS = ("accent", "accent_hover", "accent_contrast")
+# Plain CSS colours only, matched whole: hex, or rgb()/hsl() with numeric
+# channels in comma or space syntax. Whitespace is spaces only.
+_N = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)"
+_ALPHA = rf"{_N}%?"
+_S = r" *"
+_CSS_COLOR = re.compile(
+    r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+    rf"|rgba?\({_S}{_N}{_S},{_S}{_N}{_S},{_S}{_N}{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)?{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
+)
+_CSS_COLOR_MAX_LEN = 64
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
 
@@ -382,6 +402,28 @@ class PresentationConfig(BaseModel):
     skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
     capabilities: List[CapabilityConfig] = Field(default_factory=list)
     guides: List[GuideConfig] = Field(default_factory=list)
+    theme: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _keep_valid_theme_entries(cls, v: Any) -> Dict[str, str]:
+        """Drop unknown keys and non-colour values instead of failing the config."""
+        if not isinstance(v, dict):
+            if v is not None:
+                logger.warning("presentation.theme must be an object; ignoring it")
+            return {}
+        kept = {}
+        for key, value in v.items():
+            if (
+                key in THEME_KEYS
+                and isinstance(value, str)
+                and len(value) <= _CSS_COLOR_MAX_LEN
+                and _CSS_COLOR.fullmatch(value)
+            ):
+                kept[key] = value
+            else:
+                logger.warning("Skipping invalid presentation.theme entry %r", key)
+        return kept
 
 
 class AiAssistantUiConfig(BaseModel):
@@ -872,6 +914,7 @@ def get_presentation() -> Dict[str, Any]:
     - default_language: Default language code
     - default_chat_collapsed: Whether the assistant panel starts collapsed
       for a visitor with no stored preference of their own
+    - theme: Design-token overrides for the web UI (keys in THEME_KEYS)
     """
     loader = _get_loader()
     pres = loader.config.presentation
@@ -896,6 +939,7 @@ def get_presentation() -> Dict[str, Any]:
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
         "capabilities": get_capabilities()["capabilities"],
         "guides": [guide.model_dump() for guide in pres.guides],
+        "theme": dict(pres.theme),
         "ui": loader.config.ui.model_dump(),
     }
 

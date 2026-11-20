@@ -383,7 +383,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                   checked={linkResults}
                   onChange={(e) => setLinkResults(e.target.checked)}
                   style={{
-                    accentColor: '#646cff',
+                    accentColor: 'var(--co-accent)',
                     width: '1rem',
                     height: '1rem',
                     marginTop: '0.15rem',
@@ -448,7 +448,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                                 checked={!!perms[op]}
                                 onChange={(e) => handlePermissionChange(type, op, e.target.checked)}
                                 style={{
-                                  accentColor: '#646cff',
+                                  accentColor: 'var(--co-accent)',
                                   width: '1rem',
                                   height: '1rem',
                                   cursor: 'pointer',
@@ -479,7 +479,12 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                 type="checkbox"
                 checked={restrictTools}
                 onChange={(e) => setRestrictTools(e.target.checked)}
-                style={{ accentColor: '#646cff', width: '1rem', height: '1rem', cursor: 'pointer' }}
+                style={{
+                  accentColor: 'var(--co-accent)',
+                  width: '1rem',
+                  height: '1rem',
+                  cursor: 'pointer',
+                }}
               />
               <span style={{ color: '#ddd', fontSize: '0.9rem' }}>
                 {t('active_data_collection.restrict_tools_label')}
@@ -512,7 +517,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                       checked={!!allowedTools[tool.name]}
                       onChange={(e) => handleToolToggle(tool.name, e.target.checked)}
                       style={{
-                        accentColor: '#646cff',
+                        accentColor: 'var(--co-accent)',
                         width: '1rem',
                         height: '1rem',
                         cursor: 'pointer',

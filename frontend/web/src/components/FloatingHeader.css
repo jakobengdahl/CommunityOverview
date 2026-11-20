@@ -19,7 +19,7 @@
 }
 
 .floating-header-app-icon {
-  color: #646cff;
+  color: var(--co-accent);
   flex-shrink: 0;
 }
 
@@ -171,7 +171,7 @@
 }
 
 .floating-header-summon:hover {
-  background: rgba(100, 108, 255, 0.15);
+  background: color-mix(in srgb, var(--co-accent) 15%, transparent);
   color: #b3b8ff;
 }
 
