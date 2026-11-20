@@ -174,6 +174,17 @@ describe('App URL session bootstrap', () => {
 
   afterEach(() => {
     cleanup();
+    // api.js keeps session modes at module level: release every session this
+    // test named, or a later test linking the same id inherits its mode.
+    const named = [
+      api.setActiveSessionForRequests,
+      api.setSessionStaged,
+      api.setSessionModeUnknown,
+      api.setSessionOnServer,
+    ].flatMap((fn) => fn.mock.calls.map(([id]) => id));
+    new Set(named.filter(Boolean)).forEach((id) => captured.actualApi.setSessionStaged(id, false));
+    captured.actualApi.setActiveSessionForRequests(null);
+    captured.actualApi.setStagingAvailable(false);
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
