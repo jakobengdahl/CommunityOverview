@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "perf:node-shapes": "node perf/node-shapes/run.js"
   },
   "dependencies": {
     "@community-graph/ui-graph-canvas": "file:../../packages/ui-graph-canvas",

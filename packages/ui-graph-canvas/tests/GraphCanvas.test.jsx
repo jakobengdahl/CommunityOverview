@@ -178,6 +178,8 @@ describe('GraphCanvas', () => {
       />
     );
     const flat = { ...schema.node_shapes.risk, base: 'rectangle-flat', placement: 'middle-centre' };
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
     const { rerender } = render(canvas({ flat: { name: 'Flat', definition: flat, revision: 1 } }));
     const risk = screen.getByTestId('node-r1');
     expect(risk.dataset.shapeBase).toBe('triangle-down');
@@ -190,6 +192,9 @@ describe('GraphCanvas', () => {
     // A deleted library entry falls back to the card, not the configured type shape.
     rerender(canvas({}));
     expect(screen.getByTestId('node-r2').dataset.shapeBase).toBeUndefined();
+    // Area texts come from the loaded nodes: a shaped node never fetches.
+    vi.unstubAllGlobals();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('renders graph container and react-flow', () => {

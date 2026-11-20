@@ -82,7 +82,8 @@ You can also drag a node type icon from the toolbar and drop it anywhere on the 
 to create a node at that position.
 
 **Node appearance:** Right-click a node and choose **Node appearance** to preview
-its shape, scale, text fields and placement. Apply the draft to the selected node
+its shape, scale, text fields and placement. From the keyboard, Tab to the node and
+press Shift+F10 or the Menu key to open the same menu. Apply the draft to the selected node
 or as the session default for its type; other nodes with their own overrides keep
 them. Cancel discards the draft. If another appearance change is still pending or
 the appearance changes while the editor is open, follow the notice in the dialog

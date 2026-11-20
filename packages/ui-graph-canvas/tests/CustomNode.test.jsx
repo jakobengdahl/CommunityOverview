@@ -382,7 +382,7 @@ describe('CustomNode configured shapes', () => {
     const shaped = screen.getByTestId('rf__node-n1');
     expect(shaped.querySelector('.graph-custom-node')).toBeNull();
     const root = shaped.querySelector('.graph-shaped-node.graph-shape-rectangle');
-    for (const part of ['shadow', 'body', 'outline']) {
+    for (const part of ['boundary', 'shadow', 'body', 'outline']) {
       expect(root.querySelector(`.graph-shape-${part}`).getAttribute('d')).toBe(
         nodeShapeGeometry('rectangle', 1).path
       );
