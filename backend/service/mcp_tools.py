@@ -103,6 +103,7 @@ from backend.runtime.authorization import (
 )
 from . import access, graph_merge_plan
 from .service import GraphService
+from .staging import refusal_result
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 logger = logging.getLogger(__name__)
@@ -3322,6 +3323,9 @@ def register_mcp_tools(
             )
         except _CopyDenied as exc:
             return exc.result
+        except layer_store.LayerFull as exc:
+            # The source holds more staged entries than the current cap.
+            return refusal_result(exc)
         except WriteModeRefused as exc:
             return exc.to_result()
         except OpError as exc:

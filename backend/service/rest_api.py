@@ -81,6 +81,7 @@ from . import attachments as attachment_ops
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
+from .staging import refusal_result
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -1364,7 +1365,7 @@ def _register_session_endpoints(
         OpError,
         is_valid_session_id,
     )
-    from backend.core.layer_store import LayerNotEmpty, StagedSessionRetired
+    from backend.core.layer_store import LayerFull, LayerNotEmpty, StagedSessionRetired
     from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
     from backend.runtime.authorization import GRAPH_ACTION_MUTATE
 
@@ -1508,6 +1509,10 @@ def _register_session_endpoints(
             raise HTTPException(status_code=503, detail="too many sessions")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="session too large")
+        except LayerFull as exc:
+            # The source holds more staged entries than the current cap;
+            # raises the 422 layer_full refusal.
+            _staged_answer(refusal_result(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except WriteModeRefused as exc:

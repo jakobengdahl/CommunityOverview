@@ -5692,7 +5692,7 @@ async def test_copy_session_carries_staged_changes_into_its_own_layer(
     mgr = _manager(write_modes=WriteModes(backend))
     source = mgr.create_session("Staged canvas", write_mode="staged")
     entries = [
-        entry(kind, entity_id, action, session_id=source.id)
+        entry(kind, entity_id, action, session_id=source.id, stage_token="source")
         for kind, entity_id, action in [
             ("node", "new", "create"),
             ("node", "shared", shared_action),
@@ -5741,6 +5741,7 @@ async def test_copy_session_carries_staged_changes_into_its_own_layer(
     assert {e["session_id"] for e in layer} == {copied.id}
     assert all(e["session_seq"] <= copied.seq for e in layer)
     assert {e["staged_by"] for e in layer} == {"copier"}
+    assert "source" not in {e["stage_token"] for e in layer}
     assert all(e["staged_at"] > s["staged_at"] for e in layer for s in layer_before)
     drop = ("session_id", "session_seq", "stage_token", "staged_by", "staged_at")
     assert sorted(

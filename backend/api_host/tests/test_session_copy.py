@@ -166,9 +166,10 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
 ):
     """A staged copy holds the source's staged changes, staged by the copier,
     the graph unchanged; a copier the hook refuses staging, or whose copy's
-    access assignments it refuses, is refused (REST 403, MCP success false)
-    and no session is created. The hook assigns access as the copier, from the
-    source to the copy it returns."""
+    access assignments it refuses, is refused (REST 403, MCP success false),
+    as is a source over the layer cap (layer_full), and no session is created.
+    The hook assigns access as the copier, from the source to the copy it
+    returns; copied entries carry a fresh stage token."""
     from dataclasses import replace
     from unittest.mock import patch
     from fastapi.testclient import TestClient
@@ -197,7 +198,13 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
 
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(
-            create_app(replace(app_config, graph_staged_sessions="true"))
+            create_app(
+                replace(
+                    app_config,
+                    graph_staged_sessions="true",
+                    session_layer_max_entries="1",
+                )
+            )
         )
     source = client.post("/api/sessions", json={"write_mode": "staged"}).json()["id"]
     assert (
@@ -260,6 +267,21 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     (context,), kwargs = assign.call_args
     assert (context.actor["actor_id"], context.session_id) == ("copier", source)
     assert kwargs["copy_session_id"] == copied.get("id", copied.get("session_id"))
+
+    layer = manager.write_modes.layer_store
+    (staged,) = layer.load_layer(source)
+    assert staged["stage_token"] not in {
+        e["stage_token"] for e in layer.load_layer(copied_id)
+    }
+
+    # A source over the cap (staged before it was lowered) is refused as full.
+    layer.stage(source, [{**staged, "entity_id": "node-2"}])
+    count = manager.store.session_count()
+    succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    refusal = result["detail"] if transport == "rest" else result
+    assert (refusal["error"], refusal["limit"]) == ("layer_full", 1)
+    assert manager.store.session_count() == count
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
