@@ -206,8 +206,13 @@ describe('Server-backed session lifecycle', () => {
   it.each([
     ['Plan', en.sessions.copy_name.replace('{name}', 'Plan')],
     ['x'.repeat(300), en.sessions.copy_name.replace('{name}', 'x'.repeat(300)).slice(0, 200)],
+    // An emoji straddles UTF-16 unit 200: the cut keeps whole code points.
+    [
+      'x'.repeat(191) + '😀'.repeat(5),
+      en.sessions.copy_name.replace('{name}', 'x'.repeat(191) + '😀'),
+    ],
   ])(
-    'names a copy after its source, within 200 characters, and switches to it',
+    'names a copy after its source, within 200 code points, and switches to it',
     async (sourceName, expected) => {
       api.copySession.mockImplementationOnce(async (_id, name) => ({ id: '4444-5555', name }));
       sessionStore.touchSession('7777-8888');
