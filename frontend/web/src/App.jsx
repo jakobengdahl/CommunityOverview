@@ -255,7 +255,11 @@ function App() {
   // The visualization session ID doubles as the working-session identity.
   // It is state (not a constant) so the user can switch sessions; the SSE
   // stream and state uploads reconnect automatically when it changes.
+  // StrictMode calls the initializer below twice and React 19 keeps the first
+  // result, so a second call must return the same id its side effects named.
+  const initialSessionIdRef = useRef(null);
   const [sessionId, setSessionIdState] = useState(() => {
+    if (initialSessionIdRef.current) return initialSessionIdRef.current;
     const urlSession = _urlParams.get('session');
     const initial = sessionStore.isValidSessionId(urlSession)
       ? urlSession
@@ -265,6 +269,7 @@ function App() {
     // So may the starting one, until the capabilities say whether the app
     // starts in a server-created session of the installation's default mode.
     api.setSessionModeUnknown(initial);
+    initialSessionIdRef.current = initial;
     return initial;
   });
   // Written together with the state, not from an effect: a switch bumps the
