@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { GraphCanvas } from '@community-graph/ui-graph-canvas';
+import {
+  GraphCanvas,
+  INITIAL_LOAD_COUNT,
+  LAZY_LOAD_THRESHOLD,
+} from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import '../../src/index.css';
 import { createNodeShapeScene, edgesAmong } from './scene';
@@ -91,12 +95,17 @@ window.bench = {
   async mount() {
     const start = performance.now();
     flushSync(() => createRoot(document.getElementById('root')).render(<Scene />));
-    return settle(start, loadedReady(Math.min(100, scene.nodes.length)));
+    // GraphCanvas shows the whole scene up to its lazy-load threshold.
+    const shown =
+      scene.nodes.length > LAZY_LOAD_THRESHOLD ? INITIAL_LOAD_COUNT : scene.nodes.length;
+    return settle(start, loadedReady(shown));
   },
   // GraphCanvas lazily shows 100 nodes at a time over 200; this presses
-  // Load More, as a user would, until the whole scene is on the canvas.
+  // Load More, as a user would, until the whole scene is on the canvas. A
+  // scene drawn whole on mount had nothing to load and measured nothing.
   async loadAll() {
     const start = performance.now();
+    if (!document.querySelector('.graph-load-more-button')) return null;
     for (;;) {
       const button = document.querySelector('.graph-load-more-button');
       if (!button) break;

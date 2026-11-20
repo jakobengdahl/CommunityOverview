@@ -54,6 +54,7 @@ async function measureScene(context, url) {
   const sample = { requests: 0 };
   sample.initialRender = await page.evaluate(() => window.bench.mount());
   sample.loadAll = await page.evaluate(() => window.bench.loadAll());
+  if (sample.loadAll === null) delete sample.loadAll;
   // Let fit-view finish its animation before the steady-state measurements.
   await page.waitForTimeout(1200);
   await cdp.send('HeapProfiler.collectGarbage');
