@@ -405,8 +405,10 @@ shapes at 0.1/1/10 scale, in both themes: initial render, pan frame time, memory
 shape apply and edge update. Proposed budget: under 10% regression against the
 same legacy-card scene and no additional per-node network requests. Record
 hardware/browser and p50/p95; use the confirmed relative 10% budget. The scenes,
-how to run them, the measured results and the accessibility review against this
-section are recorded in [node-shapes/library-gates.md](node-shapes/library-gates.md).
+how to run them, the results measured so far and the accessibility review
+against this section are recorded in
+[node-shapes/library-gates.md](node-shapes/library-gates.md); the full 1,000-
+and 5,000-node gate run is not recorded yet.
 
 ## Migration and small implementation phases
 

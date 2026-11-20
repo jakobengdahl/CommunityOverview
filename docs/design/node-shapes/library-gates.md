@@ -65,9 +65,146 @@ npm run perf:node-shapes -- --sizes 1000,5000 --scales 0.1,1,10 --themes light,d
 ```
 
 It prints the environment and results tables below and writes the raw
-summary as JSON. The
-full matrix is long-running and is not part of CI; CI runs only
+summary as JSON. The full matrix is long-running and is not part of CI; CI runs only
 `perf/node-shapes/scene.test.js`, which checks the scenes and the budget
 arithmetic.
 
-RESULTS_PLACEHOLDER
+## Results
+
+### Gate run: not yet recorded
+
+The matrix the gate asks for has not been run: 1,000 and 5,000 nodes, three
+scales, both themes, five runs. None of the p50 or p95 values here is a
+budget result yet, and the performance gate stays open until that run is
+pasted below, with the environment table the runner prints.
+
+### Smoke run
+
+This run checks that the harness works end to end. It is not a budget
+verdict. It used one run per scene and small graphs: 150 nodes, drawn whole on
+mount, and 250 nodes, which goes through Load More. It ran at scale 1 only, in
+both themes, on a shared host whose load average was 27 to 34. The commit is
+3eeaa0d with this change's harness fixes not yet committed (`main.jsx`,
+`run.js`; the measured canvas code is unchanged). The renderer the browser
+reported is SwiftShader, which is software rendering.
+
+| Run | Value |
+| --- | --- |
+| commit | 3eeaa0d4b6fade1b9f2b745f1116bf156fbe6dbf (uncommitted changes) |
+| seed | 20261120 |
+| runs | 1 |
+| cpu | Intel(R) Xeon(R) Gold 6140 CPU @ 2.30GHz |
+| logicalCores | 72 |
+| memoryGB | 629 |
+| os | Linux 6.12.107+deb13-amd64 |
+| node | v22.23.4 |
+| browser | chromium 158.0.8127.18 |
+| userAgent | Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.8127.18 Safari/537.36 |
+| webglRenderer | ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver) |
+| viewport | {"width":1280,"height":800} |
+| gestureFrames | 60 |
+| loadAverage | {"start":[27.04,24.9,23.94],"end":[33.89,26.98,24.68]} |
+
+| Nodes | Theme | Scale | Metric | Legacy p50 / p95 | Shaped p50 / p95 | Change p50 / p95 | Budget |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 150 | light | 1 | initialRender | 246.6 / 246.6 | 254.2 / 254.2 | +3.1% / +3.1% | pass |
+| 150 | light | 1 | loadAll | not measured | not measured | not measured | — |
+| 150 | light | 1 | panFrame | 16.7 / 16.8 | 16.7 / 16.8 | +0.0% / -0.0% | pass |
+| 150 | light | 1 | edgeUpdateFrame | 16.7 / 16.7 | 16.7 / 16.8 | +0.0% / +0.6% | pass |
+| 150 | light | 1 | shapeApply | 83.8 / 92.5 | 111.8 / 130.3 | not comparable | info |
+| 150 | light | 1 | heapMB | 8.6 / 8.6 | 9.0 / 9.0 | +4.4% / +4.4% | pass |
+| 150 | light | 1 | domNodes | 2477 / 2477 | 3527 / 3527 | — | info |
+| 150 | light | 1 | requests | 0 | 0 | — | pass |
+| 150 | light | 1 | failed runs (rerun) | 0 | 0 | — | info |
+| 150 | dark | 1 | initialRender | 238.2 / 238.2 | 290.8 / 290.8 | +22.1% / +22.1% | fail |
+| 150 | dark | 1 | loadAll | not measured | not measured | not measured | — |
+| 150 | dark | 1 | panFrame | 16.7 / 16.7 | 16.7 / 16.7 | +0.0% / +0.0% | pass |
+| 150 | dark | 1 | edgeUpdateFrame | 16.7 / 16.8 | 16.7 / 16.8 | +0.0% / +0.0% | pass |
+| 150 | dark | 1 | shapeApply | 76.5 / 77.2 | 113.4 / 128.2 | not comparable | info |
+| 150 | dark | 1 | heapMB | 8.6 / 8.6 | 9.0 / 9.0 | +4.3% / +4.3% | pass |
+| 150 | dark | 1 | domNodes | 2477 / 2477 | 3527 / 3527 | — | info |
+| 150 | dark | 1 | requests | 0 | 0 | — | pass |
+| 150 | dark | 1 | failed runs (rerun) | 0 | 0 | — | info |
+| 250 | light | 1 | initialRender | 192.8 / 192.8 | 303.7 / 303.7 | +57.5% / +57.5% | fail |
+| 250 | light | 1 | loadAll | 339.0 / 339.0 | 458.8 / 458.8 | +35.3% / +35.3% | fail |
+| 250 | light | 1 | panFrame | 16.7 / 16.8 | 16.7 / 33.4 | +0.0% / +98.8% | fail |
+| 250 | light | 1 | edgeUpdateFrame | 16.7 / 33.3 | 16.7 / 33.3 | +0.0% / -0.0% | pass |
+| 250 | light | 1 | shapeApply | 135.0 / 147.3 | 167.2 / 175.5 | not comparable | info |
+| 250 | light | 1 | heapMB | 13.4 / 13.4 | 14.6 / 14.6 | +8.5% / +8.5% | pass |
+| 250 | light | 1 | domNodes | 4079 / 4079 | 5829 / 5829 | — | info |
+| 250 | light | 1 | requests | 0 | 0 | — | pass |
+| 250 | light | 1 | failed runs (rerun) | 0 | 0 | — | info |
+| 250 | dark | 1 | initialRender | 184.5 / 184.5 | 237.9 / 237.9 | +28.9% / +28.9% | fail |
+| 250 | dark | 1 | loadAll | 333.4 / 333.4 | 434.3 / 434.3 | +30.3% / +30.3% | fail |
+| 250 | dark | 1 | panFrame | 16.7 / 16.7 | 16.7 / 33.2 | +0.0% / +98.8% | fail |
+| 250 | dark | 1 | edgeUpdateFrame | 16.7 / 33.3 | 16.7 / 33.3 | +0.0% / +0.0% | pass |
+| 250 | dark | 1 | shapeApply | 147.7 / 164.0 | 197.5 / 214.1 | not comparable | info |
+| 250 | dark | 1 | heapMB | 13.4 / 13.4 | 14.6 / 14.6 | +8.4% / +8.4% | pass |
+| 250 | dark | 1 | domNodes | 4079 / 4079 | 5829 / 5829 | — | info |
+| 250 | dark | 1 | requests | 0 | 0 | — | pass |
+| 250 | dark | 1 | failed runs (rerun) | 0 | 0 | — | info |
+
+One run per scene cannot separate noise from regression on a loaded host, so
+the fail rows above are not budget results. They do show where to look first
+in the gate run: initial render and Load More cost more with shapes, the
+shaped scene has about 40% more DOM nodes, and `shapeApply` rebuilds every
+node (see the review below).
+
+## Accessibility review
+
+This review checks each rule of NODE_SHAPES.md § Theme, accessibility and scale
+(paragraphs one to three; paragraph four is the performance scenes above)
+against the code at the commit named under Results. It was done by reading the
+code and its tests. No screen reader or assistive-technology session was run.
+**Pass** means the code implements the rule. **Partial** names the part that
+is missing. **Fail** means the code does not do what the rule asks. **Not
+verified** means reading the code could not settle it. Contrast ratios are
+WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
+`#f5f5f5` on light.
+
+### Theme and contrast
+
+| Rule | Verdict | Evidence |
+| --- | --- | --- |
+| Semantic card tokens: surface, primary and secondary text, border, band foreground, focus and shadow | Pass | `--graph-card-*` in `CustomNode.css`, and the `.graph-card-theme-*` classes that pin a preview subtree to one theme; tested in `CustomNode.test.jsx` (preview theme tokens, theme shadow cascade) |
+| Honour the existing media-query theme behaviour | Pass | Shaped nodes use the same `prefers-color-scheme: light` block as the card |
+| White or dark band text at 4.5:1 or more, else an opaque text backing | Pass | `bandTextStyle` in `nodeShapes.js`; a triangle's outside label always sits on the surface; tested ("picks band text with at least 4.5:1 contrast or an opaque backing") |
+| 3:1 visible boundary | Pass | `.graph-shape-boundary` draws a neutral hairline around every shape, whatever the type colour: `#808080` on dark (4.4:1) and `#767676` on light (4.2:1). Tested ("draws a 3:1 boundary against the canvas in both themes, whatever the type colour") |
+| 3:1 focus treatment | Partial | The keyboard focus ring is solid `#646cff` (4.3:1 on dark, 3.8:1 on light). The selection ring uses the translucent `--graph-card-focus`, so its contrast depends on what is under it, and no test checks it |
+| Colour never carries state alone | Partial | Remote, staged and skill states each have a dashed outline plus a badge or ★. Selected is drawn as a wider ring. A mark is shown only by a coloured ring and dot; its label is in the tooltip and the accessible name. Highlighted and selected differ only by ring width |
+| Marked, staged, skill and remote indicators identifiable in both themes | Partial | They keep the same colours in both themes. The staged amber `#f0b429` is 1.7:1 on the light canvas, and its dashed outline and text badge carry the state on light. Nothing checks the indicators per theme |
+| Preserve reduced motion | Pass | The `prefers-reduced-motion` block stops the pulse animations that shaped nodes share with the card, and shaped nodes have no hover transform. No test covers shaped nodes |
+| Preserve stronger contrast | Pass | Under `prefers-contrast: more`, shaped nodes keep the card's only treatment, the raised opacity of dimmed nodes. The boundary, rings and badges get no further strengthening |
+
+### Editor and keyboard
+
+| Rule | Verdict | Evidence |
+| --- | --- | --- |
+| Labelled modal | Pass | `NodeAppearanceDialog.jsx`: `role="dialog"`, `aria-modal`, `aria-labelledby` |
+| Focus trap, inert canvas, Escape/Cancel, focus return | Pass | Tab wraps inside the dialog, focus that leaves it is pulled back, its siblings are made `inert` while it is open, Escape and Cancel close it, and focus returns to the opener. Tested in `MetamodelExplorerDialog.test.jsx` ("supports keyboard tabs and traps focus inside the modal", "keeps a draft isolated and restores focus on Escape") |
+| Tabs support arrow, Home and End keys and expose the selected state | Pass | `aria-selected` and roving `tabIndex`; Left, Right, Home and End move between tabs. The test presses Home and End only |
+| Every selector has a label | Pass | Every control is wrapped in a `<label>`, and the scope radios sit in a `<fieldset>` with a `<legend>`. The tests find controls by their label |
+| A preview change announces a short status, not the whole text again | Pass | Two alternating `role="status"` live regions announce a short status; the preview stage is `aria-hidden`. Tested ("validates scale and applies a type draft while preserving bindings") |
+| The accessible name gives type, name and the three mapped values in order, even when clipped; None adds nothing | Pass | `nodeShapeAccessibleName` gives the name, and `GraphCanvas` sets it as the node wrapper's `aria-label`. An area bound to the type or the name is not repeated. Tested ("names the node by type, name and mapped values once, hiding the SVG decoration") |
+| Detail access still shows the original full node content | Not verified | The hover tooltip shows the full description, but only on pointer hover. This review did not trace the app's detail panel |
+| Selection, appearance editing and the related-node action work by keyboard | Partial | Keyboard selection and the related-node action are tested ("selects by keyboard and then offers the related-node action without a pointer"). The appearance editor opens from the context menu. No keyboard path to it was found or tested |
+| SVG decoration hidden from screen readers, read once | Pass | The shape SVG is `aria-hidden` and `focusable="false"`, and the wrapper's `aria-label` stands in for its content. Asserted in the accessible-name test |
+| UI strings in English and Swedish | Partial | All `node_appearance.*` editor keys exist in both `en.json` and `sv.json`, kept in step by `keyParity.test.js`. The canvas node's own strings are English props defaults with no translated value passed in: the skill title, "Show related nodes", "Edit node" and "Communities:" |
+
+### Rendering cost
+
+| Rule | Verdict | Evidence |
+| --- | --- | --- |
+| Memoize definitions by key and revision, and the resolved look by node and type revision | Fail | `GraphCanvas` rebuilds one resolver whenever the schema, saved shapes, overrides or type defaults change. It then resolves every node again in the node `useMemo`, which also reruns on highlight, dim, mark and presence changes. Nothing is cached per key, revision or node |
+| Cache normalized geometry per base and scale; batch measurements | Pass | A module cache in `nodeShapes.js`, keyed by base and scale, returns frozen descriptors. Geometry is computed, not measured in the DOM |
+| Reuse inline paths; no per-node filters or effects; lightweight shadows | Pass | Every layer reuses the one cached `geometry.path`. The shadow is an offset path fill, and the shaped CSS uses no `filter` |
+| Use viewport culling | Fail | React Flow's `onlyRenderVisibleElements` is not enabled. Above 200 nodes the canvas shows them 100 at a time (Load More) instead |
+| No attribute fetches on render; bindings come from loaded node data | Pass | `nodeShapeAreaValues` reads only the node and its metadata |
+| Bound label lines and cap text processing before layout | Partial | The title is clamped to two lines and other text is clipped by the box. Values reach layout and the accessible name at full length |
+| A type-default change invalidates that type; a library edit only its users | Fail | Any change to the type defaults or the saved shapes rebuilds every node, as in the memoization row |
+| Edge updates limited to the affected endpoints | Fail | `SimpleFloatingEdge` subscribes to the whole `nodeInternals` map, so every edge re-renders when any node changes |
+
+The four failures and the partial rows are open findings against this gate. In
+the scenes above they show up as whole-scene costs: `shapeApply` re-resolves
+every node, not just the Actor quarter, and `edgeUpdateFrame` re-renders every
+edge, not just those of the dragged node.
