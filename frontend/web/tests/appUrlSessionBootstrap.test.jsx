@@ -242,6 +242,28 @@ describe('App URL session bootstrap', () => {
     expect(store().focusNodeId).toBe('focus-node');
   });
 
+  it('names one starting session to the api layer when StrictMode runs the initializer twice', async () => {
+    // The starting id is generated only without ?session=, which App reads at import.
+    window.history.replaceState({}, '', '/');
+    vi.resetModules();
+    const freshApi = await import('../src/services/api');
+    const { default: FreshApp } = await import('../src/App');
+    const { I18nProvider: FreshI18n } = await import('../src/i18n');
+    await act(async () => {
+      render(
+        <StrictMode>
+          <FreshI18n>
+            <FreshApp />
+          </FreshI18n>
+        </StrictMode>
+      );
+    });
+    const started = captured.canvas.sessionKey;
+    const named = (fn) => [...new Set(fn.mock.calls.map(([id]) => id))];
+    expect(named(freshApi.setActiveSessionForRequests)).toEqual([started]);
+    expect(named(freshApi.setSessionModeUnknown)).toEqual([started]);
+  });
+
   it.each(['success', '404', '500'])(
     'bounds a hung bootstrap and ignores its late %s after view and focus',
     async (outcome) => {
