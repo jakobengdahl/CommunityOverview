@@ -5757,7 +5757,8 @@ async def test_copy_session_carries_staged_changes_into_its_own_layer(
 
 async def test_copy_session_refused_staging_creates_nothing():
     """A refused staging authorization, or a failed layer write, leaves no
-    session and no active staged record behind."""
+    session and no active staged record behind; a source with no staged
+    entries never asks it."""
     from backend.core.tests.layer_store_contract import entry
     from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
@@ -5784,3 +5785,9 @@ async def test_copy_session_refused_staging_creates_nothing():
         if held["status"] == "active"
     ]
     assert active == [source.id]
+
+    del backend.stage
+    empty = mgr.create_session("Empty", write_mode="staged")
+    copied = mgr.copy_session(empty.id, authorize_staging=refuse)
+    assert mgr.write_mode_of(copied)["write_mode"] == "staged"
+    assert backend.load_layer(copied.id) == []

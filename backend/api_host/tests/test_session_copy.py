@@ -156,16 +156,38 @@ def test_copy_rejects_large_state_before_creating(test_app, monkeypatch, descrip
     assert manager.store.session_count() == 1
 
 
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
 def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
-    app_config, mock_llm_provider
+    app_config, mock_llm_provider, transport
 ):
-    """A staged copy holds the source's staged changes, the graph unchanged;
-    a copier the hook refuses staging gets 403 and no session."""
+    """A staged copy holds the source's staged changes, staged by the copier,
+    the graph unchanged; a copier the hook refuses staging is refused (REST
+    403, MCP success false) and no session is created."""
     from dataclasses import replace
     from unittest.mock import patch
     from fastapi.testclient import TestClient
     from backend.api_host.server import create_app
+    from backend.runtime.authorization import use_request_authorization
     from backend.runtime.session_context import SESSION_ID_HEADER
+
+    def actor(actor_id):
+        return {
+            "x-communityoverview-actor-id": actor_id,
+            "x-communityoverview-actor-type": "member",
+            "x-communityoverview-auth-source": "gateway",
+        }
+
+    def copy_as(source, actor_id, name=None):
+        if transport == "rest":
+            response = client.post(
+                f"/api/sessions/{source}/copy",
+                headers=actor(actor_id),
+                json={"name": name} if name else None,
+            )
+            return response.status_code == 200, response.json()
+        with use_request_authorization(headers=actor(actor_id)):
+            result = client.app.state.tools_map["copy_visualization_session"](source)
+        return result["success"], result
 
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(
@@ -175,21 +197,25 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     assert (
         client.patch(
             "/api/nodes/node-1",
-            headers={SESSION_ID_HEADER: source},
+            headers={SESSION_ID_HEADER: source, **actor("author")},
             json={"updates": {"description": "staged"}},
         ).status_code
         == 200
     )
     before = client.get(f"/api/sessions/{source}/staged").json()["items"]
-    assert len(before) == 1
+    assert [i["staged_by"] for i in before] == ["author"]
     graph_before = client.get("/api/nodes/node-1").json()
-    response = client.post(f"/api/sessions/{source}/copy", json={"name": "Kopia"})
-    assert response.status_code == 200
-    copied = response.json()
-    assert copied["write_mode"] == "staged" and copied["name"] == "Kopia"
-    copied_items = client.get(f"/api/sessions/{copied['id']}/staged").json()["items"]
+    succeeded, result = copy_as(source, "copier", name="Kopia")
+    assert succeeded
+    copied = result if transport == "rest" else result["session"]
+    copied_id = copied["id"] if transport == "rest" else copied["session_id"]
+    assert copied["write_mode"] == "staged"
+    if transport == "rest":
+        assert copied["name"] == "Kopia"
+    copied_items = client.get(f"/api/sessions/{copied_id}/staged").json()["items"]
     assert all(i["staged_at"] > before[0]["staged_at"] for i in copied_items)
-    own = ("version", "session_seq", "staged_at")
+    assert [i["staged_by"] for i in copied_items] == ["copier"]
+    own = ("version", "session_seq", "staged_at", "staged_by")
     assert [{k: v for k, v in i.items() if k not in own} for i in copied_items] == [
         {k: v for k, v in i.items() if k not in own} for i in before
     ]
@@ -203,8 +229,15 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
         allowed=ctx.graph_operation != "stage"
     )
     client.app.state.graph_service._authorization_hook = hook
-    assert client.post(f"/api/sessions/{source}/copy").status_code == 403
+    succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    if transport == "mcp":
+        assert result["success"] is False and "session" not in result
     assert manager.store.session_count() == count
+    asked = [call.args[0] for call in hook.evaluate.call_args_list]
+    assert [
+        (c.target, c.session_id) for c in asked if c.graph_operation == "stage"
+    ] == [("copy_visualization_session", source)]
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])

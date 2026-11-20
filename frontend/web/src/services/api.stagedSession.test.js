@@ -108,6 +108,15 @@ describe('staged-session binding in api.js', () => {
     expect(JSON.parse(calls[0].options.body)).toEqual({ name: null, write_mode: 'staged' });
   });
 
+  it('posts a copy with its name in the JSON body', async () => {
+    const calls = mockFetch(200, { id: '5555-6666-7777-8888' });
+    await api.copySession('1111-2222-3333-4444', 'Copy of Plan');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222-3333-4444\/copy$/);
+    expect(calls[0].options.method).toBe('POST');
+    expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Copy of Plan' });
+  });
+
   it('deletes a staged session with its staged changes only when asked to', async () => {
     const calls = mockFetch(200, { deleted: true });
     await api.deleteServerSession('1111-2222', 'c1');
