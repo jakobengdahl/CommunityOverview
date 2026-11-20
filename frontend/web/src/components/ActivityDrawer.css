@@ -63,7 +63,7 @@
 }
 
 .activity-drawer-icon {
-  color: #646cff;
+  color: var(--co-accent);
   flex-shrink: 0;
 }
 
@@ -157,7 +157,7 @@
 
 .activity-drawer-load-more:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .activity-drawer-load-more:disabled {
@@ -193,7 +193,7 @@
 
 .activity-drawer-tab.active {
   color: #fff;
-  border-bottom-color: #646cff;
+  border-bottom-color: var(--co-accent);
 }
 
 .session-activity-undo-last {
@@ -212,7 +212,7 @@
 
 .session-activity-undo-last:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .session-activity-undo-last:disabled {

@@ -64,7 +64,7 @@
 
 .node-detail-tab.active {
   color: #fff;
-  border-bottom-color: #646cff;
+  border-bottom-color: var(--co-accent);
 }
 
 .node-detail-type-dot {
@@ -169,19 +169,19 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #646cff;
+  color: var(--co-accent);
   font-size: 0.85rem;
   text-decoration: none;
   padding: 6px 12px;
-  background: rgba(100, 108, 255, 0.1);
-  border: 1px solid rgba(100, 108, 255, 0.3);
+  background: color-mix(in srgb, var(--co-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--co-accent) 30%, transparent);
   border-radius: 6px;
   word-break: break-all;
   transition: background 0.15s;
 }
 
 .node-detail-link:hover {
-  background: rgba(100, 108, 255, 0.2);
+  background: color-mix(in srgb, var(--co-accent) 20%, transparent);
   text-decoration: underline;
 }
 
@@ -224,7 +224,7 @@
 }
 
 .node-detail-actions button.primary {
-  background: #646cff;
+  background: var(--co-accent);
   color: white;
   border: none;
   transition: opacity 0.15s;

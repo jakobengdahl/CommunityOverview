@@ -159,7 +159,7 @@
 
 .nts-dialog-ok {
   padding: 8px 24px;
-  background: #646cff;
+  background: var(--co-accent);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -170,7 +170,7 @@
 }
 
 .nts-dialog-ok:hover {
-  background: #535bf2;
+  background: var(--co-accent-hover);
 }
 
 /* This dialog renders via a document.body portal, outside .app, so

@@ -39,7 +39,7 @@
 .node-history-toggle:hover,
 .node-history-toggle.active {
   background: rgba(40, 40, 40, 0.97);
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .node-history-toggle-label {
@@ -50,7 +50,7 @@
   min-width: 18px;
   padding: 0 6px;
   border-radius: 10px;
-  background: #646cff;
+  background: var(--co-accent);
   color: #fff;
   font-size: 11px;
   font-weight: 600;
@@ -83,7 +83,7 @@
 }
 
 .node-history-header-icon {
-  color: #646cff;
+  color: var(--co-accent);
   flex-shrink: 0;
 }
 

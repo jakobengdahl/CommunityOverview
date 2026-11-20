@@ -114,14 +114,14 @@
   color: #8b93ff;
   font-size: 0.9rem;
   font-weight: 600;
-  border: 1px solid #646cff;
+  border: 1px solid var(--co-accent);
   border-radius: 6px;
   padding: 4px 10px;
 }
 
 .app-notification button.app-summon-return:hover {
   color: #fff;
-  background: rgba(100, 108, 255, 0.25);
+  background: color-mix(in srgb, var(--co-accent) 25%, transparent);
 }
 
 .app-offline-banner {

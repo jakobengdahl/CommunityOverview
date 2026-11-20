@@ -25,7 +25,7 @@
 }
 
 .node-attachments-name {
-  color: #646cff;
+  color: var(--co-accent);
   font-size: 0.85rem;
   text-decoration: none;
   word-break: break-all;

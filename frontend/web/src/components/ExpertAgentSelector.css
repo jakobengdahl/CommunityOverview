@@ -18,14 +18,14 @@
 }
 
 .expert-selector-trigger:hover {
-  border-color: #646cff;
-  color: #646cff;
-  background: rgba(100, 108, 255, 0.08);
+  border-color: var(--co-accent);
+  color: var(--co-accent);
+  background: color-mix(in srgb, var(--co-accent) 8%, transparent);
 }
 
 .expert-selector-trigger.has-active {
-  border-color: #646cff;
-  color: #646cff;
+  border-color: var(--co-accent);
+  color: var(--co-accent);
 }
 
 .expert-selector-plus {
@@ -37,7 +37,7 @@
   position: absolute;
   top: -6px;
   right: -6px;
-  background: #646cff;
+  background: var(--co-accent);
   color: white;
   font-size: 0.6rem;
   font-weight: 700;
@@ -134,7 +134,7 @@
 }
 
 .expert-selector-item.active {
-  background: rgba(100, 108, 255, 0.08);
+  background: color-mix(in srgb, var(--co-accent) 8%, transparent);
 }
 
 .expert-selector-checkbox {
