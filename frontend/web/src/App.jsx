@@ -360,6 +360,8 @@ function App() {
     setRemoteLeases,
     opStreamReady,
     savedShapes,
+    savedShapesRevision,
+    refreshSavedShapes,
   } = useSyncConnection(sessionId);
   // The active session's write mode and staged changes
   // (docs/SESSION_OVERLAY_CONTRACT.md §17).
@@ -2691,6 +2693,22 @@ function App() {
     });
   }, []);
 
+  // Library writes for the appearance editor: each commits on its own and the
+  // session's library cache is refreshed to the committed revision.
+  const shapeLibrary = useMemo(() => {
+    const committed = (entry) => {
+      refreshSavedShapes(entry.revision);
+      return entry;
+    };
+    return {
+      usage: (key) => api.getSavedShapeUsage(key),
+      create: (...args) => api.createSavedShape(...args).then(committed),
+      update: (...args) => api.updateSavedShape(...args).then(committed),
+      remove: (...args) => api.deleteSavedShape(...args).then(committed),
+      refresh: () => refreshSavedShapes(null),
+    };
+  }, [refreshSavedShapes]);
+
   const applyAppearance = useCallback(
     (scope, selection) => {
       const client = syncRef.current;
@@ -4358,6 +4376,9 @@ function App() {
           shapeOverrides={shapeOverrides}
           typeShapes={typeShapes}
           nodes={nodes}
+          savedShapes={savedShapes}
+          savedShapesRevision={savedShapesRevision}
+          library={shapeLibrary}
           error={appearanceError?.dialog === appearanceDialog ? appearanceError.code : null}
           onDraftChange={() => {
             const pending = appearancePendingRef.current;

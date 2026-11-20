@@ -7,8 +7,8 @@ configured shape (or whose session selection resolves to a config or inline
 definition) renders that shape; saved library references resolve to the
 entry the client fetched for the session's confirmed library revision, else to
 the built-in card. Library writes are enabled for authenticated users through
-the REST library routes; the appearance editor does not write to the library
-yet, and minimum hit targets remain future work.
+the REST library routes, which the appearance editor uses to save, copy, edit
+and delete saved shapes; minimum hit targets remain future work.
 Unconfigured nodes continue to use the existing CustomNode renderer.
 
 [Light and dark gallery](node-shapes/gallery.html) ·
@@ -258,6 +258,15 @@ Library saves and session Apply are distinct transactions. If saving succeeds
 but Apply fails, keep the saved entry and draft, report the failure, and allow
 retry. Never report success for an optimistic preview. The static editor shows
 these steps and warnings; it is a flow mockup rather than a working library.
+
+As implemented in `NodeAppearanceDialog.jsx`, a draft that starts from a saved
+shape keeps a copy of that entry at the revision it read, previews against that
+copy and sends its revision with the usage check, edit and delete. When the
+session's library refresh (a revision notice on the session stream, or a
+reconnect) shows another revision or a deletion, the dialog flags a conflict:
+editing, deleting and applying the bare reference are disabled until the user
+chooses to review the latest version, which keeps the draft's own changes on
+top of it; Save copy and applying an inline draft stay available meanwhile.
 
 ## Shared sessions
 
