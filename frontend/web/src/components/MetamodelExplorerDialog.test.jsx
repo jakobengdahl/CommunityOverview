@@ -896,4 +896,32 @@ describe('NodeAppearanceDialog', () => {
       expect(library.update).toHaveBeenCalledWith('card', 'Card', { ...latest, scale: 3 }, 4, 2);
     }
   );
+  it('reviews a picked entry deleted elsewhere onto the built-in card, not the original entry', async () => {
+    const apply = vi.fn();
+    const card = { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 };
+    const view = (savedShapes, revision) => (
+      <NodeAppearanceDialog
+        {...props}
+        shapeOverrides={{ a: { ref: 'saved:card' } }}
+        savedShapes={savedShapes}
+        savedShapesRevision={revision}
+        library={{ refresh: vi.fn() }}
+        onApply={apply}
+      />
+    );
+    const { rerender } = render(
+      view({ card, other: { name: 'Other', definition: EXAMPLE_SHAPE, revision: 1 } }, 1)
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.saved_shape'), {
+      target: { value: 'other' },
+    });
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    rerender(view({ card }, 2));
+    await click('node_appearance.review_latest');
+    // A later revision of the original entry never moves the reviewed draft.
+    rerender(view({ card: { ...card, revision: 4 } }, 3));
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { inline: { ...DEFAULT_SHAPE, scale: 3 } });
+  });
 });

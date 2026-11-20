@@ -438,7 +438,9 @@ export default function NodeAppearanceDialog({
     setReview(null);
     setLibraryStatus(null);
     setBase(savedEntry ? { ...savedEntry, key: savedKey } : null);
-    if (!savedEntry && edits.ref) setEdits(({ ref: _ref, ...rest }) => rest);
+    // As after a delete here: dropping the ref alone would fall back to the
+    // original selection, which may be another live entry.
+    if (!savedEntry) setEdits(({ ref: _ref, ...rest }) => ({ ...rest, builtin: true }));
   }
   function handleKey(e) {
     if (e.key === 'Escape') {
