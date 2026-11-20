@@ -1,8 +1,7 @@
 // covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act, cleanup, screen, fireEvent } from '@testing-library/react';
+import { render, act, cleanup, screen } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
-import { resolveAttachedPosition } from '../src/utils/annotations';
 
 // A live node store so onNodeDragStop's getFlowNodes()/setNodes read and
 // write the same array, the same harness GraphCanvasUndo.test.jsx uses to

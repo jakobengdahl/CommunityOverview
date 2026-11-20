@@ -2420,13 +2420,10 @@ function App() {
   // 'group'), so its creation publishes immediately like any other
   // create/delete/style/geometry annotation change, not the generic 1500ms
   // autosave debounce.
-  const handleCreateGroup = useCallback(
-    (position, groupNode) => {
-      showNotification('success', 'Group created');
-      publishAnnotationChange('create');
-    },
-    [showNotification, publishAnnotationChange]
-  );
+  const handleCreateGroup = useCallback(() => {
+    showNotification('success', 'Group created');
+    publishAnnotationChange('create');
+  }, [showNotification, publishAnnotationChange]);
 
   // Confirm save view
   const handleConfirmSaveView = useCallback(
@@ -2758,7 +2755,7 @@ function App() {
 
   // Callback: Context menu action triggered from schema-defined callback items
   const handleContextMenuAction = useCallback(
-    (actionName, nodeId, nodeData) => {
+    (actionName) => {
       // Dispatch named callback actions from schema context_menu entries.
       // Add cases here as new callback-type actions are implemented.
       switch (actionName) {
@@ -3268,7 +3265,7 @@ function App() {
           reflectSessionUrl(targetId);
           if (register) sessionStore.touchSession(targetId);
           setSessionsVersion((v) => v + 1);
-        } catch (error) {
+        } catch {
           showNotification('error', t('sessions.connect_error'));
         }
       });
@@ -3800,7 +3797,7 @@ function App() {
 
   // Handle drop from toolbar onto canvas
   const handleDropCreateNode = useCallback(
-    (nodeType, position) => {
+    (nodeType) => {
       if (nodeType === 'Agent') {
         handleCreateAgent();
       } else if (nodeType === 'EventSubscription') {
@@ -3979,8 +3976,6 @@ function App() {
           onCreateGroup={handleCreateGroup}
           onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
-          onCreateSubscription={handleCreateSubscription}
-          onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
           onReferenceOpen={handleReferenceOpen}

@@ -64,7 +64,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     nodes,
     edges,
     publishMembership,
-    updateVisualization,
     clearVisualization,
     chatPanelOpen,
     toggleChatPanel,
@@ -75,7 +74,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     activeExperts,
     availableExperts,
     showMinimap,
-    presentation,
     startGuide,
     guideChatInput,
     clearGuideChatInput,
@@ -495,7 +493,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     }
   };
 
-  const handleRejectProposal = async (proposal) => {
+  const handleRejectProposal = async () => {
     const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);

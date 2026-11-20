@@ -555,7 +555,7 @@ function DomeGraph({ data, selectedNodeId, onSelect, selectedDetail }) {
   );
 }
 
-function DomeNavigationControls({ view, zoom, onZoom, onReset }) {
+function DomeNavigationControls({ view, onZoom, onReset }) {
   return (
     <div className="xr-nav" aria-label="Dome navigation">
       <button type="button" onClick={() => onZoom(1 / 1.2)} aria-label="Zoom out">
@@ -763,12 +763,7 @@ export default function App() {
         onConnect={handleConnect}
         busy={creating}
       />
-      <DomeNavigationControls
-        view={domeOptions}
-        zoom={domeNav.zoom}
-        onZoom={handleZoom}
-        onReset={handleResetView}
-      />
+      <DomeNavigationControls view={domeOptions} onZoom={handleZoom} onReset={handleResetView} />
       <div className="xr-hint">
         {error !== null ? (
           <span className="xr-error">Could not enter VR: {error}</span>
