@@ -237,6 +237,10 @@ function CustomNode({ data, id, selected }) {
           height={geometry.height}
           viewBox={`0 0 ${geometry.width} ${geometry.height}`}
         >
+          {/* Under the boundary, so its translucent fill never dims the 3:1 band. */}
+          <path className="graph-shape-shadow" d={geometry.path} />
+          {/* Under every ring: a state ring, where shown, is the boundary. */}
+          <path className="graph-shape-boundary" d={geometry.path} />
           {/* Widest first: each ring shows a band beyond the next one in. */}
           <path className="graph-shape-ring graph-shape-ring-keyboard" d={geometry.path} />
           {remote && (
@@ -256,7 +260,6 @@ function CustomNode({ data, id, selected }) {
               style={{ stroke: `${data.markColor}66` }}
             />
           )}
-          <path className="graph-shape-shadow" d={geometry.path} />
           <path className="graph-shape-body" d={geometry.path} />
           <path
             className="graph-shape-band"

@@ -13,6 +13,7 @@
   --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
   --graph-card-shadow-color: rgba(0, 0, 0, 0.3);
   --graph-card-control-border: #1a1a1a;
+  --graph-card-boundary: #808080;
 }
 
 @media (prefers-color-scheme: light) {
@@ -24,6 +25,7 @@
     --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
     --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
     --graph-card-control-border: white;
+    --graph-card-boundary: #767676;
   }
 }
 
@@ -35,6 +37,7 @@
   --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
   --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
   --graph-card-control-border: white;
+  --graph-card-boundary: #767676;
 }
 
 /* A preview node sits in normal flow, as wide as the canvas would draw it. */
@@ -525,14 +528,25 @@ body.graph-menu-open .graph-node-tooltip {
   fill: var(--graph-card-surface);
 }
 
+/* Painted under the boundary, which reaches 2px outside the path; the extra
+   2px of offset keeps the shadow visible below it. */
 .graph-shape-shadow {
   fill: var(--graph-card-shadow-color);
-  transform: translateY(2px);
+  transform: translateY(4px);
 }
 
 .graph-shape-outline {
   fill: none;
   stroke-width: 2;
+}
+
+/* Type colours are configurable and need not reach 3:1 against the canvas,
+   so a neutral hairline that does in each theme (4.4:1 on dark, 4.2:1 on
+   light) sits just outside the outline; the body covers its inner half. */
+.graph-shape-boundary {
+  fill: none;
+  stroke: var(--graph-card-boundary);
+  stroke-width: 4;
 }
 
 /* State rings sit under the body, so half their stroke shows outside it.
