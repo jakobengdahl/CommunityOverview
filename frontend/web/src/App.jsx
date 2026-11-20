@@ -3976,8 +3976,6 @@ function App() {
           onCreateGroup={handleCreateGroup}
           onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
-          onCreateSubscription={handleCreateSubscription}
-          onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
           onReferenceOpen={handleReferenceOpen}

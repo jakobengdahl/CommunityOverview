@@ -765,7 +765,6 @@ export default function App() {
       />
       <DomeNavigationControls
         view={domeOptions}
-        zoom={domeNav.zoom}
         onZoom={handleZoom}
         onReset={handleResetView}
       />
