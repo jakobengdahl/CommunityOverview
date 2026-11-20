@@ -54,7 +54,7 @@ open (see *What would decide it*).
 | Chat | `ChatPanel`, `MarkdownMessage` (react-markdown, KaTeX) | `Chat`, `Markdown` (math through a caller-supplied renderer such as KaTeX) |
 | Lists and history | `HistoryList`, `SessionActivityList`, `NodeHistoryPanel` | `List`, `TreeList`, `Table` |
 | Notices | `StagedEditNotice`, `SummonNotice`, `PendingActionCard` | `Banner`, `Toast`, `Card` |
-| Icons | `react-bootstrap-icons` (18 files) | `Icon` with a theme icon set (neutral theme uses `lucide-react`) |
+| Icons | `react-bootstrap-icons` (17 files, plus 1 in the canvas package) | `Icon` with a theme icon set (neutral theme uses `lucide-react`) |
 | Graph canvas | `packages/ui-graph-canvas` on React Flow 11: nodes, edges, annotations | **None.** The canvas stays custom; only its menus and toolbox chrome could change |
 
 Size of today's UI: 52 non-test JSX files and 38 CSS files (about 7,000 lines,
@@ -125,8 +125,8 @@ the old ones are removed.
 ## Dependency risk for open core
 
 - **Licence:** MIT, copyright Meta Platforms. Compatible with this repository.
-- **Activity:** very active, with about 50 commits in the month before
-  2026-11-20 and releases every few days. Backed by Meta, and the README says it
+- **Activity:** very active: 50 commits on 19 and 20 November 2026 alone,
+  and releases every few days. Backed by Meta, and the README says it
   has been used internally for eight years. Being open source is new, though:
   the first npm release was June 2026.
 - **Stability:** 0.x and beta. The chart packages are canary-only. Pinning an
