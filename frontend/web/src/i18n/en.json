@@ -417,6 +417,7 @@
     "delete_session": "Delete session",
     "session_menu": "Session actions",
     "create_copy": "Create a copy",
+    "copy_name": "Copy of {name}",
     "copy_error": "Could not copy session",
     "copy_size_error": "Could not copy session: the source exceeds the session size limit.",
     "copy_link": "Copy link",

@@ -517,6 +517,17 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class CopySessionRequest(BaseModel):
+    """Request model for copying a shared session."""
+
+    name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description='Name for the copy; omitted, "Copy of <source name>"',
+    )
+
+
 class MergeStagedRequest(BaseModel):
     """Request model for merging a staged session's changes (§11)."""
 
@@ -1435,8 +1446,15 @@ def _register_session_endpoints(
         return _session_payload(session, resolve=False, manager=session_manager)
 
     @router.post("/sessions/{session_id}/copy")
-    async def copy_session(session_id: str, http_request: Request) -> Dict[str, Any]:
-        from backend.runtime.authorization import GRAPH_ACTION_READ
+    async def copy_session(
+        session_id: str,
+        http_request: Request,
+        request: Optional[CopySessionRequest] = None,
+    ) -> Dict[str, Any]:
+        from backend.runtime.authorization import (
+            GRAPH_ACTION_READ,
+            GRAPH_OPERATION_STAGE,
+        )
 
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
@@ -1452,7 +1470,18 @@ def _register_session_endpoints(
             raise HTTPException(status_code=403, detail=denied.get("message"))
         _rate_limit_lookup(http_request)
         try:
-            session = await session_manager.copy_session_async(session_id)
+            session = await session_manager.copy_session_async(
+                session_id,
+                request.name if request else None,
+                # Copied staged changes are staged by the copier: never more
+                # than the copier may stage.
+                authorize_staging=lambda: _authorize_session_change(
+                    http_request,
+                    "copy_visualization_session",
+                    session_id,
+                    GRAPH_OPERATION_STAGE,
+                ),
+            )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
         except SessionLimitReached:

@@ -880,23 +880,42 @@ class SessionManager:
             ),
         )
 
-    def copy_session(self, session_id: str) -> Session:
-        """Copy canvas state only; graph entities and staged layers stay shared/absent.
+    def copy_session(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        authorize_staging: Optional[Callable[[], None]] = None,
+    ) -> Session:
+        """Copy a session: its canvas, write mode and staged graph changes.
 
-        Synchronous callers refuse an in-flight state batch. REST holds the same
-        source lock, then calls the internal method without yielding.
-        Like create_session, copying allocates through store.create without
-        consuming an MCP rate-limit bucket; the session limit still applies.
+        The copy is named ``name``, else "Copy of <source name>". Staged
+        entries are copied into the copy's own layer, so a copy never changes
+        the graph; ``authorize_staging`` runs first when there are any, and
+        refuses by raising. Synchronous callers refuse an in-flight state
+        batch. REST holds the same source lock, then calls the internal method
+        without yielding. Like create_session, copying allocates through
+        store.create without consuming an MCP rate-limit bucket; the session
+        limit still applies.
         """
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        return self._copy_session(session_id)
+        return self._copy_session(session_id, name, authorize_staging)
 
-    async def copy_session_async(self, session_id: str) -> Session:
+    async def copy_session_async(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        authorize_staging: Optional[Callable[[], None]] = None,
+    ) -> Session:
         async with self._lock(session_id):
-            return self._copy_session(session_id)
+            return self._copy_session(session_id, name, authorize_staging)
 
-    def _copy_session(self, session_id: str) -> Session:
+    def _copy_session(
+        self,
+        session_id: str,
+        name: Optional[str],
+        authorize_staging: Optional[Callable[[], None]],
+    ) -> Session:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
             raise SessionNotFound()
@@ -906,7 +925,7 @@ class SessionManager:
         # deliberately excluded from both the copy and its document budget.
         # Measured as apply_ops measures the document (ASCII-escaped), so a
         # copy that fits here still accepts later op batches.
-        name = f"{source.name or 'Untitled session'} (copy)"
+        name = name or f"Copy of {source.name or 'Untitled session'}"
         document = {
             "state": source.state,
             "name": name,
@@ -914,40 +933,17 @@ class SessionManager:
         }
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
+        mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        entries = (
+            self.write_modes.layer_store.load_layer(session_id)
+            if mode == WRITE_MODE_STAGED
+            else []
+        )
+        if entries and authorize_staging is not None:
+            authorize_staging()
         state = copy.deepcopy(source.state)
-        # A fresh staged layer cannot resolve entities created only in the
-        # source layer. Drop their canvas state, while retaining shared graph
-        # entities even when the source stages updates or deletions for them.
-        layer_backend = self.write_modes.layer_store
-        if (
-            layer_backend is not None
-            and self.write_mode_of(source)["write_mode"] == WRITE_MODE_STAGED
-        ):
-            entries = layer_backend.load_layer(session_id)
-            staged_only = {
-                kind: {
-                    entry["entity_id"]
-                    for entry in entries
-                    if entry["kind"] == kind and entry["action"] == "create"
-                }
-                for kind in ("node", "edge")
-            }
-            for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
-                state[key] = [i for i in state[key] if i not in staged_only["node"]]
-            state["positions"] = {
-                i: position
-                for i, position in state["positions"].items()
-                if i not in staged_only["node"]
-            }
-            for key in ("hidden_edge_ids", "dimmed_edge_ids"):
-                state[key] = [i for i in state[key] if i not in staged_only["edge"]]
-            for annotation in state["annotations"]:
-                if isinstance(annotation.get("member_node_ids"), list):
-                    annotation["member_node_ids"] = [
-                        i
-                        for i in annotation["member_node_ids"]
-                        if i not in staged_only["node"]
-                    ]
+        # Appearance receipts deduplicate the source's own op retries.
+        state["shape_operation_ids"] = {}
         ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
 
         # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
@@ -989,16 +985,39 @@ class SessionManager:
         document["state"] = state
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
-        mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+
+        def allocate_staged(copy_id: str) -> None:
+            self.write_modes.record_staged(copy_id)
+            if not entries:
+                return
+            # The copy's own versions of the source's entries: they belong to
+            # its layer and predate its first op.
+            token = uuid.uuid4().hex
+            try:
+                self.write_modes.layer_store.stage(
+                    copy_id,
+                    [
+                        {
+                            **entry,
+                            "session_id": copy_id,
+                            "session_seq": 0,
+                            "stage_token": token,
+                        }
+                        for entry in entries
+                    ],
+                    max_entries=self.write_modes.max_entries,
+                )
+            except Exception:
+                self.write_modes.retire(copy_id, require_empty=False)
+                raise
+
         return self.store.create(
             name,
             description=source.description,
             state=state,
             write_mode=mode,
             write_mode_source="explicit",
-            on_allocate=self.write_modes.record_staged
-            if mode == WRITE_MODE_STAGED
-            else None,
+            on_allocate=allocate_staged if mode == WRITE_MODE_STAGED else None,
         )
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:

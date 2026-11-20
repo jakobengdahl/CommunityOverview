@@ -37,6 +37,10 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         dimmed_node_ids=["dimmed"],
         dimmed_edge_ids=["dim-edge"],
         edge_intensity=0.4,
+        shape_overrides={"node": {"shape": "hexagon"}},
+        type_shapes={"Actor": {"shape": "diamond"}},
+        shape_revisions={"node:node": 2, "type:Actor": 1},
+        shape_operation_ids={'["op-1"]': True},
     )
     kinds = [
         "shape",
@@ -88,7 +92,7 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
     copied_id = result["id"] if transport == "rest" else result["session"]["session_id"]
     copied = manager.get_session(copied_id)
     assert copied.id != source.id
-    assert copied.name == "Design (copy)"
+    assert copied.name == "Copy of Design"
     assert copied.description == source.description
     assert copied.seq == 0 and copied.activity_log == []
     assert manager.roster(copied.id) == []
@@ -101,6 +105,7 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         == annotations[0]["id"]
     )
     expected = copy.deepcopy(before["state"])
+    expected["shape_operation_ids"] = {}
     for original, actual in zip(expected["annotations"], annotations):
         original["id"] = actual["id"]
         original["version"] = 1
@@ -151,10 +156,11 @@ def test_copy_rejects_large_state_before_creating(test_app, monkeypatch, descrip
     assert manager.store.session_count() == 1
 
 
-def test_copy_preserves_staged_mode_without_staged_changes(
+def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     app_config, mock_llm_provider
 ):
-    """A staged copy starts an empty layer and leaves the source layer intact."""
+    """A staged copy holds the source's staged changes, the graph unchanged;
+    a copier the hook refuses staging gets 403 and no session."""
     from dataclasses import replace
     from unittest.mock import patch
     from fastapi.testclient import TestClient
@@ -176,12 +182,28 @@ def test_copy_preserves_staged_mode_without_staged_changes(
     )
     before = client.get(f"/api/sessions/{source}/staged").json()["items"]
     assert len(before) == 1
-    response = client.post(f"/api/sessions/{source}/copy")
+    graph_before = client.get("/api/nodes/node-1").json()
+    response = client.post(f"/api/sessions/{source}/copy", json={"name": "Kopia"})
     assert response.status_code == 200
     copied = response.json()
-    assert copied["write_mode"] == "staged"
-    assert client.get(f"/api/sessions/{copied['id']}/staged").json()["items"] == []
+    assert copied["write_mode"] == "staged" and copied["name"] == "Kopia"
+    copied_items = client.get(f"/api/sessions/{copied['id']}/staged").json()["items"]
+    own = ("version", "session_seq")
+    assert [{k: v for k, v in i.items() if k not in own} for i in copied_items] == [
+        {k: v for k, v in i.items() if k not in own} for i in before
+    ]
     assert client.get(f"/api/sessions/{source}/staged").json()["items"] == before
+    assert client.get("/api/nodes/node-1").json() == graph_before
+
+    manager = client.app.state.session_manager
+    count = manager.store.session_count()
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=ctx.graph_operation != "stage"
+    )
+    client.app.state.graph_service._authorization_hook = hook
+    assert client.post(f"/api/sessions/{source}/copy").status_code == 403
+    assert manager.store.session_count() == count
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])

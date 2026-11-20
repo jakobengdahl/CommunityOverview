@@ -159,6 +159,7 @@ import App from '../src/App';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
+import en from '../src/i18n/en.json';
 
 // vi.clearAllMocks() keeps a mockImplementation() a test installed, so each
 // module default is captured here and put back before every test; otherwise
@@ -202,6 +203,27 @@ describe('Server-backed session lifecycle', () => {
     vi.restoreAllMocks();
   });
 
+  it('names a copy after its source and switches to it', async () => {
+    api.copySession.mockImplementationOnce(async (_id, name) => ({ id: '4444-5555', name }));
+    sessionStore.touchSession('7777-8888');
+    sessionStore.renameSession('7777-8888', 'Plan');
+    renderApp();
+    await waitFor(() => expect(api.setActiveSessionForRequests).toHaveBeenCalled());
+    fireEvent.click(screen.getByTitle(en.header.menu));
+    let row = await screen.findByText('Plan');
+    const actions = `[aria-label="${en.sessions.session_menu}"]`;
+    while (!row.querySelector(actions)) row = row.parentElement;
+    fireEvent.click(row.querySelector(actions));
+    fireEvent.click(screen.getByRole('menuitem', { name: en.sessions.create_copy }));
+
+    const expected = en.sessions.copy_name.replace('{name}', 'Plan');
+    await waitFor(() =>
+      expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith('4444-5555')
+    );
+    expect(api.copySession).toHaveBeenCalledWith('7777-8888', expected);
+    expect(sessionStore.listSessions().find(({ id }) => id === '4444-5555')?.name).toBe(expected);
+  });
+
   it.each([
     [413, 'Could not copy session: the source exceeds the session size limit.'],
     [403, 'Could not copy session'],
@@ -224,7 +246,10 @@ describe('Server-backed session lifecycle', () => {
 
       expect(await screen.findByText(message)).toBeInTheDocument();
       expect(api.copySession).toHaveBeenCalledTimes(1);
-      expect(api.copySession).toHaveBeenCalledWith('7777-8888');
+      expect(api.copySession).toHaveBeenCalledWith(
+        '7777-8888',
+        en.sessions.copy_name.replace('{name}', '7777-8888')
+      );
       expect(api.setActiveSessionForRequests).toHaveBeenLastCalledWith(activeSession);
       expect(sessionStore.listSessions().map(({ id }) => id)).toEqual(sessionsBefore);
       expect(screen.queryByText('server detail')).not.toBeInTheDocument();

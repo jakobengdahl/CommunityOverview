@@ -3294,7 +3294,12 @@ function App() {
           await new Promise((resolve) => requestSessionSnapshot(resolve));
           await syncRef.current?.flushPending();
         }
-        const created = await api.copySession(targetId);
+        const source = sessionStore.listSessions().find((entry) => entry.id === targetId);
+        const created = await api.copySession(
+          targetId,
+          // The server caps session names at 200 characters.
+          t('sessions.copy_name', { name: source?.name || targetId }).slice(0, 200)
+        );
         sessionStore.touchSession(created.id);
         sessionStore.renameSession(created.id, created.name);
         switchToSession(created.id);

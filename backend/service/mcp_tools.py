@@ -98,6 +98,7 @@ from backend.runtime import session_context
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
+    GRAPH_OPERATION_STAGE,
     use_request_authorization,
 )
 from . import access, graph_merge_plan
@@ -132,6 +133,15 @@ _INVALID_SESSION_ID_ERROR = (
     "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
     "(the older DDDD-DDDD form is also accepted)"
 )
+
+
+class _CopyDenied(Exception):
+    """The copier may not stage the source's staged changes into a copy."""
+
+    def __init__(self, result: Dict[str, Any]):
+        super().__init__(result.get("message"))
+        self.result = result
+
 
 # Server-assigned default when an assistant creates a session without a name
 # (contract §4: names are non-unique and the server fills a default).
@@ -3256,10 +3266,11 @@ def register_mcp_tools(
 
     @register_tool
     def copy_visualization_session(session_id: str) -> Dict[str, Any]:
-        """Create a copy of stored canvas state with fresh annotation IDs.
+        """Copy a session to a new one named "Copy of <source name>".
 
-        Graph entities remain shared. Participants, history, leases and staged
-        graph changes are excluded; the source write mode is preserved.
+        Canvas state, appearance choices, write mode and staged graph changes
+        are copied, annotations under fresh IDs; graph entities remain shared.
+        Participants, history and leases are excluded.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -3276,8 +3287,24 @@ def register_mcp_tools(
         )
         if denied:
             return denied
+
+        def authorize_staging() -> None:
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target="copy_visualization_session",
+                graph_operation=GRAPH_OPERATION_STAGE,
+                session_id=session_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
         try:
-            session = session_manager.copy_session(session_id)
+            session = session_manager.copy_session(
+                session_id, authorize_staging=authorize_staging
+            )
+        except _CopyDenied as exc:
+            return exc.result
         except WriteModeRefused as exc:
             return exc.to_result()
         except OpError as exc:
