@@ -1,3 +1,4 @@
+// covers: frontend/web/src/components/MobileShell.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
@@ -213,7 +214,7 @@ describe('MobileShell', () => {
       fireEvent.click(screen.getByLabelText('mobile_nav.annotate'));
 
       expect(screen.queryByTestId('mobile-annotate-sheet-container')).not.toBeInTheDocument();
-      expect(onAnnotationSheetContainerChange).toHaveBeenCalledWith(null);
+      expect(onAnnotationSheetContainerChange.mock.calls.at(-1)[0]).toBeNull();
     });
 
     it('is mutually exclusive with Create in both directions, releasing the container each time', () => {
@@ -231,7 +232,7 @@ describe('MobileShell', () => {
       fireEvent.click(screen.getByLabelText('mobile_nav.create'));
       expect(screen.queryByTestId('mobile-annotate-sheet-container')).not.toBeInTheDocument();
       expect(screen.getByTestId('floating-toolbar')).toBeInTheDocument();
-      expect(onAnnotationSheetContainerChange).toHaveBeenCalledWith(null);
+      expect(onAnnotationSheetContainerChange.mock.calls.at(-1)[0]).toBeNull();
     });
 
     it('closes chat when opened, and is itself closed by opening chat', () => {
@@ -258,7 +259,7 @@ describe('MobileShell', () => {
 
       fireEvent.click(screen.getByLabelText('mobile_nav.graph'));
       expect(screen.queryByTestId('mobile-annotate-sheet-container')).not.toBeInTheDocument();
-      expect(onAnnotationSheetContainerChange).toHaveBeenCalledWith(null);
+      expect(onAnnotationSheetContainerChange.mock.calls.at(-1)[0]).toBeNull();
     });
   });
 
@@ -313,7 +314,7 @@ describe('MobileShell', () => {
       expect(
         screen.queryByTestId('mobile-annotation-edit-sheet-container')
       ).not.toBeInTheDocument();
-      expect(onAnnotationEditSheetContainerChange).toHaveBeenCalledWith(null);
+      expect(onAnnotationEditSheetContainerChange.mock.calls.at(-1)[0]).toBeNull();
     });
 
     it('is mutually exclusive with Annotate in both directions', () => {
