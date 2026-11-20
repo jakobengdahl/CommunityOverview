@@ -41,6 +41,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
@@ -885,13 +886,15 @@ class SessionManager:
         session_id: str,
         name: Optional[str] = None,
         authorize_staging: Optional[Callable[[], None]] = None,
+        staged_by: str = "anonymous",
     ) -> Session:
         """Copy a session: its canvas, write mode and staged graph changes.
 
         The copy is named ``name``, else "Copy of <source name>". Staged
         entries are copied into the copy's own layer, so a copy never changes
         the graph; ``authorize_staging`` runs first when there are any, and
-        refuses by raising. Synchronous callers refuse an in-flight state
+        refuses by raising. The copied entries are staged by ``staged_by``,
+        the copier, at the copy time. Synchronous callers refuse an in-flight state
         batch. REST holds the same source lock, then calls the internal method
         without yielding. Like create_session, copying allocates through
         store.create without consuming an MCP rate-limit bucket; the session
@@ -899,22 +902,24 @@ class SessionManager:
         """
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        return self._copy_session(session_id, name, authorize_staging)
+        return self._copy_session(session_id, name, authorize_staging, staged_by)
 
     async def copy_session_async(
         self,
         session_id: str,
         name: Optional[str] = None,
         authorize_staging: Optional[Callable[[], None]] = None,
+        staged_by: str = "anonymous",
     ) -> Session:
         async with self._lock(session_id):
-            return self._copy_session(session_id, name, authorize_staging)
+            return self._copy_session(session_id, name, authorize_staging, staged_by)
 
     def _copy_session(
         self,
         session_id: str,
         name: Optional[str],
         authorize_staging: Optional[Callable[[], None]],
+        staged_by: str,
     ) -> Session:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
@@ -991,8 +996,9 @@ class SessionManager:
             if not entries:
                 return
             # The copy's own versions of the source's entries: they belong to
-            # its layer and predate its first op.
+            # its layer, predate its first op and are staged by the copier.
             token = uuid.uuid4().hex
+            staged_at = datetime.now(timezone.utc).isoformat()
             try:
                 self.write_modes.layer_store.stage(
                     copy_id,
@@ -1002,6 +1008,8 @@ class SessionManager:
                             "session_id": copy_id,
                             "session_seq": 0,
                             "stage_token": token,
+                            "staged_by": staged_by,
+                            "staged_at": staged_at,
                         }
                         for entry in entries
                     ],

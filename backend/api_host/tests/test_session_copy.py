@@ -188,7 +188,8 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     copied = response.json()
     assert copied["write_mode"] == "staged" and copied["name"] == "Kopia"
     copied_items = client.get(f"/api/sessions/{copied['id']}/staged").json()["items"]
-    own = ("version", "session_seq")
+    assert all(i["staged_at"] > before[0]["staged_at"] for i in copied_items)
+    own = ("version", "session_seq", "staged_at")
     assert [{k: v for k, v in i.items() if k not in own} for i in copied_items] == [
         {k: v for k, v in i.items() if k not in own} for i in before
     ]

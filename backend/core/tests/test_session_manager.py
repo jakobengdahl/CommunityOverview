@@ -5681,8 +5681,9 @@ class TestSessionActivityByteCache:
 async def test_copy_session_carries_staged_changes_into_its_own_layer(
     async_copy, shared_action
 ):
-    """Staged entries land, re-keyed, in the copy's layer with its canvas whole;
-    the source, its layer and the graph are untouched."""
+    """Staged entries land, re-keyed and staged by the copier, in the copy's
+    layer with its canvas whole; the source, its layer and the graph are
+    untouched."""
     from backend.core.tests.layer_store_contract import entry
     from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
@@ -5719,15 +5720,14 @@ async def test_copy_session_carries_staged_changes_into_its_own_layer(
     graph_before = copy.deepcopy([backend._store[k] for k in ("nodes", "edges")])
     authorized = []
 
-    copied = (
-        await mgr.copy_session_async(
-            source.id, authorize_staging=lambda: authorized.append(True)
-        )
-        if async_copy
-        else mgr.copy_session(
-            source.id, authorize_staging=lambda: authorized.append(True)
-        )
+    copy_session = mgr.copy_session_async if async_copy else mgr.copy_session
+    copied = copy_session(
+        source.id,
+        authorize_staging=lambda: authorized.append(True),
+        staged_by="copier",
     )
+    if async_copy:
+        copied = await copied
 
     assert authorized == [True]
     expected = copy.deepcopy(before["state"])
@@ -5740,7 +5740,9 @@ async def test_copy_session_carries_staged_changes_into_its_own_layer(
     layer = backend.load_layer(copied.id)
     assert {e["session_id"] for e in layer} == {copied.id}
     assert all(e["session_seq"] <= copied.seq for e in layer)
-    drop = ("session_id", "session_seq", "stage_token")
+    assert {e["staged_by"] for e in layer} == {"copier"}
+    assert all(e["staged_at"] > s["staged_at"] for e in layer for s in layer_before)
+    drop = ("session_id", "session_seq", "stage_token", "staged_by", "staged_at")
     assert sorted(
         ({k: v for k, v in e.items() if k not in drop} for e in layer),
         key=lambda e: (e["kind"], e["entity_id"]),

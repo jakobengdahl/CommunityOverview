@@ -3301,7 +3301,11 @@ def register_mcp_tools(
 
         try:
             session = session_manager.copy_session(
-                session_id, authorize_staging=authorize_staging
+                session_id,
+                authorize_staging=authorize_staging,
+                staged_by=access.build_mutation_actor_id(
+                    target="copy_visualization_session"
+                ),
             )
         except _CopyDenied as exc:
             return exc.result

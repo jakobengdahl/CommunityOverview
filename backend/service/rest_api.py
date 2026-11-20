@@ -1469,6 +1469,10 @@ def _register_session_endpoints(
         if denied:
             raise HTTPException(status_code=403, detail=denied.get("message"))
         _rate_limit_lookup(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            staged_by = access.build_mutation_actor_id(
+                target="copy_visualization_session"
+            )
         try:
             session = await session_manager.copy_session_async(
                 session_id,
@@ -1481,6 +1485,7 @@ def _register_session_endpoints(
                     session_id,
                     GRAPH_OPERATION_STAGE,
                 ),
+                staged_by=staged_by,
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
