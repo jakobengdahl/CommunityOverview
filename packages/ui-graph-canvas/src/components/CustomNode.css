@@ -528,9 +528,11 @@ body.graph-menu-open .graph-node-tooltip {
   fill: var(--graph-card-surface);
 }
 
+/* Painted under the boundary, which reaches 2px outside the path; the extra
+   2px of offset keeps the shadow visible below it. */
 .graph-shape-shadow {
   fill: var(--graph-card-shadow-color);
-  transform: translateY(2px);
+  transform: translateY(4px);
 }
 
 .graph-shape-outline {

@@ -735,6 +735,14 @@ describe('CustomNode configured shapes', () => {
     const [onDark, ...onLight] = boundary.map((match) => match[1]);
     expect(contrastRatio(onDark, dark)).toBeGreaterThanOrEqual(3);
     for (const color of onLight) expect(contrastRatio(color, light)).toBeGreaterThanOrEqual(3);
+    // The offset shadow fill reaches past the path; painted later it would dim the boundary.
+    renderFlow([shapedFlowNode(CARD)]);
+    const layers = [...document.querySelectorAll('.graph-shape-svg path')].map(
+      (path) => path.classList[0]
+    );
+    expect(layers.indexOf('graph-shape-shadow')).toBeLessThan(
+      layers.indexOf('graph-shape-boundary')
+    );
   });
 
   it('selects by keyboard and then offers the related-node action without a pointer', () => {
