@@ -12,7 +12,8 @@ export const METRICS = [
   'shapeApply',
   'heapMB',
 ];
-const INFO = ['domNodes', 'requests'];
+// Reported for information; `draggedEdges` shows both scenes dragged alike.
+const INFO = ['domNodes', 'draggedEdges', 'requests'];
 // Measured in both scenes but not the same operation: the legacy card has no
 // shape to apply, so its timing is a reference, never a budget verdict.
 export const NOT_COMPARABLE = ['shapeApply'];
@@ -41,7 +42,8 @@ export function summarize(runs) {
 /**
  * Per metric, the shaped scene's p50 and p95 relative to the legacy scene's
  * and whether both stay under the budget; network requests may not grow. A
- * metric the two scenes measure differently gets no verdict.
+ * metric the two scenes measure differently, or a scene with no completed
+ * run, gets no verdict.
  */
 export function compareScenes(legacy, shaped) {
   const result = {};
@@ -58,11 +60,14 @@ export function compareScenes(legacy, shaped) {
     const p95 = shaped[metric].p95 / legacy[metric].p95 - 1;
     result[metric] = { p50, p95, pass: p50 < BUDGET && p95 < BUDGET };
   }
-  result.requests = {
-    legacy: legacy.requests.p95 ?? 0,
-    shaped: shaped.requests.p95 ?? 0,
-    pass: (shaped.requests.p95 ?? 0) <= (legacy.requests.p95 ?? 0),
-  };
+  result.requests =
+    legacy.requests.measured === false || shaped.requests.measured === false
+      ? { measured: false }
+      : {
+          legacy: legacy.requests.p95,
+          shaped: shaped.requests.p95,
+          pass: shaped.requests.p95 <= legacy.requests.p95,
+        };
   return result;
 }
 
@@ -103,20 +108,27 @@ export function markdownReport({ seed, runs, commit, environment, scenes }) {
     '| --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   for (const scene of scenes) {
-    for (const metric of [...METRICS, 'domNodes']) {
+    for (const metric of [...METRICS, 'domNodes', 'draggedEdges']) {
       const budget = scene.budget[metric];
-      const digits = metric === 'domNodes' ? 0 : 1;
+      const digits = METRICS.includes(metric) ? 1 : 0;
       rows.push(
         `| ${scene.size} | ${scene.theme} | ${scene.scale} | ${metric} | ${cell(scene.legacy[metric], digits)} | ${cell(scene.shaped[metric], digits)} | ${change(budget)} | ${verdict(budget)} |`
       );
     }
     const { requests } = scene.budget;
     rows.push(
-      `| ${scene.size} | ${scene.theme} | ${scene.scale} | requests | ${requests.legacy} | ${requests.shaped} | — | ${requests.pass ? 'pass' : 'fail'} |`
+      requests.measured === false
+        ? `| ${scene.size} | ${scene.theme} | ${scene.scale} | requests | not measured | not measured | not measured | — |`
+        : `| ${scene.size} | ${scene.theme} | ${scene.scale} | requests | ${requests.legacy} | ${requests.shaped} | — | ${requests.pass ? 'pass' : 'fail'} |`
     );
     if (scene.crashes) {
       rows.push(
         `| ${scene.size} | ${scene.theme} | ${scene.scale} | failed runs (rerun) | ${scene.crashes.legacy} | ${scene.crashes.shaped} | — | info |`
+      );
+    }
+    if (scene.completed) {
+      rows.push(
+        `| ${scene.size} | ${scene.theme} | ${scene.scale} | completed runs | ${scene.completed.legacy} | ${scene.completed.shaped} | — | info |`
       );
     }
   }

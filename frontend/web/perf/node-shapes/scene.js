@@ -95,3 +95,23 @@ export function edgesAmong(edges, loaded) {
   const index = (id) => Number(id.slice(1));
   return edges.filter((e) => index(e.source) < loaded && index(e.target) < loaded).length;
 }
+
+/**
+ * The node the edge-update drag moves: the one whose saved position is
+ * nearest the centre of the grid, with the edges it redraws. It comes from
+ * the scene data alone, so a shaped scene and its legacy scene drag the same
+ * node with the same edges whatever their node sizes or fitted zoom.
+ */
+export function sceneDragNode({ nodes, edges }) {
+  const xs = nodes.map((n) => n._savedPosition.x);
+  const ys = nodes.map((n) => n._savedPosition.y);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  let best = null;
+  for (const node of nodes) {
+    const d = (node._savedPosition.x - cx) ** 2 + (node._savedPosition.y - cy) ** 2;
+    if (!best || d < best.d) best = { d, id: node.id };
+  }
+  const count = edges.filter((e) => e.source === best.id || e.target === best.id).length;
+  return { id: best.id, edges: count };
+}

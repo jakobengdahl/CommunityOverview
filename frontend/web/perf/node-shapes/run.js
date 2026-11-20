@@ -144,13 +144,15 @@ try {
           for (const variant of order) {
             const url = `${origin}index.html?size=${size}&scale=${scale}&variant=${variant}`;
             // A crashed or stuck page measured nothing: count it and run again.
-            for (;;) {
+            // Past MAX_CRASHES the variant stops here and reports only the runs
+            // it completed (none: not measured), and the matrix goes on.
+            while (crashes[variant] <= MAX_CRASHES) {
               try {
                 samples[variant].push(await runScene(browser, url, theme));
                 break;
               } catch (error) {
                 console.error(`${variant} run failed: ${error.message.split('\n')[0]}`);
-                if (++crashes[variant] > MAX_CRASHES) throw error;
+                crashes[variant]++;
                 if (!browser.isConnected()) browser = await chromium.launch();
               }
             }
@@ -161,6 +163,7 @@ try {
           theme,
           scale,
           crashes,
+          completed: { legacy: samples.legacy.length, shaped: samples.shaped.length },
           legacy: summarize(samples.legacy),
           shaped: summarize(samples.shaped),
         };

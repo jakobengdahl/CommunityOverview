@@ -1,7 +1,7 @@
 // covers: frontend/web/perf/node-shapes/scene.js, frontend/web/perf/node-shapes/stats.js
 import { describe, it, expect } from 'vitest';
 import { createNodeShapeResolver } from '@community-graph/ui-graph-canvas';
-import { SCENE_SCALES, SCENE_TYPE_BASES, createNodeShapeScene } from './scene';
+import { SCENE_SCALES, SCENE_TYPE_BASES, createNodeShapeScene, sceneDragNode } from './scene';
 import { BUDGET, NOT_COMPARABLE, compareScenes, markdownReport, summarize } from './stats';
 
 describe('node shape performance scenes', () => {
@@ -13,6 +13,9 @@ describe('node shape performance scenes', () => {
       expect(createNodeShapeScene({ size: 400, scale, shaped: true })).toEqual(shaped);
       expect(legacy.nodes).toEqual(shaped.nodes);
       expect(legacy.edges).toEqual(shaped.edges);
+      // Both scenes drag the same node, which redraws at least one edge.
+      expect(sceneDragNode(legacy)).toEqual(sceneDragNode(shaped));
+      expect(sceneDragNode(shaped).edges).toBeGreaterThan(0);
       expect(createNodeShapeScene({ size: 400, scale, shaped: true, seed: 1 }).nodes).not.toEqual(
         shaped.nodes
       );
@@ -94,5 +97,9 @@ describe('node shape performance budget', () => {
     const legacy = summarize([run(100, 2)]);
     expect(compareScenes(legacy, summarize([run(100, 2)])).requests.pass).toBe(true);
     expect(compareScenes(legacy, summarize([run(100, 3)])).requests.pass).toBe(false);
+    // A shaped variant with no completed run made no requests it could pass on.
+    const abandoned = compareScenes(legacy, summarize([]));
+    expect(abandoned.requests).toEqual({ measured: false });
+    expect(abandoned.initialRender).toEqual({ measured: false });
   });
 });

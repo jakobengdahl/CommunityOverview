@@ -10,7 +10,7 @@ import {
 } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import '../../src/index.css';
-import { createNodeShapeScene, edgesAmong } from './scene';
+import { createNodeShapeScene, edgesAmong, sceneDragNode } from './scene';
 
 const params = new URLSearchParams(location.search);
 const scene = createNodeShapeScene({
@@ -104,16 +104,18 @@ window.bench = {
   // Load More, as a user would, until the whole scene is on the canvas. A
   // scene drawn whole on mount had nothing to load and measured nothing.
   async loadAll() {
-    const start = performance.now();
     if (!document.querySelector('.graph-load-more-button')) return null;
+    let total = 0;
     for (;;) {
       const button = document.querySelector('.graph-load-more-button');
       if (!button) break;
       const target = Math.min(nodeCount() + 100, scene.nodes.length);
+      // Each click gets its own timeout; the metric is the sum of the clicks.
+      const start = performance.now();
       button.click();
-      await settle(start, loadedReady(target));
+      total += await settle(start, loadedReady(target));
     }
-    return performance.now() - start;
+    return total;
   },
   async apply(on) {
     const last = scene.nodes.findLast((n) => n.type === APPLY_TYPE).id;
@@ -181,23 +183,15 @@ window.bench = {
     return null;
   },
   /**
-   * The node nearest the viewport centre: the same node in a shaped scene and
-   * its legacy scene. The drag goes to its wrapper, as a 0.1-scale shape is
-   * too small to hit with a pointer at fit zoom.
+   * The scene's fixed drag node (scene.js `sceneDragNode`) at its on-screen
+   * centre. The drag goes to its wrapper, as a 0.1-scale shape is too small
+   * to hit with a pointer at fit zoom.
    */
   dragPoint() {
-    const cx = innerWidth / 2;
-    const cy = innerHeight / 2;
-    let best = null;
-    for (const el of document.querySelectorAll('.react-flow__node')) {
-      const r = el.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const d = (x - cx) ** 2 + (y - cy) ** 2;
-      if (!best || d < best.d) best = { d, x, y, id: el.dataset.id };
-    }
-    if (!best) return null;
-    const edges = scene.edges.filter((e) => e.source === best.id || e.target === best.id).length;
-    return { x: best.x, y: best.y, id: best.id, edges };
+    const { id, edges } = sceneDragNode(scene);
+    const el = document.querySelector(`.react-flow__node[data-id="${id}"]`);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, id, edges };
   },
 };

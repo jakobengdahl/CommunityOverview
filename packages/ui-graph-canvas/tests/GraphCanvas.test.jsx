@@ -562,6 +562,52 @@ describe('GraphCanvas', () => {
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');
   });
 
+  it('reaches Node appearance and the full detail of a shaped node by keyboard', () => {
+    const onAppearance = vi.fn();
+    const onViewNodeHistory = vi.fn();
+    const description = 'd'.repeat(300);
+    render(
+      <GraphCanvas
+        nodes={[{ id: 'node-1', name: 'Node 1', type: 'Actor', description }]}
+        edges={[]}
+        schema={{
+          node_shapes: {
+            s: {
+              version: 1,
+              base: 'rectangle',
+              scale: 1,
+              placement: 'middle-centre',
+              areas: { first: 'name', second: null, third: null },
+            },
+          },
+          node_types: { Actor: { shape: 's' } },
+        }}
+        onAppearance={onAppearance}
+        onViewNodeHistory={onViewNodeHistory}
+      />
+    );
+    const node = screen.getByTestId('node-node-1');
+    expect(node.dataset.shapeBase).toBe('rectangle');
+    const openMenuFor = (name) => {
+      // The canvas leaves Shift+F10 to the browser, which then fires
+      // `contextmenu` at the focused wrapper, where React Flow binds the handler.
+      expect(fireEvent.keyDown(node, { key: 'F10', shiftKey: true })).toBe(true);
+      fireEvent.contextMenu(node, { clientX: 0, clientY: 0 });
+      const item = screen.getByRole('button', { name });
+      for (let i = 0; i < 20 && document.activeElement !== item; i++) {
+        fireEvent.keyDown(document.activeElement, { key: 'ArrowDown' });
+      }
+      expect(document.activeElement).toBe(item);
+      fireEvent.click(item);
+    };
+
+    openMenuFor('Node appearance');
+    expect(onAppearance).toHaveBeenCalledWith('node-1');
+    // The detail dialog gets the original node, not the clipped area text.
+    openMenuFor(/view change history/i);
+    expect(onViewNodeHistory.mock.calls[0][1].description).toBe(description);
+  });
+
   it('selects every node of the same type from a single node context menu', () => {
     render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
 

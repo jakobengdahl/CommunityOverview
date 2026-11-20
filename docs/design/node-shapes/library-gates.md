@@ -36,17 +36,23 @@ browser's `prefers-color-scheme`, as in the app.
 | `initialRender` | Mount until the first 100 nodes and their edges are drawn and two frames painted (GraphCanvas shows 100 nodes at a time above 200) | 1 per run |
 | `loadAll` | Pressing **Load More** until the whole scene and its edges are on the canvas | 1 per run |
 | `panFrame` | Frame-to-frame time during a 60-frame right-button pan of the empty pane | 60 per run |
-| `edgeUpdateFrame` | Frame-to-frame time during a 60-frame drag of the node nearest the viewport centre (the same node in both scenes), which redraws its edges | 60 per run |
+| `edgeUpdateFrame` | Frame-to-frame time during a 60-frame drag of the scene's fixed drag node, the one whose grid position is nearest the grid centre. It is chosen from the scene data, so both scenes drag the same node and redraw the same edges; `draggedEdges` reports how many | 60 per run |
 | `shapeApply` | Switching the Actor type default (a quarter of the scene) to another saved shape and back, until drawn. The legacy card has no shape to apply, so its scene times a highlight of the same nodes instead; that is a different operation, reported for reference and never as a budget verdict | 4 per run (on, off, on, off) |
 | `heapMB` | Used JS heap after the full scene loaded and a forced garbage collection | 1 per run |
 | `requests` | Network requests the page made after it loaded | 1 per run |
 
-The DOM node count is reported for information. p50 and p95 are nearest-rank
+The DOM node count and the dragged node's edge count are reported for
+information. p50 and p95 are nearest-rank
 percentiles over every sample of every run. A gesture that did not move the
 view or the node is not counted, and a metric with no samples is reported as
 not measured rather than as a number. The budget passes for a metric when the
 shaped p50 and p95 are both less than 10% above the legacy p50 and p95, and
-for requests when the shaped scene made no more than the legacy one.
+for requests when the shaped scene made no more than the legacy one. A run
+that fails is counted and run again. After three such reruns the variant
+stops, reports only the runs it completed, and the matrix goes on; a variant
+with no completed run reports every metric, requests included, as not
+measured. Each Load More click has its own 600 s timeout, so a slow 5,000-node
+load is measured rather than counted as a failure.
 `shapeApply` has no legacy equivalent, so its change is reported as not
 comparable and it gets no verdict.
 
@@ -157,8 +163,7 @@ This review checks each rule of NODE_SHAPES.md § Theme, accessibility and scale
 against the code at the commit named under Results. It was done by reading the
 code and its tests. No screen reader or assistive-technology session was run.
 **Pass** means the code implements the rule. **Partial** names the part that
-is missing. **Fail** means the code does not do what the rule asks. **Not
-verified** means reading the code could not settle it. Contrast ratios are
+is missing. **Fail** means the code does not do what the rule asks. Contrast ratios are
 WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 `#f5f5f5` on light.
 
@@ -186,8 +191,8 @@ WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 | Every selector has a label | Pass | Every control is wrapped in a `<label>`, and the scope radios sit in a `<fieldset>` with a `<legend>`. The tests find controls by their label |
 | A preview change announces a short status, not the whole text again | Pass | Two alternating `role="status"` live regions announce a short status; the preview stage is `aria-hidden`. Tested ("validates scale and applies a type draft while preserving bindings") |
 | The accessible name gives type, name and the three mapped values in order, even when clipped; None adds nothing | Pass | `nodeShapeAccessibleName` gives the name, and `GraphCanvas` sets it as the node wrapper's `aria-label`. An area bound to the type or the name is not repeated. Tested ("names the node by type, name and mapped values once, hiding the SVG decoration") |
-| Detail access still shows the original full node content | Not verified | The hover tooltip shows the full description, but only on pointer hover. This review did not trace the app's detail panel |
-| Selection, appearance editing and the related-node action work by keyboard | Partial | Keyboard selection and the related-node action are tested ("selects by keyboard and then offers the related-node action without a pointer"). The appearance editor opens from the context menu. No keyboard path to it was found or tested |
+| Detail access still shows the original full node content | Pass | `GraphCanvas` builds a shaped node's `data` from the whole original node (`nodeCardData` spreads it) and only adds `shapeRender`, so double-click, **View change history** and **Edit node** hand the app's detail and edit dialogs the same full node as a card. Tested ("reaches Node appearance and the full detail of a shaped node by keyboard") |
+| Selection, appearance editing and the related-node action work by keyboard | Pass | Keyboard selection and the related-node action are tested ("selects by keyboard and then offers the related-node action without a pointer"). Shift+F10 or the Menu key on a focused node makes the browser fire `contextmenu` at the node wrapper, where React Flow binds the canvas's node menu handler; the canvas does not intercept the key for graph nodes (its Shift+F10 handler only serves annotations, whose own menus sit on a descendant). The menu focuses its first item, arrow keys reach **Node appearance**. Tested from the `contextmenu` event on ("reaches Node appearance and the full detail of a shaped node by keyboard"); the browser's own key-to-event step is not exercised in jsdom |
 | SVG decoration hidden from screen readers, read once | Pass | The shape SVG is `aria-hidden` and `focusable="false"`, and the wrapper's `aria-label` stands in for its content. Asserted in the accessible-name test |
 | UI strings in English and Swedish | Partial | All `node_appearance.*` editor keys exist in both `en.json` and `sv.json`, kept in step by `keyParity.test.js`. The canvas node's own strings are English props defaults with no translated value passed in: the skill title, "Show related nodes", "Edit node" and "Communities:" |
 
