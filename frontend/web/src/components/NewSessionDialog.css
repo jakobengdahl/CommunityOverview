@@ -11,8 +11,8 @@
   gap: 4px;
   padding: 12px 14px;
   background: #1f1f1f;
-  border: 1px solid #444;
-  border-radius: 8px;
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius-lg);
   color: #eee;
   cursor: pointer;
   text-align: left;
@@ -24,7 +24,7 @@
 }
 
 .new-session-option.is-default {
-  border-color: #666;
+  border-color: var(--co-border-strong);
 }
 
 .new-session-option-title {
@@ -33,5 +33,5 @@
 
 .new-session-option-hint {
   font-size: 12px;
-  color: #aaa;
+  color: var(--co-text-muted);
 }

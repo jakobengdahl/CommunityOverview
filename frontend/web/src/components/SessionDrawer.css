@@ -73,7 +73,7 @@
 }
 
 .session-drawer-app-icon {
-  color: #646cff;
+  color: var(--co-accent);
   flex-shrink: 0;
 }
 
@@ -148,7 +148,7 @@
 }
 
 .session-drawer-search-input:focus {
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .session-drawer-section-title {
@@ -189,7 +189,7 @@
 }
 
 .session-drawer-session.current {
-  background: rgba(100, 108, 255, 0.14);
+  background: color-mix(in srgb, var(--co-accent) 14%, transparent);
 }
 
 .session-drawer-session-name {
@@ -237,7 +237,7 @@
   margin: 0 0 6px;
   padding: 9px 10px;
   color: #d9e1ff;
-  background: rgba(100, 108, 255, 0.14);
+  background: color-mix(in srgb, var(--co-accent) 14%, transparent);
   border: 1px solid rgba(170, 180, 255, 0.26);
   border-radius: 6px;
   font-size: 0.82rem;

@@ -29,7 +29,7 @@
 }
 
 .floating-search-bar:focus-within {
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .floating-search-icon {
@@ -55,7 +55,7 @@
   width: 16px;
   height: 16px;
   border: 2px solid #444;
-  border-top-color: #646cff;
+  border-top-color: var(--co-accent);
   border-radius: 50%;
   animation: searchSpin 0.6s linear infinite;
   flex-shrink: 0;
@@ -118,7 +118,7 @@
 
 .floating-search-result-teleport:hover,
 .floating-search-result-teleport:focus-visible {
-  background: rgba(100, 108, 255, 0.25);
+  background: color-mix(in srgb, var(--co-accent) 25%, transparent);
   color: #c3c7ff;
 }
 
@@ -141,7 +141,7 @@
 
 .floating-search-result:hover,
 .floating-search-result.selected {
-  background: rgba(100, 108, 255, 0.15);
+  background: color-mix(in srgb, var(--co-accent) 15%, transparent);
 }
 
 .floating-search-result-dot {

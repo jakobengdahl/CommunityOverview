@@ -103,7 +103,7 @@
 .form-group input:focus,
 .form-group textarea:focus {
   outline: none;
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .form-group small {
@@ -137,7 +137,7 @@
 .checkbox-label input[type='checkbox'] {
   width: 1rem;
   height: 1rem;
-  accent-color: #646cff;
+  accent-color: var(--co-accent);
   cursor: pointer;
 }
 
@@ -161,12 +161,12 @@
 }
 
 .btn-primary {
-  background: #646cff;
-  color: white;
+  background: var(--co-accent);
+  color: var(--co-accent-contrast);
 }
 
 .btn-primary:hover {
-  background: #535bf2;
+  background: var(--co-accent-hover);
 }
 
 .btn-secondary {

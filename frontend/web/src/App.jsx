@@ -70,6 +70,7 @@ import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import { refusalText } from './utils/stagedReview';
+import { applyTheme } from './utils/theme';
 import './App.css';
 
 // Ceiling on how long one resyncFromServer call may stay in flight before its
@@ -1534,6 +1535,7 @@ function App() {
           }
         }
         setConfig(schemaData, presentationData, t, language);
+        applyTheme(presentationData?.theme);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
         setModelProfilesCapability(capabilitiesData.model_profiles);

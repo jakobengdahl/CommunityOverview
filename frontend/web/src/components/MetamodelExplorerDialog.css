@@ -94,8 +94,8 @@
 }
 
 .mme-tab.active {
-  background: #646cff;
-  color: #fff;
+  background: var(--co-accent);
+  color: var(--co-accent-contrast);
 }
 
 .mme-filter-input {
@@ -111,7 +111,7 @@
 }
 
 .mme-filter-input:focus {
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .mme-system-toggle {

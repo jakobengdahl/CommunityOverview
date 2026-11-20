@@ -4,7 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--co-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -12,9 +12,9 @@
 }
 
 .edit-dialog {
-  background: #2a2a2a;
-  border: 1px solid #444;
-  border-radius: 12px;
+  background: var(--co-surface-raised);
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius-xl);
   width: 90%;
   max-width: 480px;
   max-height: 90vh;
@@ -26,7 +26,7 @@
   justify-content: space-between;
   align-items: center;
   padding: 16px 20px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--co-border);
 }
 
 .edit-dialog-header-title {
@@ -45,13 +45,13 @@
 .edit-dialog-header h2 {
   margin: 0;
   font-size: 1.1rem;
-  color: #fff;
+  color: var(--co-text-strong);
 }
 
 .edit-dialog .close-button {
   background: transparent;
   border: none;
-  color: #888;
+  color: var(--co-text-faint);
   font-size: 24px;
   line-height: 1;
   padding: 0;
@@ -59,7 +59,7 @@
 }
 
 .edit-dialog .close-button:hover {
-  color: #ddd;
+  color: var(--co-text);
 }
 
 .edit-dialog form {
@@ -75,7 +75,7 @@
   margin-bottom: 6px;
   font-size: 0.9rem;
   font-weight: 500;
-  color: #bbb;
+  color: var(--co-text-subtle);
 }
 
 .edit-dialog .form-group input,
@@ -83,10 +83,10 @@
 .edit-dialog .form-group textarea {
   width: 100%;
   padding: 10px 12px;
-  background: #333;
-  border: 1px solid #444;
-  border-radius: 6px;
-  color: #ddd;
+  background: var(--co-surface-control);
+  border: 1px solid var(--co-border);
+  border-radius: var(--co-radius-md);
+  color: var(--co-text);
   font-size: 14px;
   font-family: inherit;
   box-sizing: border-box;
@@ -96,7 +96,7 @@
 .edit-dialog .form-group select:focus,
 .edit-dialog .form-group textarea:focus {
   outline: none;
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .edit-dialog .form-group textarea {
@@ -109,21 +109,21 @@
   justify-content: flex-end;
   gap: 12px;
   padding-top: 16px;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--co-border);
   margin-top: 8px;
 }
 
 .edit-dialog .form-actions button {
   padding: 10px 20px;
-  border-radius: 6px;
+  border-radius: var(--co-radius-md);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .edit-dialog .form-actions button.primary {
-  background: #646cff;
-  color: white;
+  background: var(--co-accent);
+  color: var(--co-accent-contrast);
   border: none;
   transition: opacity 0.15s;
 }
@@ -134,13 +134,13 @@
 
 .edit-dialog .form-actions button.secondary {
   background: transparent;
-  color: #888;
-  border: 1px solid #444;
+  color: var(--co-text-faint);
+  border: 1px solid var(--co-border);
 }
 
 .edit-dialog .form-actions button.secondary:hover {
-  background: #333;
-  color: #ddd;
+  background: var(--co-surface-control);
+  color: var(--co-text);
 }
 
 /* Touch targets: the "x" close button grows via flex-centering (glyph

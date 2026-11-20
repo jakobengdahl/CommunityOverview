@@ -79,8 +79,8 @@
   align-items: center;
   gap: 5px;
   padding: 4px 9px;
-  background: rgba(100, 108, 255, 0.14);
-  border: 1px solid rgba(100, 108, 255, 0.4);
+  background: color-mix(in srgb, var(--co-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--co-accent) 40%, transparent);
   border-radius: 6px;
   color: #b7bcff;
   font-size: 0.74rem;
@@ -91,8 +91,8 @@
 }
 
 .session-activity-undo-button:hover:not(:disabled) {
-  background: rgba(100, 108, 255, 0.24);
-  border-color: #646cff;
+  background: color-mix(in srgb, var(--co-accent) 24%, transparent);
+  border-color: var(--co-accent);
   color: #fff;
 }
 
