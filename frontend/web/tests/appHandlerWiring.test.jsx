@@ -189,10 +189,7 @@ describe('App handler wiring', () => {
     captured.desktop = null;
     captured.syncHandlersRef = null;
     startupStats = null;
-    // Vitest 3 resets a vi.fn(impl) back to impl, so this also drops any
-    // once-stub an earlier test left unconsumed without losing the factory
-    // defaults startup relies on.
-    vi.resetAllMocks();
+    vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
