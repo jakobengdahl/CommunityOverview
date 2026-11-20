@@ -91,7 +91,9 @@ verdict. It used one run per scene and small graphs: 150 nodes, drawn whole on
 mount, and 250 nodes, which goes through Load More. It ran at scale 1 only, in
 both themes, on a shared host whose load average was 27 to 34. The commit is
 3eeaa0d with this change's harness fixes not yet committed (`main.jsx`,
-`run.js`; the measured canvas code is unchanged). The renderer the browser
+`run.js`; the measured canvas code is unchanged). The smoke run therefore
+measured canvas code from before 7b08a1c, which only reorders the shape shadow
+under the boundary. The renderer the browser
 reported is SwiftShader, which is software rendering.
 
 | Run | Value |
@@ -160,7 +162,9 @@ node (see the review below).
 
 This review checks each rule of NODE_SHAPES.md § Theme, accessibility and scale
 (paragraphs one to three; paragraph four is the performance scenes above)
-against the code at the commit named under Results. It was done by reading the
+against the code at commit 7b08a1c, which includes the shadow-under-boundary fix
+and its test; the smoke run under Results used the earlier commit 3eeaa0d. It
+was done by reading the
 code and its tests. No screen reader or assistive-technology session was run.
 **Pass** means the code implements the rule. **Partial** names the part that
 is missing. **Fail** means the code does not do what the rule asks. Contrast ratios are
