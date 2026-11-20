@@ -369,7 +369,7 @@ class RestInterfaceConfig(BaseModel):
 THEME_KEYS = ("accent", "accent_hover", "accent_contrast")
 # Plain CSS colours only, matched whole: hex, or rgb()/hsl() with numeric
 # channels in comma or space syntax. Whitespace is spaces only.
-_N = r"[+-]?(?:\d+\.?\d*|\.\d+)"
+_N = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
 _ALPHA = rf"{_N}%?"
 _S = r" *"
 _CSS_COLOR = re.compile(

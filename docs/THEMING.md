@@ -22,10 +22,12 @@ for the text colour on a raised surface, not for a particular grey.
 | Spacing | `--co-space-1` … `--co-space-6` | A 4 px-based scale, from 4 to 24 px |
 | Type | `--co-font-family`, `--co-font-size-sm`, `-md`, `-lg` | The UI font stack, 12, 14 and 16 px |
 
-The accent is on tokens throughout the web UI stylesheets and inline styles,
-including tints of it, which are written as
-`color-mix(in srgb, var(--co-accent) N%, transparent)`, and every text on an
-accent background uses `--co-accent-contrast`. Text on other coloured
+Accent backgrounds, borders, focus rings and translucent tints are on tokens
+throughout the web UI stylesheets and inline styles; tints are written as
+`color-mix(in srgb, var(--co-accent) N%, transparent)`. Every text on an accent
+background uses `--co-accent-contrast`. The lighter accent-family shades used
+for some text and borders (such as `#8b93ff` or `#aab4ff`) are still literals,
+so they keep the default hue under a configured accent. Text on other coloured
 backgrounds, such as danger buttons or the create button in a node type's own
 colour, stays white. Surfaces, text, lines, status colours, radii and shadows
 are on tokens in the shared chrome: the confirm, input, create-node and

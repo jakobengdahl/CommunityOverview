@@ -8,7 +8,9 @@ describe('applyTheme', () => {
     applyTheme({ accent: '#0a7f5c', surface: '#000' }, root);
 
     expect(root.style.getPropertyValue('--co-accent')).toBe('#0a7f5c');
-    expect(root.style.getPropertyValue('--co-accent-hover')).toContain('#0a7f5c');
+    expect(root.style.getPropertyValue('--co-accent-hover')).toBe(
+      'color-mix(in srgb, #0a7f5c 85%, black)'
+    );
     expect(root.style.getPropertyValue('--co-surface')).toBe('');
 
     applyTheme({ accent: '#0a7f5c', accent_hover: '#086446', accent_contrast: '#000' }, root);
