@@ -422,6 +422,10 @@ class TestConfigLoader:
                 },
                 {},
             ),
+            (
+                {"accent": "rgb(\u0661,2,3)"},
+                {},
+            ),
             ({"accent": 5, "accent_hover": "rgb(" + " " * 60 + "1,2,3)"}, {}),
             ({"accent": "rgb(1 2 3 / 50%)"}, {"accent": "rgb(1 2 3 / 50%)"}),
         ],
