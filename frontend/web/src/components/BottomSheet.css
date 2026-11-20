@@ -8,7 +8,7 @@
      sheet's own percentage-of-scrim height (see .bottom-sheet below) scales
      down and stays above the keyboard instead of rendering behind it. */
   bottom: var(--keyboard-inset, 0px);
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--co-scrim-sheet);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -20,11 +20,11 @@
   position: relative;
   width: 100%;
   max-width: 640px;
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--co-surface-raised);
+  border: 1px solid var(--co-border);
   border-bottom: none;
   border-radius: 16px 16px 0 0;
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--co-shadow-sheet);
   display: flex;
   flex-direction: column;
   outline: none;
@@ -77,19 +77,19 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 16px 12px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--co-border);
 }
 
 .bottom-sheet-title {
   margin: 0;
   font-size: 1.05rem;
-  color: #fff;
+  color: var(--co-text-strong);
 }
 
 .bottom-sheet-close {
   background: transparent;
   border: none;
-  color: #ccc;
+  color: var(--co-text-soft);
   font-size: 1.4rem;
   line-height: 1;
   cursor: pointer;
@@ -97,7 +97,7 @@
 }
 
 .bottom-sheet-close:hover {
-  color: #fff;
+  color: var(--co-text-strong);
 }
 
 .bottom-sheet-content {
