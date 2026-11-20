@@ -13,7 +13,7 @@
   --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
   --graph-card-shadow-color: rgba(0, 0, 0, 0.3);
   --graph-card-control-border: #1a1a1a;
-  --graph-card-boundary: transparent;
+  --graph-card-boundary: #808080;
 }
 
 @media (prefers-color-scheme: light) {
@@ -538,9 +538,9 @@ body.graph-menu-open .graph-node-tooltip {
   stroke-width: 2;
 }
 
-/* Many type colours fall under 3:1 against the light canvas, so the light
-   theme adds a neutral hairline (4.2:1 there) just outside the outline; the
-   body covers its inner half. Type colours stay at 3:1 or more on dark. */
+/* Type colours are configurable and need not reach 3:1 against the canvas,
+   so a neutral hairline that does in each theme (4.4:1 on dark, 4.2:1 on
+   light) sits just outside the outline; the body covers its inner half. */
 .graph-shape-boundary {
   fill: none;
   stroke: var(--graph-card-boundary);

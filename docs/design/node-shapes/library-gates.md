@@ -37,7 +37,7 @@ browser's `prefers-color-scheme`, as in the app.
 | `loadAll` | Pressing **Load More** until the whole scene and its edges are on the canvas | 1 per run |
 | `panFrame` | Frame-to-frame time during a 60-frame right-button pan of the empty pane | 60 per run |
 | `edgeUpdateFrame` | Frame-to-frame time during a 60-frame drag of the node nearest the viewport centre (the same node in both scenes), which redraws its edges | 60 per run |
-| `shapeApply` | A type-wide look change on every Actor node (a quarter of the scene), until drawn: the shaped scene switches the type default to another saved shape; the legacy card has no shape, so its baseline highlights those nodes, which rebuilds the same node data | 4 per run (on, off, on, off) |
+| `shapeApply` | Switching the Actor type default (a quarter of the scene) to another saved shape and back, until drawn. The legacy card has no shape to apply, so its scene times a highlight of the same nodes instead; that is a different operation, reported for reference and never as a budget verdict | 4 per run (on, off, on, off) |
 | `heapMB` | Used JS heap after the full scene loaded and a forced garbage collection | 1 per run |
 | `requests` | Network requests the page made after it loaded | 1 per run |
 
@@ -47,6 +47,14 @@ view or the node is not counted, and a metric with no samples is reported as
 not measured rather than as a number. The budget passes for a metric when the
 shaped p50 and p95 are both less than 10% above the legacy p50 and p95, and
 for requests when the shaped scene made no more than the legacy one.
+`shapeApply` has no legacy equivalent, so its change is reported as not
+comparable and it gets no verdict.
+
+The runner records the commit (and whether the working tree had changes),
+the CPU, cores, memory, OS and Node.js version, and asks the browser itself
+for its version, user agent and WebGL renderer, so a software renderer
+shows up as such rather than being assumed. These head the printed report, so
+the table is never recorded without them.
 
 ### Running it
 
@@ -56,7 +64,8 @@ From `frontend/web`, after `npm ci` and `npx playwright install chromium`:
 npm run perf:node-shapes -- --sizes 1000,5000 --scales 0.1,1,10 --themes light,dark --runs 5 --out results.json
 ```
 
-It prints the Markdown table below and writes the raw summary as JSON. The
+It prints the environment and results tables below and writes the raw
+summary as JSON. The
 full matrix is long-running and is not part of CI; CI runs only
 `perf/node-shapes/scene.test.js`, which checks the scenes and the budget
 arithmetic.

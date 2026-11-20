@@ -8,6 +8,7 @@
 // Each run opens a fresh page with a production build of one scene, so a
 // shaped scene and its legacy-card baseline start from the same state; the
 // two alternate within every run to spread machine drift over both.
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -108,7 +109,27 @@ const server = await preview({
 });
 const origin = server.resolvedUrls.local[0];
 let browser = await chromium.launch();
-const browserVersion = browser.version();
+// What the browser reports about itself, rather than what the launch implies.
+const browserInfo = await (async () => {
+  const page = await browser.newPage();
+  try {
+    return await page.evaluate(() => {
+      const gl = document.createElement('canvas').getContext('webgl');
+      const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+      return {
+        userAgent: navigator.userAgent,
+        webglRenderer: !gl
+          ? 'no WebGL context'
+          : gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER),
+      };
+    });
+  } finally {
+    await page.close();
+  }
+})();
+browserInfo.browser = `${browser.browserType().name()} ${browser.version()}`;
+const git = (...args) => execFileSync('git', args, { cwd: here, encoding: 'utf8' }).trim();
+const commit = `${git('rev-parse', 'HEAD')}${git('status', '--porcelain') ? ' (uncommitted changes)' : ''}`;
 const loadStart = os.loadavg();
 const scenes = [];
 try {
@@ -155,6 +176,7 @@ try {
 }
 
 const result = {
+  commit,
   seed: SCENE_SEED,
   runs,
   budget: BUDGET,
@@ -164,7 +186,9 @@ const result = {
     memoryGB: Math.round(os.totalmem() / 2 ** 30),
     os: `${os.type()} ${os.release()}`,
     node: process.version,
-    browser: `Chromium ${browserVersion} headless shell (Playwright), no GPU`,
+    browser: browserInfo.browser,
+    userAgent: browserInfo.userAgent,
+    webglRenderer: browserInfo.webglRenderer,
     viewport: VIEWPORT,
     gestureFrames: GESTURE_FRAMES,
     loadAverage: { start: loadStart, end: os.loadavg() },

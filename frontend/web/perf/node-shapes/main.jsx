@@ -33,8 +33,9 @@ const stable = {
   contextMenuLabels: EMPTY,
   annotationToolboxLabels: EMPTY,
 };
-// The legacy card has no shape to apply; its type-wide look change is a
-// highlight, which rebuilds the same nodes and restyles that type's cards.
+// The legacy card has no shape to apply. It times a highlight of the same
+// nodes instead, a different operation reported for reference only (stats.js
+// NOT_COMPARABLE), never as the shape apply baseline.
 const APPLY_IDS = scene.nodes.filter((n) => n.type === APPLY_TYPE).map((n) => n.id);
 const LEGACY_APPLY = scene.typeShapes[APPLY_TYPE] ? NONE : APPLY_IDS;
 let setApplied = null;

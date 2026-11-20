@@ -22,6 +22,7 @@ import {
   BAND_TEXT_DARK,
   BAND_TEXT_LIGHT,
   bandTextStyle,
+  contrastRatio,
   createNodeShapeResolver,
   nodeShapeActionLayout,
   nodeShapeAccessibleName,
@@ -719,6 +720,21 @@ describe('CustomNode configured shapes', () => {
     expect(bandTextStyle('#777777')).toEqual({ color: BAND_TEXT_DARK });
     expect(bandTextStyle('#fde047')).toEqual({ color: BAND_TEXT_DARK });
     expect(bandTextStyle('tomato').background).toBe('var(--graph-card-surface)');
+  });
+
+  it('draws a 3:1 boundary against the canvas in both themes, whatever the type colour', () => {
+    const canvasCss = readFileSync(
+      new NodeURL('../src/components/GraphCanvas.css', import.meta.url),
+      'utf8'
+    );
+    const canvas = [...canvasCss.matchAll(/\.graph-canvas-container \{[^}]*?background: (#\w+)/g)];
+    // Dark block first, then the light media query and the pinned light class.
+    const boundary = [...customNodeCss.matchAll(/--graph-card-boundary: ([^;]+);/g)];
+    const [dark, light] = canvas.map((match) => match[1]);
+    expect(boundary.map((match) => match[1])).toHaveLength(3);
+    const [onDark, ...onLight] = boundary.map((match) => match[1]);
+    expect(contrastRatio(onDark, dark)).toBeGreaterThanOrEqual(3);
+    for (const color of onLight) expect(contrastRatio(color, light)).toBeGreaterThanOrEqual(3);
   });
 
   it('selects by keyboard and then offers the related-node action without a pointer', () => {

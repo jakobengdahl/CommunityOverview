@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { createNodeShapeResolver } from '@community-graph/ui-graph-canvas';
 import { SCENE_SCALES, SCENE_TYPE_BASES, createNodeShapeScene } from './scene';
-import { BUDGET, compareScenes, summarize } from './stats';
+import { BUDGET, NOT_COMPARABLE, compareScenes, markdownReport, summarize } from './stats';
 
 describe('node shape performance scenes', () => {
   it.each(SCENE_SCALES)(
@@ -57,6 +57,37 @@ describe('node shape performance budget', () => {
     expect(summarize([partial]).edgeUpdateFrame).toEqual({ measured: false });
     expect(unmeasured.edgeUpdateFrame).toEqual({ measured: false });
     expect(unmeasured.initialRender.pass).toBe(true);
+    // The two scenes time different operations here: no verdict either way.
+    for (const metric of NOT_COMPARABLE) {
+      expect(within[metric]).toEqual({ comparable: false });
+      expect(at[metric]).toEqual({ comparable: false });
+    }
+  });
+
+  it('puts the commit and every environment field into the reported table', () => {
+    const environment = { cpu: 'cpu-x', browser: 'chromium 1', viewport: { width: 1 } };
+    const report = markdownReport({
+      commit: 'abc',
+      seed: 7,
+      runs: 2,
+      environment,
+      scenes: [],
+    });
+    const cells = report.split('\n').map((row) =>
+      row
+        .split('|')
+        .slice(1, -1)
+        .map((cell) => cell.trim())
+    );
+    const fields = Object.fromEntries(cells.filter((row) => row.length === 2));
+    expect(fields).toMatchObject({
+      commit: 'abc',
+      seed: '7',
+      runs: '2',
+      cpu: 'cpu-x',
+      browser: 'chromium 1',
+      viewport: JSON.stringify(environment.viewport),
+    });
   });
 
   it('fails any additional network request from the shaped scene', () => {

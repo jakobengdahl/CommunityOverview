@@ -127,6 +127,13 @@ function luminance(hex) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+/** WCAG contrast ratio of two hex colours, or null if either cannot be parsed. */
+export function contrastRatio(a, b) {
+  const [x, y] = [luminance(a), luminance(b)];
+  if (x === null || y === null) return null;
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
 export const BAND_TEXT_LIGHT = '#ffffff';
 export const BAND_TEXT_DARK = '#000000';
 
@@ -135,16 +142,14 @@ export const BAND_TEXT_DARK = '#000000';
  * that cannot be parsed gets an opaque backing in the card tokens instead.
  */
 export function bandTextStyle(color) {
-  const band = luminance(color);
-  if (band === null) {
+  if (luminance(color) === null) {
     return {
       color: 'var(--graph-card-text-primary)',
       background: 'var(--graph-card-surface)',
     };
   }
-  const contrast = (text) => (Math.max(band, text) + 0.05) / (Math.min(band, text) + 0.05);
-  if (contrast(1) >= 4.5) return { color: BAND_TEXT_LIGHT };
-  if (contrast(luminance(BAND_TEXT_DARK)) >= 4.5) return { color: BAND_TEXT_DARK };
+  if (contrastRatio(color, BAND_TEXT_LIGHT) >= 4.5) return { color: BAND_TEXT_LIGHT };
+  if (contrastRatio(color, BAND_TEXT_DARK) >= 4.5) return { color: BAND_TEXT_DARK };
   return { color: 'var(--graph-card-text-primary)', background: 'var(--graph-card-surface)' };
 }
 
