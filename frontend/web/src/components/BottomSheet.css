@@ -69,7 +69,7 @@
   width: 36px;
   height: 4px;
   border-radius: 2px;
-  background: #666;
+  background: var(--co-handle);
 }
 
 .bottom-sheet-header {

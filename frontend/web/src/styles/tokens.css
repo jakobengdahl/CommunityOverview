@@ -8,9 +8,10 @@
  * (`presentation.theme` in the schema config), which set the accent tokens
  * on :root at load.
  *
- * The UI has a single dark appearance today, whatever the system colour
- * scheme. A light token set is future work: it needs every stylesheet on
- * tokens first, or the untokenized parts would stay dark.
+ * The UI is designed dark; a light system scheme only switches a few base
+ * colours in index.css and the canvas package. A light token set is future
+ * work: it needs every stylesheet on tokens first, or the untokenized parts
+ * would stay dark.
  */
 :root {
   /* Surfaces, from the page outwards */

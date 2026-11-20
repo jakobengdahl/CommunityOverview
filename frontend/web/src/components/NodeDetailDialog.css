@@ -225,7 +225,7 @@
 
 .node-detail-actions button.primary {
   background: var(--co-accent);
-  color: white;
+  color: var(--co-accent-contrast);
   border: none;
   transition: opacity 0.15s;
 }

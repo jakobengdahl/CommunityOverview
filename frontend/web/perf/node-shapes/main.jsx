@@ -9,6 +9,7 @@ import {
   LAZY_LOAD_THRESHOLD,
 } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
+import '../../src/styles/tokens.css';
 import '../../src/index.css';
 import { createNodeShapeScene, edgesAmong, sceneDragNode } from './scene';
 

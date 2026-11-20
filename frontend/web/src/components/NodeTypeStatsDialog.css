@@ -160,7 +160,7 @@
 .nts-dialog-ok {
   padding: 8px 24px;
   background: var(--co-accent);
-  color: #fff;
+  color: var(--co-accent-contrast);
   border: none;
   border-radius: 6px;
   font-size: 0.85rem;

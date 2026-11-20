@@ -95,7 +95,7 @@
 
 .mme-tab.active {
   background: var(--co-accent);
-  color: #fff;
+  color: var(--co-accent-contrast);
 }
 
 .mme-filter-input {

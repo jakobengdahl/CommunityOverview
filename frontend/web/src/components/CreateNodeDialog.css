@@ -130,7 +130,7 @@
 }
 
 .create-node-dialog .form-actions button.primary {
-  color: var(--co-accent-contrast);
+  color: #fff;
   border: none;
   transition: opacity 0.15s;
 }

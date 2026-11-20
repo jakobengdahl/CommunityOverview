@@ -200,7 +200,7 @@
 .chat-message.user {
   align-self: flex-end;
   background-color: var(--co-accent);
-  color: white;
+  color: var(--co-accent-contrast);
 }
 
 .chat-message.assistant {
@@ -588,7 +588,7 @@
   flex: 1;
   padding: 0.4rem 0.8rem;
   background-color: var(--co-accent);
-  color: white;
+  color: var(--co-accent-contrast);
   border: none;
   border-radius: 6px;
   cursor: pointer;

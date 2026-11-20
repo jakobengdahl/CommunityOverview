@@ -367,10 +367,20 @@ class RestInterfaceConfig(BaseModel):
 # design token of the same name (accent -> --co-accent). Values must be plain
 # CSS colours: anything else could smuggle another declaration into the page.
 THEME_KEYS = ("accent", "accent_hover", "accent_contrast")
+# Plain CSS colours only, matched whole: hex, or rgb()/hsl() with numeric
+# channels in comma or space syntax. Whitespace is spaces only.
+_N = r"[+-]?(?:\d+\.?\d*|\.\d+)"
+_ALPHA = rf"{_N}%?"
+_S = r" *"
 _CSS_COLOR = re.compile(
-    r"^(#[0-9a-fA-F]{3,4}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}"
-    r"|(rgb|rgba|hsl|hsla)\([0-9.,%\s/+-]+\))$"
+    r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+    rf"|rgba?\({_S}{_N}{_S},{_S}{_N}{_S},{_S}{_N}{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)?{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
 )
+_CSS_COLOR_MAX_LEN = 64
 
 
 class PresentationConfig(BaseModel):
@@ -404,7 +414,12 @@ class PresentationConfig(BaseModel):
             return {}
         kept = {}
         for key, value in v.items():
-            if key in THEME_KEYS and isinstance(value, str) and _CSS_COLOR.match(value):
+            if (
+                key in THEME_KEYS
+                and isinstance(value, str)
+                and len(value) <= _CSS_COLOR_MAX_LEN
+                and _CSS_COLOR.fullmatch(value)
+            ):
                 kept[key] = value
             else:
                 logger.warning("Skipping invalid presentation.theme entry %r", key)

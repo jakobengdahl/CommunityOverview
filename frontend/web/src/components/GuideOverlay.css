@@ -291,7 +291,7 @@
 
 .guide-btn-next {
   background: var(--co-accent);
-  color: #fff;
+  color: var(--co-accent-contrast);
 }
 
 .guide-btn-next:hover:not(:disabled) {

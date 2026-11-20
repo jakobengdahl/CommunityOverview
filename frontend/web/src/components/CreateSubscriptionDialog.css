@@ -162,7 +162,7 @@
 
 .btn-primary {
   background: var(--co-accent);
-  color: white;
+  color: var(--co-accent-contrast);
 }
 
 .btn-primary:hover {

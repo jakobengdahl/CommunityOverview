@@ -414,6 +414,11 @@ class TestConfigLoader:
                 {"accent": "#0a7f5c", "accent_hover": "rgb(8, 100, 70)"},
             ),
             ("#0a7f5c", {}),
+            (
+                {"accent": "rgb(10, 20)", "accent_hover": "#fff\n"},
+                {},
+            ),
+            ({"accent": "rgb(1 2 3 / 50%)"}, {"accent": "rgb(1 2 3 / 50%)"}),
         ],
     )
     def test_theme_keeps_only_known_colour_tokens(self, tmp_path, theme, expected):
