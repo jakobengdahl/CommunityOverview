@@ -248,7 +248,7 @@ class ClaudeProvider(LLMProvider):
             api_key=api_key,
             base_url=base_url,
         )
-        self.model = model or "claude-sonnet-4-5"
+        self.model = model or "claude-sonnet-4-6"
 
     def _cap_nonstreaming(self, max_tokens: int) -> int:
         """Keep a limit within what the installed SDK allows without streaming."""
