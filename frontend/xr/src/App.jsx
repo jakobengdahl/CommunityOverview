@@ -555,7 +555,7 @@ function DomeGraph({ data, selectedNodeId, onSelect, selectedDetail }) {
   );
 }
 
-function DomeNavigationControls({ view, zoom, onZoom, onReset }) {
+function DomeNavigationControls({ view, onZoom, onReset }) {
   return (
     <div className="xr-nav" aria-label="Dome navigation">
       <button type="button" onClick={() => onZoom(1 / 1.2)} aria-label="Zoom out">

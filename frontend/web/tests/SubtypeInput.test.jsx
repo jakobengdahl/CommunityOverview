@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SubtypeInput from '../src/components/SubtypeInput';
 
@@ -67,7 +67,7 @@ describe('SubtypeInput', () => {
       const user = userEvent.setup();
       render(<SubtypeInput value={[]} onChange={mockOnChange} existingSubtypes={[]} />);
 
-      const input = screen.getByRole('textbox');
+      screen.getByRole('textbox');
       await user.keyboard('{Enter}');
 
       expect(mockOnChange).not.toHaveBeenCalled();

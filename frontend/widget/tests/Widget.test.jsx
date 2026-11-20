@@ -7,14 +7,14 @@
  * - Error handling works
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import Widget from '../src/Widget';
 import * as mcp from '../src/mcpClient';
 
 // Mock GraphCanvas component
 vi.mock('@community-graph/ui-graph-canvas', () => ({
-  GraphCanvas: ({ nodes, edges, onExpand, onEdit, highlightedNodeIds }) => (
+  GraphCanvas: ({ nodes, edges, onExpand, onEdit }) => (
     <div data-testid="graph-canvas">
       <div data-testid="node-count">{nodes?.length || 0} nodes</div>
       <div data-testid="edge-count">{edges?.length || 0} edges</div>

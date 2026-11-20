@@ -441,8 +441,6 @@ function GraphCanvasInner({
   onSaveView,
   onNodePositionChange,
   layoutType = null,
-  onCreateSubscription,
-  onCreateAgent,
   onDropCreateNode,
   // Called with (dataUrl, position) when a human pastes an image from the
   // clipboard, drops an image file on the canvas, or uses the annotation
