@@ -4487,7 +4487,9 @@ function GraphCanvasInner({
       const edgeEl = e.target.closest('.react-flow__edge');
       const menuEl =
         e.target.closest('.graph-context-menu') || e.target.closest('.graph-group-context-menu');
-      const controlsEl = e.target.closest('.react-flow__controls');
+      // The compact pill is the touch layout's stand-in for the ReactFlow
+      // controls, and its focus control acts on the current selection.
+      const controlsEl = e.target.closest('.react-flow__controls, .graph-compact-controls');
       const minimapEl = e.target.closest('.react-flow__minimap');
       const selectionEl = e.target.closest('.react-flow__selection');
       if (!nodeEl && !edgeEl && !menuEl && !controlsEl && !minimapEl && !selectionEl) {
