@@ -98,10 +98,12 @@ from backend.runtime import session_context
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
+    GRAPH_OPERATION_STAGE,
     use_request_authorization,
 )
 from . import access, graph_merge_plan
 from .service import GraphService
+from .staging import refusal_result
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 logger = logging.getLogger(__name__)
@@ -132,6 +134,16 @@ _INVALID_SESSION_ID_ERROR = (
     "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
     "(the older DDDD-DDDD form is also accepted)"
 )
+
+
+class _CopyDenied(Exception):
+    """The hook refused staging the source's changes into a copy, or the
+    copy's access assignments."""
+
+    def __init__(self, result: Dict[str, Any]):
+        super().__init__(result.get("message"))
+        self.result = result
+
 
 # Server-assigned default when an assistant creates a session without a name
 # (contract §4: names are non-unique and the server fills a default).
@@ -3256,10 +3268,13 @@ def register_mcp_tools(
 
     @register_tool
     def copy_visualization_session(session_id: str) -> Dict[str, Any]:
-        """Create a copy of stored canvas state with fresh annotation IDs.
+        """Copy a session to a new one named "Copy of <source name>".
 
-        Graph entities remain shared. Participants, history, leases and staged
-        graph changes are excluded; the source write mode is preserved.
+        Canvas state, appearance choices, write mode and staged graph changes
+        are copied, annotations under fresh IDs; graph entities remain shared.
+        A hook holding per-session roles gives the copy the source's, capped at
+        the copier's rights, with the copier as owner. Participants, history
+        and leases are excluded.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -3276,8 +3291,41 @@ def register_mcp_tools(
         )
         if denied:
             return denied
+
+        def authorize_staging() -> None:
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target="copy_visualization_session",
+                graph_operation=GRAPH_OPERATION_STAGE,
+                session_id=session_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
+        def assign_access(copy_id: str) -> None:
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=session_id,
+                copy_session_id=copy_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
         try:
-            session = session_manager.copy_session(session_id)
+            session = session_manager.copy_session(
+                session_id,
+                authorize_staging=authorize_staging,
+                assign_access=assign_access,
+                staged_by=access.build_mutation_actor_id(
+                    target="copy_visualization_session"
+                ),
+            )
+        except _CopyDenied as exc:
+            return exc.result
+        except layer_store.LayerFull as exc:
+            # The source holds more staged entries than the current cap.
+            return refusal_result(exc)
         except WriteModeRefused as exc:
             return exc.to_result()
         except OpError as exc:

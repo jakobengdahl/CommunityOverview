@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import json
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -5677,9 +5678,12 @@ class TestSessionActivityByteCache:
 
 @pytest.mark.parametrize("async_copy", [False, True])
 @pytest.mark.parametrize("shared_action", ["update", "delete"])
-async def test_copy_session_omits_staged_only_canvas_references(
+async def test_copy_session_carries_staged_changes_into_its_own_layer(
     async_copy, shared_action
 ):
+    """Staged entries land, re-keyed and staged by the copier, in the copy's
+    layer with its canvas whole; the source, its layer and the graph are
+    untouched."""
     from backend.core.tests.layer_store_contract import entry
     from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
@@ -5688,7 +5692,7 @@ async def test_copy_session_omits_staged_only_canvas_references(
     mgr = _manager(write_modes=WriteModes(backend))
     source = mgr.create_session("Staged canvas", write_mode="staged")
     entries = [
-        entry(kind, entity_id, action, session_id=source.id)
+        entry(kind, entity_id, action, session_id=source.id, stage_token="source")
         for kind, entity_id, action in [
             ("node", "new", "create"),
             ("node", "shared", shared_action),
@@ -5713,25 +5717,78 @@ async def test_copy_session_omits_staged_only_canvas_references(
     mgr.store.persist(source)
     before = copy.deepcopy(source.to_dict())
     layer_before = backend.load_layer(source.id)
+    graph_before = copy.deepcopy([backend._store[k] for k in ("nodes", "edges")])
+    authorized = []
 
-    copied = (
-        await mgr.copy_session_async(source.id)
-        if async_copy
-        else mgr.copy_session(source.id)
+    copy_session = mgr.copy_session_async if async_copy else mgr.copy_session
+    copied = copy_session(
+        source.id,
+        authorize_staging=lambda: authorized.append(True),
+        staged_by="copier",
     )
+    if async_copy:
+        copied = await copied
 
+    assert authorized == [True]
     expected = copy.deepcopy(before["state"])
-    for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
-        expected[key] = ["shared"]
-    expected["positions"].pop("new")
-    for key in ("hidden_edge_ids", "dimmed_edge_ids"):
-        expected[key] = ["shared-edge"]
     group = copied.state["annotations"][0]
     assert group["id"] != "group"
-    assert group["member_node_ids"] == ["shared"]
+    assert group["member_node_ids"] == ["new", "shared"]
     expected["annotations"] = [group]
     assert copied.state == expected
     assert mgr.write_mode_of(copied)["write_mode"] == "staged"
-    assert backend.load_layer(copied.id) == []
+    layer = backend.load_layer(copied.id)
+    assert {e["session_id"] for e in layer} == {copied.id}
+    assert all(e["session_seq"] <= copied.seq for e in layer)
+    assert {e["staged_by"] for e in layer} == {"copier"}
+    assert "source" not in {e["stage_token"] for e in layer}
+    assert all(e["staged_at"] > s["staged_at"] for e in layer for s in layer_before)
+    drop = ("session_id", "session_seq", "stage_token", "staged_by", "staged_at")
+    assert sorted(
+        ({k: v for k, v in e.items() if k not in drop} for e in layer),
+        key=lambda e: (e["kind"], e["entity_id"]),
+    ) == sorted(
+        ({k: v for k, v in e.items() if k not in drop} for e in layer_before),
+        key=lambda e: (e["kind"], e["entity_id"]),
+    )
     assert mgr.get_session(source.id).to_dict() == before
     assert backend.load_layer(source.id) == layer_before
+    assert [backend._store[k] for k in ("nodes", "edges")] == graph_before
+
+
+async def test_copy_session_refused_staging_creates_nothing():
+    """A refused staging authorization, or a failed layer write, leaves no
+    session and no active staged record behind; a source with no staged
+    entries never asks it."""
+    from backend.core.tests.layer_store_contract import entry
+    from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+
+    backend = InMemoryGraphPersistenceBackend({}, staged=True)
+    mgr = _manager(write_modes=WriteModes(backend))
+    source = mgr.create_session("Staged", write_mode="staged")
+    backend.stage(source.id, entries=[entry("node", "n", session_id=source.id)])
+
+    def refuse():
+        raise PermissionError
+
+    with pytest.raises(PermissionError):
+        mgr.copy_session(source.id, authorize_staging=refuse)
+    assert mgr.store.session_count() == 1
+
+    backend.stage = Mock(side_effect=RuntimeError)
+    with pytest.raises(RuntimeError):
+        mgr.copy_session(source.id)
+    assert mgr.store.session_count() == 1
+    active = [
+        sid
+        for sid, held in backend._store["sessions"].items()
+        if held["status"] == "active"
+    ]
+    assert active == [source.id]
+
+    del backend.stage
+    empty = mgr.create_session("Empty", write_mode="staged")
+    copied = mgr.copy_session(empty.id, authorize_staging=refuse)
+    assert mgr.write_mode_of(copied)["write_mode"] == "staged"
+    assert backend.load_layer(copied.id) == []

@@ -93,6 +93,21 @@ class GraphAuthorizationHook(Protocol):
     ) -> GraphAuthorizationDecision: ...
 
 
+class SessionCopyAccessHook(Protocol):
+    """Optional method of a GraphAuthorizationHook that holds per-session roles.
+
+    The core keeps none, so a session copy hands them over here, before the
+    copy is saved: ``context`` is the copier's, its ``session_id`` the source.
+    The hook gives the copy the source's assignments, each capped at the
+    copier's own rights, and makes the copier its owner; a refusal creates
+    nothing.
+    """
+
+    def assign_copied_session_access(
+        self, context: GraphAuthorizationContext, *, copy_session_id: str
+    ) -> GraphAuthorizationDecision: ...
+
+
 class DefaultGraphAuthorizationHook:
     """Standalone-safe default hook, driven only by the authorization mode env var.
 

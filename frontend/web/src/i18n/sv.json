@@ -417,6 +417,7 @@
     "delete_session": "Ta bort session",
     "session_menu": "Sessionsåtgärder",
     "create_copy": "Skapa en kopia",
+    "copy_name": "Kopia av {name}",
     "copy_error": "Kunde inte kopiera sessionen",
     "copy_size_error": "Kunde inte kopiera sessionen: källsessionen överskrider storleksgränsen för sessioner.",
     "copy_link": "Kopiera länk",

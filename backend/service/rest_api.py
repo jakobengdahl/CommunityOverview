@@ -81,6 +81,7 @@ from . import attachments as attachment_ops
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
+from .staging import refusal_result
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -514,6 +515,17 @@ class CreateSessionRequest(BaseModel):
             "direct or staged; omitted, the session takes the graph default "
             "(SESSION_WRITE_MODE_DEFAULT)"
         ),
+    )
+
+
+class CopySessionRequest(BaseModel):
+    """Request model for copying a shared session."""
+
+    name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description='Name for the copy; omitted, "Copy of <source name>"',
     )
 
 
@@ -1353,7 +1365,7 @@ def _register_session_endpoints(
         OpError,
         is_valid_session_id,
     )
-    from backend.core.layer_store import LayerNotEmpty, StagedSessionRetired
+    from backend.core.layer_store import LayerFull, LayerNotEmpty, StagedSessionRetired
     from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
     from backend.runtime.authorization import GRAPH_ACTION_MUTATE
 
@@ -1376,6 +1388,18 @@ def _register_session_endpoints(
                 target=target,
                 graph_operation=operation,
                 session_id=session_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+
+    def _assign_copy_access(
+        http_request: Request, source_id: str, copy_id: str
+    ) -> None:
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=source_id,
+                copy_session_id=copy_id,
             )
         if denied:
             raise HTTPException(status_code=403, detail=denied.get("message"))
@@ -1435,8 +1459,15 @@ def _register_session_endpoints(
         return _session_payload(session, resolve=False, manager=session_manager)
 
     @router.post("/sessions/{session_id}/copy")
-    async def copy_session(session_id: str, http_request: Request) -> Dict[str, Any]:
-        from backend.runtime.authorization import GRAPH_ACTION_READ
+    async def copy_session(
+        session_id: str,
+        http_request: Request,
+        request: Optional[CopySessionRequest] = None,
+    ) -> Dict[str, Any]:
+        from backend.runtime.authorization import (
+            GRAPH_ACTION_READ,
+            GRAPH_OPERATION_STAGE,
+        )
 
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
@@ -1451,14 +1482,37 @@ def _register_session_endpoints(
         if denied:
             raise HTTPException(status_code=403, detail=denied.get("message"))
         _rate_limit_lookup(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            staged_by = access.build_mutation_actor_id(
+                target="copy_visualization_session"
+            )
         try:
-            session = await session_manager.copy_session_async(session_id)
+            session = await session_manager.copy_session_async(
+                session_id,
+                request.name if request else None,
+                # Copied staged changes are staged by the copier: never more
+                # than the copier may stage.
+                authorize_staging=lambda: _authorize_session_change(
+                    http_request,
+                    "copy_visualization_session",
+                    session_id,
+                    GRAPH_OPERATION_STAGE,
+                ),
+                staged_by=staged_by,
+                assign_access=lambda copy_id: _assign_copy_access(
+                    http_request, session_id, copy_id
+                ),
+            )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="session too large")
+        except LayerFull as exc:
+            # The source holds more staged entries than the current cap;
+            # raises the 422 layer_full refusal.
+            _staged_answer(refusal_result(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except WriteModeRefused as exc:

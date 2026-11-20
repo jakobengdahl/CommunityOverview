@@ -37,6 +37,10 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         dimmed_node_ids=["dimmed"],
         dimmed_edge_ids=["dim-edge"],
         edge_intensity=0.4,
+        shape_overrides={"node": {"shape": "hexagon"}},
+        type_shapes={"Actor": {"shape": "diamond"}},
+        shape_revisions={"node:node": 2, "type:Actor": 1},
+        shape_operation_ids={'["op-1"]': True},
     )
     kinds = [
         "shape",
@@ -88,7 +92,7 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
     copied_id = result["id"] if transport == "rest" else result["session"]["session_id"]
     copied = manager.get_session(copied_id)
     assert copied.id != source.id
-    assert copied.name == "Design (copy)"
+    assert copied.name == "Copy of Design"
     assert copied.description == source.description
     assert copied.seq == 0 and copied.activity_log == []
     assert manager.roster(copied.id) == []
@@ -101,6 +105,7 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
         == annotations[0]["id"]
     )
     expected = copy.deepcopy(before["state"])
+    expected["shape_operation_ids"] = {}
     for original, actual in zip(expected["annotations"], annotations):
         original["id"] = actual["id"]
         original["version"] = 1
@@ -119,9 +124,10 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-@pytest.mark.parametrize("denied_action", ["read", "mutate"])
+@pytest.mark.parametrize("denied_action", ["read", "mutate", "assign"])
 def test_copy_requires_source_read_access(test_app, transport, denied_action):
-    """Permission to create alone cannot copy an unreadable source."""
+    """Permission to create alone cannot copy an unreadable source, nor a copy
+    whose access assignments the hook refuses."""
     source = test_app.app.state.session_manager.create_session()
     hook = Mock()
     hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
@@ -129,6 +135,9 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
             ctx.action == denied_action
             and (denied_action == "mutate" or ctx.session_id == source.id)
         )
+    )
+    hook.assign_copied_session_access.return_value = GraphAuthorizationDecision(
+        allowed=denied_action != "assign"
     )
     test_app.app.state.graph_service._authorization_hook = hook
     status, result = invoke(test_app, source, transport)
@@ -151,37 +160,128 @@ def test_copy_rejects_large_state_before_creating(test_app, monkeypatch, descrip
     assert manager.store.session_count() == 1
 
 
-def test_copy_preserves_staged_mode_without_staged_changes(
-    app_config, mock_llm_provider
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
+    app_config, mock_llm_provider, transport
 ):
-    """A staged copy starts an empty layer and leaves the source layer intact."""
+    """A staged copy holds the source's staged changes, staged by the copier,
+    the graph unchanged; a copier the hook refuses staging, or whose copy's
+    access assignments it refuses, is refused (REST 403, MCP success false),
+    as is a source over the layer cap (layer_full), and no session is created.
+    The hook assigns access as the copier, from the source to the copy it
+    returns; copied entries carry a fresh stage token."""
     from dataclasses import replace
     from unittest.mock import patch
     from fastapi.testclient import TestClient
     from backend.api_host.server import create_app
+    from backend.runtime.authorization import use_request_authorization
     from backend.runtime.session_context import SESSION_ID_HEADER
+
+    def actor(actor_id):
+        return {
+            "x-communityoverview-actor-id": actor_id,
+            "x-communityoverview-actor-type": "member",
+            "x-communityoverview-auth-source": "gateway",
+        }
+
+    def copy_as(source, actor_id, name=None):
+        if transport == "rest":
+            response = client.post(
+                f"/api/sessions/{source}/copy",
+                headers=actor(actor_id),
+                json={"name": name} if name else None,
+            )
+            return response.status_code == 200, response.json()
+        with use_request_authorization(headers=actor(actor_id)):
+            result = client.app.state.tools_map["copy_visualization_session"](source)
+        return result["success"], result
 
     with patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider):
         client = TestClient(
-            create_app(replace(app_config, graph_staged_sessions="true"))
+            create_app(
+                replace(
+                    app_config,
+                    graph_staged_sessions="true",
+                    session_layer_max_entries="1",
+                )
+            )
         )
     source = client.post("/api/sessions", json={"write_mode": "staged"}).json()["id"]
     assert (
         client.patch(
             "/api/nodes/node-1",
-            headers={SESSION_ID_HEADER: source},
+            headers={SESSION_ID_HEADER: source, **actor("author")},
             json={"updates": {"description": "staged"}},
         ).status_code
         == 200
     )
     before = client.get(f"/api/sessions/{source}/staged").json()["items"]
-    assert len(before) == 1
-    response = client.post(f"/api/sessions/{source}/copy")
-    assert response.status_code == 200
-    copied = response.json()
+    assert [i["staged_by"] for i in before] == ["author"]
+    graph_before = client.get("/api/nodes/node-1").json()
+    succeeded, result = copy_as(source, "copier", name="Kopia")
+    assert succeeded
+    copied = result if transport == "rest" else result["session"]
+    copied_id = copied["id"] if transport == "rest" else copied["session_id"]
     assert copied["write_mode"] == "staged"
-    assert client.get(f"/api/sessions/{copied['id']}/staged").json()["items"] == []
+    if transport == "rest":
+        assert copied["name"] == "Kopia"
+    copied_items = client.get(f"/api/sessions/{copied_id}/staged").json()["items"]
+    assert all(i["staged_at"] > before[0]["staged_at"] for i in copied_items)
+    assert [i["staged_by"] for i in copied_items] == ["copier"]
+    own = ("version", "session_seq", "staged_at", "staged_by")
+    assert [{k: v for k, v in i.items() if k not in own} for i in copied_items] == [
+        {k: v for k, v in i.items() if k not in own} for i in before
+    ]
     assert client.get(f"/api/sessions/{source}/staged").json()["items"] == before
+    assert client.get("/api/nodes/node-1").json() == graph_before
+
+    manager = client.app.state.session_manager
+    count = manager.store.session_count()
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=ctx.graph_operation != "stage"
+    )
+    client.app.state.graph_service._authorization_hook = hook
+    succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    if transport == "mcp":
+        assert result["success"] is False and "session" not in result
+    assert manager.store.session_count() == count
+    asked = [call.args[0] for call in hook.evaluate.call_args_list]
+    assert [
+        (c.target, c.session_id) for c in asked if c.graph_operation == "stage"
+    ] == [("copy_visualization_session", source)]
+
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(allowed=True)
+    assign = hook.assign_copied_session_access
+    assign.return_value = GraphAuthorizationDecision(allowed=False)
+    succeeded, _ = copy_as(source, "copier")
+    assert not succeeded
+    assert manager.store.session_count() == count
+    refused_id = assign.call_args.kwargs["copy_session_id"]
+    assert manager.write_modes.is_retired(refused_id)
+    assign.return_value = GraphAuthorizationDecision(allowed=True)
+    succeeded, result = copy_as(source, "copier")
+    assert succeeded
+    copied = result if transport == "rest" else result["session"]
+    (context,), kwargs = assign.call_args
+    assert (context.actor["actor_id"], context.session_id) == ("copier", source)
+    assert kwargs["copy_session_id"] == copied.get("id", copied.get("session_id"))
+
+    layer = manager.write_modes.layer_store
+    (staged,) = layer.load_layer(source)
+    assert staged["stage_token"] not in {
+        e["stage_token"] for e in layer.load_layer(copied_id)
+    }
+
+    # A source over the cap (staged before it was lowered) is refused as full.
+    layer.stage(source, [{**staged, "entity_id": "node-2"}])
+    count = manager.store.session_count()
+    succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    refusal = result["detail"] if transport == "rest" else result
+    assert (refusal["error"], refusal["limit"]) == ("layer_full", 1)
+    assert manager.store.session_count() == count
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
