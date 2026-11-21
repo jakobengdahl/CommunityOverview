@@ -12,6 +12,8 @@ import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
+import { buildExpertCommands } from '../commands/appCommands';
+import { useRegisterCommands } from '../commands/commandRegistry';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
@@ -73,6 +75,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     clearSelectedGraphNodes,
     activeExperts,
     availableExperts,
+    toggleExpertAgent,
     showMinimap,
     startGuide,
     guideChatInput,
@@ -90,6 +93,17 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  // Same availability as ExpertAgentSelector: nothing joins mid-request.
+  const expertCommands = useMemo(
+    () =>
+      buildExpertCommands(
+        availableExperts || [],
+        { activeExperts: activeExperts || [], language, disabled: isProcessing },
+        toggleExpertAgent
+      ),
+    [availableExperts, activeExperts, language, isProcessing, toggleExpertAgent]
+  );
+  useRegisterCommands(expertCommands);
   const [progressSteps, setProgressSteps] = useState([]);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);

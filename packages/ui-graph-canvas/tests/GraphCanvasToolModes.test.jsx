@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 // The annotation toolbox arms a tool; the canvas decides where the object goes
 // (task-annotation-tool-modes). Covers the three behaviours that motivated the
 // change — sticky placement, an eraser, and a stylus's inverted tip — plus the
@@ -175,6 +176,35 @@ describe('GraphCanvas annotation tool modes', () => {
     tapPane(260, 240);
     // Sticky: the tool stays armed, so three taps are three dots.
     expect(countOf('vote_dot')).toBe(3);
+  });
+
+  it('an annotationToolRequest arms the tool like the toolbox does, once per seq', () => {
+    const { rerender } = render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    const request = { kind: 'vote_dot', options: undefined, seq: 1 };
+    rerender(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onAnnotationChange={vi.fn()}
+        annotationToolRequest={request}
+      />
+    );
+    tapPane(120, 80);
+    expect(countOf('vote_dot')).toBe(1);
+
+    openToolbox();
+    arm(/^select$/i);
+    // The same request object again is not a new request.
+    rerender(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onAnnotationChange={vi.fn()}
+        annotationToolRequest={{ ...request }}
+      />
+    );
+    tapPane(200, 160);
+    expect(countOf('vote_dot')).toBe(1);
   });
 
   it('places each object at the tapped point, not at a fixed location', () => {

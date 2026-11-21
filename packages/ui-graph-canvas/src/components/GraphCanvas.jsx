@@ -483,6 +483,10 @@ function GraphCanvasInner({
   createGroupSignal = 0,
   saveViewSignal = 0,
   closeMenusSignal = 0,
+  // `{ kind, options, seq }`: arms an annotation tool from outside the
+  // toolbox (the host's command registry) through the toolbox's own handler.
+  // A new `seq` is a new request, so asking for the same tool twice re-arms it.
+  annotationToolRequest = null,
   groupsToRestore = null,
   onGroupsRestored,
   annotationsToRestore = null,
@@ -4845,6 +4849,20 @@ function GraphCanvasInner({
       handleAddGroup();
     }
   }, [createGroupSignal, handleAddGroup, activeFocusRootId]);
+
+  // Like createGroupSignal, a request made while a focus view hides the
+  // toolbox is honoured once focus exits.
+  const handledAnnotationToolSeqRef = useRef(null);
+  useEffect(() => {
+    if (
+      annotationToolRequest &&
+      annotationToolRequest.seq !== handledAnnotationToolSeqRef.current &&
+      !activeFocusRootId
+    ) {
+      handledAnnotationToolSeqRef.current = annotationToolRequest.seq;
+      handleSelectTool(annotationToolRequest.kind, annotationToolRequest.options);
+    }
+  }, [annotationToolRequest, handleSelectTool, activeFocusRootId]);
 
   // Save view when signal changes (triggered from toolbar)
   useEffect(() => {

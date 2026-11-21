@@ -71,6 +71,8 @@ import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import { refusalText } from './utils/stagedReview';
 import { applyTheme } from './utils/theme';
+import { CommandRegistryContext, createCommandRegistry } from './commands/commandRegistry';
+import { buildAppCommands } from './commands/appCommands';
 import './App.css';
 
 // Ceiling on how long one resyncFromServer call may stay in flight before its
@@ -3883,6 +3885,82 @@ function App() {
     setDeleteSessionDialog,
   };
 
+  const handleRequestRenameSession = useCallback(
+    (id) => {
+      const entry = sessions.find((s) => s.id === id);
+      setRenameDialog({ id, name: entry?.name || '' });
+    },
+    [sessions, setRenameDialog]
+  );
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+  const handleOpenConnectSession = useCallback(() => setConnectDialogOpen(true), []);
+  const handleToggleLock = useCallback(
+    () => setCanvasLocked(!canvasLocked),
+    [canvasLocked, setCanvasLocked]
+  );
+
+  // Arms an annotation tool through GraphCanvas's own toolbox handler.
+  const [annotationToolRequest, setAnnotationToolRequest] = useState(null);
+  const handleSelectAnnotationTool = useCallback((kind, options) => {
+    setAnnotationToolRequest((prev) => ({ kind, options, seq: (prev?.seq ?? 0) + 1 }));
+  }, []);
+
+  // The command box's registry. Only this interactive view provides it; kiosk
+  // views render outside App and so register nothing.
+  const [commandRegistry] = useState(createCommandRegistry);
+  const appCommands = useMemo(
+    () =>
+      buildAppCommands(
+        { schema, language, sessionId, canvasLocked },
+        {
+          onCreateNode: handleCreateNodeForType,
+          onCreateAgent: handleCreateAgent,
+          onCreateSubscription: handleCreateSubscription,
+          onSaveView: handleToolbarSaveView,
+          onCreateGroup: handleToolbarCreateGroup,
+          onCreateActiveKnowledgeCollection: handleCreateAKC,
+          onOpenSettings: handleOpenSettings,
+          onNewSession: handleNewSession,
+          onConnectSession: handleOpenConnectSession,
+          onRenameSession: handleRequestRenameSession,
+          onCopySession: handleCopySession,
+          onCopySessionLink: handleCopySessionLink,
+          onCopyTriggerUrl: handleCopyTriggerUrl,
+          onDeleteSession: handleRequestDeleteSession,
+          onToggleLock: handleToggleLock,
+          onEnterFullscreen: enterFullscreenCanvas,
+          onSelectAnnotationTool: handleSelectAnnotationTool,
+        }
+      ),
+    [
+      schema,
+      language,
+      sessionId,
+      canvasLocked,
+      handleCreateNodeForType,
+      handleCreateAgent,
+      handleCreateSubscription,
+      handleToolbarSaveView,
+      handleToolbarCreateGroup,
+      handleCreateAKC,
+      handleOpenSettings,
+      handleNewSession,
+      handleOpenConnectSession,
+      handleRequestRenameSession,
+      handleCopySession,
+      handleCopySessionLink,
+      handleCopyTriggerUrl,
+      handleRequestDeleteSession,
+      handleToggleLock,
+      enterFullscreenCanvas,
+      handleSelectAnnotationTool,
+    ]
+  );
+  useEffect(() => {
+    const cleanups = appCommands.map((command) => commandRegistry.register(command));
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [commandRegistry, appCommands]);
+
   // The session drawer is non-modal (in either shell), so any dialog can be
   // stacked on top of it; while one is open, Escape belongs to that dialog.
   const suspendEscape = !!(
@@ -3914,19 +3992,16 @@ function App() {
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
-    onConnectSession: () => setConnectDialogOpen(true),
+    onConnectSession: handleOpenConnectSession,
     onSelectSession: handleSelectSession,
-    onRenameSession: (id) => {
-      const entry = sessions.find((s) => s.id === id);
-      setRenameDialog({ id, name: entry?.name || '' });
-    },
+    onRenameSession: handleRequestRenameSession,
     onDeleteSession: handleRequestDeleteSession,
     onCopySessionLink: handleCopySessionLink,
     onCopySession: handleCopySession,
     onCopyTriggerUrl: handleCopyTriggerUrl,
-    onOpenSettings: () => setSettingsOpen(true),
+    onOpenSettings: handleOpenSettings,
     canvasLocked,
-    onToggleLock: () => setCanvasLocked(!canvasLocked),
+    onToggleLock: handleToggleLock,
     suspendEscape,
     onCreateNodeForType: handleCreateNodeForType,
     onCreateAgent: handleCreateAgent,
@@ -3939,7 +4014,7 @@ function App() {
     onEnterFullscreen: enterFullscreenCanvas,
   };
 
-  return (
+  const appContent = (
     <div
       ref={appRef}
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
@@ -3987,6 +4062,7 @@ function App() {
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
+          annotationToolRequest={annotationToolRequest}
           saveViewSignal={saveViewSignal}
           closeMenusSignal={closeMenusSignal}
           groupsToRestore={pendingGroups}
@@ -4431,6 +4507,12 @@ function App() {
       <GuideOverlay />
       <AppInstallPrompt />
     </div>
+  );
+
+  return (
+    <CommandRegistryContext.Provider value={commandRegistry}>
+      {appContent}
+    </CommandRegistryContext.Provider>
   );
 }
 
