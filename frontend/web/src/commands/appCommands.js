@@ -109,7 +109,10 @@ const interactive = (context) => context.view === 'interactive';
  * Builds the interactive view's commands from the handlers its surfaces are
  * given. `state` carries what decides labels and availability.
  */
-export function buildAppCommands({ schema, language, sessionId, canvasLocked }, handlers) {
+export function buildAppCommands(
+  { schema, language, sessionId, sessionListed, canvasLocked },
+  handlers
+) {
   const command = (id, labelKey, descriptionKey, execute, extra = {}) => ({
     id,
     labelKey,
@@ -137,12 +140,15 @@ export function buildAppCommands({ schema, language, sessionId, canvasLocked }, 
       );
     });
 
+  // The drawer offers row actions only on listed sessions; a new session
+  // stays unlisted until first edited, so its row actions are not offered.
   const sessionCommand = (id, labelKey, handler) =>
     command(
       `session:${id}`,
       labelKey,
       `commands.session_${id.replace(/-/g, '_')}_description`,
-      () => handler(sessionId)
+      () => handler(sessionId),
+      { isAvailable: (context) => interactive(context) && sessionListed }
     );
 
   return [
@@ -153,7 +159,12 @@ export function buildAppCommands({ schema, language, sessionId, canvasLocked }, 
     command('new-session', 'sessions.new_session', 'commands.new_session_description', () =>
       handlers.onNewSession()
     ),
-    sessionCommand('connect', 'sessions.connect_session', () => handlers.onConnectSession()),
+    command(
+      'session:connect',
+      'sessions.connect_session',
+      'commands.session_connect_description',
+      () => handlers.onConnectSession()
+    ),
     sessionCommand('rename', 'sessions.rename_session', handlers.onRenameSession),
     sessionCommand('copy', 'sessions.create_copy', handlers.onCopySession),
     sessionCommand('copy-link', 'sessions.copy_link', handlers.onCopySessionLink),

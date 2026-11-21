@@ -3911,7 +3911,13 @@ function App() {
   const appCommands = useMemo(
     () =>
       buildAppCommands(
-        { schema, language, sessionId, canvasLocked },
+        {
+          schema,
+          language,
+          sessionId,
+          sessionListed: sessions.some((entry) => entry.id === sessionId),
+          canvasLocked,
+        },
         {
           onCreateNode: handleCreateNodeForType,
           onCreateAgent: handleCreateAgent,
@@ -3936,6 +3942,7 @@ function App() {
       schema,
       language,
       sessionId,
+      sessions,
       canvasLocked,
       handleCreateNodeForType,
       handleCreateAgent,

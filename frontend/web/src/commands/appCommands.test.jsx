@@ -46,7 +46,13 @@ const calls = (handlers) =>
   Object.entries(handlers)
     .filter(([, fn]) => fn.mock.calls.length > 0)
     .map(([name, fn]) => [name, fn.mock.calls]);
-const state = { schema, language: 'sv', sessionId: 's-1', canvasLocked: false };
+const state = {
+  schema,
+  language: 'sv',
+  sessionId: 's-1',
+  sessionListed: true,
+  canvasLocked: false,
+};
 const resolve = (dict, key) => key.split('.').reduce((node, part) => node?.[part], dict);
 const context = { view: 'interactive', locale: 'sv' };
 
@@ -92,6 +98,21 @@ describe('buildAppCommands', () => {
     }
     expect(handlers.onSelectAnnotationTool).toHaveBeenCalledWith('shape', { shape: 'circle' });
     expect(APP_HANDLERS.filter((name) => handlers[name].mock.calls.length === 0)).toEqual([]);
+  });
+
+  it('offers row actions only for a session the drawer lists', () => {
+    const commands = buildAppCommands(
+      { ...state, sessionListed: false },
+      mockHandlers(APP_HANDLERS)
+    );
+    const unavailable = commands.filter((c) => !c.isAvailable(context)).map((c) => c.id);
+    expect(unavailable).toEqual([
+      'session:rename',
+      'session:copy',
+      'session:copy-link',
+      'session:copy-trigger-url',
+      'session:delete',
+    ]);
   });
 });
 
