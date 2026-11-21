@@ -245,12 +245,13 @@ function App() {
   const [agentProposalsAgentId, setAgentProposalsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
   // Flow position of the toolbar drop that opened the current create dialog;
-  // null when it was opened any other way. Taken (and cleared) by the save.
+  // null when it was opened any other way. Cleared only once a create
+  // succeeds: a failed one leaves the dialog open, and its retry still lands there.
   const dropPositionRef = useRef(null);
-  const takeDropPosition = useCallback(() => {
-    const position = dropPositionRef.current;
+  const createAtDropPosition = useCallback(async (create) => {
+    const result = await create(dropPositionRef.current || undefined);
     dropPositionRef.current = null;
-    return position || undefined;
+    return result;
   }, []);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
@@ -2530,13 +2531,14 @@ function App() {
             t('notifications.subscription_updated', { name: data.updates.name })
           );
         } else {
-          const position = takeDropPosition();
-          await persistNewNodes({
-            nodes: [data],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([data], result, position),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [data],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([data], result, position),
+            })
+          );
           showNotification('success', t('notifications.subscription_created', { name: data.name }));
         }
       } catch (error) {
@@ -2549,7 +2551,7 @@ function App() {
         );
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification, t, takeDropPosition]
+    [addNodesToVisualization, updateVisualization, showNotification, t, createAtDropPosition]
   );
 
   // Save agent nodes (create or update)
@@ -2568,14 +2570,15 @@ function App() {
         } else {
           // CREATE
           const { nodes: agentNodes, edges: agentEdges } = data;
-          const position = takeDropPosition();
-          await persistNewNodes({
-            nodes: agentNodes,
-            edges: agentEdges,
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result, position),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: agentNodes,
+              edges: agentEdges,
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result, position),
+            })
+          );
 
           const agentNode = agentNodes.find((n) => n.type === 'Agent');
           showNotification('success', `Agent "${agentNode?.name || 'Agent'}" created`);
@@ -2585,7 +2588,7 @@ function App() {
         showNotification('error', 'Could not save agent');
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification, takeDropPosition]
+    [addNodesToVisualization, updateVisualization, showNotification, createAtDropPosition]
   );
 
   // Callback: Create node from toolbar
@@ -2625,15 +2628,17 @@ function App() {
   // can show them.
   const handleNodeCreated = useCallback(
     (node) =>
-      createDialogNode({
-        node,
-        addNodes: api.addNodes,
-        addNodesToVisualization,
-        showNotification,
-        onDrawn: focusCreatedNode,
-        position: takeDropPosition(),
-      }),
-    [addNodesToVisualization, showNotification, focusCreatedNode, takeDropPosition]
+      createAtDropPosition((position) =>
+        createDialogNode({
+          node,
+          addNodes: api.addNodes,
+          addNodesToVisualization,
+          showNotification,
+          onDrawn: focusCreatedNode,
+          position,
+        })
+      ),
+    [addNodesToVisualization, showNotification, focusCreatedNode, createAtDropPosition]
   );
 
   // Callback: Save a skill node (create or update)
@@ -2649,13 +2654,14 @@ function App() {
           });
           showNotification('success', 'Skill updated');
         } else {
-          const position = takeDropPosition();
-          await persistNewNodes({
-            nodes: [skillData],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([skillData], result, position),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [skillData],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([skillData], result, position),
+            })
+          );
           showNotification('success', `${skillData.type} "${skillData.name}" created`);
         }
       } catch (error) {
@@ -2663,7 +2669,7 @@ function App() {
         showNotification('error', 'Could not save skill');
       }
     },
-    [updateVisualization, addNodesToVisualization, showNotification, takeDropPosition]
+    [updateVisualization, addNodesToVisualization, showNotification, createAtDropPosition]
   );
 
   const handleCreateAKC = useCallback(() => {
@@ -2684,13 +2690,14 @@ function App() {
           });
           showNotification('success', 'Knowledge collection updated');
         } else {
-          const position = takeDropPosition();
-          await persistNewNodes({
-            nodes: [nodeData],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([nodeData], result, position),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [nodeData],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([nodeData], result, position),
+            })
+          );
           showNotification('success', `Collection "${nodeData.name}" created`);
         }
       } catch (error) {
@@ -2698,7 +2705,7 @@ function App() {
         showNotification('error', 'Could not save knowledge collection');
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification, takeDropPosition]
+    [addNodesToVisualization, updateVisualization, showNotification, createAtDropPosition]
   );
 
   const openAppearance = useCallback((id) => {

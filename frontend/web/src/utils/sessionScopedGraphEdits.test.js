@@ -573,7 +573,7 @@ describe('agentCreateToCanvas (handleSaveAgent create branch)', () => {
     ]);
   });
 
-  it('pins only the Agent at a drop position', () => {
+  it('pins the Agent at a drop position and its subscription below it', () => {
     const drawn = agentCreateToCanvas(
       agentNodes,
       agentEdges,
@@ -581,7 +581,7 @@ describe('agentCreateToCanvas (handleSaveAgent create branch)', () => {
       { x: 5, y: 7 }
     );
     expect(drawn.nodes.map((n) => [n.type, n._savedPosition])).toEqual([
-      ['EventSubscription', undefined],
+      ['EventSubscription', { x: 5, y: 247 }],
       ['Agent', { x: 5, y: 7 }],
     ]);
   });

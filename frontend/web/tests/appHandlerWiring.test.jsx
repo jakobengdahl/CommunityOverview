@@ -488,20 +488,33 @@ describe('App handler wiring', () => {
     ['Actor', 'onNodeCreated'],
     ['EventSubscription', 'onSaveSubscription'],
     ['ActiveKnowledgeCollection', 'onSaveAKC'],
-  ])('a %s dropped from the toolbar is drawn at the drop point', async (type, handler) => {
-    await renderApp();
-    const data = { type, name: 'Dropped' };
-    api.addNodes.mockResolvedValue({ success: true, added_node_ids: ['dropped-1'] });
+  ])(
+    'a %s dropped from the toolbar is drawn at the drop point, also on a retry',
+    async (type, handler) => {
+      await renderApp();
+      const data = { type, name: 'Dropped' };
+      api.addNodes
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue({ success: true, added_node_ids: ['dropped-1'] });
 
-    act(() => canvas().onDropCreateNode(type, { x: 120, y: -40 }));
-    await act(async () => {
-      await dialogs()[handler](data);
-    });
+      act(() => canvas().onDropCreateNode(type, { x: 120, y: -40 }));
+      // The first save fails and the dialog stays open; the retry succeeds.
+      await act(async () => {
+        await dialogs()
+          [handler](data)
+          .catch(() => {});
+      });
+      await act(async () => {
+        await dialogs()[handler](data);
+      });
 
-    // The position is the canvas's alone; the server is sent the node as entered.
-    expect(api.addNodes).toHaveBeenCalledWith([data], []);
-    await waitFor(() => expect(findNode('dropped-1')?._savedPosition).toEqual({ x: 120, y: -40 }));
-  });
+      // The position is the canvas's alone; the server is sent the node as entered.
+      expect(api.addNodes).toHaveBeenCalledWith([data], []);
+      await waitFor(() =>
+        expect(findNode('dropped-1')?._savedPosition).toEqual({ x: 120, y: -40 })
+      );
+    }
+  );
 
   it('does not place a toolbar-created node at an earlier abandoned drop point', async () => {
     await renderApp();

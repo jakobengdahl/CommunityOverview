@@ -649,6 +649,10 @@ export function createdNodesToCanvas(nodes, result, position) {
   };
 }
 
+// How far below a dropped Agent its EventSubscription is drawn; the canvas
+// layout's parent-to-child offset.
+const AGENT_SUBSCRIPTION_OFFSET_Y = 240;
+
 /**
  * Map an agent create's addNodes result onto the Agent, its subscription and the
  * edge between them, so the canvas edge points at the ids the server assigned.
@@ -656,16 +660,21 @@ export function createdNodesToCanvas(nodes, result, position) {
  * @param {Array} agentNodes  The Agent and EventSubscription nodes as sent.
  * @param {Array} agentEdges  The edges as sent.
  * @param {Object} result  The addNodes reply.
- * @param {{x: number, y: number}} [position]  Flow position for the Agent node.
+ * @param {{x: number, y: number}} [position]  Flow position for the Agent node; its
+ *   subscription is drawn below it.
  * @returns {{nodes: Array, edges: Array}|null} What to draw, or null when nothing was created.
  */
 export function agentCreateToCanvas(agentNodes, agentEdges, result, position) {
   const created = createdNodesToCanvas(agentNodes, result);
   if (!created) return null;
   if (position) {
-    created.nodes = created.nodes.map((n) =>
-      n.type === 'Agent' ? { ...n, _savedPosition: position } : n
-    );
+    // Pin the subscription too: one saved position makes the canvas skip its
+    // layout, so an unpinned companion would land at the origin.
+    const below = { x: position.x, y: position.y + AGENT_SUBSCRIPTION_OFFSET_Y };
+    created.nodes = created.nodes.map((n) => ({
+      ...n,
+      _savedPosition: n.type === 'Agent' ? position : below,
+    }));
   }
   const ids = result.added_node_ids;
   const agentId = ids[agentNodes.findIndex((n) => n.type === 'Agent')];
