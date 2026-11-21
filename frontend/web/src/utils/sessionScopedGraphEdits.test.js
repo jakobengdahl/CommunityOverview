@@ -573,6 +573,19 @@ describe('agentCreateToCanvas (handleSaveAgent create branch)', () => {
     ]);
   });
 
+  it('pins the Agent at a drop position and its subscription below it', () => {
+    const drawn = agentCreateToCanvas(
+      agentNodes,
+      agentEdges,
+      { added_node_ids: ['sub-1', 'agent-1'] },
+      { x: 5, y: 7 }
+    );
+    expect(drawn.nodes.map((n) => [n.type, n._savedPosition])).toEqual([
+      ['EventSubscription', { x: 5, y: 247 }],
+      ['Agent', { x: 5, y: 7 }],
+    ]);
+  });
+
   it('keeps the sent edge id when the server returns none', () => {
     const drawn = agentCreateToCanvas(agentNodes, agentEdges, {
       added_node_ids: ['sub-1', 'agent-1'],
