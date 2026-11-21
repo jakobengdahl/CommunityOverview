@@ -408,7 +408,8 @@ hardware/browser and p50/p95; use the confirmed relative 10% budget. The scenes,
 how to run them, the results measured so far and the accessibility review
 against this section are recorded in
 [node-shapes/library-gates.md](node-shapes/library-gates.md), with the latest
-full 1,000- and 5,000-node gate run and its verdict per scene.
+full 1,000- and 5,000-node gate run and its verdict per scene, measured with
+software rendering.
 
 ## Migration and small implementation phases
 

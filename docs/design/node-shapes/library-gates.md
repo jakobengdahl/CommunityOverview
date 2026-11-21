@@ -82,17 +82,42 @@ arithmetic.
 The full matrix: 1,000 and 5,000 nodes, scales 0.1, 1 and 10, both themes,
 five runs per scene, seed 20261120, at commit e966b27 (this change). It ran on
 a shared host (72 cores, other work running) and the browser reported
-SwiftShader (software rendering), so the frame-time rows carry host noise;
-pan frame times also move in steps of one 60 Hz frame (16.7 ms), which makes
-small changes show as large percentages. The heap rows do not depend on host
-load.
+SwiftShader (software rendering). Pan frame times move in steps of one 60 Hz
+frame (16.7 ms), so a one-frame change shows as a large percentage. The heap
+rows do not depend on host load.
 
 Result: 42 rows pass and 30 fail, against 22 and 50 at d90a04f the day
-before. Heap is now 2 to 4 % over the legacy card in every scene (it was 12
-to 17 %), within the 10 % budget. Initial render, Load More and pan frame
-time still miss the budget in part of the scenes; with the host noise above,
-those rows need a run on a quiet machine with GPU rendering before they count
-as a verdict. Library writes stay off.
+before. The Budget column is this run's verdict per scene, failures
+included. Heap is now 2 to 4 % over the legacy card in every scene (it was 12
+to 17 %), within the 10 % budget. Initial render, Load More, pan and edge
+update frame time miss the budget in part of the scenes. These verdicts hold
+for software rendering on this host; a run with GPU rendering has not been
+made, so how they compare there is not measured. Library writes stay off.
+
+- **Pan frame at 1,000 nodes is one frame slower.** At scales 0.1 and 1 the
+  shaped p50 is 50.0 ms against 33.3 ms for the legacy card, and p95 is 66.7
+  against 50.0 ms, in all four scenes. At scale 10 p50 is equal and p95 is
+  one frame slower. The d90a04f run shows the same steps in the same scenes.
+  A result that repeats in every scene of both runs is not host noise: on
+  this renderer the shaped scene drops one more frame per pan frame at 1,000
+  nodes. The cause has not been measured. One difference the table does show
+  is that the shaped scene has 44 % more DOM nodes (23,079 against 16,079).
+- **5,000 nodes, dark, scale 10: the Load More p95 is an outlier.** With
+  five runs, the nearest-rank p95 is the slowest run. So 478,944.3 ms is one
+  shaped run, 5.7 times the scene's own p50 of 83,748.6 ms. No click hit the
+  600 s settle timeout, and no run failed. The runner keeps only p50/p95 per
+  scene, not per-run values, so the cause of that one slow run was not
+  captured. To check it, the scene was run again on its own (five runs, seed
+  20261120, same host and renderer, load average 25 to 29). That run used
+  commit 73ce1e4, which adds only the command box's toolbox activation to the
+  canvas package since e966b27. The slow run did not repeat:
+
+  | Metric | Legacy p50 / p95 | Shaped p50 / p95 | Change p50 / p95 | Budget |
+  | --- | --- | --- | --- | --- |
+  | loadAll | 78956.2 / 79901.2 | 84592.0 / 92108.9 | +7.1% / +15.3% | fail |
+
+  The scene's Load More row still fails: p50 is within the budget in both
+  runs, and p95 is over it in both.
 
 | Run | Value |
 | --- | --- |
