@@ -1,6 +1,7 @@
 # covers: backend/ui/chat_logic.py
-"""Attachment refusal audit coverage for the chat processor."""
+"""Chat processor coverage: attachment refusal audit and system prompt rules."""
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -198,3 +199,35 @@ def test_attachment_non_object_audit(chat_service, monkeypatch, caplog, name):
     assert len(lines) == 1
     assert "SECRET-file-query" not in lines[0]
     assert json.loads(lines[0])["outcome"] == "invalid_arguments"
+
+
+def test_write_verification_rules_reach_prompt_and_name_only_offered_tools(
+    chat_service,
+):
+    """All four rules are in the prompt; every tool they call is advertised."""
+    from backend.ui import chat_logic
+
+    service, _ = chat_service
+    prompt = chat_logic._build_system_prompt()
+    offered = {t["name"] for t in service._processor.tool_definitions}
+    rules = chat_logic._WRITE_VERIFICATION_RULES
+    called = {name for rule in rules for name in re.findall(r"(\w+)\(", rule)}
+
+    assert len(rules) == 4
+    assert all(rule in prompt for rule in rules)
+    assert called and called <= offered
+
+
+def test_prompt_prefix_and_suffix_still_wrap_the_base_prompt(monkeypatch):
+    """Presentation prefix opens and suffix closes around the added rules."""
+    from backend.ui import chat_logic
+
+    presentation = {"prompt_prefix": "PREFIX-MARK", "prompt_suffix": "SUFFIX-MARK"}
+    monkeypatch.setattr(
+        chat_logic.config_loader, "get_presentation", lambda: presentation
+    )
+    prompt = chat_logic._build_system_prompt()
+    section = prompt.index(chat_logic._WRITE_VERIFICATION_SECTION)
+
+    assert prompt.startswith("PREFIX-MARK")
+    assert section < prompt.index("SUFFIX-MARK")
