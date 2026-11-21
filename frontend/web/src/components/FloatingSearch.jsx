@@ -3,6 +3,7 @@ import { Search, BoxArrowUpRight } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
+import { searchVisibleNodes } from '../commands/commandSuggestions';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
 import { savedViewLayout, savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
@@ -194,11 +195,8 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       activeSearchRef.current = searchId;
       setIsLoading(true);
       try {
-        const result = await api.searchGraph(query, { limit: 10, federationDepth });
+        const nodes = await searchVisibleNodes(query, { limit: 10, federationDepth });
         if (cancelled || activeSearchRef.current !== searchId) return;
-        const nodes = (result.nodes || []).filter(
-          (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
-        );
         setResults(nodes);
         setResultsQuery(query);
         setSelectedIndex(0);
