@@ -43,7 +43,11 @@ class FakeClient {
 FakeClient.instances = [];
 
 vi.mock('../services/sessionSyncClient', () => ({
-  SessionSyncClient: vi.fn((opts) => new FakeClient(opts)),
+  // Vitest 4+ calls a constructed mock's implementation with `new`, so it must
+  // be a function expression, not an arrow.
+  SessionSyncClient: vi.fn(function (opts) {
+    return new FakeClient(opts);
+  }),
 }));
 
 beforeEach(() => {
@@ -112,7 +116,7 @@ describe('useSyncConnection.ensureSyncConnected', () => {
   // and the un-guarded auto-save call site throws.
   it('returns null and leaves syncRef empty when connect throws', () => {
     const { result } = renderHook(() => useSyncConnection('1111-2222'));
-    SessionSyncClient.mockImplementationOnce((opts) => {
+    SessionSyncClient.mockImplementationOnce(function (opts) {
       const c = new FakeClient(opts);
       c.connectImpl = () => {
         throw new Error('bad stream url');
