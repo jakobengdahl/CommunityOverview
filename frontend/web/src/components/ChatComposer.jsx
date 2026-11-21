@@ -26,6 +26,21 @@ export function formatNodeReference(node) {
 
 const isComposingKey = (e) => e.nativeEvent?.isComposing || e.keyCode === 229;
 
+// Space kept between the popup and the visual viewport's top edge, beyond the
+// popup's own offset above the box.
+const POPUP_VIEWPORT_MARGIN_PX = 8;
+
+/**
+ * The `[start, end)` span of the whitespace-delimited word at `caret`: what a
+ * plain-mode suggestion is queried with and what accepting one replaces.
+ */
+export function wordAtCaret(text, caret) {
+  return {
+    start: text.slice(0, caret).search(/\S*$/),
+    end: caret + text.slice(caret).search(/\s|$/),
+  };
+}
+
 /**
  * ChatPanel's single chat input. Inside the interactive App, which provides the
  * command registry, it is the command box (docs/COMMAND_BOX_DESIGN.md); without
@@ -60,19 +75,34 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   const { t, language } = useI18n();
   const schema = useGraphStore((s) => s.schema);
   const baseId = useId();
+  const boxRef = useRef(null);
   const inputRef = useRef(null);
   const pendingCaret = useRef(null);
 
   const [focused, setFocused] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [activeKey, setActiveKey] = useState(null);
+  // The caret as last reported for `value`; any other value has it at the end.
+  const [selection, setSelection] = useState({ value: '', caret: 0 });
   const [frozenInput, setFrozenInput] = useState(null);
   const [failure, setFailure] = useState(null);
+  const [popupSpace, setPopupSpace] = useState(null);
 
   const context = useMemo(() => ({ view: 'interactive', locale: language }), [language]);
   const nodeTypes = useMemo(() => getSuggestedNodeTypes(schema, language), [schema, language]);
+  const caret = selection.value === value ? selection.caret : value.length;
   // During IME composition the query stays at its pre-composition text.
-  const { mode, items, status } = useCommandSuggestions(frozenInput ?? value, context, nodeTypes);
+  const queried = frozenInput ?? { value, caret };
+  const word = wordAtCaret(queried.value, queried.caret);
+  // Slash mode reads the whole draft; plain mode completes the word at the
+  // caret, so a reference can be composed into a sentence. A slash-led word
+  // there is ordinary text and must not open command mode.
+  let suggestionInput = queried.value;
+  if (parseCommandInput(queried.value).mode !== 'command') {
+    const text = queried.value.slice(word.start, word.end);
+    suggestionInput = text.startsWith('/') ? '' : text;
+  }
+  const { mode, items, status } = useCommandSuggestions(suggestionInput, context, nodeTypes);
 
   const keyOf = (item) => `${item.kind}:${item.id}`;
   const optionId = (item) => `${baseId}-opt-${keyOf(item).replace(/[^\w-]/g, '_')}`;
@@ -90,6 +120,25 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     pendingCaret.current = null;
   }, [value]);
 
+  // dvh ignores an on-screen keyboard on iOS, so bound the popup by the room
+  // left above the box in the visual viewport instead.
+  useLayoutEffect(() => {
+    const vv = window.visualViewport;
+    if (!open || !vv) return undefined;
+    const measure = () => {
+      const top = boxRef.current?.getBoundingClientRect().top;
+      if (top == null) return;
+      setPopupSpace(Math.max(0, Math.floor(top - vv.offsetTop - POPUP_VIEWPORT_MARGIN_PX)));
+    };
+    measure();
+    vv.addEventListener('resize', measure);
+    vv.addEventListener('scroll', measure);
+    return () => {
+      vv.removeEventListener('resize', measure);
+      vv.removeEventListener('scroll', measure);
+    };
+  }, [open]);
+
   useEffect(() => {
     if (activeItem)
       document.getElementById(optionId(activeItem))?.scrollIntoView?.({ block: 'nearest' });
@@ -100,20 +149,22 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     setActiveKey(null);
   };
 
-  const edit = (text) => {
+  const edit = (target) => {
     setActiveKey(null);
     setDismissed(false);
     setFailure(null);
-    onChange(text);
+    setSelection({ value: target.value, caret: target.selectionStart ?? target.value.length });
+    onChange(target.value);
   };
 
-  // Node and type suggestions complete the text they matched: plain mode
-  // queries the whole trimmed draft, so that text is what gets replaced.
+  // Node and type suggestions replace the word at the caret they were queried with.
   const insert = (text) => {
-    const start = value.length - value.trimStart().length;
-    const end = value.trimEnd().length;
-    const next = `${value.slice(0, start)}${text} ${value.slice(end).trimStart()}`;
-    pendingCaret.current = start + text.length + 1;
+    const { start, end } = wordAtCaret(value, caret);
+    const rest = value.slice(end);
+    const next = `${value.slice(0, start)}${text}${/^\s/.test(rest) ? '' : ' '}${rest}`;
+    const nextCaret = start + text.length + 1;
+    pendingCaret.current = nextCaret;
+    setSelection({ value: next, caret: nextCaret });
     close();
     onChange(next);
     inputRef.current?.focus();
@@ -187,13 +238,14 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   }
 
   return (
-    <div className="command-box">
+    <div className="command-box" ref={boxRef}>
       {open && (
         <ul
           id={listboxId}
           className="command-box-popup"
           role="listbox"
           aria-label={t('command_box.suggestions')}
+          style={popupSpace === null ? undefined : { maxHeight: `min(20rem, ${popupSpace}px)` }}
         >
           {items.map((item) => {
             const selected = item === activeItem;
@@ -227,9 +279,12 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
         aria-controls={open ? listboxId : undefined}
         aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
         value={value}
-        onChange={(e) => edit(e.target.value)}
+        onChange={(e) => edit(e.target)}
+        onSelect={(e) =>
+          setSelection({ value: e.target.value, caret: e.target.selectionStart ?? 0 })
+        }
         onKeyDown={handleKeyDown}
-        onCompositionStart={() => setFrozenInput(value)}
+        onCompositionStart={() => setFrozenInput({ value, caret })}
         onCompositionEnd={() => setFrozenInput(null)}
         onFocus={(e) => {
           setFocused(true);

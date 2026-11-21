@@ -556,7 +556,9 @@
 
 /* Command box (ChatComposer.jsx): the suggestion list is anchored above the
    input, over the chat history, with bounded height and its own scrolling. On
-   mobile the hosting BottomSheet keeps the composer above the keyboard. */
+   mobile the hosting BottomSheet keeps the composer above the keyboard, and the
+   component narrows max-height inline to the room left in the visual viewport
+   (dvh below is only the fallback where visualViewport is missing). */
 .command-box {
   position: relative;
 }

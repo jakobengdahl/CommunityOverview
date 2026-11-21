@@ -40,7 +40,8 @@ const renderComposer = () => {
   act(() => input.focus());
   return input;
 };
-const type = (input, value) => fireEvent.change(input, { target: { value } });
+const type = (input, value, caret = value.length) =>
+  fireEvent.change(input, { target: { value, selectionStart: caret, selectionEnd: caret } });
 const settle = () => act(async () => vi.advanceTimersByTimeAsync(NODE_QUERY_DEBOUNCE_MS));
 const options = () => screen.queryAllByRole('option');
 const key = (input, k, init = {}) => fireEvent.keyDown(input, { key: k, ...init });
@@ -138,14 +139,22 @@ describe('ChatComposer', () => {
     expect(registry.get('beta').execute).not.toHaveBeenCalled();
   });
 
-  it('inserts a node reference or a type label without sending, and keeps focus', async () => {
+  it('inserts a node reference at the caret or a type label without sending, and keeps focus', async () => {
     const input = renderComposer();
-    type(input, ' goals ');
+    // A slash-led word mid-sentence is ordinary text, not command mode.
+    type(input, 'see /alpha');
     await settle();
+    expect(options()).toHaveLength(0);
+
+    const draft = 'tell me about goals please';
+    type(input, draft, draft.indexOf(' please'));
+    await settle();
+    expect(api.searchGraph).toHaveBeenLastCalledWith('goals', expect.anything());
     key(input, 'ArrowDown');
     key(input, 'Enter');
-    expect(input).toHaveValue(` ${formatNodeReference(goalNode)} `);
-    expect(input.selectionStart).toBe(input.value.length);
+    const reference = formatNodeReference(goalNode);
+    expect(input).toHaveValue(`tell me about ${reference} please`);
+    expect(input.selectionStart).toBe(`tell me about ${reference} `.length);
 
     type(input, 'goal');
     await settle();
@@ -175,6 +184,26 @@ describe('ChatComposer', () => {
     await act(async () => key(input, 'Tab'));
     expect(input).toHaveValue('/broken');
     expect(screen.getByRole('status')).toHaveTextContent('command_box.command_failed');
+  });
+
+  it('bounds the popup by the room above the box in the visual viewport', () => {
+    const viewport = Object.assign(new EventTarget(), { offsetTop: 0, height: 400 });
+    vi.stubGlobal('visualViewport', viewport);
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({ top: 300 });
+    try {
+      const input = renderComposer();
+      type(input, '/');
+      expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 292px)');
+      // The keyboard opening scrolls the visual viewport down over the page.
+      viewport.offsetTop = 200;
+      act(() => viewport.dispatchEvent(new Event('scroll')));
+      expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 92px)');
+    } finally {
+      rect.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('accepts a tapped row before blur can dismiss it; leaving the box closes the list', async () => {
