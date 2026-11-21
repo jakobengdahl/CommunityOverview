@@ -95,8 +95,9 @@ for software rendering on this host; a run with GPU rendering has not been
 made, so how they compare there is not measured. Library writes stay off.
 
 - **Pan frame at 1,000 nodes is one frame slower.** At scales 0.1 and 1 the
-  shaped p50 is 50.0 ms against 33.3 ms for the legacy card, and p95 is 66.7
-  against 50.0 ms, in all four scenes. At scale 10 p50 is equal and p95 is
+  shaped p50 is 50.0 ms and p95 66.7 ms in all four scenes. The legacy card
+  has p50 33.3 ms at scale 0.1 and 33.4 ms at scale 1, and p95 50.0 ms,
+  except 50.1 ms in the dark scene at scale 0.1. At scale 10 p50 is equal and p95 is
   one frame slower. The d90a04f run shows the same steps in the same scenes.
   A result that repeats in every scene of both runs is not host noise: on
   this renderer the shaped scene drops one more frame per pan frame at 1,000
