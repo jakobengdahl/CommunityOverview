@@ -204,7 +204,8 @@ def test_attachment_non_object_audit(chat_service, monkeypatch, caplog, name):
 def test_write_verification_rules_reach_prompt_and_name_only_offered_tools(
     chat_service,
 ):
-    """All four rules are in the prompt; every tool they call is advertised."""
+    """All four rules are in the prompt, call only advertised tools, and let
+    add_nodes() edges name nodes created in the same call."""
     from backend.ui import chat_logic
 
     service, _ = chat_service
@@ -213,9 +214,17 @@ def test_write_verification_rules_reach_prompt_and_name_only_offered_tools(
     rules = chat_logic._WRITE_VERIFICATION_RULES
     called = {name for rule in rules for name in re.findall(r"(\w+)\(", rule)}
 
+    add_nodes = next(
+        t for t in service._processor.tool_definitions if t["name"] == "add_nodes"
+    )
+    node_fields = add_nodes["input_schema"]["properties"]["nodes"]["items"]
+
     assert len(rules) == 4
     assert all(rule in prompt for rule in rules)
     assert called and called <= offered
+    # add_nodes() offers no nodes[].id, so ID-first must exempt same-call nodes.
+    assert "id" not in node_fields["properties"]
+    assert rules[3].endswith(chat_logic._SAME_CALL_EDGE_EXEMPTION)
 
 
 def test_prompt_prefix_and_suffix_still_wrap_the_base_prompt(monkeypatch):

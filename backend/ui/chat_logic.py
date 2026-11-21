@@ -193,6 +193,15 @@ def _build_system_prompt() -> str:
     )
 
 
+# add_nodes() nodes carry no client-side id (ids are server-generated) and
+# edge endpoints accept a name, so a node created in the same call can only be
+# referenced by the name it is being created with.
+_SAME_CALL_EDGE_EXEMPTION = (
+    "Exception: an edge in add_nodes() that points at a node created in that "
+    "same call uses the new node's exact name, since it has no ID yet."
+)
+
+
 # Read-backs name get_related_nodes because the chat tool set has no
 # get_node_details; it always returns the anchor node in full, by ID.
 _WRITE_VERIFICATION_RULES = (
@@ -217,11 +226,12 @@ _WRITE_VERIFICATION_RULES = (
     "include_archived=true) and present the values it returns now, then fix "
     "any remaining difference with the user's approval.",
     "RESOLVE IDS FIRST: Before any update, archive, delete or edge operation, "
-    "resolve every node the user names to its unique ID with search_graph() "
-    "or find_similar_nodes_batch(). If a name matches several nodes, ask the "
-    "user which one is meant. Pass those exact IDs to every following call, "
-    "including edge source and target in add_nodes(), and reuse the IDs that "
-    "add_nodes() returns for nodes it created, never their names.",
+    "resolve every existing node the user names to its unique ID with "
+    "search_graph() or find_similar_nodes_batch(). If a name matches several "
+    "nodes, ask the user which one is meant. Pass those exact IDs to every "
+    "following call, including edge source and target in add_nodes(), and in "
+    "later calls reuse the IDs that add_nodes() returns for nodes it created, "
+    "never their names. " + _SAME_CALL_EDGE_EXEMPTION,
 )
 
 _WRITE_VERIFICATION_SECTION = (
