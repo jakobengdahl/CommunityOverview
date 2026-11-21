@@ -592,6 +592,7 @@ export async function openAgentEditor({ agent, getNodeDetails, openEditor, showN
  * @param {Function} params.addNodesToVisualization  Store action: add to the canvas.
  * @param {Function} params.showNotification  Surface the outcome to the user.
  * @param {Function} [params.onDrawn]  Called with the created node once it is drawn.
+ * @param {{x: number, y: number}} [params.position]  Flow position to draw the node at.
  * @returns {Promise<boolean>} Whether the node was drawn.
  */
 export async function createDialogNode({
@@ -600,10 +601,11 @@ export async function createDialogNode({
   addNodesToVisualization,
   showNotification,
   onDrawn,
+  position,
 }) {
   const scope = captureCanvasScope();
   const result = await addNodes([node], []);
-  const created = createdNodesToCanvas([node], result);
+  const created = createdNodesToCanvas([node], result, position);
   if (!created) return false;
   const [createdNode] = created.nodes;
   showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
@@ -626,14 +628,25 @@ export async function createDialogNode({
  * The `toCanvas` of the single-node create branches (subscription, skill,
  * knowledge collection, CreateNodeDialog).
  *
+ * A `position` (a toolbar drop point) pins the first node there as its saved
+ * position, so the canvas draws it where it was dropped instead of auto-placing
+ * it; it is set on the drawn copy only, never sent to the server.
+ *
  * @param {Array} nodes  The nodes as sent.
  * @param {Object} result  The addNodes reply.
+ * @param {{x: number, y: number}} [position]  Flow position for the first node.
  * @returns {{nodes: Array}|null} What to draw, or null when nothing was created.
  */
-export function createdNodesToCanvas(nodes, result) {
+export function createdNodesToCanvas(nodes, result, position) {
   const ids = result?.added_node_ids;
   if (!(ids && ids.length > 0)) return null;
-  return { nodes: nodes.map((node, index) => ({ ...node, id: ids[index] || node.id })) };
+  return {
+    nodes: nodes.map((node, index) => ({
+      ...node,
+      id: ids[index] || node.id,
+      ...(position && index === 0 ? { _savedPosition: position } : {}),
+    })),
+  };
 }
 
 /**
@@ -643,11 +656,17 @@ export function createdNodesToCanvas(nodes, result) {
  * @param {Array} agentNodes  The Agent and EventSubscription nodes as sent.
  * @param {Array} agentEdges  The edges as sent.
  * @param {Object} result  The addNodes reply.
+ * @param {{x: number, y: number}} [position]  Flow position for the Agent node.
  * @returns {{nodes: Array, edges: Array}|null} What to draw, or null when nothing was created.
  */
-export function agentCreateToCanvas(agentNodes, agentEdges, result) {
+export function agentCreateToCanvas(agentNodes, agentEdges, result, position) {
   const created = createdNodesToCanvas(agentNodes, result);
   if (!created) return null;
+  if (position) {
+    created.nodes = created.nodes.map((n) =>
+      n.type === 'Agent' ? { ...n, _savedPosition: position } : n
+    );
+  }
   const ids = result.added_node_ids;
   const agentId = ids[agentNodes.findIndex((n) => n.type === 'Agent')];
   const subscriptionId = ids[agentNodes.findIndex((n) => n.type === 'EventSubscription')];
