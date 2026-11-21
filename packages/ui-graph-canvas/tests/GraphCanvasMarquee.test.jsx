@@ -59,7 +59,10 @@ it('selects triangle bodies and cards through pane selection and node changes', 
   const pane = container.querySelector('.react-flow__pane');
   pane.classList.add('nopan');
   const label = container.querySelector('.graph-shape-outside-label .graph-shape-label-chip');
-  vi.spyOn(label, 'getBoundingClientRect').mockReturnValue({
+  // An own property, not vi.spyOn: since Vitest 4 spying on the inherited,
+  // already-mocked prototype method returns that same mock, so this rect would
+  // leak to every element, the canvas wrapper included.
+  label.getBoundingClientRect = () => ({
     left: 190,
     right: 220,
     top: 75,
