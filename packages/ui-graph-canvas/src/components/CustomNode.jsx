@@ -76,7 +76,7 @@ function shapeLayout(geometry, placement, hasExpand, hasEdit) {
 // Every character a CSS colour can use, and none that could leave the style
 // attribute or start another declaration. Anything else is not a colour, so
 // the paint is left out, as the style property would have ignored it.
-const CSS_COLOR = /^[\w\s#(),.%/+-]+$/;
+const CSS_COLOR = /^[\w\s#(),.%/*+-]+$/;
 
 function paint(property, color) {
   return typeof color === 'string' && CSS_COLOR.test(color) ? ` style="${property}: ${color}"` : '';
