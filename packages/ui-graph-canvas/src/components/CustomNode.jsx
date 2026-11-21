@@ -9,6 +9,114 @@ import {
 } from '../utils/nodeShapes';
 import './CustomNode.css';
 
+const BAND_TEXT_OUTSIDE = Object.freeze({
+  color: 'var(--graph-card-text-primary)',
+  background: 'var(--graph-card-surface)',
+});
+const JUSTIFY = { top: 'flex-start', middle: 'safe center', centre: 'safe center' };
+const ALIGN = { left: 'flex-start', centre: 'center', right: 'flex-end' };
+
+// Everything a shaped node derives from its geometry, placement and buttons,
+// built once and shared by every node with the same inputs: a large canvas
+// then holds one copy of each style object and string, not one per node.
+const shapeLayouts = new WeakMap();
+
+function shapeLayout(geometry, placement, hasExpand, hasEdit) {
+  if (!shapeLayouts.has(geometry)) shapeLayouts.set(geometry, new Map());
+  const cache = shapeLayouts.get(geometry);
+  const key = `${placement}|${hasExpand}|${hasEdit}`;
+  if (cache.has(key)) return cache.get(key);
+  const triangle = Boolean(geometry.vertices);
+  const [vertical, horizontal] = triangle ? [placement, 'centre'] : placement.split('-');
+  const box = nodeShapeTextBox(geometry, placement);
+  const actions = nodeShapeActionLayout(geometry, placement, hasExpand + hasEdit);
+  const [expandSlot, editSlot] = hasExpand ? actions.buttons : [null, actions.buttons[0]];
+  const slotStyle = (slot, em) =>
+    slot &&
+    Object.freeze({
+      left: slot.x,
+      top: slot.y,
+      width: slot.size,
+      height: slot.size,
+      fontSize: `${(em * slot.size) / 24}rem`,
+    });
+  const text = {
+    left: box.x,
+    top: box.y,
+    width: box.width,
+    height: box.height,
+    justifyContent: JUSTIFY[vertical] || 'safe flex-end',
+    alignItems: ALIGN[horizontal],
+    textAlign: horizontal === 'centre' ? 'center' : horizontal,
+    paddingRight: actions.inset,
+  };
+  const layout = Object.freeze({
+    root: Object.freeze({ width: geometry.width, height: geometry.height }),
+    viewBox: `0 0 ${geometry.width} ${geometry.height}`,
+    bandPath: nodeShapeBandPath(geometry),
+    band: Object.freeze({
+      top: triangle ? -geometry.bandHeight : 0,
+      height: geometry.bandHeight,
+      padding: `0 ${geometry.padding}px`,
+      fontSize: `${geometry.text.type}rem`,
+      justifyContent: ALIGN[horizontal],
+    }),
+    text: Object.freeze(text),
+    // Keep at least one title line visible when rem text outgrows the pixel box.
+    textWithTitle: Object.freeze({ ...text, minHeight: `${geometry.text.title * 1.2}rem` }),
+    title: Object.freeze({ fontSize: `${geometry.text.title}rem` }),
+    summary: Object.freeze({ fontSize: `${geometry.text.summary}rem` }),
+    expand: slotStyle(expandSlot, 1),
+    edit: slotStyle(editSlot, 0.8),
+  });
+  cache.set(key, layout);
+  return layout;
+}
+
+// Every character a CSS colour can use, and none that could leave the style
+// attribute or start another declaration. Anything else is not a colour, so
+// the paint is left out, as the style property would have ignored it.
+const CSS_COLOR = /^[\w\s#(),.%/+-]+$/;
+
+function paint(property, color) {
+  return typeof color === 'string' && CSS_COLOR.test(color) ? ` style="${property}: ${color}"` : '';
+}
+
+const shapeLayerMarkup = new WeakMap();
+
+/**
+ * The SVG layers of a shaped node as markup, cached per geometry and state:
+ * a canvas has a few type colours and states, so its nodes share a handful of
+ * strings. Paint order: the shadow under the boundary, so its translucent
+ * fill never dims the 3:1 band; the boundary under every ring, as a state
+ * ring, where shown, is the boundary; rings widest first, so each shows a
+ * band beyond the next one in.
+ */
+function shapeLayers(geometry, bandPath, color, outline, remoteColor, focused, markColor) {
+  if (!shapeLayerMarkup.has(geometry)) shapeLayerMarkup.set(geometry, new Map());
+  const cache = shapeLayerMarkup.get(geometry);
+  const key = JSON.stringify([color, outline, remoteColor, Boolean(focused), markColor]);
+  if (!cache.has(key)) {
+    const path = (className, extra = '', d = geometry.path) =>
+      `<path class="${className}" d="${d}"${extra}></path>`;
+    const ring = (state, extra) => path(`graph-shape-ring graph-shape-ring-${state}`, extra);
+    cache.set(key, {
+      __html: [
+        path('graph-shape-shadow'),
+        path('graph-shape-boundary'),
+        ring('keyboard'),
+        typeof remoteColor === 'string' ? ring('remote', paint('stroke', remoteColor)) : '',
+        focused ? ring('focus') : '',
+        markColor ? ring('mark', paint('stroke', `${markColor}66`)) : '',
+        path('graph-shape-body'),
+        path('graph-shape-band', paint('fill', color), bandPath),
+        path('graph-shape-outline', paint('stroke', outline)),
+      ].join(''),
+    });
+  }
+  return cache.get(key);
+}
+
 /**
  * CustomNode - A graph node component for displaying entities
  *
@@ -136,6 +244,7 @@ function CustomNode({ data, id, selected }) {
 
   const skillBadge = isSkill && (
     <span
+      key="skill"
       className="skill-node-badge"
       title="Skill — select and ask the AI to apply these instructions"
     >
@@ -198,34 +307,20 @@ function CustomNode({ data, id, selected }) {
     );
 
   if (geometry) {
-    const { placement } = data.shapeRender.definition;
     const values = data.shapeRender.values;
-    const [vertical, horizontal] = triangle ? [placement, 'centre'] : placement.split('-');
-    const align = { left: 'flex-start', centre: 'center', right: 'flex-end' }[horizontal];
-    const box = nodeShapeTextBox(geometry, placement);
-    const actions = nodeShapeActionLayout(
+    const layout = shapeLayout(
       geometry,
-      placement,
-      [data.onExpand, data.onEdit].filter(Boolean).length
+      data.shapeRender.definition.placement,
+      Boolean(data.onExpand),
+      Boolean(data.onEdit)
     );
-    const [expandSlot, editSlot] = data.onExpand ? actions.buttons : [null, actions.buttons[0]];
-    const slotStyle = (slot, em) =>
-      slot && {
-        left: slot.x,
-        top: slot.y,
-        width: slot.size,
-        height: slot.size,
-        fontSize: `${(em * slot.size) / 24}rem`,
-      };
     const outline = data.markColor || data.color;
-    const bandText = triangle
-      ? { color: 'var(--graph-card-text-primary)', background: 'var(--graph-card-surface)' }
-      : bandTextStyle(data.color);
+    const bandText = triangle ? BAND_TEXT_OUTSIDE : bandTextStyle(data.color);
     return (
       <div
         ref={nodeRef}
         className={`graph-shaped-node graph-shape-${geometry.base} ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''} ${remote ? 'remote-selected' : ''} ${data.isDimmed ? 'dimmed' : ''} ${staged ? `staged staged-${staged}` : ''}`}
-        style={{ width: geometry.width, height: geometry.height }}
+        style={layout.root}
         {...mouseHandlers}
       >
         <Handle type="target" position={Position.Top} />
@@ -235,84 +330,45 @@ function CustomNode({ data, id, selected }) {
           focusable="false"
           width={geometry.width}
           height={geometry.height}
-          viewBox={`0 0 ${geometry.width} ${geometry.height}`}
-        >
-          {/* Under the boundary, so its translucent fill never dims the 3:1 band. */}
-          <path className="graph-shape-shadow" d={geometry.path} />
-          {/* Under every ring: a state ring, where shown, is the boundary. */}
-          <path className="graph-shape-boundary" d={geometry.path} />
-          {/* Widest first: each ring shows a band beyond the next one in. */}
-          <path className="graph-shape-ring graph-shape-ring-keyboard" d={geometry.path} />
-          {remote && (
-            <path
-              className="graph-shape-ring graph-shape-ring-remote"
-              d={geometry.path}
-              style={{ stroke: remote.color }}
-            />
+          viewBox={layout.viewBox}
+          // Decoration only: no state, handlers or text, so one shared markup
+          // string per look replaces a fiber and props object per layer.
+          dangerouslySetInnerHTML={shapeLayers(
+            geometry,
+            layout.bandPath,
+            data.color,
+            outline,
+            remote ? String(remote.color ?? '') : null,
+            selected || data.isHighlighted,
+            data.markColor
           )}
-          {(selected || data.isHighlighted) && (
-            <path className="graph-shape-ring graph-shape-ring-focus" d={geometry.path} />
-          )}
-          {data.markColor && (
-            <path
-              className="graph-shape-ring graph-shape-ring-mark"
-              d={geometry.path}
-              style={{ stroke: `${data.markColor}66` }}
-            />
-          )}
-          <path className="graph-shape-body" d={geometry.path} />
-          <path
-            className="graph-shape-band"
-            d={nodeShapeBandPath(geometry)}
-            style={{ fill: data.color }}
-          />
-          <path className="graph-shape-outline" d={geometry.path} style={{ stroke: outline }} />
-        </svg>
+        />
 
         {stateOverlays}
 
         <div
           className={`graph-shape-band-text${triangle ? ' graph-shape-outside-label' : ''}`}
-          style={{
-            top: triangle ? -geometry.bandHeight : 0,
-            height: geometry.bandHeight,
-            padding: `0 ${geometry.padding}px`,
-            fontSize: `${geometry.text.type}rem`,
-            justifyContent: align,
-          }}
+          style={layout.band}
         >
           {(skillBadge || values.first) && (
             <span className="graph-shape-label-chip" style={bandText}>
-              {skillBadge}
-              {values.first}
+              {/* A lone string child needs no text fiber of its own. */}
+              {skillBadge ? [skillBadge, values.first] : values.first}
             </span>
           )}
         </div>
 
         <div
           className="graph-shape-text"
-          style={{
-            left: box.x,
-            top: box.y,
-            width: box.width,
-            height: box.height,
-            // Keep at least one title line visible when rem text outgrows the pixel box.
-            minHeight: values.second ? `${geometry.text.title * 1.2}rem` : undefined,
-            justifyContent:
-              { top: 'flex-start', middle: 'safe center', centre: 'safe center' }[vertical] ||
-              'safe flex-end',
-            alignItems: align,
-            textAlign: horizontal === 'centre' ? 'center' : horizontal,
-            paddingRight: actions.inset,
-          }}
+          style={values.second ? layout.textWithTitle : layout.text}
         >
           {values.second && (
-            <div className="graph-node-label" style={{ fontSize: `${geometry.text.title}rem` }}>
+            <div className="graph-node-label" style={layout.title}>
               {values.second}
             </div>
           )}
           {values.third && (
-            <div className="graph-node-summary" style={{ fontSize: `${geometry.text.summary}rem` }}>
+            <div className="graph-node-summary" style={layout.summary}>
               {values.third}
             </div>
           )}
@@ -323,7 +379,7 @@ function CustomNode({ data, id, selected }) {
 
         {/* Inside the body, so no hover path leaves it; also shown while
             selected, so a keyboard user can Tab to them. */}
-        {actionButtons(showButtons || selected, slotStyle(expandSlot, 1), slotStyle(editSlot, 0.8))}
+        {actionButtons(showButtons || selected, layout.expand, layout.edit)}
         {tooltip}
         <Handle type="source" position={Position.Bottom} />
       </div>

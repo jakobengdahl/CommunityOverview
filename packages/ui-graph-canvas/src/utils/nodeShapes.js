@@ -142,16 +142,24 @@ export const BAND_TEXT_DARK = '#000000';
  * that cannot be parsed gets an opaque backing in the card tokens instead.
  */
 export function bandTextStyle(color) {
-  if (luminance(color) === null) {
-    return {
-      color: 'var(--graph-card-text-primary)',
-      background: 'var(--graph-card-surface)',
-    };
+  if (!bandTextStyles.has(color)) {
+    let style = BAND_TEXT_BACKED;
+    if (contrastRatio(color, BAND_TEXT_LIGHT) >= 4.5) style = BAND_TEXT_ON_DARK;
+    else if (contrastRatio(color, BAND_TEXT_DARK) >= 4.5) style = BAND_TEXT_ON_LIGHT;
+    bandTextStyles.set(color, style);
   }
-  if (contrastRatio(color, BAND_TEXT_LIGHT) >= 4.5) return { color: BAND_TEXT_LIGHT };
-  if (contrastRatio(color, BAND_TEXT_DARK) >= 4.5) return { color: BAND_TEXT_DARK };
-  return { color: 'var(--graph-card-text-primary)', background: 'var(--graph-card-surface)' };
+  return bandTextStyles.get(color);
 }
+
+// One frozen style per outcome, cached by type colour, so a large canvas
+// holds no per-node copies.
+const bandTextStyles = new Map();
+const BAND_TEXT_BACKED = Object.freeze({
+  color: 'var(--graph-card-text-primary)',
+  background: 'var(--graph-card-surface)',
+});
+const BAND_TEXT_ON_DARK = Object.freeze({ color: BAND_TEXT_LIGHT });
+const BAND_TEXT_ON_LIGHT = Object.freeze({ color: BAND_TEXT_DARK });
 
 // Triangle text stacks as fractions of the body, chosen so every corner stays
 // inside the polygon; a downward triangle's bottom stops well above its tip.

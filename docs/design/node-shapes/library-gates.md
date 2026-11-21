@@ -362,7 +362,7 @@ WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 
 | Rule | Verdict | Evidence |
 | --- | --- | --- |
-| Memoize definitions by key and revision, and the resolved look by node and type revision | Fail | `GraphCanvas` rebuilds one resolver whenever the schema, saved shapes, overrides or type defaults change. It then resolves every node again in the node `useMemo`, which also reruns on highlight, dim, mark and presence changes. Nothing is cached per key, revision or node |
+| Memoize definitions by key and revision, and the resolved look by node and type revision | Partial | Revised with the current gate run, after 7b08a1c: `GraphCanvas` keeps each node's resolved look (definition, area texts, geometry, accessible name) per graph node object, so Load More and highlight, dim, mark and presence changes reuse it, and `CustomNode` shares its geometry-derived styles and SVG layer markup across nodes with the same look. Any change to the schema, saved shapes, overrides or type defaults still drops every look, and definitions are not cached per key and revision (see the invalidation row) |
 | Cache normalized geometry per base and scale; batch measurements | Pass | A module cache in `nodeShapes.js`, keyed by base and scale, returns frozen descriptors. Geometry is computed, not measured in the DOM |
 | Reuse inline paths; no per-node filters or effects; lightweight shadows | Pass | Every layer reuses the one cached `geometry.path`. The shadow is an offset path fill, and the shaped CSS uses no `filter` |
 | Use viewport culling | Fail | React Flow's `onlyRenderVisibleElements` is not enabled. Above 200 nodes the canvas shows them 100 at a time (Load More) instead |
@@ -371,7 +371,7 @@ WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 | A type-default change invalidates that type; a library edit only its users | Fail | Any change to the type defaults or the saved shapes rebuilds every node, as in the memoization row |
 | Edge updates limited to the affected endpoints | Fail | `SimpleFloatingEdge` subscribes to the whole `nodeInternals` map, so every edge re-renders when any node changes |
 
-The four failures and the partial rows are open findings against this gate. In
+The three failures and the partial rows are open findings against this gate. In
 the scenes above they show up as whole-scene costs: `shapeApply` re-resolves
 every node, not just the Actor quarter, and `edgeUpdateFrame` re-renders every
 edge, not just those of the dragged node.

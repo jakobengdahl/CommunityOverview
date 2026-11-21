@@ -402,6 +402,34 @@ function shapeOverlapsMarquee(geometry, rect) {
   });
 }
 
+/**
+ * `(node) => {shapeRender, ariaLabel} | null`: the resolved look of each graph
+ * node object under one set of shape selections, kept per object. Load More
+ * and highlight, dim, mark or presence changes rebuild the flow nodes; they
+ * reuse each look instead of resolving it again.
+ */
+function createNodeShapeLook(selections) {
+  const resolve = createNodeShapeResolver(selections);
+  const looks = new WeakMap();
+  return (node) => {
+    if (!looks.has(node)) {
+      const resolved = resolve(node);
+      let look = null;
+      if (resolved) {
+        const { definition, fields } = resolved;
+        const values = nodeShapeAreaValues(definition, node, fields);
+        const geometry = nodeShapeGeometry(definition.base, definition.scale);
+        look = {
+          shapeRender: { definition, values, geometry },
+          ariaLabel: nodeShapeAccessibleName(definition, node, values),
+        };
+      }
+      looks.set(node, look);
+    }
+    return looks.get(node);
+  };
+}
+
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
@@ -1546,9 +1574,9 @@ function GraphCanvasInner({
     });
   }, [visibleEdges, dimmedEdgeIds, edgeIntensity, stagedStates, stagedLabels]);
 
-  const resolveNodeShape = useMemo(
+  const nodeShapeLook = useMemo(
     () =>
-      createNodeShapeResolver({
+      createNodeShapeLook({
         nodeTypes: schema?.node_types,
         nodeShapes: schema?.node_shapes,
         savedShapes: savedShapes || {},
@@ -1566,25 +1594,22 @@ function GraphCanvasInner({
       const mark = nodeMarks[node.id];
       const remote = remoteSelections?.[node.id] ?? null;
       const stagedLabel = stagedLabels[stagedStates?.nodes?.[node.id]] ?? null;
-      const resolved = resolveNodeShape(node);
+      const look = nodeShapeLook(node);
       let shaped = null;
-      if (resolved) {
-        const { definition, fields } = resolved;
-        const values = nodeShapeAreaValues(definition, node, fields);
-        const geometry = nodeShapeGeometry(definition.base, definition.scale);
+      if (look) {
+        const { definition, values, geometry } = look.shapeRender;
+        const extras = [stagedLabel, mark?.label, remote?.displayName];
         shaped = {
           node: {
             geometry,
             className: 'graph-shaped-flow-node',
             // React Flow puts this on the focusable wrapper, replacing the
             // visible (possibly clipped) text as the node's name.
-            ariaLabel: nodeShapeAccessibleName(definition, node, values, [
-              stagedLabel,
-              mark?.label,
-              remote?.displayName,
-            ]),
+            ariaLabel: extras.some(Boolean)
+              ? nodeShapeAccessibleName(definition, node, values, extras)
+              : look.ariaLabel,
           },
-          data: { shapeRender: { definition, values, geometry } },
+          data: { shapeRender: look.shapeRender },
         };
       }
       return {
@@ -1649,7 +1674,7 @@ function GraphCanvasInner({
     stagedStates,
     stagedLabels,
     nodePreviewEnabled,
-    resolveNodeShape,
+    nodeShapeLook,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
