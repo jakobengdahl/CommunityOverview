@@ -3,8 +3,12 @@
 **Status: Design (target state), approved; partly implemented.**
 The command registry and suggestion providers exist in
 `frontend/web/src/commands/` (registry, ranking, node/type/command providers and
-the interactive view's commands). No composer uses them yet, so nothing in this
-note is user-visible.
+the interactive view's commands), and the chat composer uses them
+(`frontend/web/src/components/ChatComposer.jsx`): suggestions, keyboard, touch
+and combobox semantics as below. On mobile the composer is still the chat bottom
+sheet's input, which keeps it above the keyboard while the sheet is open; it is
+not yet visible with the sheet closed. The hide-classic-surfaces preference is
+not implemented yet.
 The five product choices below are settled. The remaining mechanics are design
 choices made here under delegated authority, with a reason for each.
 
