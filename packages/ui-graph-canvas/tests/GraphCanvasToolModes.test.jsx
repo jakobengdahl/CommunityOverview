@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 // The annotation toolbox arms a tool; the canvas decides where the object goes
 // (task-annotation-tool-modes). Covers the three behaviours that motivated the
 // change — sticky placement, an eraser, and a stylus's inverted tip — plus the
@@ -176,6 +177,32 @@ describe('GraphCanvas annotation tool modes', () => {
     // Sticky: the tool stays armed, so three taps are three dots.
     expect(countOf('vote_dot')).toBe(3);
   });
+
+  it.each([
+    ['vote_dot', 'color', '#ef4444'],
+    ['icon', 'icon', 'flag'],
+  ])(
+    'an annotationToolRequest for %s creates like the toolbox key press, once per seq',
+    (kind, field, remembered) => {
+      localStorage.setItem('communityoverview:annotation-toolbox:vote-dot-slot', '#ef4444');
+      localStorage.setItem('communityoverview:annotation-toolbox:icon-slot', 'flag');
+      const props = { nodes: [], edges: [], onAnnotationChange: vi.fn() };
+      const { rerender } = render(<GraphCanvas {...props} />);
+      const request = { kind, options: undefined, seq: 1 };
+      rerender(<GraphCanvas {...props} annotationToolRequest={request} />);
+      // Placed at once in the remembered slot variant; nothing is left armed
+      // for a pointer the keyboard user does not have.
+      expect(store.nodes.filter((n) => n.type === kind).map((n) => n.data[field])).toEqual([
+        remembered,
+      ]);
+      tapPane(120, 80);
+      expect(countOf(kind)).toBe(1);
+
+      // The same seq again is not a new request.
+      rerender(<GraphCanvas {...props} annotationToolRequest={{ ...request }} />);
+      expect(countOf(kind)).toBe(1);
+    }
+  );
 
   it('places each object at the tapped point, not at a fixed location', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);

@@ -1111,5 +1111,31 @@
     "review_latest": "Granska senaste versionen",
     "library_forbidden": "Du måste vara inloggad för att spara former.",
     "library_failed": "Formbiblioteket kunde inte ändras. Ditt utkast finns kvar; försök igen."
+  },
+  "commands": {
+    "create_node": "Skapa {type}",
+    "create_node_description": "Öppna formuläret för en ny nod av den här typen",
+    "create_agent": "Skapa agent",
+    "create_agent_description": "Öppna formuläret för en ny agent",
+    "create_subscription": "Skapa prenumeration",
+    "create_subscription_description": "Öppna formuläret för en ny webhook-prenumeration",
+    "create_knowledge_collection": "Skapa kunskapsinsamling",
+    "create_knowledge_collection_description": "Öppna formuläret för en ny aktiv kunskapsinsamling",
+    "create_group": "Skapa grupp",
+    "create_group_description": "Lägg till en gruppruta i visualiseringen",
+    "save_view": "Spara vy",
+    "save_view_description": "Spara den aktuella visualiseringen som en vy",
+    "settings_description": "Öppna inställningarna",
+    "new_session_description": "Starta en ny, tom session",
+    "session_connect_description": "Anslut till en session via dess ID",
+    "session_rename_description": "Namnge den aktuella sessionen",
+    "session_copy_description": "Skapa en kopia av den aktuella sessionen",
+    "session_copy_link_description": "Kopiera en länk till den aktuella sessionen",
+    "session_copy_trigger_url_description": "Kopiera URL:en som skickar pulser till den här sessionen",
+    "session_delete_description": "Ta bort den aktuella sessionen",
+    "toggle_lock_description": "Lås eller lås upp visualiseringen",
+    "fullscreen_description": "Visa visualiseringen i helskärm",
+    "add_expert": "Lägg till expert-agent: {name}",
+    "add_expert_description": "Ta med den här expert-agenten i samtalet"
   }
 }

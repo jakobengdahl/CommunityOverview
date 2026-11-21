@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useToolSlotSelection } from '../hooks/useToolSlotSelection';
+import { readStoredKey, useToolSlotSelection } from '../hooks/useToolSlotSelection';
 import { ANNOTATION_ICONS, resolveAnnotationIcon } from '../utils/annotationIcons';
 import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
 import {
@@ -77,6 +77,7 @@ const ICON_VARIANTS = Object.keys(ANNOTATION_ICONS).map((icon) => ({
   label: icon.replace(/_/g, ' '),
 }));
 const ICON_VARIANT_KEYS = ICON_VARIANTS.map((variant) => variant.icon);
+const DEFAULT_ICON = 'check';
 const ICON_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
 const ICON_SLOT_ITEM_KEY = 'icon-slot';
 
@@ -149,6 +150,26 @@ const TOOLBOX_ITEMS_TRAILING = [
 // Tools that arm a mode instead of producing an object. They never drag-create
 // and never open a picker; GraphCanvas owns what each one then does.
 const MODE_KINDS = new Set(['select', 'eraser', 'freehand']);
+
+/**
+ * Enter/Space on a toolbox entry, for a caller outside the toolbox (the host's
+ * command box): mode tools and `image` arm, every other kind creates at the
+ * viewport centre. Missing options are the slot's remembered variant, as the
+ * slot's own button would pass.
+ */
+export function keyboardToolActivation(kind, options) {
+  let resolved = options;
+  if (!resolved && kind === 'shape') {
+    resolved = { shape: readStoredKey(SHAPE_SLOT_STORAGE_KEY, SHAPE_VARIANT_KEYS, DEFAULT_SHAPE) };
+  } else if (!resolved && kind === 'icon') {
+    resolved = { icon: readStoredKey(ICON_SLOT_STORAGE_KEY, ICON_VARIANT_KEYS, DEFAULT_ICON) };
+  } else if (!resolved && kind === 'vote_dot') {
+    resolved = {
+      color: readStoredKey(VOTE_DOT_SLOT_STORAGE_KEY, VOTE_DOT_VARIANT_KEYS, DEFAULT_GENERIC_COLOR),
+    };
+  }
+  return { arm: MODE_KINDS.has(kind) || kind === 'image', options: resolved };
+}
 
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
 
@@ -296,7 +317,7 @@ function AnnotationToolbox({
   const [currentIcon, setCurrentIcon] = useToolSlotSelection(
     ICON_SLOT_STORAGE_KEY,
     ICON_VARIANT_KEYS,
-    'check'
+    DEFAULT_ICON
   );
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [currentVoteDotColor, setCurrentVoteDotColor] = useToolSlotSelection(
