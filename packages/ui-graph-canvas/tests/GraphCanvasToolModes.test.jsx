@@ -178,34 +178,31 @@ describe('GraphCanvas annotation tool modes', () => {
     expect(countOf('vote_dot')).toBe(3);
   });
 
-  it('an annotationToolRequest arms the tool like the toolbox does, once per seq', () => {
-    const { rerender } = render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
-    const request = { kind: 'vote_dot', options: undefined, seq: 1 };
-    rerender(
-      <GraphCanvas
-        nodes={[]}
-        edges={[]}
-        onAnnotationChange={vi.fn()}
-        annotationToolRequest={request}
-      />
-    );
-    tapPane(120, 80);
-    expect(countOf('vote_dot')).toBe(1);
+  it.each([
+    ['vote_dot', 'color', '#ef4444'],
+    ['icon', 'icon', 'flag'],
+  ])(
+    'an annotationToolRequest for %s creates like the toolbox key press, once per seq',
+    (kind, field, remembered) => {
+      localStorage.setItem('communityoverview:annotation-toolbox:vote-dot-slot', '#ef4444');
+      localStorage.setItem('communityoverview:annotation-toolbox:icon-slot', 'flag');
+      const props = { nodes: [], edges: [], onAnnotationChange: vi.fn() };
+      const { rerender } = render(<GraphCanvas {...props} />);
+      const request = { kind, options: undefined, seq: 1 };
+      rerender(<GraphCanvas {...props} annotationToolRequest={request} />);
+      // Placed at once in the remembered slot variant; nothing is left armed
+      // for a pointer the keyboard user does not have.
+      expect(store.nodes.filter((n) => n.type === kind).map((n) => n.data[field])).toEqual([
+        remembered,
+      ]);
+      tapPane(120, 80);
+      expect(countOf(kind)).toBe(1);
 
-    openToolbox();
-    arm(/^select$/i);
-    // The same request object again is not a new request.
-    rerender(
-      <GraphCanvas
-        nodes={[]}
-        edges={[]}
-        onAnnotationChange={vi.fn()}
-        annotationToolRequest={{ ...request }}
-      />
-    );
-    tapPane(200, 160);
-    expect(countOf('vote_dot')).toBe(1);
-  });
+      // The same seq again is not a new request.
+      rerender(<GraphCanvas {...props} annotationToolRequest={{ ...request }} />);
+      expect(countOf(kind)).toBe(1);
+    }
+  );
 
   it('places each object at the tapped point, not at a fixed location', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);

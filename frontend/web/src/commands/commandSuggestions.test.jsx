@@ -31,6 +31,18 @@ describe('parseCommandInput', () => {
 });
 
 describe('rankSuggestions', () => {
+  it.each([
+    ['goal 2030', 'Strategic goal 2030'],
+    ['e-tj', 'Ny e-tjänst'],
+  ])('%j at a word boundary of %j is a word prefix, not a substring', (query, label) => {
+    const items = [
+      // Substring only, and first by label, so only the tier can order them.
+      { kind: 'node', id: 'sub', label: label.replace(query, `a${query}`) },
+      { kind: 'node', id: 'word', label },
+    ];
+    expect(ids(rankSuggestions(items, query, 'en'))).toEqual(['node:word', 'node:sub']);
+  });
+
   it('ranks by match tier first, so a weak node match never beats a stronger type match', () => {
     const items = [
       { kind: 'node', id: 'n1', label: 'Strategic goal' }, // word prefix
@@ -106,7 +118,8 @@ describe('useCommandSuggestions', () => {
     );
     await settle(NODE_QUERY_DEBOUNCE_MS - 1);
     expect(api.searchGraph).not.toHaveBeenCalled();
-    expect(result.current.status).toBe('loading');
+    // Node types are debounced with the nodes, not shown ahead of them.
+    expect(result.current).toMatchObject({ status: 'loading', items: [] });
 
     await settle(1);
     expect(api.searchGraph).toHaveBeenCalledWith('goal', { limit: 10, federationDepth: 1 });

@@ -25,7 +25,7 @@ import GenericAnnotationNode, {
   regularShapeAspect,
 } from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
-import AnnotationToolbox from './AnnotationToolbox';
+import AnnotationToolbox, { keyboardToolActivation } from './AnnotationToolbox';
 import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { DEFAULT_FREEHAND_OPTIONS } from '../utils/freehandOptions';
 import { isFederatedNode } from '../utils/nodeProvenance';
@@ -483,9 +483,9 @@ function GraphCanvasInner({
   createGroupSignal = 0,
   saveViewSignal = 0,
   closeMenusSignal = 0,
-  // `{ kind, options, seq }`: arms an annotation tool from outside the
-  // toolbox (the host's command registry) through the toolbox's own handler.
-  // A new `seq` is a new request, so asking for the same tool twice re-arms it.
+  // `{ kind, options, seq }`: activates an annotation tool from outside the
+  // toolbox (the host's command registry) as the toolbox's Enter/Space does.
+  // A new `seq` is a new request, so asking for the same tool twice repeats it.
   annotationToolRequest = null,
   groupsToRestore = null,
   onGroupsRestored,
@@ -4860,9 +4860,19 @@ function GraphCanvasInner({
       !activeFocusRootId
     ) {
       handledAnnotationToolSeqRef.current = annotationToolRequest.seq;
-      handleSelectTool(annotationToolRequest.kind, annotationToolRequest.options);
+      // A command is accepted from the keyboard, and an armed placing tool
+      // needs a pointer to place anything.
+      const { kind } = annotationToolRequest;
+      const { arm, options } = keyboardToolActivation(kind, annotationToolRequest.options);
+      if (arm) handleSelectTool(kind, options);
+      else createAnnotationAtViewportCenter(kind, options);
     }
-  }, [annotationToolRequest, handleSelectTool, activeFocusRootId]);
+  }, [
+    annotationToolRequest,
+    handleSelectTool,
+    createAnnotationAtViewportCenter,
+    activeFocusRootId,
+  ]);
 
   // Save view when signal changes (triggered from toolbar)
   useEffect(() => {

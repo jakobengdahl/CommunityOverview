@@ -40,12 +40,15 @@ function textTier(text, query, locale) {
   if (!haystack) return NO_MATCH;
   if (haystack === query) return TIER_EXACT;
   if (haystack.startsWith(query)) return TIER_PREFIX;
-  const index = haystack.indexOf(query);
+  let index = haystack.indexOf(query);
   if (index < 0) return NO_MATCH;
-  const wordStart = haystack
-    .split(/[^\p{L}\p{N}]+/u)
-    .some((word) => word && word.startsWith(query));
-  return wordStart ? TIER_WORD_PREFIX : TIER_SUBSTRING;
+  // A word prefix is an occurrence starting at a word boundary; the query may
+  // itself span several words or punctuation ('goal 2030', 'e-tj').
+  while (index >= 0) {
+    if (!/[\p{L}\p{N}]$/u.test(haystack.slice(0, index))) return TIER_WORD_PREFIX;
+    index = haystack.indexOf(query, index + 1);
+  }
+  return TIER_SUBSTRING;
 }
 
 /** Best tier of the label and aliases for `query`, or -1 for no match. */
@@ -108,8 +111,8 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
 /**
  * Suggestions for the command box's current `input`. Slash mode offers the
  * registry's available commands only, filtered immediately; plain mode offers
- * node types (`nodeTypes`: `{ id, label }`) and nodes from the debounced graph
- * search, never commands. A superseded search's result is discarded.
+ * node types (`nodeTypes`: `{ id, label }`) and nodes once the debounced graph
+ * search settles, never commands. A superseded search's result is discarded.
  */
 export function useCommandSuggestions(input, context, nodeTypes) {
   const { t } = useI18n();
@@ -150,11 +153,17 @@ export function useCommandSuggestions(input, context, nodeTypes) {
   if (!registry || mode === 'idle') return { mode, items: [], status: 'idle' };
   if (mode === 'command') return { mode, items: commandItems, status: 'ready' };
 
+  // Node types wait for the same debounced search as nodes, so the list
+  // appears once and never reorders when the nodes arrive.
   const current = search.query === query && search.scope === federationDepth;
+  if (!current) return { mode, items: [], status: 'loading' };
   const typeItems = (nodeTypes || []).map((type) => ({ kind: 'nodeType', ...type }));
-  const nodeItems = current
-    ? search.nodes.map((node) => ({ kind: 'node', id: node.id, label: node.name, node }))
-    : [];
-  const status = !current ? 'loading' : search.failed ? 'error' : 'ready';
+  const nodeItems = search.nodes.map((node) => ({
+    kind: 'node',
+    id: node.id,
+    label: node.name,
+    node,
+  }));
+  const status = search.failed ? 'error' : 'ready';
   return { mode, items: rankSuggestions([...nodeItems, ...typeItems], query, locale), status };
 }

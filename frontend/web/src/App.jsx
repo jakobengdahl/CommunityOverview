@@ -3899,7 +3899,7 @@ function App() {
     [canvasLocked, setCanvasLocked]
   );
 
-  // Arms an annotation tool through GraphCanvas's own toolbox handler.
+  // Activates an annotation tool as the toolbox's keyboard activation does.
   const [annotationToolRequest, setAnnotationToolRequest] = useState(null);
   const handleSelectAnnotationTool = useCallback((kind, options) => {
     setAnnotationToolRequest((prev) => ({ kind, options, seq: (prev?.seq ?? 0) + 1 }));
