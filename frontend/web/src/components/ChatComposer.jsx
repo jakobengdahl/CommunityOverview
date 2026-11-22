@@ -298,6 +298,9 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
           className="command-box-popup"
           role="listbox"
           aria-label={t('command_box.suggestions')}
+          // An overflowing scroller is a Tab stop in some browsers; Shift+Tab
+          // would land in the popup instead of leaving the box.
+          tabIndex={-1}
           // Keep focus in the box, so blur cannot dismiss before a tap lands or
           // while the popup's padding or scrollbar is pressed.
           onMouseDown={(e) => e.preventDefault()}

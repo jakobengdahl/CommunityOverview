@@ -123,6 +123,8 @@ describe('ChatComposer', () => {
     expect(input).toHaveAttribute('aria-expanded', 'true');
     expect(input).toHaveAttribute('aria-controls', screen.getByRole('listbox').id);
     expect(input).not.toHaveAttribute('aria-activedescendant');
+    // The scrolling popup is no Tab stop, so Shift+Tab leaves the box natively.
+    expect(screen.getByRole('listbox')).toHaveAttribute('tabindex', '-1');
 
     key(input, 'ArrowUp');
     expect(selected()).toBe(2);
