@@ -124,6 +124,12 @@ class ShapeLibraryCreateRequest(BaseModel):
     definition: Dict[str, Any]
 
 
+class UserPreferencesUpdateRequest(BaseModel):
+    """Preferences to change; omitted keys keep their saved value."""
+
+    hideClassicSurfaces: Optional[bool] = None
+
+
 class ShapeLibraryEditRequest(BaseModel):
     """An edit of the reviewed revision, whose usage the user was warned of."""
 
@@ -2891,6 +2897,49 @@ def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> 
 # ==================== Router Factory ====================
 
 
+def _register_user_preference_endpoints(router: APIRouter, store) -> None:
+    """The signed-in user's remembered interface preferences.
+
+    The identity is only ever the user principal the auth middleware recorded;
+    without one (anonymous, or the shared instance token) the defaults are
+    returned and nothing is saved, so no request reads another user's values.
+    """
+    from backend.api_host.middleware import AUTHENTICATED_PRINCIPAL_SCOPE_KEY
+    from backend.core.shape_library import library_identity
+    from backend.core.user_preferences import PREFERENCE_DEFAULTS
+
+    def _identity(http_request: Request) -> Optional[str]:
+        principal = http_request.scope.get(AUTHENTICATED_PRINCIPAL_SCOPE_KEY)
+        if store is None or not isinstance(principal, dict):
+            return None
+        if principal.get("kind") != "user":
+            return None
+        return library_identity(principal)
+
+    @router.get("/user-preferences")
+    def get_user_preferences(http_request: Request) -> Dict[str, Any]:
+        identity = _identity(http_request)
+        if identity is None:
+            return {"signed_in": False, "preferences": dict(PREFERENCE_DEFAULTS)}
+        return {"signed_in": True, "preferences": store.get(identity)}
+
+    @router.put("/user-preferences")
+    def put_user_preferences(
+        request: UserPreferencesUpdateRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        identity = _identity(http_request)
+        if identity is None:
+            raise HTTPException(
+                status_code=403, detail="Saving preferences needs a signed-in user."
+            )
+        try:
+            preferences = store.update(identity, request.model_dump(exclude_none=True))
+        except OSError:
+            logger.exception("Saving user preferences failed")
+            raise HTTPException(status_code=503, detail="preferences not saved")
+        return {"signed_in": True, "preferences": preferences}
+
+
 def create_rest_router(
     service: GraphService,
     prefix: str = "",
@@ -2898,6 +2947,7 @@ def create_rest_router(
     rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
     import_job_store: Optional["ExecutionStore"] = None,
     function_invocation_service=None,
+    user_preferences=None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -2916,6 +2966,8 @@ def create_rest_router(
             fine for tests and standalone runs, but import jobs then do NOT
             survive a restart; production wiring (``backend/api_host/server.py``)
             passes a durable ``SqliteExecutionStore``.
+        user_preferences: Optional ``UserPreferencesStore``. Without one,
+            every request reads the defaults and saving is refused.
 
     Returns:
         Configured APIRouter
@@ -2956,6 +3008,7 @@ def create_rest_router(
     _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
+    _register_user_preference_endpoints(router, user_preferences)
 
     @router.get("/collect/{short_name}")
     async def get_collect_config(

@@ -79,6 +79,8 @@
     "progress_error": "Chat failed",
     "progress_interrupted": "Chat connection interrupted",
     "placeholder": "Ask a question or request an action...",
+    "command_box_hint": "Type @ to find nodes and node types, or / for commands such as creating nodes or opening settings.",
+    "command_box_hint_dismiss": "Dismiss hint",
     "placeholder_with_file": "Describe what you want to do with the document...",
     "send": "Send",
     "processing": "Processing...",
@@ -461,7 +463,11 @@
     "display_name_placeholder": "Guest",
     "display_name_hint": "Shown to others collaborating in the same session. Takes effect the next time you open or switch session.",
     "metamodel_explorer": "Explore metamodel",
-    "metamodel_explorer_hint": "Interactive read-only view of node types, relationships and their configured rules."
+    "metamodel_explorer_hint": "Interactive read-only view of node types, relationships and their configured rules.",
+    "hide_classic_surfaces": "Command box only",
+    "hide_classic_surfaces_hint": "Hides the search bar and the add-node and view buttons; use the assistant's command box instead. Menus stay available.",
+    "hide_classic_surfaces_signed_out": "Sign in to use this setting.",
+    "hide_classic_surfaces_error": "The setting could not be saved. Your previous choice still applies."
   },
   "metamodel": {
     "error_title": "Metamodel explorer error",

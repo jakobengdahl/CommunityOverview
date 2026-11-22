@@ -745,6 +745,10 @@ text never runs one.
 
 Collection kiosks have no suggestions or commands.
 
+With **Settings → Command box only** switched on (see [Settings dialog](#settings-dialog)),
+the chat input is the one place to search and create: a short hint above it
+explains **@** and **/** the first time, until you close it.
+
 ![Command suggestions above the chat input](images/chat-command-box.png)
 
 ### 4.2 Adding nodes through chat
@@ -1178,6 +1182,7 @@ change the schema — editing the metamodel is not part of the open-source core.
 | **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
 | **Edge intensity** | A slider setting the baseline visibility for every connection in this session. Dimmed connections (see [2.4](#24-right-click-context-menu)) always render below this baseline — lowering it fades the whole graph's connections together, while dimming still singles out specific ones underneath that. |
 | **Assistant panel open** | Toggle the chat panel between expanded and collapsed. Your choice is remembered in the browser and used every time you return, overriding this deployment's configured startup default. Click **Reset to default** underneath to forget your choice and go back to that default. |
+| **Command box only** | Off by default. When on, the separate search bar and the add-node and view buttons are hidden (on a phone, the **Search** and **Create** slots), and you search, create and run actions from the chat input with **@** and **/** (see [4.1](#41-asking-questions)). The session menu, Settings and the annotation tools stay where they are. The choice is saved for your account, so it follows you when you sign in and never applies to another user of the same browser; it needs you to be signed in, and is shown only when the assistant is available. If saving fails, your previous choice stays in effect and the dialog says so. Turning it off brings the hidden controls back at once. |
 
 #### Your presence
 
@@ -1515,7 +1520,8 @@ desktop chrome — the header, search bar, toolbar, chat panel and session
 menu — for a layout that fits a thumb.
 
 **Navigation.** A compact top bar replaces the desktop header, and a six-slot
-bottom navigation bar replaces the toolbar and the hamburger menu:
+bottom navigation bar replaces the toolbar and the hamburger menu (four slots,
+without **Search** and **Create**, when **Settings → Command box only** is on):
 
 | Slot | Effect |
 |------|--------|

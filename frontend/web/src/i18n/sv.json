@@ -79,6 +79,8 @@
     "progress_error": "Chatten misslyckades",
     "progress_interrupted": "Anslutningen till chatten avbröts",
     "placeholder": "Ställ en fråga eller begär en åtgärd...",
+    "command_box_hint": "Skriv @ för att hitta noder och nodtyper, eller / för kommandon som att skapa noder eller öppna inställningar.",
+    "command_box_hint_dismiss": "Stäng tipset",
     "placeholder_with_file": "Beskriv vad du vill göra med dokumentet...",
     "send": "Skicka",
     "processing": "Bearbetar...",
@@ -461,7 +463,11 @@
     "display_name_placeholder": "Gäst",
     "display_name_hint": "Visas för andra som samarbetar i samma session. Börjar gälla nästa gång du öppnar eller byter session.",
     "metamodel_explorer": "Utforska metamodell",
-    "metamodel_explorer_hint": "Interaktiv skrivskyddad vy över nodtyper, relationer och deras konfigurerade regler."
+    "metamodel_explorer_hint": "Interaktiv skrivskyddad vy över nodtyper, relationer och deras konfigurerade regler.",
+    "hide_classic_surfaces": "Endast kommandorutan",
+    "hide_classic_surfaces_hint": "Döljer sökfältet och knapparna för att lägga till noder och vyer; använd assistentens kommandoruta i stället. Menyerna finns kvar.",
+    "hide_classic_surfaces_signed_out": "Logga in för att använda den här inställningen.",
+    "hide_classic_surfaces_error": "Inställningen kunde inte sparas. Ditt tidigare val gäller fortfarande."
   },
   "metamodel": {
     "error_title": "Fel i metamodellutforskaren",

@@ -47,6 +47,8 @@ function DesktopShell({
   onCreateActiveKnowledgeCollection,
   llmAvailable,
   akcShortName,
+  // The user's "command box only" layout: no separate search or create toolbar.
+  hideClassicSurfaces = false,
 }) {
   return (
     <>
@@ -78,15 +80,19 @@ function DesktopShell({
         onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
-      <FloatingSearch onTeleport={onTeleportToSourceGraph} />
-      <FloatingToolbar
-        onCreateNode={onCreateNodeForType}
-        onCreateAgent={onCreateAgent}
-        onCreateSubscription={onCreateSubscription}
-        onSaveView={onSaveView}
-        onCreateGroup={onCreateGroup}
-        onCreateActiveKnowledgeCollection={onCreateActiveKnowledgeCollection}
-      />
+      {!hideClassicSurfaces && (
+        <>
+          <FloatingSearch onTeleport={onTeleportToSourceGraph} />
+          <FloatingToolbar
+            onCreateNode={onCreateNodeForType}
+            onCreateAgent={onCreateAgent}
+            onCreateSubscription={onCreateSubscription}
+            onSaveView={onSaveView}
+            onCreateGroup={onCreateGroup}
+            onCreateActiveKnowledgeCollection={onCreateActiveKnowledgeCollection}
+          />
+        </>
+      )}
       {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
     </>
   );

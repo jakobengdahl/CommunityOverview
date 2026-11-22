@@ -49,6 +49,7 @@ from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.shape_library import FileShapeLibraryPersistenceBackend, ShapeLibrary
+from backend.core.user_preferences import UserPreferencesStore
 from backend.ui.conversation_state import FileTaintRegistry
 from backend.core.session_manager import SessionManager
 from backend.core.write_modes import WriteModes
@@ -514,6 +515,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         session_manager=session_manager,
         import_job_store=import_job_store,
         function_invocation_service=function_invocation_service,
+        user_preferences=UserPreferencesStore(Path(sessions_dir) / "user-preferences"),
     )
     app.include_router(rest_router, prefix=config.api_prefix)
 
