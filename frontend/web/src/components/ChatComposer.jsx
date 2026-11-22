@@ -19,9 +19,16 @@ const KIND_LABEL_KEYS = {
   command: 'command_box.kind_command',
 };
 
-/** The text a node suggestion inserts: a reference the assistant can resolve by id. */
+/**
+ * The text a node suggestion inserts: a reference the assistant can resolve by
+ * id. A whitespace-preceded `@` in the name is dropped, as it would start a new
+ * `@` trigger inside the reference.
+ */
 export function formatNodeReference(node) {
-  return `[${String(node.name ?? node.id).replace(/[[\]]/g, '')}](node:${node.id})`;
+  const name = String(node.name ?? node.id)
+    .replace(/[[\]]/g, '')
+    .replace(/(?<=\s)@+/g, '');
+  return `[${name}](node:${node.id})`;
 }
 
 const isComposingKey = (e) => e.nativeEvent?.isComposing || e.keyCode === 229;
@@ -266,9 +273,9 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     } else if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
-    } else if (e.key === 'Escape' && active && !dismissed) {
+    } else if (e.key === 'Escape' && (open || (active && !dismissed && status === 'loading'))) {
       // Also while results are loading, so none open after it. Only the list's
-      // Escape: the hosting panel or sheet keeps the rest.
+      // Escape: the hosting panel or sheet keeps the rest, an empty list's too.
       e.preventDefault();
       e.stopPropagation();
       close();

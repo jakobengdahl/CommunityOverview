@@ -154,6 +154,14 @@ describe('ChatComposer', () => {
     await settle();
     expect(options()).toHaveLength(0);
     expect(sheetKeyDown.mock.calls.map(([e]) => e.key)).not.toContain('Escape');
+    // With no list shown, Escape belongs to the hosting sheet.
+    type(input, '/zzz');
+    expect(key(input, 'Escape')).toBe(true);
+    api.searchGraph.mockResolvedValueOnce({ nodes: [] });
+    type(input, '@zz');
+    await settle();
+    expect(key(input, 'Escape')).toBe(true);
+    expect(sheetKeyDown.mock.calls.filter(([e]) => e.key === 'Escape')).toHaveLength(2);
 
     type(input, '/a');
     key(input, 'ArrowDown');
@@ -222,6 +230,18 @@ describe('ChatComposer', () => {
     const reference = formatNodeReference(goalNode);
     expect(input).toHaveValue(`tell me about ${reference} please`);
     expect(input.selectionStart).toBe(`tell me about ${reference} `.length);
+
+    // An @ inside an inserted reference never becomes a trigger of its own.
+    api.searchGraph.mockResolvedValueOnce({
+      nodes: [{ id: 'n2', name: 'Team @alpha', type: 'Goal' }],
+    });
+    type(input, '@team');
+    await settle();
+    key(input, 'Tab');
+    type(input, `${input.value}x`);
+    await settle();
+    expect(api.searchGraph).toHaveBeenLastCalledWith('team', expect.anything());
+    expect(options()).toHaveLength(0);
 
     type(input, '@goal');
     await settle();
