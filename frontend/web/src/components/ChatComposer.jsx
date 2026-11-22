@@ -219,7 +219,12 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
       if (!stillOffered) throw new Error('command no longer available');
       await command.execute(context);
     } catch {
-      setFailure(t('command_box.command_failed', { label: item.label }));
+      // A new sequence number remounts the announcement, so a repeated
+      // identical failure still reaches the live region.
+      setFailure((prev) => ({
+        message: t('command_box.command_failed', { label: item.label }),
+        seq: (prev?.seq ?? 0) + 1,
+      }));
       return;
     }
     // Text typed while the handoff was pending is a new draft; keep it.
@@ -246,6 +251,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     const step = (index) => {
       e.preventDefault();
       setDismissed(false);
+      setFailure(null);
       setActiveKey(keyOf(items[Math.max(0, Math.min(items.length - 1, index))]));
     };
     if (e.key === 'Tab') {
@@ -268,7 +274,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     }
   };
 
-  let announcement = failure || '';
+  let announcement = failure ? <span key={failure.seq}>{failure.message}</span> : '';
   if (!failure && active && !dismissed) {
     if (status === 'loading') announcement = t('command_box.loading');
     else if (status === 'error') announcement = t('command_box.search_failed');

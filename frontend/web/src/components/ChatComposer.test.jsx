@@ -254,7 +254,16 @@ describe('ChatComposer', () => {
     type(input, '/broken');
     await act(async () => key(input, 'Tab'));
     expect(input).toHaveValue('/broken');
-    expect(screen.getByRole('status')).toHaveTextContent('command_box.command_failed');
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('command_box.command_failed');
+
+    // Reopening shows the count again; a repeated failure is a new announcement.
+    const firstFailure = status.firstChild;
+    key(input, 'ArrowDown');
+    expect(status).toHaveTextContent('command_box.results');
+    await act(async () => key(input, 'Enter'));
+    expect(status).toHaveTextContent('command_box.command_failed');
+    expect(status.firstChild).not.toBe(firstFailure);
   });
 
   it('gives every item a distinct option id that stays its own when the list reorders', async () => {
