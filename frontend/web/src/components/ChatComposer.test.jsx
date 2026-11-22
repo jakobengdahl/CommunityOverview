@@ -279,11 +279,13 @@ describe('ChatComposer', () => {
     const viewport = Object.assign(new EventTarget(), { offsetTop: 0, height: 400 });
     vi.stubGlobal('visualViewport', viewport);
     let sheetTop = 0;
+    let boxTop = 300;
     const rect = vi
       .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
       .mockImplementation(function () {
-        return { top: this.classList.contains('sheet') ? sheetTop : 300 };
+        return { top: this.classList.contains('sheet') ? sheetTop : boxTop };
       });
+    const removeListener = vi.spyOn(window, 'removeEventListener');
     try {
       const input = renderComposer((composerElement) => (
         <div className="sheet" style={{ overflowY: 'auto' }}>
@@ -300,7 +302,16 @@ describe('ChatComposer', () => {
       sheetTop = 250;
       act(() => viewport.dispatchEvent(new Event('resize')));
       expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 42px)');
+      // Scrolling the sheet moves the box within it without any viewport event.
+      boxTop = 350;
+      act(() => document.querySelector('.sheet').dispatchEvent(new Event('scroll')));
+      expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 92px)');
+      // Closing the list stops listening for ancestor scrolls.
+      key(input, 'Escape');
+      expect(screen.queryByRole('listbox')).toBeNull();
+      expect(removeListener).toHaveBeenCalledWith('scroll', expect.any(Function), true);
     } finally {
+      removeListener.mockRestore();
       rect.mockRestore();
       vi.unstubAllGlobals();
     }

@@ -140,28 +140,35 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   // dvh ignores an on-screen keyboard on iOS, so bound the popup by the room
   // left above the box in the visual viewport instead, and by the nearest
   // scrolling ancestor (the mobile bottom sheet's content), which clips it.
+  // Re-measured while open: the box moves when an ancestor scrolls or content
+  // above it (indicators, the sheet's header) changes size.
   useLayoutEffect(() => {
-    if (!open) return undefined;
+    const box = boxRef.current;
+    if (!open || !box) return undefined;
     const vv = window.visualViewport;
+    let scroller = null;
+    for (let el = box.parentElement; el && !scroller; el = el.parentElement) {
+      if (getComputedStyle(el).overflowY !== 'visible') scroller = el;
+    }
     const measure = () => {
-      const box = boxRef.current;
-      if (!box) return;
       let ceiling = vv ? vv.offsetTop : 0;
-      for (let el = box.parentElement; el; el = el.parentElement) {
-        if (getComputedStyle(el).overflowY !== 'visible') {
-          ceiling = Math.max(ceiling, el.getBoundingClientRect().top);
-          break;
-        }
-      }
+      if (scroller) ceiling = Math.max(ceiling, scroller.getBoundingClientRect().top);
       const top = box.getBoundingClientRect().top;
       setPopupSpace(Math.max(0, Math.floor(top - ceiling - POPUP_VIEWPORT_MARGIN_PX)));
     };
     measure();
     vv?.addEventListener('resize', measure);
     vv?.addEventListener('scroll', measure);
+    // Scroll does not bubble; capturing on window sees every ancestor's.
+    window.addEventListener('scroll', measure, true);
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(box);
+    if (scroller) resizeObserver.observe(scroller);
     return () => {
       vv?.removeEventListener('resize', measure);
       vv?.removeEventListener('scroll', measure);
+      window.removeEventListener('scroll', measure, true);
+      resizeObserver.disconnect();
     };
   }, [open]);
 
