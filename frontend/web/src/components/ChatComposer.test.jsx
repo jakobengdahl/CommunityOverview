@@ -115,7 +115,10 @@ describe('ChatComposer', () => {
   });
 
   it('moves with arrows without wrapping, accepts the first item on Tab and keeps native keys otherwise', async () => {
-    const input = renderComposer();
+    const sheetKeyDown = vi.fn();
+    const input = renderComposer((composerElement) => (
+      <div onKeyDown={sheetKeyDown}>{composerElement}</div>
+    ));
     type(input, '/');
     expect(input).toHaveAttribute('aria-expanded', 'true');
     expect(input).toHaveAttribute('aria-controls', screen.getByRole('listbox').id);
@@ -145,7 +148,14 @@ describe('ChatComposer', () => {
     expect(input).toHaveAttribute('aria-expanded', 'false');
     expect(input).not.toHaveAttribute('aria-controls');
     expect(key(input, 'Tab')).toBe(true);
+    // Esc while @ results load keeps them closed when they arrive and stays in the box.
+    type(input, '@goal');
+    expect(key(input, 'Escape')).toBe(false);
+    await settle();
+    expect(options()).toHaveLength(0);
+    expect(sheetKeyDown.mock.calls.map(([e]) => e.key)).not.toContain('Escape');
 
+    type(input, '/a');
     key(input, 'ArrowDown');
     expect(selected()).toBe(0);
     type(input, '/');
@@ -250,6 +260,16 @@ describe('ChatComposer', () => {
     type(input, 'next question');
     await act(async () => finish());
     expect(input).toHaveValue('next question');
+
+    // A command that became unavailable after it was listed is not run.
+    const stale = command('stale');
+    registry.register(stale);
+    type(input, '/stale');
+    stale.isAvailable = () => false;
+    await act(async () => key(input, 'Tab'));
+    expect(stale.execute).not.toHaveBeenCalled();
+    expect(input).toHaveValue('/stale');
+    expect(screen.getByRole('status')).toHaveTextContent('command_box.command_failed');
 
     type(input, '/broken');
     await act(async () => key(input, 'Tab'));

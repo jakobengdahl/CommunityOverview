@@ -266,8 +266,9 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     } else if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
-    } else if (e.key === 'Escape' && open) {
-      // Only the list's Escape: the hosting panel or sheet keeps the rest.
+    } else if (e.key === 'Escape' && active && !dismissed) {
+      // Also while results are loading, so none open after it. Only the list's
+      // Escape: the hosting panel or sheet keeps the rest.
       e.preventDefault();
       e.stopPropagation();
       close();
