@@ -8,6 +8,7 @@ means the default layout.
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -16,6 +17,8 @@ from pathlib import Path
 from backend.core.session_store import _fsync_directory, _make_directory
 
 PREFERENCE_DEFAULTS = {"hideClassicSurfaces": False}
+
+logger = logging.getLogger(__name__)
 
 
 class UserPreferencesStore:
@@ -42,7 +45,11 @@ class UserPreferencesStore:
         }
 
     def update(self, identity: str, changes: dict) -> dict:
-        """Write the known keys of ``changes``; return once durable."""
+        """Write the known keys of ``changes``; return once they are in effect.
+
+        Raises only when the new value was not saved, so a caller's error always
+        means the previous value still applies.
+        """
         with self._lock:
             preferences = self.get(identity)
             preferences.update(
@@ -58,7 +65,12 @@ class UserPreferencesStore:
                     output.flush()
                     os.fsync(output.fileno())
                 os.replace(temporary, self._path(identity))
-                _fsync_directory(self.directory)
+                try:
+                    _fsync_directory(self.directory)
+                except OSError:
+                    # The rename already made the new value the one every read
+                    # returns; only its survival across a crash is uncertain.
+                    logger.warning("preferences directory fsync failed", exc_info=True)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)

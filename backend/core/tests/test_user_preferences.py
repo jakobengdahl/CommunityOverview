@@ -1,4 +1,5 @@
 # covers: backend/core/user_preferences.py, backend/service/rest_api.py
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -62,7 +63,15 @@ def test_preference_is_per_user_and_defaults_off(tmp_path):
     assert _hide(client, "bearer:instance-token") is False
 
 
-def test_failed_save_keeps_the_previous_value(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("failing", "status", "value"),
+    [("replace", 503, True), ("_fsync_directory", 200, False)],
+)
+def test_save_reports_failure_only_when_the_previous_value_still_applies(
+    tmp_path, monkeypatch, failing, status, value
+):
+    """503 means the new value was not saved; once the rename has made it the
+    value every read returns, a later directory-fsync error is not a failure."""
     client = _client(tmp_path)
     alice = {"x-test-principal": "user:alice"}
     client.put("/user-preferences", json={"hideClassicSurfaces": True}, headers=alice)
@@ -70,9 +79,10 @@ def test_failed_save_keeps_the_previous_value(tmp_path, monkeypatch):
     def fail(*_args):
         raise OSError("disk full")
 
-    monkeypatch.setattr(user_preferences.os, "replace", fail)
-    failed = client.put(
+    target = user_preferences.os if failing == "replace" else user_preferences
+    monkeypatch.setattr(target, failing, fail)
+    response = client.put(
         "/user-preferences", json={"hideClassicSurfaces": False}, headers=alice
     )
-    assert failed.status_code == 503
-    assert _hide(client, "user:alice") is True
+    assert response.status_code == status
+    assert _hide(client, "user:alice") is value
