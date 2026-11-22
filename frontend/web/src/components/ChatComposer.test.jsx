@@ -172,6 +172,30 @@ describe('ChatComposer', () => {
     expect(registry.get('alpha').execute).not.toHaveBeenCalled();
   });
 
+  it('a caret move that changes the @ query clears the selection so Enter sends', async () => {
+    const input = renderComposer();
+    type(input, '@goals 2030');
+    await settle();
+    key(input, 'ArrowDown');
+    expect(selected()).toBe(0);
+    const moveCaret = (caret) =>
+      act(() => {
+        input.setSelectionRange(caret, caret);
+        fireEvent.select(input);
+      });
+    moveCaret(6);
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+    await settle();
+    // Back at the end, the results reopen with nothing selected.
+    moveCaret(11);
+    await settle();
+    expect(options().length).toBeGreaterThan(0);
+    expect(selected()).toBe(-1);
+    key(input, 'Enter');
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(input).toHaveValue('@goals 2030');
+  });
+
   it('inserts a node reference at the caret or a type label without sending, and keeps focus', async () => {
     const input = renderComposer();
     // A slash-led word mid-sentence is ordinary text, not command mode.

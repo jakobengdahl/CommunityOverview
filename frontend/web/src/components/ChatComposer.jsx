@@ -94,15 +94,6 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     latestValue.current = value;
   }, [value]);
 
-  // A language or graph-scope change drops the selection before the recomputed
-  // results render, so Enter cannot accept an item chosen under the old scope.
-  const scope = `${language}|${federationDepth}`;
-  const [selectionScope, setSelectionScope] = useState(scope);
-  if (selectionScope !== scope) {
-    setSelectionScope(scope);
-    setActiveKey(null);
-  }
-
   const context = useMemo(() => ({ view: 'interactive', locale: language }), [language]);
   const nodeTypes = useMemo(() => getSuggestedNodeTypes(schema, language), [schema, language]);
   const caret = selection.value === value ? selection.caret : value.length;
@@ -117,6 +108,16 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   }
   const { mode, items, status } = useCommandSuggestions(suggestionInput, context, nodeTypes);
 
+  // A new query (a caret move included), language or graph scope drops the
+  // selection before the recomputed results render, so Enter cannot accept an
+  // item chosen for another query.
+  const scope = `${language}|${federationDepth}|${suggestionInput}`;
+  const [selectionScope, setSelectionScope] = useState(scope);
+  if (selectionScope !== scope) {
+    setSelectionScope(scope);
+    setActiveKey(null);
+  }
+
   const keyOf = (item) => `${item.kind}:${item.id}`;
   // By row: item ids are arbitrary strings and no sanitizing keeps them distinct.
   const optionId = (index) => `${baseId}-opt-${index}`;
@@ -125,6 +126,8 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
 
   const active = mode !== 'idle' && focused && !disabled;
   const open = active && !dismissed && items.length > 0;
+  // A closed list holds no selection to reappear when it reopens.
+  if (!open && activeKey !== null) setActiveKey(null);
   const activeIndex = open ? items.findIndex((item) => keyOf(item) === activeKey) : -1;
   const activeItem = activeIndex >= 0 ? items[activeIndex] : null;
 
