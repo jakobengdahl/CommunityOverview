@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { mockSignedInPreferences, toggleCommandBoxOnly } from './helpers';
 
 /**
  * Mobile smoke tests — the guard rail for phone-sized viewports.
@@ -372,5 +373,25 @@ test.describe('mobile shell', () => {
     });
     expect(fits.top).toBeGreaterThanOrEqual(0);
     expect(fits.bottom).toBeLessThanOrEqual(fits.viewportHeight);
+  });
+
+  test('command box only drops the Search and Create slots until turned off', async ({ page }) => {
+    await mockSignedInPreferences(page);
+    await openApp(page);
+    const slot = (label) => page.locator(`.mobile-shell-bottomnav-item[aria-label="${label}"]`);
+    const openMenu = () => slot('Menu').tap();
+    await expect(slot('Search')).toBeVisible();
+    await expect(slot('Create')).toBeVisible();
+
+    await toggleCommandBoxOnly(page, openMenu, true);
+    await expect(slot('Search')).toHaveCount(0);
+    await expect(slot('Create')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Close menu' }).tap();
+    await openChatSheet(page);
+    await expect(page.locator('.chat-input')).toBeVisible();
+
+    await toggleCommandBoxOnly(page, openMenu, false);
+    await expect(slot('Search')).toBeVisible();
+    await expect(slot('Create')).toBeVisible();
   });
 });

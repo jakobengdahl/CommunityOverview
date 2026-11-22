@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { addNodeViaSearch, canvasNode, seedNode, uniqueToken } from './helpers';
+import {
+  addNodeViaSearch,
+  canvasNode,
+  mockSignedInPreferences,
+  seedNode,
+  toggleCommandBoxOnly,
+  uniqueToken,
+} from './helpers';
 
 /**
  * Desktop smoke tests: the floating-chrome shell on a mouse pointer.
@@ -122,5 +129,31 @@ test.describe('desktop shell', () => {
       })
       .toBe(true);
     expect(Number(await values.first().textContent())).toBeGreaterThan(0);
+  });
+
+  test('command box only hides search and toolbar, is remembered, and turns off at once', async ({
+    page,
+  }) => {
+    await mockSignedInPreferences(page);
+    await openApp(page);
+    const search = page.locator('.floating-search-input');
+    const toolbar = page.locator('.floating-toolbar-item');
+    const openMenu = () => page.locator('.floating-header-hamburger').click();
+    await expect(search).toBeVisible();
+    await expect(toolbar.first()).toBeVisible();
+
+    await toggleCommandBoxOnly(page, openMenu, true);
+    await expect(search).toHaveCount(0);
+    await expect(toolbar).toHaveCount(0);
+    await expect(page.locator('.chat-input')).toBeVisible();
+    await expect(page.locator('.command-box-hint')).toBeVisible();
+
+    await page.reload();
+    await expect(page.locator('.chat-input')).toBeVisible();
+    await expect(search).toHaveCount(0);
+
+    await toggleCommandBoxOnly(page, openMenu, false);
+    await expect(search).toBeVisible();
+    await expect(toolbar.first()).toBeVisible();
   });
 });

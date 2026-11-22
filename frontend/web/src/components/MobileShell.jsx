@@ -112,6 +112,8 @@ function MobileShell({
   onCreateActiveKnowledgeCollection,
   llmAvailable,
   akcShortName,
+  // The user's "command box only" layout: no Search or Create slot.
+  hideClassicSurfaces = false,
   // A plain callback ref (App.jsx passes its state setter for this
   // directly): called with the annotate sheet's content DOM node while it is
   // mounted, and with null once it unmounts (the sheet closing, or switching
@@ -213,6 +215,7 @@ function MobileShell({
       Icon: Search,
       active: surface.isOpen('search'),
       onClick: () => openSheet('search'),
+      classic: true,
     },
     {
       key: 'create',
@@ -220,6 +223,7 @@ function MobileShell({
       Icon: PlusCircleFill,
       active: surface.isOpen('create'),
       onClick: () => openSheet('create'),
+      classic: true,
     },
     {
       key: 'annotate',
@@ -242,7 +246,7 @@ function MobileShell({
       active: surface.isOpen('menu'),
       onClick: openMenu,
     },
-  ];
+  ].filter((item) => !(hideClassicSurfaces && item.classic));
 
   return (
     <>

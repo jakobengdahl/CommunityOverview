@@ -59,7 +59,8 @@ describe('session-aware routes', () => {
     ['POST', '/api/shape-library'],
     ['PUT', '/api/shape-library/my%20shape'],
     ['DELETE', '/api/shape-library/my%20shape'],
-  ])('leave the saved shape library write %s %s without the header', (verb, path) => {
+    ['PUT', '/api/user-preferences'],
+  ])('leave the non-graph write %s %s without the header', (verb, path) => {
     expect(needsSessionHeader(verb, path)).toBe(false);
   });
 

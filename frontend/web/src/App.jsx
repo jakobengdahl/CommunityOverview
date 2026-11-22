@@ -7,6 +7,7 @@ import {
 } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
+import useUserPreferencesStore from './store/userPreferencesStore';
 import { useI18n } from './i18n';
 import DesktopShell from './components/DesktopShell';
 import MobileShell from './components/MobileShell';
@@ -399,6 +400,15 @@ function App() {
   useEffect(() => {
     api.setMessageTranslator(t);
   }, [t]);
+  // The signed-in user's layout choice, read once per page load: signing in as
+  // another user reloads the page and so reads that user's value.
+  const loadUserPreferences = useUserPreferencesStore((state) => state.load);
+  useEffect(() => {
+    loadUserPreferences();
+  }, [loadUserPreferences]);
+  // Without the assistant there is no command box to take over their work.
+  const hideClassicSurfaces =
+    useUserPreferencesStore((state) => state.preferences.hideClassicSurfaces) && llmAvailable;
   const sessionWriteModeRef = useRef(sessionWriteMode);
   sessionWriteModeRef.current = sessionWriteMode;
   const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
@@ -4045,6 +4055,7 @@ function App() {
     llmAvailable,
     akcShortName,
     onEnterFullscreen: enterFullscreenCanvas,
+    hideClassicSurfaces,
   };
 
   const appContent = (

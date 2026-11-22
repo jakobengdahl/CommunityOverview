@@ -8,7 +8,10 @@ the interactive view's commands), and the chat composer uses them
 and combobox semantics as below. On mobile the composer is still the chat bottom
 sheet's input, which keeps it above the keyboard while the sheet is open; it is
 not yet visible with the sheet closed. The hide-classic-surfaces preference is
-not implemented yet.
+implemented as **Settings → Command box only**: the server keeps it per signed-in
+user (`/api/user-preferences`), and it hides `FloatingSearch` and
+`FloatingToolbar` (on mobile, the Search and Create slots) while the assistant
+is available, with a dismissible first-use hint above the composer.
 The five product choices below are settled. The remaining mechanics are design
 choices made here under delegated authority, with a reason for each.
 

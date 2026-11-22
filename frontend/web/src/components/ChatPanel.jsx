@@ -15,6 +15,7 @@ import ExpertAgentSelector from './ExpertAgentSelector';
 import { buildExpertCommands } from '../commands/appCommands';
 import { useRegisterCommands } from '../commands/commandRegistry';
 import ChatComposer from './ChatComposer';
+import CommandBoxHint from './CommandBoxHint';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
@@ -1106,6 +1107,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           </div>
         )}
 
+        <CommandBoxHint />
         <ChatComposer
           ref={composerRef}
           value={inputValue}

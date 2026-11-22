@@ -568,6 +568,19 @@ export async function getSchema() {
   return apiFetch(`${API_BASE}/schema`);
 }
 
+/** The signed-in user's remembered preferences: `{signed_in, preferences}`. */
+export async function getUserPreferences() {
+  return apiFetch(`${API_BASE}/user-preferences`);
+}
+
+/** Save preference changes for the signed-in user; anonymous requests are a 403. */
+export async function saveUserPreferences(changes) {
+  return apiFetch(`${API_BASE}/user-preferences`, {
+    method: 'PUT',
+    body: JSON.stringify(changes),
+  });
+}
+
 /** Saved node shapes: `{revision, entries: {key: {name, definition, revision}}}`. */
 export async function getShapeLibrary() {
   return apiFetch(`${API_BASE}/shape-library`);

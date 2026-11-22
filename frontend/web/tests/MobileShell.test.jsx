@@ -83,6 +83,19 @@ describe('MobileShell', () => {
     expect(screen.queryByTestId('mobile-annotate-sheet-container')).not.toBeInTheDocument();
   });
 
+  it('drops only the Search and Create slots in the command-box-only layout, restored on turning it off', () => {
+    const { rerender } = render(<MobileShell {...baseProps({ hideClassicSurfaces: true })} />);
+    expect(screen.queryByLabelText('mobile_nav.search')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('mobile_nav.create')).not.toBeInTheDocument();
+    for (const slot of ['graph', 'annotate', 'chat', 'menu']) {
+      expect(screen.getByLabelText(`mobile_nav.${slot}`)).toBeInTheDocument();
+    }
+
+    rerender(<MobileShell {...baseProps({ hideClassicSurfaces: false })} />);
+    expect(screen.getByLabelText('mobile_nav.search')).toBeInTheDocument();
+    expect(screen.getByLabelText('mobile_nav.create')).toBeInTheDocument();
+  });
+
   it('opens the search sheet and closes it again on toggle, without opening chat', () => {
     render(<MobileShell {...baseProps()} />);
 
