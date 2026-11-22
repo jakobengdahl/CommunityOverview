@@ -342,8 +342,8 @@ function shapedFlowNode(definition, data = {}, node = graphNode) {
   };
 }
 
-function renderFlow(nodes, { onNodesChange = () => {} } = {}) {
-  return render(
+function flow(nodes, onNodesChange = () => {}) {
+  return (
     <ReactFlowProvider>
       <ReactFlow
         nodes={nodes}
@@ -355,6 +355,10 @@ function renderFlow(nodes, { onNodesChange = () => {} } = {}) {
       />
     </ReactFlowProvider>
   );
+}
+
+function renderFlow(nodes, { onNodesChange } = {}) {
+  return render(flow(nodes, onNodesChange));
 }
 
 function withStylesheet(run) {
@@ -390,6 +394,47 @@ describe('CustomNode configured shapes', () => {
     }
     expect(root.querySelector('.graph-shape-band').style.fill).toBe('#1e3a8a');
     expect(screen.getByTestId('rf__node-plain').querySelector('.graph-custom-node')).not.toBeNull();
+  });
+
+  it('paints type, mark and presence colours on the layers and never a value that is not a colour', () => {
+    const states = {
+      markColor: '#ff0000',
+      remoteSelection: { color: '#00aa00', displayName: 'Ada' },
+    };
+    const nodes = (n1Data = states) => [
+      shapedFlowNode(CARD, n1Data),
+      { ...shapedFlowNode(CARD, states), id: 'n2', position: { x: 400, y: 0 } },
+      {
+        ...shapedFlowNode(CARD, {
+          color: 'red" onmouseover="alert(1)',
+          markColor: 'red; fill: blue',
+        }),
+        id: 'n3',
+        position: { x: 800, y: 0 },
+      },
+    ];
+    const { rerender } = renderFlow(nodes());
+    const layer = (id, part) =>
+      screen.getByTestId(`rf__node-${id}`).querySelector(`.graph-shape-${part}`);
+    for (const id of ['n1', 'n2']) {
+      expect(layer(id, 'band').style.fill).toBe('#1e3a8a');
+      expect(layer(id, 'outline').style.stroke).toBe('#ff0000');
+      expect(layer(id, 'ring-mark').style.stroke).toBe('#ff000066');
+      expect(layer(id, 'ring-remote').style.stroke).toBe('#00aa00');
+    }
+    const hostile = screen.getByTestId('rf__node-n3').querySelector('svg');
+    // Six layers and the mark ring: a mark is drawn even when its colour is not paintable.
+    expect(hostile.querySelectorAll('path')).toHaveLength(7);
+    expect(hostile.querySelector('[onmouseover]')).toBeNull();
+    for (const path of hostile.querySelectorAll('path')) {
+      expect(path.getAttribute('style')).toBeNull();
+    }
+
+    // An edited node keeps its id; its layers take the new look, calc() included.
+    const calcColor = 'rgb(calc(2 * 50), 0, 0)';
+    rerender(flow(nodes({ ...states, color: calcColor })));
+    expect(layer('n1', 'band').style.fill).toBe(calcColor);
+    expect(layer('n2', 'band').style.fill).toBe('#1e3a8a');
   });
 
   it('binds areas to plain text of declared scalars only and keeps the band when text is None', () => {
