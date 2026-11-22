@@ -1140,7 +1140,7 @@
   },
   "command_box": {
     "label": "Message or command",
-    "help": "Type two characters for node suggestions, or / for commands. Arrow keys choose a suggestion, Tab accepts the first one, Enter accepts the chosen one or sends the message, Escape closes the list.",
+    "help": "Type @ and at least two characters to insert a node reference, or start with / for commands. Arrow keys choose a suggestion, Tab accepts the first one, Enter accepts the chosen one or sends the message, Escape closes the list.",
     "suggestions": "Suggestions",
     "kind_node": "Node",
     "kind_node_type": "Node type",

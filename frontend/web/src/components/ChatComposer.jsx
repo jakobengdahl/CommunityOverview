@@ -31,14 +31,15 @@ const isComposingKey = (e) => e.nativeEvent?.isComposing || e.keyCode === 229;
 const POPUP_VIEWPORT_MARGIN_PX = 8;
 
 /**
- * The `[start, end)` span of the whitespace-delimited word at `caret`: what a
- * plain-mode suggestion is queried with and what accepting one replaces.
+ * The node reference being typed at `caret`: the nearest `@` before it, unless
+ * that `@` follows a non-whitespace character (an e-mail address), and the text
+ * from there to the caret, spaces included so multi-word names can be queried.
+ * `null` without one. Accepting a suggestion replaces `[start, caret)`.
  */
-export function wordAtCaret(text, caret) {
-  return {
-    start: text.slice(0, caret).search(/\S*$/),
-    end: caret + text.slice(caret).search(/\s|$/),
-  };
+export function mentionAtCaret(text, caret) {
+  const start = text.lastIndexOf('@', caret - 1);
+  if (start < 0 || /\S/.test(text.charAt(start - 1))) return null;
+  return { start, query: text.slice(start + 1, caret) };
 }
 
 /**
@@ -93,19 +94,18 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   const caret = selection.value === value ? selection.caret : value.length;
   // During IME composition the query stays at its pre-composition text.
   const queried = frozenInput ?? { value, caret };
-  const word = wordAtCaret(queried.value, queried.caret);
-  // Slash mode reads the whole draft; plain mode completes the word at the
-  // caret, so a reference can be composed into a sentence. A slash-led word
-  // there is ordinary text and must not open command mode.
+  // Slash mode reads the whole draft; plain text suggests only for an `@`
+  // reference at the caret, whose query must never open command mode.
   let suggestionInput = queried.value;
   if (parseCommandInput(queried.value).mode !== 'command') {
-    const text = queried.value.slice(word.start, word.end);
-    suggestionInput = text.startsWith('/') ? '' : text;
+    const query = mentionAtCaret(queried.value, queried.caret)?.query ?? '';
+    suggestionInput = query.trimStart().startsWith('/') ? '' : query;
   }
   const { mode, items, status } = useCommandSuggestions(suggestionInput, context, nodeTypes);
 
   const keyOf = (item) => `${item.kind}:${item.id}`;
-  const optionId = (item) => `${baseId}-opt-${keyOf(item).replace(/[^\w-]/g, '_')}`;
+  // By row: item ids are arbitrary strings and no sanitizing keeps them distinct.
+  const optionId = (index) => `${baseId}-opt-${index}`;
   const listboxId = `${baseId}-listbox`;
   const helpId = `${baseId}-help`;
 
@@ -121,27 +121,36 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   }, [value]);
 
   // dvh ignores an on-screen keyboard on iOS, so bound the popup by the room
-  // left above the box in the visual viewport instead.
+  // left above the box in the visual viewport instead, and by the nearest
+  // scrolling ancestor (the mobile bottom sheet's content), which clips it.
   useLayoutEffect(() => {
+    if (!open) return undefined;
     const vv = window.visualViewport;
-    if (!open || !vv) return undefined;
     const measure = () => {
-      const top = boxRef.current?.getBoundingClientRect().top;
-      if (top == null) return;
-      setPopupSpace(Math.max(0, Math.floor(top - vv.offsetTop - POPUP_VIEWPORT_MARGIN_PX)));
+      const box = boxRef.current;
+      if (!box) return;
+      let ceiling = vv ? vv.offsetTop : 0;
+      for (let el = box.parentElement; el; el = el.parentElement) {
+        if (getComputedStyle(el).overflowY !== 'visible') {
+          ceiling = Math.max(ceiling, el.getBoundingClientRect().top);
+          break;
+        }
+      }
+      const top = box.getBoundingClientRect().top;
+      setPopupSpace(Math.max(0, Math.floor(top - ceiling - POPUP_VIEWPORT_MARGIN_PX)));
     };
     measure();
-    vv.addEventListener('resize', measure);
-    vv.addEventListener('scroll', measure);
+    vv?.addEventListener('resize', measure);
+    vv?.addEventListener('scroll', measure);
     return () => {
-      vv.removeEventListener('resize', measure);
-      vv.removeEventListener('scroll', measure);
+      vv?.removeEventListener('resize', measure);
+      vv?.removeEventListener('scroll', measure);
     };
   }, [open]);
 
   useEffect(() => {
-    if (activeItem)
-      document.getElementById(optionId(activeItem))?.scrollIntoView?.({ block: 'nearest' });
+    if (activeIndex >= 0)
+      document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: 'nearest' });
   }, [activeItem]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const close = () => {
@@ -157,10 +166,12 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     onChange(target.value);
   };
 
-  // Node and type suggestions replace the word at the caret they were queried with.
+  // Node and type suggestions replace the `@` reference they were queried with.
   const insert = (text) => {
-    const { start, end } = wordAtCaret(value, caret);
-    const rest = value.slice(end);
+    const mention = mentionAtCaret(value, caret);
+    if (!mention) return;
+    const { start } = mention;
+    const rest = value.slice(caret);
     const next = `${value.slice(0, start)}${text}${/^\s/.test(rest) ? '' : ' '}${rest}`;
     const nextCaret = start + text.length + 1;
     pendingCaret.current = nextCaret;
@@ -247,12 +258,12 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
           aria-label={t('command_box.suggestions')}
           style={popupSpace === null ? undefined : { maxHeight: `min(20rem, ${popupSpace}px)` }}
         >
-          {items.map((item) => {
+          {items.map((item, index) => {
             const selected = item === activeItem;
             return (
               <li
                 key={keyOf(item)}
-                id={optionId(item)}
+                id={optionId(index)}
                 role="option"
                 aria-selected={selected}
                 className={`command-box-option${selected ? ' active' : ''}`}
@@ -277,7 +288,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
-        aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
+        aria-activedescendant={activeItem ? optionId(activeIndex) : undefined}
         value={value}
         onChange={(e) => edit(e.target)}
         onSelect={(e) =>

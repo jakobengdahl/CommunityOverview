@@ -30,10 +30,10 @@ function Harness({ initial = '' }) {
   );
 }
 
-const renderComposer = () => {
+const renderComposer = (wrap = (composerElement) => composerElement) => {
   render(
     <CommandRegistryContext.Provider value={registry}>
-      <Harness />
+      {wrap(<Harness />)}
     </CommandRegistryContext.Provider>
   );
   const input = screen.getByRole('combobox');
@@ -76,13 +76,25 @@ describe('ChatComposer', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('offers nodes and node types for plain text and only commands in slash mode', async () => {
+  it('offers nodes and node types only after an @ trigger and only commands in slash mode', async () => {
     const input = renderComposer();
-    type(input, 'g');
+    type(input, 'goals');
+    await settle();
+    expect(options()).toHaveLength(0);
+    // An @ after a non-whitespace character is an e-mail address.
+    type(input, 'mail bob@goals');
+    await settle();
+    expect(api.searchGraph).not.toHaveBeenCalled();
+    type(input, '@g');
     await settle();
     expect(options()).toHaveLength(0);
 
-    type(input, 'goal');
+    // The query runs to the caret, spaces included.
+    type(input, 'about @goals 20');
+    await settle();
+    expect(api.searchGraph).toHaveBeenLastCalledWith('goals 20', expect.anything());
+
+    type(input, '@goal');
     await settle();
     expect(options().map((o) => o.textContent)).toEqual([
       'Goalcommand_box.kind_node_type',
@@ -146,7 +158,7 @@ describe('ChatComposer', () => {
     await settle();
     expect(options()).toHaveLength(0);
 
-    const draft = 'tell me about goals please';
+    const draft = 'tell me about @goals please';
     type(input, draft, draft.indexOf(' please'));
     await settle();
     expect(api.searchGraph).toHaveBeenLastCalledWith('goals', expect.anything());
@@ -156,7 +168,7 @@ describe('ChatComposer', () => {
     expect(input).toHaveValue(`tell me about ${reference} please`);
     expect(input.selectionStart).toBe(`tell me about ${reference} `.length);
 
-    type(input, 'goal');
+    type(input, '@goal');
     await settle();
     key(input, 'Tab');
     expect(input).toHaveValue('Goal ');
@@ -186,20 +198,49 @@ describe('ChatComposer', () => {
     expect(screen.getByRole('status')).toHaveTextContent('command_box.command_failed');
   });
 
-  it('bounds the popup by the room above the box in the visual viewport', () => {
+  it('gives every row a distinct option id even when item ids sanitize alike', async () => {
+    api.searchGraph.mockResolvedValue({
+      nodes: [
+        { id: 'a b', name: 'Goal A', type: 'Goal' },
+        { id: 'a_b', name: 'Goal B', type: 'Goal' },
+      ],
+    });
+    const input = renderComposer();
+    type(input, '@goal');
+    await settle();
+    const ids = options().map((o) => o.id);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+    key(input, 'ArrowDown');
+    key(input, 'ArrowDown');
+    expect(input).toHaveAttribute('aria-activedescendant', ids[1]);
+  });
+
+  it('bounds the popup by the room above the box in the visual viewport and its scroll container', () => {
     const viewport = Object.assign(new EventTarget(), { offsetTop: 0, height: 400 });
     vi.stubGlobal('visualViewport', viewport);
+    let sheetTop = 0;
     const rect = vi
       .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockReturnValue({ top: 300 });
+      .mockImplementation(function () {
+        return { top: this.classList.contains('sheet') ? sheetTop : 300 };
+      });
     try {
-      const input = renderComposer();
+      const input = renderComposer((composerElement) => (
+        <div className="sheet" style={{ overflowY: 'auto' }}>
+          {composerElement}
+        </div>
+      ));
       type(input, '/');
       expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 292px)');
       // The keyboard opening scrolls the visual viewport down over the page.
       viewport.offsetTop = 200;
       act(() => viewport.dispatchEvent(new Event('scroll')));
       expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 92px)');
+      // A bottom sheet's scrolling content starting lower clips the popup sooner.
+      sheetTop = 250;
+      act(() => viewport.dispatchEvent(new Event('resize')));
+      expect(screen.getByRole('listbox').style.maxHeight).toBe('min(20rem, 42px)');
     } finally {
       rect.mockRestore();
       vi.unstubAllGlobals();

@@ -1140,7 +1140,7 @@
   },
   "command_box": {
     "label": "Meddelande eller kommando",
-    "help": "Skriv två tecken för nodförslag, eller / för kommandon. Piltangenterna väljer ett förslag, Tab tar det första, Enter tar det valda eller skickar meddelandet, Escape stänger listan.",
+    "help": "Skriv @ och minst två tecken för att infoga en nodreferens, eller börja med / för kommandon. Piltangenterna väljer ett förslag, Tab tar det första, Enter tar det valda eller skickar meddelandet, Escape stänger listan.",
     "suggestions": "Förslag",
     "kind_node": "Nod",
     "kind_node_type": "Nodtyp",

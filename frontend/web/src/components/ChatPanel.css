@@ -558,7 +558,8 @@
    input, over the chat history, with bounded height and its own scrolling. On
    mobile the hosting BottomSheet keeps the composer above the keyboard, and the
    component narrows max-height inline to the room left in the visual viewport
-   (dvh below is only the fallback where visualViewport is missing). */
+   and inside the sheet's scrolling content, which would clip it (dvh below is
+   only the fallback before that measurement). */
 .command-box {
   position: relative;
 }
