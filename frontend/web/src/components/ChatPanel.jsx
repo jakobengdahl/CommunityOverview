@@ -14,6 +14,7 @@ import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import { buildExpertCommands } from '../commands/appCommands';
 import { useRegisterCommands } from '../commands/commandRegistry';
+import ChatComposer from './ChatComposer';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
@@ -116,6 +117,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const handleSendRef = useRef(null);
+  const composerRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -398,13 +400,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   // Keep ref current so the guide animation can call the latest handleSend after animation
   // completes, picking up the fully-typed inputValue rather than a stale closure.
   handleSendRef.current = handleSend;
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -1111,11 +1106,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           </div>
         )}
 
-        <textarea
-          className="chat-input"
+        <ChatComposer
+          ref={composerRef}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onKeyPress={handleKeyPress}
+          onChange={setInputValue}
+          onSend={handleSend}
           onFocus={requestCloseMenus}
           placeholder={
             uploadedFile
@@ -1126,7 +1121,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                   ? t('chat.placeholder_with_selection')
                   : t('chat.placeholder')
           }
-          rows={3}
           disabled={isProcessing}
         />
 
@@ -1201,7 +1195,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           </button>
           <button
             className="chat-send-button"
-            onClick={handleSend}
+            // Keeps focus (and an open suggestion list) in the composer.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => composerRef.current.submit()}
             disabled={(!inputValue.trim() && !uploadedFile) || isProcessing}
           >
             {isProcessing ? t('chat.processing') : t('chat.send')}

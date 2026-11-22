@@ -1137,5 +1137,18 @@
     "fullscreen_description": "Show the visualization in fullscreen",
     "add_expert": "Add expert agent: {name}",
     "add_expert_description": "Bring this expert agent into the conversation"
+  },
+  "command_box": {
+    "label": "Message or command",
+    "help": "Type @ and at least two characters to insert a node reference, or start with / for commands. Arrow keys choose a suggestion, Tab accepts the first one, Enter accepts the chosen one or sends the message, Escape closes the list.",
+    "suggestions": "Suggestions",
+    "kind_node": "Node",
+    "kind_node_type": "Node type",
+    "kind_command": "Command",
+    "loading": "Searching…",
+    "no_results": "No suggestions",
+    "results": "{count} suggestions",
+    "search_failed": "Node search failed; only node types are suggested",
+    "command_failed": "Could not run {label}. Your text is kept."
   }
 }

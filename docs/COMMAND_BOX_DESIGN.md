@@ -3,8 +3,12 @@
 **Status: Design (target state), approved; partly implemented.**
 The command registry and suggestion providers exist in
 `frontend/web/src/commands/` (registry, ranking, node/type/command providers and
-the interactive view's commands). No composer uses them yet, so nothing in this
-note is user-visible.
+the interactive view's commands), and the chat composer uses them
+(`frontend/web/src/components/ChatComposer.jsx`): suggestions, keyboard, touch
+and combobox semantics as below. On mobile the composer is still the chat bottom
+sheet's input, which keeps it above the keyboard while the sheet is open; it is
+not yet visible with the sheet closed. The hide-classic-surfaces preference is
+not implemented yet.
 The five product choices below are settled. The remaining mechanics are design
 choices made here under delegated authority, with a reason for each.
 
@@ -26,7 +30,7 @@ choices made here under delegated authority, with a reason for each.
 
 | Choice | Rule | Reason |
 |---|---|---|
-| Trigger | With input focus, suggest nodes and node types after two non-whitespace characters. A slash at the start of the input, ignoring leading whitespace, enters command mode immediately; bare `/` lists available commands. Slashes elsewhere are ordinary text. | Avoid noisy single-letter searches while keeping command discovery immediate. |
+| Trigger | With input focus, suggest nodes and node types only after an `@` trigger (owner decision 2026-11-22): the query is the text from the nearest `@` before the caret up to the caret, may contain spaces, and needs two non-whitespace characters. An `@` directly after a non-whitespace character (an e-mail address) is not a trigger; without an active `@` there are no plain-text suggestions. A slash at the start of the input, ignoring leading whitespace, enters command mode immediately; bare `/` lists available commands. Slashes elsewhere are ordinary text. | Avoid noisy single-letter searches while keeping command discovery immediate. |
 | Debounce | Debounce node/type queries by 150 ms after the last edit; filter the local command registry immediately. Cancel superseded work and discard results for an old query, scope or closed popup. | Reduce query traffic without delaying local commands or showing stale results. |
 | Show | Open when the trigger is satisfied and at least one eligible result exists. Initially no item is selected. Loading, no-results and error feedback are non-selectable status text. | Typing and sending chat must remain the default action. |
 | Hide | Close on Esc, loss of focus outside the box and popup, cleared/short input, no results, submission or acceptance. After Esc, keep closed until the next edit or explicit ArrowDown request. | Dismissal stays effective and stale choices cannot be accepted. |
@@ -50,8 +54,8 @@ results before acceptance is possible.
 | Composition | During IME composition, do not accept, submit or intercept composition keys; query after composition ends. | Keep text entry safe across input methods. |
 | Edit | Any edit clears the active item immediately, including while awaiting results. | A selection must correspond to the visible, current query. |
 
-Accepting a node inserts a structured node reference at the caret; accepting a
-node type inserts its displayed label as text. Both close the list and keep the
+Accepting a node replaces the `@` trigger and its query with a structured node
+reference; accepting a node type inserts its displayed label in the same place. Both close the list and keep the
 draft focused without sending chat or creating graph data. Accepting a command
 closes the list and invokes its handler only if the input is still in slash mode
 and the command is still available. The handler opens its existing action flow;

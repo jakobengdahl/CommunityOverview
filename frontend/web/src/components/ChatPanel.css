@@ -554,6 +554,78 @@
   opacity: 0.6;
 }
 
+/* Command box (ChatComposer.jsx): the suggestion list is anchored above the
+   input, over the chat history, with bounded height and its own scrolling. On
+   mobile the hosting BottomSheet keeps the composer above the keyboard, and the
+   component narrows max-height inline to the room left in the visual viewport
+   and inside the sheet's scrolling content, which would clip it (dvh below is
+   only the fallback before that measurement). */
+.command-box {
+  position: relative;
+}
+
+.command-box-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 2;
+  max-height: min(20rem, 40vh);
+  max-height: min(20rem, 40dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #1f1f1f;
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.command-box-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.6rem;
+  border-radius: 6px;
+  color: #eee;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.command-box-option:hover,
+.command-box-option.active {
+  background: #333;
+}
+
+.command-box-option.active {
+  outline: 1px solid var(--co-accent);
+}
+
+.command-box-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-box-option-kind {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.command-box-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* Button row */
 .button-row {
   display: flex;

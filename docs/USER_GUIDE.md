@@ -720,6 +720,33 @@ The assistant responds in whatever language you write in — switch mid-conversa
 Responses support **Markdown**: bold text, bullet lists, tables, and inline code are
 rendered properly.
 
+#### Suggestions and commands in the chat input
+
+The chat input also suggests things as you type. Type **@** to insert a node
+reference: after **@** and two more characters it lists matching nodes and node
+types above the input, and the name may contain spaces (`@labour force`). An
+**@** inside a word, as in an e-mail address, does not trigger suggestions.
+Start with **/** to list commands instead, such as creating a node, saving a view or the session actions
+(**/** alone lists them all). Commands are only offered after **/**, so ordinary
+text never runs one.
+
+- **↓** / **↑** choose a suggestion; **Tab** accepts the first one; **Enter**
+  accepts the chosen one; **Esc** closes the list and keeps your text. On a
+  touch screen, tap a row.
+- A node replaces the **@** and what you typed after it with a reference such
+  as `[Labour Force Survey](node:…)`, which the assistant can look up; a node
+  type is inserted as its name. Neither
+  sends the message.
+- A command opens the same dialog or action as its button elsewhere, including
+  any confirmation. If it cannot run, your text is kept.
+- With no suggestion chosen, **Enter** and **Send** send your text as a chat
+  message exactly as typed, even when it starts with **/**. **Shift+Enter**
+  adds a new line.
+
+Collection kiosks have no suggestions or commands.
+
+![Command suggestions above the chat input](images/chat-command-box.png)
+
 ### 4.2 Adding nodes through chat
 
 Ask the assistant to add content:
