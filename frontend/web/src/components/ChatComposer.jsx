@@ -119,8 +119,10 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   }
 
   const keyOf = (item) => `${item.kind}:${item.id}`;
-  // By row: item ids are arbitrary strings and no sanitizing keeps them distinct.
-  const optionId = (index) => `${baseId}-opt-${index}`;
+  // Per item, so a reordered list keeps each option's id: an injective escape
+  // of the key (`_` included), as item ids are arbitrary strings.
+  const optionId = (item) =>
+    `${baseId}-opt-${keyOf(item).replace(/[^A-Za-z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16)}_`)}`;
   const listboxId = `${baseId}-listbox`;
   const helpId = `${baseId}-help`;
 
@@ -174,7 +176,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
 
   useEffect(() => {
     if (activeIndex >= 0)
-      document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: 'nearest' });
+      document.getElementById(optionId(activeItem))?.scrollIntoView?.({ block: 'nearest' });
   }, [activeItem]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const close = () => {
@@ -282,19 +284,20 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
           className="command-box-popup"
           role="listbox"
           aria-label={t('command_box.suggestions')}
+          // Keep focus in the box, so blur cannot dismiss before a tap lands or
+          // while the popup's padding or scrollbar is pressed.
+          onMouseDown={(e) => e.preventDefault()}
           style={popupSpace === null ? undefined : { maxHeight: `min(20rem, ${popupSpace}px)` }}
         >
-          {items.map((item, index) => {
+          {items.map((item) => {
             const selected = item === activeItem;
             return (
               <li
                 key={keyOf(item)}
-                id={optionId(index)}
+                id={optionId(item)}
                 role="option"
                 aria-selected={selected}
                 className={`command-box-option${selected ? ' active' : ''}`}
-                // Keep focus in the box, so blur cannot dismiss before the tap lands.
-                onMouseDown={(e) => e.preventDefault()}
                 // Accepting mid-composition would rewrite text the IME still owns.
                 onClick={() => frozenInput === null && accept(item)}
               >
@@ -315,7 +318,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
-        aria-activedescendant={activeItem ? optionId(activeIndex) : undefined}
+        aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
         value={value}
         onChange={(e) => edit(e.target)}
         onSelect={(e) =>

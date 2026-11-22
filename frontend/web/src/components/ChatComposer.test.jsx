@@ -257,7 +257,7 @@ describe('ChatComposer', () => {
     expect(screen.getByRole('status')).toHaveTextContent('command_box.command_failed');
   });
 
-  it('gives every row a distinct option id even when item ids sanitize alike', async () => {
+  it('gives every item a distinct option id that stays its own when the list reorders', async () => {
     api.searchGraph.mockResolvedValue({
       nodes: [
         { id: 'a b', name: 'Goal A', type: 'Goal' },
@@ -273,6 +273,15 @@ describe('ChatComposer', () => {
     key(input, 'ArrowDown');
     key(input, 'ArrowDown');
     expect(input).toHaveAttribute('aria-activedescendant', ids[1]);
+
+    type(input, '/');
+    const before = Object.fromEntries(options().map((o) => [o.textContent, o.id]));
+    // A command sorting first shifts every row of the same query down.
+    act(() => registry.register(command('aaa')));
+    const after = Object.fromEntries(options().map((o) => [o.textContent, o.id]));
+    expect(Object.keys(after)).toHaveLength(4);
+    Object.keys(before).forEach((label) => expect(after[label]).toBe(before[label]));
+    expect(Object.values(before)).not.toContain(Object.values(after)[0]);
   });
 
   it('bounds the popup by the room above the box in the visual viewport and its scroll container', () => {
@@ -327,6 +336,8 @@ describe('ChatComposer', () => {
     expect(registry.get('beta').execute).not.toHaveBeenCalled();
     fireEvent.compositionEnd(input);
     expect(fireEvent.mouseDown(row)).toBe(false);
+    // Pressing the popup's padding or scrollbar keeps focus too.
+    expect(fireEvent.mouseDown(screen.getByRole('listbox'))).toBe(false);
     await act(async () => fireEvent.click(row));
     expect(registry.get('beta').execute).toHaveBeenCalledTimes(1);
 
