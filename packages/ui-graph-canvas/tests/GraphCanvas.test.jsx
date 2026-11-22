@@ -2,6 +2,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { nodeShapeAreaValues } from '../src/utils/nodeShapes';
+
+vi.mock('../src/utils/nodeShapes', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, nodeShapeAreaValues: vi.fn(actual.nodeShapeAreaValues) };
+});
 
 const hoisted = vi.hoisted(() => ({ onNodesChange: null, selectionOnChange: null }));
 
@@ -195,6 +201,39 @@ describe('GraphCanvas', () => {
     // Area texts come from the loaded nodes: a shaped node never fetches.
     vi.unstubAllGlobals();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('resolves a node look once across overlay changes and again when shape selections change', () => {
+    const risk = {
+      version: 1,
+      base: 'triangle-down',
+      scale: 1,
+      placement: 'bottom',
+      areas: { first: 'name', second: 'risk_level', third: null },
+    };
+    const schema = {
+      node_shapes: { risk },
+      node_types: { Risk: { shape: 'risk', fields: ['risk_level'] } },
+    };
+    const nodes = [{ id: 'r1', name: 'Supply delay', type: 'Risk', risk_level: 'high' }];
+    const flat = { ...risk, base: 'rectangle-flat', placement: 'middle-centre' };
+    const savedShapes = { flat: { name: 'Flat', definition: flat, revision: 1 } };
+    const canvas = (props) => (
+      <GraphCanvas nodes={nodes} edges={[]} schema={schema} savedShapes={savedShapes} {...props} />
+    );
+    nodeShapeAreaValues.mockClear();
+    const { rerender } = render(canvas({}));
+    const node = () => screen.getByTestId('node-r1');
+    rerender(
+      canvas({ highlightedNodeIds: ['r1'], nodeMarks: { r1: { color: '#f00', label: 'Watch' } } })
+    );
+    expect(node().getAttribute('aria-label')).toBe('Risk, Supply delay, high, Watch');
+    rerender(canvas({ dimmedNodeIds: ['r1'] }));
+    expect(node().getAttribute('aria-label')).toBe('Risk, Supply delay, high');
+    expect(nodeShapeAreaValues).toHaveBeenCalledTimes(1);
+    rerender(canvas({ typeShapes: { Risk: { ref: 'saved:flat' } } }));
+    expect(node().dataset.shapeBase).toBe('rectangle-flat');
+    expect(nodeShapeAreaValues).toHaveBeenCalledTimes(2);
   });
 
   it('renders graph container and react-flow', () => {
