@@ -188,8 +188,62 @@ def _build_system_prompt() -> str:
         node_types_section=node_types_section,
         relationship_types_section=rel_types_section,
         language_policy_section=language_policy_section,
+        write_verification_section=_WRITE_VERIFICATION_SECTION,
         prompt_suffix=prompt_suffix,
     )
+
+
+# add_nodes() nodes carry no client-side id (ids are server-generated) and
+# edge endpoints accept a name, so a node created in the same call can only be
+# referenced by the name it is being created with.
+_SAME_CALL_EDGE_EXEMPTION = (
+    "Exception: an edge in add_nodes() that points at a node created in that "
+    "same call uses the new node's exact name, since it has no ID yet."
+)
+
+
+# Read-backs name get_related_nodes because the chat tool set has no
+# get_node_details; it always returns the anchor node in full, by ID.
+_WRITE_VERIFICATION_RULES = (
+    "VERIFY AFTER EVERY WRITE: A successful result from add_nodes(), "
+    "update_node() or another write tool is not proof that the graph changed. "
+    "Before telling the user a change succeeded, read the affected node back "
+    "by ID with get_related_nodes(node_id=<id>, depth=1, include_archived=true) "
+    "and compare the returned values with the change you intended (after a "
+    "delete, a not-found result is the expected one). Report success only "
+    "when they match; report any field that differs as not applied. If the "
+    "write result says the change is pending, awaiting confirmation or was "
+    "refused, say so instead of reporting it as done. If "
+    "you cannot read the node back, say the change is unverified.",
+    "INSPECT THE WHOLE OBJECT: When the user asks for a complete, full or "
+    "total update (for example translating a node in full), check every "
+    "field of the returned node, including summary, tags, subtypes, aliases "
+    "and nested metadata, not only name and description. List each field you "
+    "changed and each field still left in its old state.",
+    "RE-FETCH WHEN DISPUTED: If the user says a change you reported is "
+    "missing or wrong, do not answer from memory of the earlier tool call. "
+    "Read the node again with get_related_nodes(node_id=<id>, depth=1, "
+    "include_archived=true) and present the values it returns now, then fix "
+    "any remaining difference with the user's approval.",
+    "RESOLVE IDS FIRST: Before any update, archive, delete or edge operation, "
+    "resolve every existing node the user names to its unique ID with "
+    "search_graph() or find_similar_nodes_batch(). If a name matches several "
+    "nodes, ask the user which one is meant. Pass those exact IDs to every "
+    "following call, including edge source and target in add_nodes(), and in "
+    "later calls reuse the IDs that add_nodes() returns for nodes it created, "
+    "never their names. " + _SAME_CALL_EDGE_EXEMPTION,
+)
+
+_WRITE_VERIFICATION_SECTION = (
+    "WRITE VERIFICATION (these rules apply to every graph change. Their "
+    "read-back calls take precedence over the call-minimising advice and the "
+    "'confirm the update' steps elsewhere in this prompt; they never replace "
+    "asking the user for approval before a change):\n"
+    + "".join(
+        f"{number}. {rule}\n"
+        for number, rule in enumerate(_WRITE_VERIFICATION_RULES, start=1)
+    )
+)
 
 
 # Base system prompt with placeholders for dynamic content
@@ -331,6 +385,7 @@ SECURITY RULES:
 3. Show affected connections before deletion
 4. Filter results appropriately based on the user's query
 
+{write_verification_section}
 CRITICAL - ADD vs REPLACE vs CLEAR (visualization intent):
 The default is ADDITIVE. Only clear or replace the current view when the user
 EXPLICITLY asks for it. When in doubt, add — never silently clear the canvas.

@@ -484,6 +484,53 @@ describe('App handler wiring', () => {
     );
   });
 
+  it.each([
+    ['Actor', 'onNodeCreated'],
+    ['EventSubscription', 'onSaveSubscription'],
+    ['ActiveKnowledgeCollection', 'onSaveAKC'],
+  ])(
+    'a %s dropped from the toolbar is drawn at the drop point, also on a retry',
+    async (type, handler) => {
+      await renderApp();
+      const data = { type, name: 'Dropped' };
+      api.addNodes
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue({ success: true, added_node_ids: ['dropped-1'] });
+
+      act(() => canvas().onDropCreateNode(type, { x: 120, y: -40 }));
+      // The first save fails and the dialog stays open; the retry succeeds.
+      await act(async () => {
+        await dialogs()
+          [handler](data)
+          .catch(() => {});
+      });
+      await act(async () => {
+        await dialogs()[handler](data);
+      });
+
+      // The position is the canvas's alone; the server is sent the node as entered.
+      expect(api.addNodes).toHaveBeenCalledWith([data], []);
+      await waitFor(() =>
+        expect(findNode('dropped-1')?._savedPosition).toEqual({ x: 120, y: -40 })
+      );
+    }
+  );
+
+  it('does not place a toolbar-created node at an earlier abandoned drop point', async () => {
+    await renderApp();
+    api.addNodes.mockResolvedValue({ success: true, added_node_ids: ['clicked-1'] });
+
+    act(() => canvas().onDropCreateNode('Actor', { x: 120, y: -40 }));
+    act(() => captured.desktop.onCreateNodeForType('Actor'));
+    expect(dialogs().dialogs.createNodeType).toBe('Actor');
+    await act(async () => {
+      await dialogs().onNodeCreated({ type: 'Actor', name: 'Clicked' });
+    });
+
+    await waitFor(() => expect(findNode('clicked-1')).toBeTruthy());
+    expect(findNode('clicked-1')._savedPosition).toBeUndefined();
+  });
+
   it('handleEdgeUpdate persists the edge edit and applies it to the canvas edge', async () => {
     await renderApp();
     await act(async () => {

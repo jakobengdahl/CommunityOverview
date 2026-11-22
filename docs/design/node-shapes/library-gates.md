@@ -77,22 +77,52 @@ arithmetic.
 
 ## Results
 
-### Gate run (2026-11-20)
+### Gate run (2026-11-21, after the memory and render optimisation)
 
 The full matrix: 1,000 and 5,000 nodes, scales 0.1, 1 and 10, both themes,
-five runs per scene, seed 20261120, at commit d90a04f (main). It ran on a
-shared host whose load average was about 28 on 72 cores, and the browser
-reported SwiftShader (software rendering), so the frame-time rows carry host
-noise. The heap rows do not depend on host load.
+five runs per scene, seed 20261120, at commit e966b27 (this change). It ran on
+a shared host (72 cores, other work running) and the browser reported
+SwiftShader (software rendering). Pan frame times move in steps of one 60 Hz
+frame (16.7 ms), so a one-frame change shows as a large percentage. The heap
+rows do not depend on host load.
 
-Result: the 10 % budget is **not met**. 50 rows fail and 22 pass. Heap is
-12 to 17 % over the legacy card in every scene, and initial render, Load More
-and pan frame time fail in most scenes. Library writes stay off until the
-regressions are addressed and the matrix is run again.
+Result: 42 rows pass and 30 fail, against 22 and 50 at d90a04f the day
+before. The Budget column is this run's verdict per scene, failures
+included. Heap is now 2 to 4 % over the legacy card in every scene (it was 12
+to 17 %), within the 10 % budget. Initial render, Load More, pan and edge
+update frame time miss the budget in part of the scenes. These verdicts hold
+for software rendering on this host; a run with GPU rendering has not been
+made, so how they compare there is not measured. Library writes stay off.
+
+- **Pan frame at 1,000 nodes is one frame slower.** At scales 0.1 and 1 the
+  shaped p50 is 50.0 ms and p95 66.7 ms in all four scenes. The legacy card
+  has p50 33.3 ms at scale 0.1 and 33.4 ms at scale 1, and p95 50.0 ms,
+  except 50.1 ms in the dark scene at scale 0.1. At scale 10 p50 is equal and p95 is
+  one frame slower. The d90a04f run shows the same steps in the same scenes.
+  A result that repeats in every scene of both runs is not host noise: on
+  this renderer the shaped scene drops one more frame per pan frame at 1,000
+  nodes. The cause has not been measured. One difference the table does show
+  is that the shaped scene has 44 % more DOM nodes (23,079 against 16,079).
+- **5,000 nodes, dark, scale 10: the Load More p95 is an outlier.** With
+  five runs, the nearest-rank p95 is the slowest run. So 478,944.3 ms is one
+  shaped run, 5.7 times the scene's own p50 of 83,748.6 ms. No click hit the
+  600 s settle timeout, and no run failed. The runner keeps only p50/p95 per
+  scene, not per-run values, so the cause of that one slow run was not
+  captured. To check it, the scene was run again on its own (five runs, seed
+  20261120, same host and renderer, load average 25 to 29). That run used
+  commit 73ce1e4, which adds only the command box's toolbox activation to the
+  canvas package since e966b27. The slow run did not repeat:
+
+  | Metric | Legacy p50 / p95 | Shaped p50 / p95 | Change p50 / p95 | Budget |
+  | --- | --- | --- | --- | --- |
+  | loadAll | 78956.2 / 79901.2 | 84592.0 / 92108.9 | +7.1% / +15.3% | fail |
+
+  The scene's Load More row still fails: p50 is within the budget in both
+  runs, and p95 is over it in both.
 
 | Run | Value |
 | --- | --- |
-| commit | d90a04f5ae8b81a24d320df535c46ef034e3c2f9 |
+| commit | e966b27b00abfb2787aa6932747975d7485ad9a6 |
 | seed | 20261120 |
 | runs | 5 |
 | cpu | Intel(R) Xeon(R) Gold 6140 CPU @ 2.30GHz |
@@ -105,137 +135,137 @@ regressions are addressed and the matrix is run again.
 | webglRenderer | ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver) |
 | viewport | {"width":1280,"height":800} |
 | gestureFrames | 60 |
-| loadAverage | {"start":[26.59,27.35,28.44],"end":[34.6,37.91,35.53]} |
+| loadAverage | {"start":[26.38,26.57,25.8],"end":[33.02,35.17,32.1]} |
 
 | Nodes | Theme | Scale | Metric | Legacy p50 / p95 | Shaped p50 / p95 | Change p50 / p95 | Budget |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1000 | light | 0.1 | initialRender | 207.5 / 212.9 | 235.9 / 279.2 | +13.7% / +31.1% | fail |
-| 1000 | light | 0.1 | loadAll | 3489.3 / 3678.0 | 4329.5 / 4391.6 | +24.1% / +19.4% | fail |
-| 1000 | light | 0.1 | panFrame | 33.3 / 50.1 | 50.0 / 66.7 | +50.2% / +33.1% | fail |
-| 1000 | light | 0.1 | edgeUpdateFrame | 133.4 / 183.3 | 166.6 / 200.0 | +24.9% / +9.1% | fail |
-| 1000 | light | 0.1 | shapeApply | 543.6 / 641.6 | 667.5 / 756.4 | not comparable | info |
-| 1000 | light | 0.1 | heapMB | 44.1 / 44.1 | 50.3 / 50.3 | +13.9% / +13.9% | fail |
+| 1000 | light | 0.1 | initialRender | 197.5 / 255.5 | 224.3 / 250.6 | +13.6% / -1.9% | fail |
+| 1000 | light | 0.1 | loadAll | 3623.7 / 3759.1 | 4100.6 / 4647.3 | +13.2% / +23.6% | fail |
+| 1000 | light | 0.1 | panFrame | 33.3 / 50.0 | 50.0 / 66.7 | +50.2% / +33.4% | fail |
+| 1000 | light | 0.1 | edgeUpdateFrame | 266.6 / 333.4 | 283.3 / 350.0 | +6.3% / +5.0% | pass |
+| 1000 | light | 0.1 | shapeApply | 587.7 / 644.8 | 718.5 / 794.0 | not comparable | info |
+| 1000 | light | 0.1 | heapMB | 42.0 / 42.0 | 43.2 / 43.2 | +2.9% / +2.9% | pass |
 | 1000 | light | 0.1 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | light | 0.1 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | light | 0.1 | requests | 0 | 0 | — | pass |
 | 1000 | light | 0.1 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | light | 0.1 | completed runs | 5 | 5 | — | info |
-| 1000 | light | 1 | initialRender | 177.4 / 227.0 | 220.4 / 253.6 | +24.2% / +11.7% | fail |
-| 1000 | light | 1 | loadAll | 3365.2 / 3586.6 | 4337.7 / 4493.0 | +28.9% / +25.3% | fail |
-| 1000 | light | 1 | panFrame | 33.3 / 50.0 | 50.0 / 66.7 | +50.2% / +33.4% | fail |
-| 1000 | light | 1 | edgeUpdateFrame | 133.4 / 183.3 | 150.0 / 200.0 | +12.4% / +9.1% | fail |
-| 1000 | light | 1 | shapeApply | 530.1 / 598.9 | 685.5 / 804.3 | not comparable | info |
-| 1000 | light | 1 | heapMB | 44.1 / 44.1 | 49.5 / 49.5 | +12.3% / +12.2% | fail |
+| 1000 | light | 1 | initialRender | 210.8 / 224.6 | 221.7 / 242.5 | +5.2% / +8.0% | pass |
+| 1000 | light | 1 | loadAll | 3582.9 / 3768.0 | 3945.1 / 3979.4 | +10.1% / +5.6% | fail |
+| 1000 | light | 1 | panFrame | 33.4 / 50.0 | 50.0 / 66.7 | +49.7% / +33.4% | fail |
+| 1000 | light | 1 | edgeUpdateFrame | 266.6 / 316.7 | 266.7 / 333.3 | +0.0% / +5.2% | pass |
+| 1000 | light | 1 | shapeApply | 559.0 / 608.1 | 648.3 / 737.6 | not comparable | info |
+| 1000 | light | 1 | heapMB | 42.0 / 42.0 | 43.0 / 43.0 | +2.3% / +2.3% | pass |
 | 1000 | light | 1 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | light | 1 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | light | 1 | requests | 0 | 0 | — | pass |
 | 1000 | light | 1 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | light | 1 | completed runs | 5 | 5 | — | info |
-| 1000 | light | 10 | initialRender | 187.5 / 209.9 | 210.3 / 234.7 | +12.2% / +11.8% | fail |
-| 1000 | light | 10 | loadAll | 3370.6 / 3551.7 | 3896.1 / 4039.8 | +15.6% / +13.7% | fail |
-| 1000 | light | 10 | panFrame | 33.3 / 33.4 | 33.3 / 49.9 | +0.0% / +49.4% | fail |
-| 1000 | light | 10 | edgeUpdateFrame | 133.3 / 166.7 | 133.3 / 183.2 | +0.0% / +9.9% | pass |
-| 1000 | light | 10 | shapeApply | 519.3 / 641.7 | 647.0 / 711.7 | not comparable | info |
-| 1000 | light | 10 | heapMB | 44.1 / 44.2 | 49.6 / 49.7 | +12.4% / +12.5% | fail |
+| 1000 | light | 10 | initialRender | 214.3 / 233.7 | 217.8 / 281.6 | +1.6% / +20.5% | fail |
+| 1000 | light | 10 | loadAll | 3506.2 / 3645.1 | 3624.3 / 3802.4 | +3.4% / +4.3% | pass |
+| 1000 | light | 10 | panFrame | 33.3 / 33.4 | 33.3 / 50.0 | +0.0% / +49.7% | fail |
+| 1000 | light | 10 | edgeUpdateFrame | 250.0 / 300.0 | 233.4 / 299.9 | -6.6% / -0.0% | pass |
+| 1000 | light | 10 | shapeApply | 564.3 / 624.3 | 627.4 / 689.7 | not comparable | info |
+| 1000 | light | 10 | heapMB | 42.1 / 42.1 | 43.0 / 43.0 | +2.3% / +2.2% | pass |
 | 1000 | light | 10 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | light | 10 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | light | 10 | requests | 0 | 0 | — | pass |
 | 1000 | light | 10 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | light | 10 | completed runs | 5 | 5 | — | info |
-| 1000 | dark | 0.1 | initialRender | 222.0 / 238.9 | 226.6 / 272.6 | +2.1% / +14.1% | fail |
-| 1000 | dark | 0.1 | loadAll | 3582.0 / 3805.2 | 4298.4 / 4549.8 | +20.0% / +19.6% | fail |
-| 1000 | dark | 0.1 | panFrame | 33.3 / 50.0 | 50.0 / 66.7 | +50.2% / +33.4% | fail |
-| 1000 | dark | 0.1 | edgeUpdateFrame | 150.0 / 216.6 | 166.6 / 216.7 | +11.1% / +0.0% | fail |
-| 1000 | dark | 0.1 | shapeApply | 549.5 / 643.9 | 752.2 / 814.8 | not comparable | info |
-| 1000 | dark | 0.1 | heapMB | 44.1 / 44.1 | 50.2 / 50.4 | +13.9% / +14.2% | fail |
+| 1000 | dark | 0.1 | initialRender | 216.8 / 223.5 | 221.9 / 235.2 | +2.4% / +5.2% | pass |
+| 1000 | dark | 0.1 | loadAll | 3432.3 / 3504.4 | 3979.0 / 4557.6 | +15.9% / +30.1% | fail |
+| 1000 | dark | 0.1 | panFrame | 33.3 / 50.1 | 50.0 / 66.7 | +50.2% / +33.1% | fail |
+| 1000 | dark | 0.1 | edgeUpdateFrame | 250.0 / 316.6 | 283.4 / 366.6 | +13.4% / +15.8% | fail |
+| 1000 | dark | 0.1 | shapeApply | 550.7 / 606.0 | 646.0 / 766.3 | not comparable | info |
+| 1000 | dark | 0.1 | heapMB | 42.0 / 42.0 | 43.2 / 43.2 | +2.7% / +2.9% | pass |
 | 1000 | dark | 0.1 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | dark | 0.1 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | dark | 0.1 | requests | 0 | 0 | — | pass |
 | 1000 | dark | 0.1 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | dark | 0.1 | completed runs | 5 | 5 | — | info |
-| 1000 | dark | 1 | initialRender | 191.9 / 217.0 | 234.8 / 250.4 | +22.4% / +15.4% | fail |
-| 1000 | dark | 1 | loadAll | 3536.9 / 3783.2 | 4235.9 / 4541.9 | +19.8% / +20.1% | fail |
-| 1000 | dark | 1 | panFrame | 33.3 / 50.0 | 50.0 / 66.7 | +50.2% / +33.4% | fail |
-| 1000 | dark | 1 | edgeUpdateFrame | 133.4 / 199.9 | 150.1 / 200.1 | +12.5% / +0.1% | fail |
-| 1000 | dark | 1 | shapeApply | 551.2 / 617.6 | 683.8 / 759.7 | not comparable | info |
-| 1000 | dark | 1 | heapMB | 44.1 / 44.2 | 49.6 / 49.6 | +12.5% / +12.4% | fail |
+| 1000 | dark | 1 | initialRender | 206.0 / 293.3 | 234.6 / 237.7 | +13.9% / -19.0% | fail |
+| 1000 | dark | 1 | loadAll | 3794.0 / 3838.5 | 4027.2 / 4255.1 | +6.1% / +10.9% | fail |
+| 1000 | dark | 1 | panFrame | 33.4 / 50.0 | 50.0 / 66.7 | +49.7% / +33.4% | fail |
+| 1000 | dark | 1 | edgeUpdateFrame | 266.6 / 333.3 | 250.0 / 316.7 | -6.2% / -5.0% | pass |
+| 1000 | dark | 1 | shapeApply | 558.7 / 627.3 | 638.8 / 756.1 | not comparable | info |
+| 1000 | dark | 1 | heapMB | 42.0 / 42.0 | 43.0 / 43.0 | +2.3% / +2.3% | pass |
 | 1000 | dark | 1 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | dark | 1 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | dark | 1 | requests | 0 | 0 | — | pass |
 | 1000 | dark | 1 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | dark | 1 | completed runs | 5 | 5 | — | info |
-| 1000 | dark | 10 | initialRender | 206.6 / 231.7 | 230.0 / 267.3 | +11.3% / +15.4% | fail |
-| 1000 | dark | 10 | loadAll | 3668.2 / 4141.1 | 4205.5 / 4441.4 | +14.6% / +7.3% | fail |
+| 1000 | dark | 10 | initialRender | 196.4 / 213.4 | 224.7 / 246.4 | +14.4% / +15.5% | fail |
+| 1000 | dark | 10 | loadAll | 3489.7 / 3580.1 | 3688.7 / 3963.8 | +5.7% / +10.7% | fail |
 | 1000 | dark | 10 | panFrame | 33.3 / 33.4 | 33.3 / 50.0 | +0.0% / +49.7% | fail |
-| 1000 | dark | 10 | edgeUpdateFrame | 150.0 / 216.7 | 150.0 / 200.0 | +0.0% / -7.7% | pass |
-| 1000 | dark | 10 | shapeApply | 583.5 / 665.3 | 722.4 / 823.7 | not comparable | info |
-| 1000 | dark | 10 | heapMB | 44.2 / 44.2 | 49.6 / 49.7 | +12.4% / +12.4% | fail |
+| 1000 | dark | 10 | edgeUpdateFrame | 250.0 / 316.7 | 233.4 / 300.1 | -6.6% / -5.2% | pass |
+| 1000 | dark | 10 | shapeApply | 558.2 / 617.1 | 586.9 / 684.7 | not comparable | info |
+| 1000 | dark | 10 | heapMB | 42.1 / 42.1 | 43.0 / 43.0 | +2.3% / +2.3% | pass |
 | 1000 | dark | 10 | domNodes | 16079 / 16079 | 23079 / 23079 | — | info |
 | 1000 | dark | 10 | draggedEdges | 4 / 4 | 4 / 4 | — | info |
 | 1000 | dark | 10 | requests | 0 | 0 | — | pass |
 | 1000 | dark | 10 | failed runs (rerun) | 0 | 0 | — | info |
 | 1000 | dark | 10 | completed runs | 5 | 5 | — | info |
-| 5000 | light | 0.1 | initialRender | 199.7 / 298.1 | 282.4 / 311.1 | +41.4% / +4.4% | fail |
-| 5000 | light | 0.1 | loadAll | 87806.5 / 122440.5 | 137874.7 / 144429.4 | +57.0% / +18.0% | fail |
-| 5000 | light | 0.1 | panFrame | 150.0 / 216.7 | 199.9 / 283.3 | +33.3% / +30.7% | fail |
-| 5000 | light | 0.1 | edgeUpdateFrame | 1033.2 / 1250.0 | 1050.1 / 1250.0 | +1.6% / +0.0% | pass |
-| 5000 | light | 0.1 | shapeApply | 5003.5 / 5793.2 | 6032.6 / 6679.0 | not comparable | info |
-| 5000 | light | 0.1 | heapMB | 267.7 / 267.7 | 315.6 / 315.7 | +17.9% / +17.9% | fail |
+| 5000 | light | 0.1 | initialRender | 215.6 / 235.6 | 227.6 / 255.8 | +5.6% / +8.6% | pass |
+| 5000 | light | 0.1 | loadAll | 83381.4 / 85720.1 | 84864.2 / 88538.6 | +1.8% / +3.3% | pass |
+| 5000 | light | 0.1 | panFrame | 116.7 / 183.3 | 133.4 / 200.1 | +14.3% / +9.2% | fail |
+| 5000 | light | 0.1 | edgeUpdateFrame | 1266.6 / 1599.9 | 1283.2 / 1566.7 | +1.3% / -2.1% | pass |
+| 5000 | light | 0.1 | shapeApply | 3419.2 / 4169.5 | 3900.4 / 4581.7 | not comparable | info |
+| 5000 | light | 0.1 | heapMB | 255.9 / 256.0 | 265.7 / 265.8 | +3.9% / +3.9% | pass |
 | 5000 | light | 0.1 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | light | 0.1 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | light | 0.1 | requests | 0 | 0 | — | pass |
 | 5000 | light | 0.1 | failed runs (rerun) | 0 | 0 | — | info |
 | 5000 | light | 0.1 | completed runs | 5 | 5 | — | info |
-| 5000 | light | 1 | initialRender | 260.4 / 306.9 | 306.5 / 344.6 | +17.7% / +12.3% | fail |
-| 5000 | light | 1 | loadAll | 108642.9 / 123513.7 | 137005.7 / 141635.2 | +26.1% / +14.7% | fail |
-| 5000 | light | 1 | panFrame | 166.6 / 233.3 | 200.0 / 300.0 | +20.0% / +28.6% | fail |
-| 5000 | light | 1 | edgeUpdateFrame | 1016.7 / 1316.6 | 1050.0 / 1316.7 | +3.3% / +0.0% | pass |
-| 5000 | light | 1 | shapeApply | 5010.2 / 5702.2 | 5790.4 / 6669.7 | not comparable | info |
-| 5000 | light | 1 | heapMB | 267.7 / 267.8 | 312.2 / 312.3 | +16.6% / +16.6% | fail |
+| 5000 | light | 1 | initialRender | 198.6 / 217.8 | 232.7 / 244.8 | +17.2% / +12.4% | fail |
+| 5000 | light | 1 | loadAll | 78357.2 / 80445.1 | 86982.2 / 92813.8 | +11.0% / +15.4% | fail |
+| 5000 | light | 1 | panFrame | 116.7 / 166.7 | 150.0 / 233.3 | +28.5% / +40.0% | fail |
+| 5000 | light | 1 | edgeUpdateFrame | 1183.3 / 1499.9 | 1299.9 / 1699.9 | +9.9% / +13.3% | fail |
+| 5000 | light | 1 | shapeApply | 3347.4 / 3775.8 | 3796.0 / 4360.9 | not comparable | info |
+| 5000 | light | 1 | heapMB | 255.8 / 255.9 | 264.5 / 264.7 | +3.4% / +3.4% | pass |
 | 5000 | light | 1 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | light | 1 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | light | 1 | requests | 0 | 0 | — | pass |
 | 5000 | light | 1 | failed runs (rerun) | 0 | 0 | — | info |
 | 5000 | light | 1 | completed runs | 5 | 5 | — | info |
-| 5000 | light | 10 | initialRender | 262.7 / 285.7 | 206.4 / 360.5 | -21.4% / +26.2% | fail |
-| 5000 | light | 10 | loadAll | 107803.8 / 122049.1 | 95414.4 / 131967.3 | -11.5% / +8.1% | pass |
-| 5000 | light | 10 | panFrame | 133.3 / 216.7 | 133.4 / 249.9 | +0.1% / +15.3% | fail |
-| 5000 | light | 10 | edgeUpdateFrame | 849.9 / 1299.8 | 766.6 / 1216.6 | -9.8% / -6.4% | pass |
-| 5000 | light | 10 | shapeApply | 4100.5 / 5371.4 | 4120.4 / 7000.7 | not comparable | info |
-| 5000 | light | 10 | heapMB | 267.8 / 268.0 | 312.4 / 312.5 | +16.6% / +16.6% | fail |
+| 5000 | light | 10 | initialRender | 200.8 / 212.7 | 203.6 / 237.1 | +1.4% / +11.5% | fail |
+| 5000 | light | 10 | loadAll | 79427.9 / 83754.5 | 84868.6 / 89359.9 | +6.8% / +6.7% | pass |
+| 5000 | light | 10 | panFrame | 100.1 / 183.3 | 116.7 / 200.0 | +16.6% / +9.1% | fail |
+| 5000 | light | 10 | edgeUpdateFrame | 1250.0 / 1599.9 | 1216.6 / 1616.6 | -2.7% / +1.0% | pass |
+| 5000 | light | 10 | shapeApply | 3626.1 / 3986.9 | 3596.4 / 3987.9 | not comparable | info |
+| 5000 | light | 10 | heapMB | 255.9 / 256.0 | 264.6 / 264.9 | +3.4% / +3.5% | pass |
 | 5000 | light | 10 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | light | 10 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | light | 10 | requests | 0 | 0 | — | pass |
 | 5000 | light | 10 | failed runs (rerun) | 0 | 0 | — | info |
 | 5000 | light | 10 | completed runs | 5 | 5 | — | info |
-| 5000 | dark | 0.1 | initialRender | 197.9 / 209.5 | 234.0 / 258.2 | +18.2% / +23.2% | fail |
-| 5000 | dark | 0.1 | loadAll | 82977.4 / 101897.5 | 98737.9 / 112637.6 | +19.0% / +10.5% | fail |
-| 5000 | dark | 0.1 | panFrame | 116.6 / 183.3 | 150.0 / 249.9 | +28.6% / +36.3% | fail |
-| 5000 | dark | 0.1 | edgeUpdateFrame | 700.0 / 1133.3 | 750.0 / 999.9 | +7.1% / -11.8% | pass |
-| 5000 | dark | 0.1 | shapeApply | 3540.3 / 3957.9 | 4275.6 / 4749.9 | not comparable | info |
-| 5000 | dark | 0.1 | heapMB | 267.7 / 267.7 | 315.6 / 315.9 | +17.9% / +18.0% | fail |
+| 5000 | dark | 0.1 | initialRender | 201.4 / 208.9 | 238.0 / 251.4 | +18.2% / +20.3% | fail |
+| 5000 | dark | 0.1 | loadAll | 78590.1 / 86831.8 | 86724.7 / 90405.2 | +10.4% / +4.1% | fail |
+| 5000 | dark | 0.1 | panFrame | 116.7 / 183.3 | 150.0 / 216.7 | +28.5% / +18.2% | fail |
+| 5000 | dark | 0.1 | edgeUpdateFrame | 1216.6 / 1616.6 | 1266.6 / 1749.9 | +4.1% / +8.2% | pass |
+| 5000 | dark | 0.1 | shapeApply | 3365.7 / 3641.8 | 3962.2 / 4351.2 | not comparable | info |
+| 5000 | dark | 0.1 | heapMB | 255.9 / 256.1 | 265.6 / 265.7 | +3.8% / +3.7% | pass |
 | 5000 | dark | 0.1 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | dark | 0.1 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | dark | 0.1 | requests | 0 | 0 | — | pass |
 | 5000 | dark | 0.1 | failed runs (rerun) | 0 | 0 | — | info |
 | 5000 | dark | 0.1 | completed runs | 5 | 5 | — | info |
-| 5000 | dark | 1 | initialRender | 206.2 / 222.6 | 220.0 / 234.3 | +6.7% / +5.3% | pass |
-| 5000 | dark | 1 | loadAll | 83785.4 / 100499.2 | 94165.8 / 99751.4 | +12.4% / -0.7% | fail |
-| 5000 | dark | 1 | panFrame | 116.7 / 183.4 | 133.4 / 200.0 | +14.3% / +9.1% | fail |
-| 5000 | dark | 1 | edgeUpdateFrame | 766.6 / 1233.2 | 733.4 / 1000.0 | -4.3% / -18.9% | pass |
-| 5000 | dark | 1 | shapeApply | 3819.0 / 4813.0 | 4282.9 / 4638.6 | not comparable | info |
-| 5000 | dark | 1 | heapMB | 267.7 / 267.8 | 312.2 / 312.2 | +16.6% / +16.6% | fail |
+| 5000 | dark | 1 | initialRender | 198.7 / 213.9 | 225.3 / 233.2 | +13.4% / +9.0% | fail |
+| 5000 | dark | 1 | loadAll | 79268.7 / 99067.3 | 84170.0 / 93001.1 | +6.2% / -6.1% | pass |
+| 5000 | dark | 1 | panFrame | 133.4 / 250.0 | 150.0 / 233.3 | +12.4% / -6.7% | fail |
+| 5000 | dark | 1 | edgeUpdateFrame | 1250.0 / 1699.9 | 1250.0 / 1650.0 | +0.0% / -2.9% | pass |
+| 5000 | dark | 1 | shapeApply | 3338.2 / 3906.7 | 3969.2 / 4616.1 | not comparable | info |
+| 5000 | dark | 1 | heapMB | 255.8 / 256.2 | 264.5 / 264.5 | +3.4% / +3.3% | pass |
 | 5000 | dark | 1 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | dark | 1 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | dark | 1 | requests | 0 | 0 | — | pass |
 | 5000 | dark | 1 | failed runs (rerun) | 0 | 0 | — | info |
 | 5000 | dark | 1 | completed runs | 5 | 5 | — | info |
-| 5000 | dark | 10 | initialRender | 186.0 / 230.3 | 226.9 / 281.0 | +22.0% / +22.0% | fail |
-| 5000 | dark | 10 | loadAll | 82647.7 / 93462.1 | 90736.5 / 109094.2 | +9.8% / +16.7% | fail |
-| 5000 | dark | 10 | panFrame | 116.6 / 166.7 | 116.7 / 183.4 | +0.1% / +10.0% | fail |
-| 5000 | dark | 10 | edgeUpdateFrame | 683.3 / 950.0 | 666.7 / 949.9 | -2.4% / -0.0% | pass |
-| 5000 | dark | 10 | shapeApply | 3329.4 / 3968.4 | 3920.4 / 4354.1 | not comparable | info |
-| 5000 | dark | 10 | heapMB | 267.8 / 268.0 | 312.4 / 312.5 | +16.7% / +16.6% | fail |
+| 5000 | dark | 10 | initialRender | 195.5 / 236.7 | 212.1 / 254.6 | +8.5% / +7.6% | pass |
+| 5000 | dark | 10 | loadAll | 78931.7 / 83523.3 | 83748.6 / 478944.3 | +6.1% / +473.4% | fail |
+| 5000 | dark | 10 | panFrame | 100.1 / 183.3 | 116.7 / 183.3 | +16.6% / +0.0% | fail |
+| 5000 | dark | 10 | edgeUpdateFrame | 1183.3 / 1583.3 | 1150.0 / 1683.3 | -2.8% / +6.3% | pass |
+| 5000 | dark | 10 | shapeApply | 3251.7 / 3902.3 | 3693.9 / 4339.9 | not comparable | info |
+| 5000 | dark | 10 | heapMB | 255.8 / 255.9 | 264.5 / 264.6 | +3.4% / +3.4% | pass |
 | 5000 | dark | 10 | domNodes | 80078 / 80078 | 115078 / 115078 | — | info |
 | 5000 | dark | 10 | draggedEdges | 5 / 5 | 5 / 5 | — | info |
 | 5000 | dark | 10 | requests | 0 | 0 | — | pass |
@@ -362,7 +392,7 @@ WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 
 | Rule | Verdict | Evidence |
 | --- | --- | --- |
-| Memoize definitions by key and revision, and the resolved look by node and type revision | Fail | `GraphCanvas` rebuilds one resolver whenever the schema, saved shapes, overrides or type defaults change. It then resolves every node again in the node `useMemo`, which also reruns on highlight, dim, mark and presence changes. Nothing is cached per key, revision or node |
+| Memoize definitions by key and revision, and the resolved look by node and type revision | Partial | Added in e966b27 and measured in the 2026-11-21 gate run: `GraphCanvas` keeps each node's resolved look (definition, area texts, geometry, accessible name) per graph node object, so Load More and highlight, dim, mark and presence changes reuse it, and `CustomNode` shares its geometry-derived styles and SVG layer markup across nodes with the same look. Any change to the schema, saved shapes, overrides or type defaults still drops every look, and definitions are not cached per key and revision (see the invalidation row) |
 | Cache normalized geometry per base and scale; batch measurements | Pass | A module cache in `nodeShapes.js`, keyed by base and scale, returns frozen descriptors. Geometry is computed, not measured in the DOM |
 | Reuse inline paths; no per-node filters or effects; lightweight shadows | Pass | Every layer reuses the one cached `geometry.path`. The shadow is an offset path fill, and the shaped CSS uses no `filter` |
 | Use viewport culling | Fail | React Flow's `onlyRenderVisibleElements` is not enabled. Above 200 nodes the canvas shows them 100 at a time (Load More) instead |
@@ -371,7 +401,7 @@ WCAG ratios computed from the CSS colours. The canvas is `#1a1a1a` on dark and
 | A type-default change invalidates that type; a library edit only its users | Fail | Any change to the type defaults or the saved shapes rebuilds every node, as in the memoization row |
 | Edge updates limited to the affected endpoints | Fail | `SimpleFloatingEdge` subscribes to the whole `nodeInternals` map, so every edge re-renders when any node changes |
 
-The four failures and the partial rows are open findings against this gate. In
+The three failures and the partial rows are open findings against this gate. In
 the scenes above they show up as whole-scene costs: `shapeApply` re-resolves
 every node, not just the Actor quarter, and `edgeUpdateFrame` re-renders every
 edge, not just those of the dragged node.
