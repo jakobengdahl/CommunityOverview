@@ -6,15 +6,17 @@ import { CommandRegistryContext, createCommandRegistry } from '../commands/comma
 import { NODE_QUERY_DEBOUNCE_MS } from '../commands/commandSuggestions';
 import ChatComposer, { formatNodeReference } from './ChatComposer';
 
+const scope = vi.hoisted(() => ({ language: 'en', federationDepth: 1 }));
 vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
-vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key, language: 'en' }) }));
+vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key, language: scope.language }) }));
 vi.mock('../store/graphStore', () => ({
-  default: (selector) => selector({ federationDepth: 1, schema: null }),
+  default: (selector) => selector({ federationDepth: scope.federationDepth, schema: null }),
 }));
 
 const goalNode = { id: 'n1', name: 'Goals 2030', type: 'Goal' };
 let registry;
 let onSend;
+let rerenderComposer;
 const composer = createRef();
 
 function Harness({ initial = '' }) {
@@ -31,11 +33,13 @@ function Harness({ initial = '' }) {
 }
 
 const renderComposer = (wrap = (composerElement) => composerElement) => {
-  render(
+  const tree = () => (
     <CommandRegistryContext.Provider value={registry}>
       {wrap(<Harness />)}
     </CommandRegistryContext.Provider>
   );
+  const { rerender } = render(tree());
+  rerenderComposer = () => rerender(tree());
   const input = screen.getByRole('combobox');
   act(() => input.focus());
   return input;
@@ -54,6 +58,7 @@ function command(id, execute = vi.fn(async () => {})) {
 describe('ChatComposer', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    Object.assign(scope, { language: 'en', federationDepth: 1 });
     registry = createCommandRegistry();
     ['alpha', 'beta', 'gamma'].forEach((id) => registry.register(command(id)));
     onSend = vi.fn();
@@ -151,6 +156,22 @@ describe('ChatComposer', () => {
     expect(registry.get('beta').execute).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['language', { language: 'sv' }],
+    ['graph scope', { federationDepth: 2 }],
+  ])('a %s change clears the selection so Enter sends instead of accepting', (_, change) => {
+    const input = renderComposer();
+    type(input, '/');
+    key(input, 'ArrowDown');
+    expect(selected()).toBe(0);
+    Object.assign(scope, change);
+    rerenderComposer();
+    expect(selected()).toBe(-1);
+    key(input, 'Enter');
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(registry.get('alpha').execute).not.toHaveBeenCalled();
+  });
+
   it('inserts a node reference at the caret or a type label without sending, and keeps focus', async () => {
     const input = renderComposer();
     // A slash-led word mid-sentence is ordinary text, not command mode.
@@ -191,6 +212,20 @@ describe('ChatComposer', () => {
       locale: 'en',
     });
     expect(input).toHaveValue('');
+
+    // Text typed while the handoff is pending is a new draft and survives it.
+    let finish;
+    registry.register(
+      command(
+        'slow',
+        vi.fn(() => new Promise((resolve) => (finish = resolve)))
+      )
+    );
+    type(input, '/slow');
+    await act(async () => key(input, 'Tab'));
+    type(input, 'next question');
+    await act(async () => finish());
+    expect(input).toHaveValue('next question');
 
     type(input, '/broken');
     await act(async () => key(input, 'Tab'));
@@ -251,6 +286,11 @@ describe('ChatComposer', () => {
     const input = renderComposer();
     type(input, '/');
     const row = options()[1];
+    // A tap during IME composition does not accept.
+    fireEvent.compositionStart(input);
+    await act(async () => fireEvent.click(row));
+    expect(registry.get('beta').execute).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input);
     expect(fireEvent.mouseDown(row)).toBe(false);
     await act(async () => fireEvent.click(row));
     expect(registry.get('beta').execute).toHaveBeenCalledTimes(1);

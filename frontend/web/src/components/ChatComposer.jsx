@@ -75,6 +75,7 @@ function PlainComposer({ ref, value, onChange, onSend, ...textareaProps }) {
 function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled, placeholder }) {
   const { t, language } = useI18n();
   const schema = useGraphStore((s) => s.schema);
+  const federationDepth = useGraphStore((s) => s.federationDepth);
   const baseId = useId();
   const boxRef = useRef(null);
   const inputRef = useRef(null);
@@ -88,6 +89,19 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   const [frozenInput, setFrozenInput] = useState(null);
   const [failure, setFailure] = useState(null);
   const [popupSpace, setPopupSpace] = useState(null);
+  const latestValue = useRef(value);
+  useLayoutEffect(() => {
+    latestValue.current = value;
+  }, [value]);
+
+  // A language or graph-scope change drops the selection before the recomputed
+  // results render, so Enter cannot accept an item chosen under the old scope.
+  const scope = `${language}|${federationDepth}`;
+  const [selectionScope, setSelectionScope] = useState(scope);
+  if (selectionScope !== scope) {
+    setSelectionScope(scope);
+    setActiveKey(null);
+  }
 
   const context = useMemo(() => ({ view: 'interactive', locale: language }), [language]);
   const nodeTypes = useMemo(() => getSuggestedNodeTypes(schema, language), [schema, language]);
@@ -184,8 +198,9 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
   const runCommand = async (item) => {
     close();
     const command = registry.get(item.id);
+    const accepted = latestValue.current;
     const stillOffered =
-      parseCommandInput(inputRef.current?.value ?? value).mode === 'command' &&
+      parseCommandInput(accepted).mode === 'command' &&
       command === item.command &&
       command.isAvailable(context);
     try {
@@ -195,7 +210,8 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
       setFailure(t('command_box.command_failed', { label: item.label }));
       return;
     }
-    onChange('');
+    // Text typed while the handoff was pending is a new draft; keep it.
+    if (latestValue.current === accepted) onChange('');
   };
 
   const accept = (item) => {
@@ -269,7 +285,8 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
                 className={`command-box-option${selected ? ' active' : ''}`}
                 // Keep focus in the box, so blur cannot dismiss before the tap lands.
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => accept(item)}
+                // Accepting mid-composition would rewrite text the IME still owns.
+                onClick={() => frozenInput === null && accept(item)}
               >
                 <span className="command-box-option-label">{item.label}</span>
                 <span className="command-box-option-kind">{t(KIND_LABEL_KEYS[item.kind])}</span>
