@@ -15,7 +15,7 @@
  */
 import { useCallback, useState } from 'react';
 
-function readStoredKey(storageKey, validKeys, defaultKey) {
+export function readStoredKey(storageKey, validKeys, defaultKey) {
   try {
     const stored = window.localStorage?.getItem(storageKey);
     if (stored && validKeys.includes(stored)) return stored;

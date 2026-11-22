@@ -145,7 +145,7 @@ See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
 ## Prerequisites
 
 - Python 3.11+
-- Node.js 20+
+- Node.js 22.12+ (Vitest 5; the production image build needs only 20.19+)
 - npm 9+
 
 ## Installation

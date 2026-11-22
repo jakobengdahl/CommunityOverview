@@ -1,7 +1,10 @@
 # Unified command box interaction design
 
-**Status: Design (target state), for owner review before implementation.**
-This note specifies future behaviour; it does not describe a shipped feature.
+**Status: Design (target state), approved; partly implemented.**
+The command registry and suggestion providers exist in
+`frontend/web/src/commands/` (registry, ranking, node/type/command providers and
+the interactive view's commands). No composer uses them yet, so nothing in this
+note is user-visible.
 The five product choices below are settled. The remaining mechanics are design
 choices made here under delegated authority, with a reason for each.
 
@@ -132,10 +135,10 @@ visibility an authorization boundary.
 
 ## Review and consequences
 
-Implementation waits for owner approval of this design. It will need keyboard,
-screen-reader, touch and mobile-keyboard verification, including ordinary text
-that resembles commands, IME entry, stale suggestions and per-user preference
-isolation. This documentation change enables no feature, alters no saved data
-and needs no rollout or migration. The main implementation risks are interception
-of native editing keys and keeping the composer visible as mobile viewports
-resize; the explicit acceptance rules and viewport checks above bound those risks.
+The composer will need keyboard, screen-reader, touch and mobile-keyboard
+verification, including ordinary text that resembles commands, IME entry, stale
+suggestions and per-user preference isolation. The registry and providers alone
+enable no user-visible feature, alter no saved data and need no rollout or
+migration. The main implementation risks are interception of native editing keys
+and keeping the composer visible as mobile viewports resize; the explicit
+acceptance rules and viewport checks above bound those risks.
