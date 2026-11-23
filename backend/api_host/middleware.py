@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from backend.federation.publish import FEDERATION_GRAPH_PATH
 from backend.runtime.extensions import RuntimeExtensions, bind_runtime_extensions
 from backend.runtime.request_context import (
     ACTOR_ID_HEADER,
@@ -302,6 +303,15 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             "/favicon.png",
             "/graph-icon.svg",
         ]:
+            return await call_next(request)
+
+        # The federation read route checks its own federation keys, which are
+        # valid nowhere else; it exists only while publishing is on.
+        if (
+            request.method in {"GET", "HEAD"}
+            and request.url.path == FEDERATION_GRAPH_PATH
+            and getattr(request.app.state, "federation_route_active", False)
+        ):
             return await call_next(request)
 
         # This endpoint authenticates its own per-function bearer credential.

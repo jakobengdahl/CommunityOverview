@@ -26,6 +26,11 @@ app = create_app(
 )
 ```
 
+`RuntimeExtensions(federation_key_provider=...)` also accepts the key provider
+the federation read route uses when `federation.publish.access` is `external`
+(see `docs/FEDERATED_GRAPH_DESIGN.md`, section 1a); it is ignored in the other
+access modes.
+
 Both new arguments are keyword-only and optional. `authorization_hook` implements
 `GraphAuthorizationHook` and is passed to `GraphService` for reads and writes.
 The core holds no per-session roles; a hook that does also implements

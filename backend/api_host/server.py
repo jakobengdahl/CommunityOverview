@@ -74,6 +74,7 @@ from backend.federation import (
     load_federation_config,
     summarize_federation_config,
 )
+from backend.federation.publish import build_key_provider
 
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
@@ -97,6 +98,7 @@ from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
 from .agent_routes import register_agent_routes
+from .federation_routes import register_federation_routes
 
 logger = logging.getLogger(__name__)
 
@@ -650,6 +652,18 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
 
     # Federation + agent-system status endpoints
     register_agent_routes(app, agent_registry, graph_service, federation_manager)
+
+    # Federation read route for other instances; absent unless publishing is on.
+    register_federation_routes(
+        app,
+        graph_storage,
+        federation_config.federation,
+        build_key_provider(
+            federation_config.federation,
+            external_provider=runtime_extensions.federation_key_provider,
+            reserved_tokens=(config.auth_bearer_token, config.auth_password),
+        ),
+    )
 
     async def shutdown():
         """Gracefully shutdown agent registry and event system."""
