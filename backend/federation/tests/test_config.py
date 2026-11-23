@@ -197,3 +197,25 @@ def test_validate_interval_invalid():
         FederationSync(interval_seconds=5)
 
     assert "interval_seconds must be >= 10" in str(exc_info.value)
+
+
+def test_allow_write_disables_only_that_graph_and_publishing_defaults_off():
+    def graph(graph_id, allow_write):
+        return {
+            "graph_id": graph_id,
+            "display_name": graph_id,
+            "endpoints": {"graph_json_url": "https://example.invalid/graph.json"},
+            "capabilities": {"allow_write": allow_write},
+        }
+
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [graph("w", True), graph("r", False)],
+            }
+        }
+    )
+
+    assert [g.enabled for g in config.federation.graphs] == [False, True]
+    assert summarize_federation_config(config)["publish"]["enabled"] is False

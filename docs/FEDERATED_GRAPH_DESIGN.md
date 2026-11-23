@@ -122,9 +122,157 @@ Add a dedicated config file, for example `config/default/federation_config.json`
 ```
 
 Rules:
-- Loaded at startup only.
+- Loaded at startup only, together with every environment variable it names.
+  Adding, removing or rotating a key, changing a mode or flipping a switch takes
+  effect on the next restart.
 - Not editable via GUI/chat/MCP assistant tools.
 - Invalid or unreachable entries become `degraded` state, not fatal startup errors.
+
+### 1a. Access: switch, read-only rule, publishing modes, outbound auth
+
+**The switch.** `federation.enabled` is the single switch for both directions.
+When it is `false` (the default, and the result of a missing or invalid config
+file) no outbound sync runs — not at startup, not on schedule, not through
+`POST /federation/sync` — and the federation read route does not exist (`404`),
+whatever keys are configured and whatever their environment variables hold.
+Configuring keys never enables anything. The publishing side has its own
+`federation.publish.enabled` (default `false`), so an instance can consume other
+graphs without publishing its own; the master switch still wins.
+
+**Read-only.** Federation never writes to a remote graph, and no federation
+credential can write to this one:
+
+- The consuming side only issues `GET` to `graph_json_url`.
+- A federation key authenticates exactly one thing: `GET`/`HEAD` on
+  `/federation/v1/graph`. Instance auth still guards every other route and method,
+  where a federation key is not a valid credential.
+- A graph entry with `capabilities.allow_write: true` is disabled at load, with a
+  warning naming the graph; the rest of the config still loads.
+
+**Publishing side.** While both switches are on, the instance serves its graph at
+`GET /federation/v1/graph` as `{"nodes": [...], "edges": [...]}`. A consumer puts
+this URL in its `graph_json_url`; do not hand out `/export_graph` with the
+instance's own bearer token, which also opens the write routes and MCP.
+`federation.publish.access` selects who may read it. Key values never appear in
+the file; the config names the environment variable that holds each.
+
+(a) `open` — read-only without a key, for material meant to be public. Startup
+logs a warning naming the mode.
+
+```json
+{
+  "federation": {
+    "enabled": true,
+    "publish": { "enabled": true, "access": "open" }
+  }
+}
+```
+
+(b) `shared_token` — every consumer presents the same token. Revoking one consumer
+means rotating the token for all of them. If the variable is unset or empty,
+publishing is off (it never falls back to `open`).
+
+```json
+{
+  "federation": {
+    "enabled": true,
+    "publish": {
+      "enabled": true,
+      "access": "shared_token",
+      "shared_token_env": "FEDERATION_PUBLISH_TOKEN"
+    }
+  }
+}
+```
+
+(c) `per_consumer` (the default `access`) — each consuming graph has its own
+entry and token, is logged by name and can be revoked alone.
+
+```json
+{
+  "federation": {
+    "enabled": true,
+    "publish": {
+      "enabled": true,
+      "access": "per_consumer",
+      "graph_id": "methods",
+      "consumers": [
+        {
+          "consumer_id": "partner-metadata-graph",
+          "name": "Partner metadata graph",
+          "purpose": "Reference links from statistical domains to our method nodes",
+          "token_env": "FEDERATION_KEY_PARTNER_METADATA",
+          "expires_at": "2027-06-30T00:00:00Z",
+          "enabled": true
+        }
+      ]
+    }
+  }
+}
+```
+
+Load-time rules for `per_consumer`: a consumer whose variable is unset or empty is
+skipped and logged by `consumer_id`; two consumers whose variables hold the same
+value are both skipped (the usage log could not tell them apart); a repeated
+`consumer_id` skips every entry with it; no consumers at all means every request
+is refused. In every mode a key equal to the instance's own bearer token or
+password is refused at load. An unknown `access` value turns publishing off.
+
+Generate keys with at least 256 bits from a CSPRNG, for example
+`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
+**Verifying a key.** The route accepts `Authorization: Bearer <key>` or
+`X-API-Key: <key>`; both present with different values is refused. Keys are
+compared with `hmac.compare_digest`, in `per_consumer` mode against every loaded
+consumer, disabled and expired ones included, before deciding. After a match a
+consumer with `enabled: false` is refused, then one whose `expires_at` has passed.
+Every refusal is `401` with the same fixed body: it does not say whether a key was
+unknown, disabled or expired. Revoking a consumer means removing its entry (or
+setting `enabled: false`, or unsetting its variable) and restarting.
+
+**Fetch log.** Every request to the route, served or not, logs one record from
+`backend.federation.publish` with `event` `federation.fetch`, `consumer_id`
+(`open` in mode (a), `shared` in mode (b), the matched consumer in (c), also when
+refused as disabled or expired, `unauthenticated` when nothing matched),
+`graph_id` (`publish.graph_id`, default `local`), `outcome` (`served`,
+`refused_auth`, `refused_disabled`, `refused_expired`), node and edge counts when
+served, `timestamp` and `request_id`. It never contains the key, any part of it or
+the auth headers, and does not log the client IP.
+
+**External auth.** An instance behind an external authentication layer can
+manage consumers and keys there instead of in this file: set
+`publish.access` to `external` and install a key provider through runtime
+extensions. The provider implements `FederationKeyProvider` from
+`backend/federation/publish.py`: `authenticate(presented)` receives the presented
+key (or `None`) and returns a `FederationAuthResult(consumer_id, outcome)` using
+the outcomes above. The core keeps the single route, read-only enforcement and
+the fetch log; with `external` and no provider installed, or a provider that
+raises, every request is refused. The core ships no external provider.
+
+```python
+from backend.runtime.extensions import RuntimeExtensions
+
+app = create_app(
+    config, runtime_extensions=RuntimeExtensions(federation_key_provider=my_provider)
+)
+```
+
+**Consuming side (outbound auth).** For each enabled entry in `graphs[]`:
+
+| `auth.type` | Header sent on every sync |
+|---|---|
+| `none` | none |
+| `bearer` | `Authorization: Bearer <value of the variable named in env_token>` |
+| `api_key` | `X-API-Key: <value of the variable named in env_token>` |
+
+If `auth.type` is `bearer` or `api_key` and `env_token` is absent or names an
+unset or empty variable, the graph is skipped: no request is sent, its status is
+`disabled` with `last_error` `missing_credential`, and one warning names the
+graph and the variable, never a value. Redirects are not followed, so a key is
+never sent on to a second host.
+
+Everyone who can search a consuming instance can read every graph it federates:
+a key is issued to a consuming graph, not to a person.
 
 ### 2. Canonical provenance model
 
@@ -363,7 +511,7 @@ actions in the two places.
 ## Security and governance
 
 - Credentials for remote MCP stored in environment/secrets, never in graph data.
-- Per-graph capability policy (read/write/adopt).
+- Per-graph capability policy (read/adopt); federation is read-only (section 1a).
 - Audit log for cross-graph writes and adoptions.
 - Optional allowlist for reachable federation domains.
 
@@ -399,10 +547,16 @@ actions in the two places.
   with ordinary selection and double-click behaviour unchanged
 - Inbound `?node=` deep link focuses a node a teleport arrived at
 - Federated event subscriptions (`scope: local_and_federated`)
+- Access (section 1a): `federation.enabled` switches both directions;
+  `capabilities.allow_write: true` disables that graph; publishing route
+  `GET /federation/v1/graph` with `open`, `shared_token`, `per_consumer` and
+  `external` access modes, constant-time key checks and one `federation.fetch` log
+  record per request; outbound `bearer`/`api_key` headers from `env_token`, with a
+  graph whose key is missing skipped without a request
 
 ### Remaining / future work
 
-- **Phase 4 (MCP federation):** controlled cross-graph writes via MCP connector with scoped credentials
+- **Phase 4 (MCP federation):** federation is read-only; cross-graph writes are not planned
 - **Phase 5 (advanced subscriptions):** live-remote event sources beyond sync-engine events
 - **Hosted teleport routing (SaaS):** tenant-visible route resolution and the authorization
   decision behind a cross-deployment hop; consumes the open-core contract above

@@ -563,6 +563,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/similar` | Find similar nodes |
 | POST | `/api/similar/batch` | Batch similarity search |
 | POST | `/api/federation/adopt` | Adopt a federated node into the local graph |
+| GET | `/federation/v1/graph` | Published graph (`nodes`, `edges`) for federation consumers; exists only while `federation.enabled` and `federation.publish.enabled` are on; checks its own federation key, `401` on any refusal. See [FEDERATED_GRAPH_DESIGN.md](../docs/FEDERATED_GRAPH_DESIGN.md#1a-access-switch-read-only-rule-publishing-modes-outbound-auth) |
 | POST | `/api/federation/teleport` | Resolve the canonical route from a node to the graph that owns it. Returns a `status` of `ok`, `local`, `permission_denied`, `graph_unavailable` or `unknown_node`; a `route` only for `ok`. Graph visibility comes from the request's existing graph-access narrowing, so a caller who may not see the source graph is told nothing about it. See [FEDERATED_GRAPH_DESIGN.md](../docs/FEDERATED_GRAPH_DESIGN.md#teleport-navigation-contract) |
 | GET | `/api/schema` | Get schema config |
 | GET | `/api/presentation` | Get presentation config (its `capabilities` field is the `/api/capabilities` manifest) |

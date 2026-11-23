@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.runtime.config_context import resolve_federation_config_path_info
 
@@ -93,6 +94,44 @@ class FederationGraphConfig(BaseModel):
             raise ValueError("At least one endpoint URL must be configured")
         return value
 
+    @model_validator(mode="after")
+    def disable_write_capability(self) -> "FederationGraphConfig":
+        # Federation is read-only in code; a config claiming write access is
+        # disabled rather than loaded with a capability nothing implements.
+        if self.capabilities.allow_write and self.enabled:
+            logger.warning(
+                "Federated graph %s sets capabilities.allow_write, which is not "
+                "supported (federation is read-only); graph disabled",
+                self.graph_id,
+            )
+            self.enabled = False
+        return self
+
+
+class FederationConsumer(BaseModel):
+    """One consuming graph admitted by the publishing side in per_consumer mode."""
+
+    consumer_id: str
+    name: str = ""
+    purpose: str = ""
+    token_env: str = ""
+    expires_at: Optional[datetime] = None
+    enabled: bool = True
+
+
+class FederationPublish(BaseModel):
+    """Publishing side: who may read this graph over the federation route.
+
+    ``access`` stays a plain string so an unknown value turns publishing off
+    when the key provider is built, instead of failing the whole config.
+    """
+
+    enabled: bool = False
+    access: str = "per_consumer"
+    graph_id: str = "local"
+    shared_token_env: Optional[str] = None
+    consumers: List[FederationConsumer] = Field(default_factory=list)
+
 
 class FederationSettings(BaseModel):
     """Top-level federation settings."""
@@ -103,6 +142,7 @@ class FederationSettings(BaseModel):
     default_timeout_ms: int = 1200
     allow_live_remote_enrichment: bool = False
     graphs: List[FederationGraphConfig] = Field(default_factory=list)
+    publish: FederationPublish = Field(default_factory=FederationPublish)
 
     @field_validator("max_traversal_depth")
     @classmethod
@@ -177,6 +217,10 @@ def summarize_federation_config(config: FederationFileConfig) -> Dict[str, Any]:
         "max_traversal_depth": settings.max_traversal_depth,
         "depth_levels": settings.depth_levels,
         "allow_live_remote_enrichment": settings.allow_live_remote_enrichment,
+        "publish": {
+            "enabled": settings.enabled and settings.publish.enabled,
+            "access": settings.publish.access,
+        },
         "graphs": [
             {
                 "graph_id": graph.graph_id,

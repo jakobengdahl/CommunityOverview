@@ -1278,3 +1278,82 @@ async def test_sync_graph_declines_unknown_and_disabled_graphs_without_a_request
     assert manager.get_status()["graphs"][0]["status"] == "disabled"
     assert stub.clients_opened == 0
     assert remote.requests == []
+
+
+def _authed_config(auth, enabled=True):
+    config = _single_graph_config()
+    data = config.model_dump()
+    data["federation"]["enabled"] = enabled
+    data["federation"]["graphs"][0]["auth"] = auth
+    return FederationFileConfig.model_validate(data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth_type,header,expected",
+    [
+        ("bearer", "authorization", "Bearer peer-key"),
+        ("api_key", "x-api-key", "peer-key"),
+    ],
+)
+async def test_sync_sends_the_configured_key_and_does_not_follow_redirects(
+    monkeypatch, auth_type, header, expected
+):
+    monkeypatch.setenv("PEER_KEY", "peer-key")
+    remote = _ScriptedTransport((302, {}))
+    _sealed(monkeypatch, remote)
+
+    manager = FederationManager(
+        _authed_config({"type": auth_type, "env_token": "PEER_KEY"})
+    )
+    result = await manager.sync_graph("esam-main")
+
+    assert remote.requests[0].method == "GET"
+    assert remote.requests[0].headers[header] == expected
+    assert len(remote.requests) == 1
+    assert result["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_token", [None, "UNSET_PEER_KEY"])
+async def test_a_peer_whose_key_is_missing_is_skipped_without_a_request(
+    monkeypatch, env_token
+):
+    monkeypatch.delenv("UNSET_PEER_KEY", raising=False)
+    remote = _ScriptedTransport((200, _ONE_NODE))
+    _sealed(monkeypatch, remote)
+
+    manager = FederationManager(
+        _authed_config({"type": "bearer", "env_token": env_token})
+    )
+    manager.sync_on_startup()
+    result = await manager.sync_graph("esam-main")
+
+    assert result["error"] == manager_module.MISSING_CREDENTIAL
+    status = manager.get_status()["graphs"][0]
+    assert (status["status"], status["last_error"]) == (
+        "disabled",
+        manager_module.MISSING_CREDENTIAL,
+    )
+    assert remote.requests == []
+
+
+@pytest.mark.asyncio
+async def test_switched_off_federation_fetches_nothing_even_when_keys_are_set(
+    monkeypatch,
+):
+    monkeypatch.setenv("PEER_KEY", "peer-key")
+    remote = _ScriptedTransport((200, _ONE_NODE))
+    stub = _sealed(monkeypatch, remote)
+
+    manager = FederationManager(
+        _authed_config({"type": "bearer", "env_token": "PEER_KEY"}, enabled=False)
+    )
+    manager.sync_on_startup()
+    manager.start()
+    await manager.sync_all()
+    await manager.sync_graph("esam-main")
+
+    assert manager.get_status()["scheduler_running"] is False
+    assert stub.clients_opened == 0
+    assert remote.requests == []
