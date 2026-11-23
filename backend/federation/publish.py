@@ -27,6 +27,7 @@ OUTCOME_SERVED = "served"
 OUTCOME_REFUSED_AUTH = "refused_auth"
 OUTCOME_REFUSED_DISABLED = "refused_disabled"
 OUTCOME_REFUSED_EXPIRED = "refused_expired"
+OUTCOME_ERROR = "error"
 
 CONSUMER_OPEN = "open"
 CONSUMER_SHARED = "shared"

@@ -133,8 +133,11 @@ Rules:
 **The switch.** `federation.enabled` is the single switch for both directions.
 When it is `false` (the default, and the result of a missing or invalid config
 file) no outbound sync runs — not at startup, not on schedule, not through
-`POST /federation/sync` — and the federation read route does not exist (`404`),
-whatever keys are configured and whatever their environment variables hold.
+`POST /federation/sync` — and the federation read route does not exist,
+whatever keys are configured and whatever their environment variables hold: a
+request to it is answered like any unknown path (`404`, or `401` from instance
+auth when that is on and the request lacks instance credentials). A federation
+key is never accepted.
 Configuring keys never enables anything. The publishing side has its own
 `federation.publish.enabled` (default `false`), so an instance can consume other
 graphs without publishing its own; the master switch still wins.
@@ -215,8 +218,10 @@ Load-time rules for `per_consumer`: a consumer whose variable is unset or empty 
 skipped and logged by `consumer_id`; two consumers whose variables hold the same
 value are both skipped (the usage log could not tell them apart); a repeated
 `consumer_id` skips every entry with it; no consumers at all means every request
-is refused. In every mode a key equal to the instance's own bearer token or
-password is refused at load. An unknown `access` value turns publishing off.
+is refused. In `shared_token` and `per_consumer` modes a key equal to the
+instance's own bearer token or password is refused at load; in `external` mode the
+installed provider owns its keys and must keep them apart from instance
+credentials itself. An unknown `access` value turns publishing off.
 
 Generate keys with at least 256 bits from a CSPRNG, for example
 `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
@@ -235,9 +240,11 @@ setting `enabled: false`, or unsetting its variable) and restarting.
 (`open` in mode (a), `shared` in mode (b), the matched consumer in (c), also when
 refused as disabled or expired, `unauthenticated` when nothing matched),
 `graph_id` (`publish.graph_id`, default `local`), `outcome` (`served`,
-`refused_auth`, `refused_disabled`, `refused_expired`), node and edge counts when
+`refused_auth`, `refused_disabled`, `refused_expired`, or `error` when a matched
+key's request failed reading the graph and got `500`), node and edge counts when
 served, `timestamp` and `request_id`. It never contains the key, any part of it or
-the auth headers, and does not log the client IP.
+the auth headers, and does not log the client IP. A provider that raises or returns
+anything but a `FederationAuthResult` is a `401` refusal (`refused_auth`).
 
 **External auth.** An instance behind an external authentication layer can
 manage consumers and keys there instead of in this file: set

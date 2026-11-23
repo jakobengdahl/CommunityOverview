@@ -1,5 +1,6 @@
 """The federation read route: the published graph, read-only, for other instances."""
 
+import inspect
 import logging
 from typing import Any, Dict, Optional
 
@@ -10,7 +11,9 @@ from starlette.requests import Request
 from backend.federation.config import FederationSettings
 from backend.federation.publish import (
     FEDERATION_GRAPH_PATH,
+    OUTCOME_ERROR,
     REFUSED,
+    FederationAuthResult,
     FederationKeyProvider,
     log_fetch,
     presented_key,
@@ -60,10 +63,32 @@ def register_federation_routes(
             except Exception:
                 # A failing (external) provider admits nothing.
                 logger.exception("Federation key provider failed")
+                result = REFUSED
+            if not isinstance(result, FederationAuthResult):
+                # e.g. an async authenticate handing back a coroutine.
+                logger.error(
+                    "Federation key provider returned %s, not a "
+                    "FederationAuthResult; refusing",
+                    type(result).__name__,
+                )
+                if inspect.iscoroutine(result):
+                    result.close()
+                result = REFUSED
         if not result.served:
             log_fetch(result, graph_id=graph_id, request_id=request_id)
             return JSONResponse(status_code=401, content=_REFUSED_BODY)
-        payload = published_graph(graph_storage)
+        try:
+            payload = published_graph(graph_storage)
+        except Exception:
+            logger.exception("Federation graph could not be read")
+            log_fetch(
+                FederationAuthResult(result.consumer_id, OUTCOME_ERROR),
+                graph_id=graph_id,
+                request_id=request_id,
+            )
+            return JSONResponse(
+                status_code=500, content={"detail": "Federation read failed"}
+            )
         log_fetch(
             result,
             graph_id=graph_id,

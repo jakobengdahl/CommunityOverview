@@ -7,6 +7,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.api_host import federation_routes
 from backend.api_host.server import create_app
 from backend.api_host.tests.test_auth_middleware import _make_config
 from backend.federation import publish
@@ -122,7 +123,43 @@ def test_a_federation_key_opens_no_other_route_or_method(
     assert response.status_code == 401
 
 
-def test_external_mode_admits_through_the_installed_key_provider(tmp_path, monkeypatch):
+def test_a_graph_read_failure_after_a_matched_key_is_logged_as_error(
+    tmp_path, monkeypatch, caplog
+):
+    client = _client(tmp_path, monkeypatch, _per_consumer())
+    client.raise_server_exceptions = False
+
+    def broken(graph_storage):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(federation_routes, "published_graph", broken)
+    with caplog.at_level(logging.INFO, logger=publish.__name__):
+        response = client.get(
+            FEDERATION_GRAPH_PATH, headers={"X-API-Key": CONSUMER_KEY}
+        )
+
+    assert response.status_code == 500
+    records = [r for r in caplog.records if hasattr(r, "federation_fetch")]
+    assert [
+        (r.federation_fetch["consumer_id"], r.federation_fetch["outcome"])
+        for r in records
+    ] == [("partner", publish.OUTCOME_ERROR)]
+
+
+class _AsyncProvider:
+    async def authenticate(self, presented):
+        return FederationAuthResult("external-partner", "served")
+
+
+class _RaisingProvider:
+    def authenticate(self, presented):
+        raise RuntimeError("auth backend down")
+
+
+@pytest.mark.parametrize("broken_provider", [_AsyncProvider, _RaisingProvider])
+def test_external_mode_admits_through_the_installed_key_provider(
+    tmp_path, monkeypatch, caplog, broken_provider
+):
     class Provider:
         def authenticate(self, presented):
             outcome = "served" if presented == "external-key" else "refused_auth"
@@ -136,7 +173,19 @@ def test_external_mode_admits_through_the_installed_key_provider(tmp_path, monke
         RuntimeExtensions(federation_key_provider=Provider()),
     )
     missing = _client(tmp_path, monkeypatch, federation)
+    broken = _client(
+        tmp_path,
+        monkeypatch,
+        federation,
+        RuntimeExtensions(federation_key_provider=broken_provider()),
+    )
+    broken.raise_server_exceptions = False
 
     headers = {"X-API-Key": "external-key"}
     assert installed.get(FEDERATION_GRAPH_PATH, headers=headers).status_code == 200
-    assert missing.get(FEDERATION_GRAPH_PATH, headers=headers).status_code == 401
+    refused = missing.get(FEDERATION_GRAPH_PATH, headers=headers)
+    with caplog.at_level(logging.INFO, logger=publish.__name__):
+        failed = broken.get(FEDERATION_GRAPH_PATH, headers=headers)
+    assert (failed.status_code, failed.content) == (401, refused.content)
+    records = [r for r in caplog.records if hasattr(r, "federation_fetch")]
+    assert [r.federation_fetch["outcome"] for r in records] == ["refused_auth"]
