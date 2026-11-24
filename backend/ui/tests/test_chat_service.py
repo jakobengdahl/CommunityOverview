@@ -1907,15 +1907,14 @@ class TestLinkResultsToResponse:
             service._processor.default_api_key = "test-key"
         return service
 
-    def _add_collection(self, graph_service, short_name, perms, link_results=None):
+    def _add_collection(self, graph_service, short_name, perms, **settings):
         """Persist an AKC node (optionally with link_results) and return its id."""
         meta = {
             "short_name": short_name,
             "prompt": "Collect data.",
             "node_type_permissions": perms,
         }
-        if link_results is not None:
-            meta["link_results"] = link_results
+        meta.update(settings)
         result = graph_service.add_nodes(
             nodes=[
                 {
@@ -1950,11 +1949,18 @@ class TestLinkResultsToResponse:
         service._resolve_collection("run")
         assert service._collection_nodes["run"]["link_results"] is True
 
-    def test_resolve_records_link_results_false(self, graph_service, mock_llm_provider):
+    @pytest.mark.parametrize("setting, expected", [(False, False), (None, True)])
+    def test_resolve_records_link_results_setting(
+        self, graph_service, mock_llm_provider, setting, expected
+    ):
         service = self._service(graph_service, mock_llm_provider)
-        self._add_collection(graph_service, "run", self.ALL_OPS, link_results=False)
+        node_id = self._add_collection(
+            graph_service, "run", self.ALL_OPS, link_results=setting
+        )
+        metadata = graph_service.get_node_details(node_id)["node"]["metadata"]
+        assert "link_results" in metadata and metadata["link_results"] is setting
         service._resolve_collection("run")
-        assert service._collection_nodes["run"]["link_results"] is False
+        assert service._collection_nodes["run"]["link_results"] is expected
 
     def test_links_response_to_created_and_updated_nodes(
         self, graph_service, mock_llm_provider
