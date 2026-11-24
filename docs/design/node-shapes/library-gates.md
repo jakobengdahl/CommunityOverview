@@ -92,7 +92,10 @@ included. Heap is now 2 to 4 % over the legacy card in every scene (it was 12
 to 17 %), within the 10 % budget. Initial render, Load More, pan and edge
 update frame time miss the budget in part of the scenes. These verdicts hold
 for software rendering on this host; a run with GPU rendering has not been
-made, so how they compare there is not measured. Library writes stay off.
+made, so how they compare there is not measured. The gate was accepted on
+2026-11-24 on these results: library writes stay as the code already has them
+(accepted from an authenticated principal since phase 6d-a); a GPU run that
+shows a regression reopens it.
 
 - **Pan frame at 1,000 nodes is one frame slower.** At scales 0.1 and 1 the
   shaped p50 is 50.0 ms and p95 66.7 ms in all four scenes. The legacy card
