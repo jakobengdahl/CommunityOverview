@@ -543,8 +543,9 @@ def _work_dir_exceeds_quota(spec):
     cannot exhaust the supervisor's descriptors. Each inode counts once, so an
     entry moved or unlinked during the scan is not counted twice. Disappearing
     entries are normal during a run, but a listed directory that was not
-    scanned requires a retry so its subtree cannot escape accounting. Missing
-    identities remain required across retries; exhausting them raises an error.
+    scanned causes a rescan, and one still unscanned after every attempt
+    raises. Best-effort against a racing function: identities are inode
+    numbers, so a deleted directory's reused number clears its miss.
     """
     limits = spec.get("disk_limits")
     if limits is None:
