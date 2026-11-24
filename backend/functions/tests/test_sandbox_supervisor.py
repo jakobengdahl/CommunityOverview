@@ -1,3 +1,4 @@
+# covers: backend/functions/sandbox.py
 """Landlock ABI rules and the real supervisor's status protocol."""
 
 import contextlib
@@ -310,18 +311,48 @@ def test_disk_scan_skips_an_entry_that_vanishes_before_its_stat(monkeypatch, tmp
     assert sandbox._work_dir_exceeds_quota(spec) is False
 
 
+@pytest.mark.parametrize("renames", [1, sandbox.DISK_SCAN_ATTEMPTS])
+def test_disk_scan_retries_a_listed_directory_that_moves(
+    monkeypatch, tmp_path, renames
+):
+    directory = tmp_path / "hidden"
+    directory.mkdir()
+    (directory / "large").write_bytes(b"x" * 128 * 1024)
+    real_open = os.open
+    names = iter(f"moved{n}" for n in range(renames))
+
+    def rename_before_open(path, flags, *args, dir_fd=None, **kwargs):
+        if dir_fd is not None and path != "..":
+            target = next(names, None)
+            if target is not None:
+                os.rename(path, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(sandbox.os, "open", rename_before_open)
+    monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
+    if renames == 1:
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+    else:
+        with pytest.raises(OSError):
+            sandbox._work_dir_exceeds_quota(spec)
+
+
 @pytest.mark.parametrize("change", ["vanished", "file", "other_directory"])
-def test_disk_scan_skips_a_directory_changed_between_listing_and_open(
+def test_disk_scan_rechecks_a_directory_changed_between_listing_and_open(
     monkeypatch, tmp_path, change
 ):
-    """The replacement is not scanned and its descriptor is not left open."""
+    """Replacements are counted on retry and descriptors are closed."""
     work = tmp_path / "work"
     listed = work / "listed"
     listed.mkdir(parents=True)
     real_open = os.open
+    changed = False
 
     def change_then_open(path, flags, *args, dir_fd=None, **kw):
-        if path == "listed":
+        nonlocal changed
+        if path == "listed" and not changed:
+            changed = True
             # Renamed, not removed: a freed inode could be reused by the new one.
             listed.rename(tmp_path / "moved")
             if change == "file":
@@ -335,7 +366,7 @@ def test_disk_scan_skips_a_directory_changed_between_listing_and_open(
     monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
     spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 1}}
     before = len(os.listdir("/proc/self/fd"))
-    assert sandbox._work_dir_exceeds_quota(spec) is False
+    assert sandbox._work_dir_exceeds_quota(spec) is (change == "other_directory")
     assert len(os.listdir("/proc/self/fd")) == before
 
 

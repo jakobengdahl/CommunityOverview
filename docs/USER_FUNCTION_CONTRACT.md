@@ -444,7 +444,8 @@ system that started it.
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. Each scan has a
   one-second deadline so it cannot indefinitely delay supervision or the final
-  report. If usage cannot be checked, including a scan timeout, the run is
+  report. If usage cannot be checked, including a scan timeout or repeated directory moves that prevent a complete
+  scan, the run is
   terminated and fails with `disk_check_failed`.
   Polling is best-effort: usage may overshoot between scans. Transient files
   closed between scans, memory-mapped files, FIFO or pipe transfers, and
