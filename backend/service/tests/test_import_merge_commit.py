@@ -1,3 +1,4 @@
+# covers: backend/service/import_service.py, backend/service/graph_merge_plan.py, backend/core/storage.py, backend/service/rest_api.py
 """
 REST and service tests for the merge import commit (``POST /import/merge``)
 of docs/adr/0013-graph-import-merge-mode.md, slice 2.
@@ -12,6 +13,8 @@ see it.
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import Any, Dict, List
 
 import pytest
@@ -683,6 +686,31 @@ class TestBinding:
         again = client.post(URL, json={**body, "plan_digest": digest})
         assert again.status_code == 409
 
+    def test_a_renamed_edge_between_live_nodes_is_stale_on_retry(
+        self, storage, job_store
+    ):
+        client = _client(storage, job_store)
+        body = _body(
+            {
+                "nodes": [],
+                "edges": [
+                    {"id": "e1", "source": "a2", "target": "i1", "type": "BELONGS_TO"}
+                ],
+            },
+            policy={"default": "rename"},
+        )
+        digest = _preview(client, body)["plan_digest"]
+        first = client.post(URL, json={**body, "plan_digest": digest})
+        assert first.status_code == 200
+        (renamed,) = first.json()["renamed"]["edges"]["items"]
+        edge = storage.edges[renamed["new_id"]]
+        assert (edge.source, edge.target) == ("a2", "i1")
+        before = _state(storage)
+        again = client.post(URL, json={**body, "plan_digest": digest})
+        assert again.status_code == 409
+        assert again.json()["detail"]["error_code"] == "import_plan_stale"
+        assert _state(storage) == before
+
     def test_a_retried_commit_is_stale_not_reapplied(self, storage, job_store):
         client = _client(storage, job_store)
         body = _body()
@@ -726,6 +754,50 @@ class TestWindowBetweenPlanAndLock:
         assert _state(storage) == holder["before"]
         assert holder["events"] == []
         assert job_store.list_jobs() == []
+
+    def test_a_writer_cannot_change_the_graph_during_locked_prepare(
+        self, storage, job_store, monkeypatch
+    ):
+        client = _client(storage, job_store)
+        body = _body()
+        digest = _preview(client, body)["plan_digest"]
+        attempted = Event()
+        finished = Event()
+        real_apply = storage.apply_import_merge
+        futures = []
+
+        def writer():
+            acquired = storage._lock.acquire(blocking=False)
+            if acquired:
+                storage._lock.release()
+            attempted.set()
+            storage.update_node("a1", {"description": "concurrent edit"})
+            finished.set()
+            return acquired
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+
+            def apply(prepare, event_context=None):
+                def locked_prepare():
+                    future = executor.submit(writer)
+                    futures.append(future)
+                    assert attempted.wait(5)
+                    assert not finished.is_set()
+                    writes = prepare()
+                    assert not finished.is_set()
+                    assert not future.done()
+                    return writes
+
+                return real_apply(locked_prepare, event_context=event_context)
+
+            monkeypatch.setattr(storage, "apply_import_merge", apply)
+            response = client.post(URL, json={**body, "plan_digest": digest})
+            assert response.status_code == 200
+            assert len(futures) == 1
+            assert futures[0].result(timeout=5) is False
+        assert finished.is_set()
+        assert storage.get_node("a1").name == "Alice B"
+        assert storage.get_node("a1").description == "concurrent edit"
 
     def test_an_overwrite_target_edited_in_the_window(
         self, storage, job_store, monkeypatch
@@ -945,16 +1017,34 @@ class TestRefusals:
         assert os.path.exists(detail["backup_path"])
         assert job_store.list_jobs() == []
 
-    def test_one_commit_at_a_time(self, storage, job_store):
-        assert import_service._COMMIT_SLOT.acquire(blocking=False)
-        try:
-            response = _client(storage, job_store).post(
-                URL, json=_body(policy={"default": "skip"})
+    def test_one_commit_at_a_time(self, storage, job_store, monkeypatch):
+        entered = Event()
+        release = Event()
+        real_backup = import_service._write_backup
+
+        def backup(store):
+            entered.set()
+            assert release.wait(5)
+            return real_backup(store)
+
+        monkeypatch.setattr(import_service, "_write_backup", backup)
+        client = _client(storage, job_store)
+        body = _body()
+        digest = _preview(client, body)["plan_digest"]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                client.post, URL, json={**body, "plan_digest": digest}
             )
-        finally:
-            import_service._COMMIT_SLOT.release()
-        assert response.status_code == 503
-        assert response.json()["detail"]["error_code"] == "import_merge_busy"
+            try:
+                assert entered.wait(5)
+                before = _state(storage)
+                response = client.post(URL, json={**body, "plan_digest": digest})
+                assert response.status_code == 503
+                assert response.json()["detail"]["error_code"] == "import_merge_busy"
+                assert _state(storage) == before
+            finally:
+                release.set()
+            assert first.result(timeout=5).status_code == 200
 
     def test_a_failed_commit_still_frees_the_slot(
         self, storage, job_store, monkeypatch
