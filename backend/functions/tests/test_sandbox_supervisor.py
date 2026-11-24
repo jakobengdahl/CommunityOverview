@@ -338,6 +338,47 @@ def test_disk_scan_retries_a_listed_directory_that_moves(
             sandbox._work_dir_exceeds_quota(spec)
 
 
+@pytest.mark.parametrize("recover", [True, False])
+def test_disk_scan_retains_missed_directory_across_attempts(monkeypatch, tmp_path, recover):
+    for name in ("0hidden", "a", "b"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "0hidden" / "large").write_bytes(b"x" * 128 * 1024)
+    real_open, real_scandir = os.open, os.scandir
+    attempts = 0
+
+    def move_before_open(path, flags, *args, dir_fd=None, **kwargs):
+        nonlocal attempts
+        if dir_fd is None and path == str(tmp_path):
+            attempts += 1
+        if attempts == 1 and path == "0hidden":
+            (tmp_path / "0hidden").rename(tmp_path / "a" / "0hidden")
+        elif attempts == 2 and path == "a":
+            destination = (
+                tmp_path / "b" / "0hidden"
+                if recover
+                else tmp_path.parent / (tmp_path.name + "-moved")
+            )
+            (tmp_path / "a" / "0hidden").rename(destination)
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    @contextlib.contextmanager
+    def ordered_scandir(fd):
+        with real_scandir(fd) as entries:
+            yield sorted(entries, key=lambda entry: entry.name)
+
+    monkeypatch.setattr(sandbox.os, "open", move_before_open)
+    monkeypatch.setattr(sandbox.os, "scandir", ordered_scandir)
+    monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
+    spec = {"work_dir": str(tmp_path), "disk_limits": {"bytes": 64 * 1024, "files": 10}}
+    if recover:
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+        assert attempts == 3
+    else:
+        with pytest.raises(OSError):
+            sandbox._work_dir_exceeds_quota(spec)
+        assert attempts == sandbox.DISK_SCAN_ATTEMPTS
+
+
 @pytest.mark.parametrize("change", ["vanished", "file", "other_directory"])
 def test_disk_scan_rechecks_a_directory_changed_between_listing_and_open(
     monkeypatch, tmp_path, change
@@ -366,7 +407,11 @@ def test_disk_scan_rechecks_a_directory_changed_between_listing_and_open(
     monkeypatch.setattr(sandbox, "_children_of", lambda pid: [])
     spec = {"work_dir": str(work), "disk_limits": {"bytes": 64 * 1024, "files": 1}}
     before = len(os.listdir("/proc/self/fd"))
-    assert sandbox._work_dir_exceeds_quota(spec) is (change == "other_directory")
+    if change == "other_directory":
+        assert sandbox._work_dir_exceeds_quota(spec) is True
+    else:
+        with pytest.raises(OSError):
+            sandbox._work_dir_exceeds_quota(spec)
     assert len(os.listdir("/proc/self/fd")) == before
 
 
@@ -416,7 +461,11 @@ def test_disk_scan_completes_a_walk_down_with_exact_totals_and_descriptors(
         "disk_limits": {"bytes": 64 * sandbox.MIB, "files": limit},
     }
     before = len(os.listdir("/proc/self/fd"))
-    assert sandbox._work_dir_exceeds_quota(spec) is over_quota
+    if not sibling_scanned and not over_quota:
+        with pytest.raises(OSError):
+            sandbox._work_dir_exceeds_quota(spec)
+    else:
+        assert sandbox._work_dir_exceeds_quota(spec) is over_quota
     assert len(os.listdir("/proc/self/fd")) == before
     assert ("d" in opened_after_move) is sibling_scanned
 

@@ -543,20 +543,22 @@ def _work_dir_exceeds_quota(spec):
     cannot exhaust the supervisor's descriptors. Each inode counts once, so an
     entry moved or unlinked during the scan is not counted twice. Disappearing
     entries are normal during a run, but a listed directory that was not
-    scanned requires a retry so its subtree cannot escape accounting.
+    scanned requires a retry so its subtree cannot escape accounting. Missing
+    identities remain required across retries; exhausting them raises an error.
     """
     limits = spec.get("disk_limits")
     if limits is None:
         return False
+    missed = set()
     for _ in range(DISK_SCAN_ATTEMPTS):
-        exceeded = _scan_work_dir(spec["work_dir"], limits)
+        exceeded = _scan_work_dir(spec["work_dir"], limits, missed)
         if exceeded is not None:
             return exceeded
     raise OSError("work directory kept changing during every usage scan")
 
 
-def _scan_work_dir(work_dir, limits):
-    """Return None when a listed directory could not be scanned."""
+def _scan_work_dir(work_dir, limits, missed):
+    """Return None while any listed directory remains unscanned across attempts."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     seen = set()
     listed = set()
@@ -674,7 +676,9 @@ def _scan_work_dir(work_dir, limits):
             walking.clear()
             if previous != root:
                 os.close(previous)
-        if listed - scanned:
+        missed.difference_update(scanned)
+        missed.update(listed - scanned)
+        if missed:
             return None
         # Unlinked open files have no directory entry. Measure before cleanup
         # closes the run's descriptors and releases their storage.
