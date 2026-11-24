@@ -339,7 +339,9 @@ def test_disk_scan_retries_a_listed_directory_that_moves(
 
 
 @pytest.mark.parametrize("recover", [True, False])
-def test_disk_scan_retains_missed_directory_across_attempts(monkeypatch, tmp_path, recover):
+def test_disk_scan_retains_missed_directory_across_attempts(
+    monkeypatch, tmp_path, recover
+):
     for name in ("0hidden", "a", "b"):
         (tmp_path / name).mkdir()
     (tmp_path / "0hidden" / "large").write_bytes(b"x" * 128 * 1024)
