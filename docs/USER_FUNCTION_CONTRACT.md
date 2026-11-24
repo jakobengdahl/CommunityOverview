@@ -444,18 +444,20 @@ system that started it.
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. Each scan has a
   one-second deadline so it cannot indefinitely delay supervision or the final
-  report. A directory listed but not scanned because it moved during a scan
-  causes a rescan; the scan remembers such directories by device and inode
-  across up to five attempts. If usage cannot be checked, including a scan
-  timeout or directories that stay unscanned through every attempt, the run is
+  report. A directory listed but not scanned because it moved or was deleted
+  during a scan causes a rescan; the scan remembers such directories by device
+  and inode across up to five attempts, and treats one absent from two later
+  rescans as deleted or moved out. If usage cannot be checked, including a scan
+  timeout or directories still missed after every attempt, the run is
   terminated and fails with `disk_check_failed`.
   Polling is best-effort: usage may overshoot between scans. Transient files
   closed between scans, memory-mapped files, and FIFO or pipe transfers may
   escape accounting; unlinked regular files the run still holds open are
   counted once per inode. The scan cannot be complete against a function that
-  times directory moves and deletions to race it: a missed directory whose
-  inode number is freed and reused by a new directory counts as scanned, so
-  its moved subtree can escape that check.
+  times renames to race it: an entry or directory moved into an
+  already-scanned directory before the scan reaches it is not counted by that
+  scan, and a missed directory whose inode number is reused by a new directory
+  counts as scanned.
   The 16 MiB per-file limit remains in force. Operators should also cap the backing
   container/host storage (see [Deployment Guide](DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 - Termination is forced. The runner does not wait for the function to clean up,

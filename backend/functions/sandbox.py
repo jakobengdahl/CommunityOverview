@@ -543,14 +543,15 @@ def _work_dir_exceeds_quota(spec):
     cannot exhaust the supervisor's descriptors. Each inode counts once, so an
     entry moved or unlinked during the scan is not counted twice. Disappearing
     entries are normal during a run, but a listed directory that was not
-    scanned causes a rescan, and one still unscanned after every attempt
-    raises. Best-effort against a racing function: identities are inode
-    numbers, so a deleted directory's reused number clears its miss.
+    scanned causes a rescan, and misses still pending after every attempt
+    raise. A missed directory absent from two later walks is taken as deleted
+    or moved out. Best-effort against a racing function: an entry moved ahead
+    of the walk into an already-scanned directory is not counted by that walk.
     """
     limits = spec.get("disk_limits")
     if limits is None:
         return False
-    missed = set()
+    missed = {}  # directory identity -> walks since it was last listed unscanned
     for _ in range(DISK_SCAN_ATTEMPTS):
         exceeded = _scan_work_dir(spec["work_dir"], limits, missed)
         if exceeded is not None:
@@ -559,7 +560,7 @@ def _work_dir_exceeds_quota(spec):
 
 
 def _scan_work_dir(work_dir, limits, missed):
-    """Return None while any listed directory remains unscanned across attempts."""
+    """Return None while a missed directory may still hold uncounted entries."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     seen = set()
     listed = set()
@@ -677,8 +678,14 @@ def _scan_work_dir(work_dir, limits, missed):
             walking.clear()
             if previous != root:
                 os.close(previous)
-        missed.difference_update(scanned)
-        missed.update(listed - scanned)
+        for identity in list(missed):
+            # A directory moved into an already-scanned one is not listed
+            # again by this walk, so absence once still calls for a rescan.
+            if identity in scanned or missed[identity] >= 1:
+                del missed[identity]
+            else:
+                missed[identity] += 1
+        missed.update(dict.fromkeys(listed - scanned, 0))
         if missed:
             return None
         # Unlinked open files have no directory entry. Measure before cleanup
