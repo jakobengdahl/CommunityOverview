@@ -5,6 +5,7 @@
 - **Scope:** Open-source core
 - **Related:** [`MULTI_USER_SESSIONS_DESIGN.md`](../MULTI_USER_SESSIONS_DESIGN.md)
   decision D13; [`MCP_SESSION_LIFECYCLE_CONTRACT.md`](../MCP_SESSION_LIFECYCLE_CONTRACT.md);
+  [`Session and saved-view compatibility contract`](../SESSION_SAVEDVIEW_COMPAT_CONTRACT.md);
   [ADR 0005](0005-sessions-may-stage-graph-changes.md)
 
 ## Context
