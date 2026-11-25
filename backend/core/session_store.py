@@ -197,6 +197,10 @@ class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
 
 
+class AnnotationLimitReached(OpError):
+    """The session cannot hold any more annotations."""
+
+
 class AppearanceVersionRequired(OpError):
     """The writer has not declared support for appearance state."""
 
@@ -1257,7 +1261,7 @@ class SessionStore:
                 if annotation["id"] in session._deleted_annotation_ids:
                     restored.append(annotation["id"])
             if len(annotations) > self._max_annotations:
-                raise OpError("annotation limit reached for this session")
+                raise AnnotationLimitReached("annotation limit reached for this session")
             state["annotations"] = annotations
             tombstoned = [a for a in held if isinstance(a, str)]
 
@@ -1742,7 +1746,7 @@ class SessionStore:
                 }
             else:
                 if len(state["annotations"]) >= self._max_annotations:
-                    raise OpError("annotation limit reached for this session")
+                    raise AnnotationLimitReached("annotation limit reached for this session")
                 if not isinstance(annotation.get("id"), str):
                     annotation["id"] = secrets.token_hex(8)
                 annotation.setdefault("created_by", op.get("client_id"))

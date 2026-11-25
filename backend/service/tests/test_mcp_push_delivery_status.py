@@ -497,6 +497,32 @@ async def test_a_push_the_server_cannot_store_reaches_no_browser(
 
 
 @pytest.mark.asyncio
+async def test_initial_push_over_annotation_limit_fails_without_publication(
+    tmp_path, monkeypatch
+):
+    tools, registry, manager = _wire(tmp_path)
+    manager.store._max_annotations = 0
+    materialize = manager.materialize_command
+
+    def with_annotations(session_id, command):
+        command["result"].update(
+            action="load_visualization",
+            annotation_document=[{"id": "note", "kind": "note"}],
+        )
+        return materialize(session_id, command)
+
+    monkeypatch.setattr(manager, "materialize_command", with_annotations)
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
+        result = _search(tools, UNKNOWN_SESSION_ID)
+        assert result["success"] is False
+        assert result["error"] == "session_too_large"
+        assert result["visualization_delivery"]["error_code"] == "session_too_large"
+        assert result["visualization_delivery"]["delivered"] is False
+        assert await _settle(lambda: bool(received), turns=50) is False
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+
+@pytest.mark.asyncio
 async def test_a_push_under_an_unknown_action_is_stored_and_sent_as_an_add(wired):
     """search_graph passes a free-form action through: the server stores its
     nodes and every browser receives it as the add it draws."""

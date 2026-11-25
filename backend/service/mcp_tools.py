@@ -39,6 +39,7 @@ from backend.service.mcp_widget import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import (
     AnnotationFieldConflict,
+    AnnotationLimitReached,
     OpError,
     is_valid_session_id,
 )
@@ -6614,7 +6615,12 @@ def _push_to_session(
                 membership_applied = session_manager.materialize_command(
                     session_id, command
                 )
-            except (OSError, SessionLimitReached, OpBatchTooLarge) as exc:
+            except (
+                OSError,
+                SessionLimitReached,
+                OpBatchTooLarge,
+                AnnotationLimitReached,
+            ) as exc:
                 materialization_error = (
                     "storage_error"
                     if isinstance(exc, OSError)
