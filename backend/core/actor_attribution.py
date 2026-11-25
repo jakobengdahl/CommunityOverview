@@ -28,8 +28,13 @@ def preflight_file(path: str | Path, *, write: bool = False) -> None:
 
     O_NONBLOCK keeps a FIFO from blocking the open; it is then refused as not
     a regular file, like a directory, which the read-write open refuses.
+    Writers open with O_CREAT, which fs.protected_regular refuses in a sticky
+    directory even for root, so a write open of an existing file adds it; a
+    dangling symlink is opened without it, so nothing is ever created.
     """
     flags = os.O_RDWR if write else os.O_RDONLY
+    if write and os.path.exists(path):
+        flags |= os.O_CREAT
     fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

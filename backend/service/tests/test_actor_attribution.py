@@ -949,6 +949,21 @@ def _owner_permissions(monkeypatch):
     monkeypatch.setattr(os, "access", fake_access)
 
 
+def _protected_regular_applies_to_root():
+    try:
+        level = Path("/proc/sys/fs/protected_regular").read_text().strip()
+    except OSError:
+        return False
+    return hasattr(os, "geteuid") and os.geteuid() == 0 and level != "0"
+
+
+# The kernel refuses these O_CREAT opens; only root can chown the file away.
+_protected_regular = pytest.mark.skipif(
+    not _protected_regular_applies_to_root(),
+    reason="needs root and fs.protected_regular",
+)
+
+
 class _FakeMergeRecords:
     def __init__(self, dsn, *, schema, scope):
         self.erased = []
@@ -980,6 +995,9 @@ class _FakeMergeRecords:
         "run_history_shm_is_directory",
         "run_history_journal_is_directory",
         "run_history_symlink_target_shm_is_directory",
+        pytest.param(
+            "run_history_foreign_in_sticky_directory", marks=_protected_regular
+        ),
         "db_directory_read_only",
         "db_directory_sticky_and_journal_not_owned",
         "proposals_is_fifo",
@@ -988,6 +1006,9 @@ class _FakeMergeRecords:
         "session_file_unreadable",
         "session_lock_is_directory",
         "session_lock_read_only",
+        pytest.param(
+            "session_lock_foreign_in_sticky_directory", marks=_protected_regular
+        ),
         "sessions_directory_read_only",
         "sessions_directory_sticky_and_file_not_owned",
         "merge_log_is_directory",
@@ -1056,6 +1077,9 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         (tmp_path / "db" / "runs.db").rename(tmp_path / "target" / "runs.db")
         (tmp_path / "db" / "runs.db").symlink_to(tmp_path / "target" / "runs.db")
         (tmp_path / "target" / "runs.db-shm").mkdir()
+    elif broken == "run_history_foreign_in_sticky_directory":
+        db.chmod(0o1777)
+        os.chown(db / "runs.db", 4242, 4242)
     elif broken == "proposals_is_fifo":
         (tmp_path / "db" / "proposals.db").unlink()
         os.mkfifo(tmp_path / "db" / "proposals.db")
@@ -1071,6 +1095,9 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         (sessions / ".sessions.lock").mkdir()
     elif broken == "session_lock_read_only":
         (sessions / ".sessions.lock").chmod(0o444)
+    elif broken == "session_lock_foreign_in_sticky_directory":
+        sessions.chmod(0o1777)
+        os.chown(sessions / ".sessions.lock", 4242, 4242)
     elif broken == "sessions_directory_read_only":
         sessions.chmod(0o555)
     elif broken == "sessions_directory_sticky_and_file_not_owned":
