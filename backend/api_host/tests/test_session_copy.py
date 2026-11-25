@@ -405,3 +405,43 @@ def test_creation_storage_failure_is_safe(
             assert response.json()["detail"]["error"] == "storage_error"
     assert manager.store.session_count() == 1
     assert manager.create_session()
+
+
+@pytest.mark.parametrize("operation", ["rename", "mcp_rename", "mcp_describe"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_materialization_update_storage_failure(test_app, monkeypatch, operation, existing):
+    from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+
+    manager = test_app.app.state.session_manager
+    sid = "1111-2222"
+    if existing:
+        manager.get_or_create(sid)
+    manager._max_sessions = 1
+    backend = manager.store._backend
+    replace = backend._replace_locked
+    calls = 0
+
+    def fail_update(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == (1 if existing else 2):
+            raise OSError("private storage detail")
+        return replace(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "_replace_locked", fail_update)
+        if operation == "rename":
+            response = test_app.patch(f"/api/sessions/{sid}", json={"name": "name"})
+            assert response.status_code == 503
+            assert response.json()["detail"]["error"] == "storage_error"
+            assert "private storage detail" not in response.text
+        else:
+            tool = test_app.app.state.tools_map[operation.replace("mcp_", "") + "_visualization_session"]
+            assert tool(sid, "value") == {"success": False, "error": "storage_error"}
+
+    fresh = SessionStore(FileSessionPersistenceBackend(backend.directory))
+    assert (manager.store.get(sid) is not None) == existing
+    assert (fresh.get(sid) is not None) == existing
+    assert manager.store.session_count() == int(existing)
+    if not existing:
+        assert manager.create_session()
