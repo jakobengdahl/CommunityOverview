@@ -482,10 +482,11 @@ class SessionLimitReached(Exception):
 
 
 def _session_files(directory: Path) -> List[Path]:
+    # A dangling symlink is no session, as load() treats it.
     return [
         p
         for p in directory.iterdir()
-        if p.suffix == ".json" and is_valid_session_id(p.stem)
+        if p.suffix == ".json" and is_valid_session_id(p.stem) and p.exists()
     ]
 
 

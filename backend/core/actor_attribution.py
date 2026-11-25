@@ -66,10 +66,11 @@ def preflight_directory(path: str | Path, replaces: Iterable[str | Path] = ()) -
 def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
     """Preflight a read-write SQLite store: False if absent, raise if unusable.
 
-    The database and existing -wal/-shm sidecars are opened read-write, the
-    directory must take new journal files and let SQLite remove its own, and *path* must be a store owning
-    *table* at schema *version*: the read-write constructors create and
-    migrate schema in whatever file they are given.
+    The database and existing -journal/-wal/-shm sidecars are opened
+    read-write, the directory must take new journal files and let SQLite
+    remove its own, and *path* must be a store owning *table* at schema
+    *version*: the read-write constructors create and migrate schema in
+    whatever file they are given.
     """
     if not Path(path).exists():
         return False
@@ -77,7 +78,11 @@ def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
     # target, so that is the directory and those are the files checked.
     path = os.path.realpath(path)
     preflight_file(path, write=True)
-    sidecars = [f"{path}{s}" for s in ("-wal", "-shm") if Path(f"{path}{s}").exists()]
+    sidecars = [
+        f"{path}{s}"
+        for s in ("-journal", "-wal", "-shm")
+        if Path(f"{path}{s}").exists()
+    ]
     preflight_directory(Path(path).parent, replaces=sidecars)
     for sidecar in sidecars:
         preflight_file(sidecar, write=True)

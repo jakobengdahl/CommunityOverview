@@ -919,6 +919,36 @@ def _tree(root):
     return tree
 
 
+def _owner_permissions(monkeypatch):
+    """Make os.open and os.access honour owner mode bits even for root."""
+    real_open, real_access = os.open, os.access
+
+    def allowed(path, want_read, want_write, want_exec=False):
+        try:
+            mode = os.stat(path).st_mode
+        except OSError:
+            return True
+        return not (
+            (want_read and not mode & stat.S_IRUSR)
+            or (want_write and not mode & stat.S_IWUSR)
+            or (want_exec and not mode & stat.S_IXUSR)
+        )
+
+    def fake_open(path, flags, *args, **kwargs):
+        access = flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)
+        if not allowed(path, access != os.O_WRONLY, access != os.O_RDONLY):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    def fake_access(path, mode, **kwargs):
+        if not allowed(path, mode & os.R_OK, mode & os.W_OK, mode & os.X_OK):
+            return False
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(os, "access", fake_access)
+
+
 class _FakeMergeRecords:
     def __init__(self, dsn, *, schema, scope):
         self.erased = []
@@ -941,19 +971,25 @@ class _FakeMergeRecords:
     "broken",
     [
         None,
+        "session_file_dangling_symlink",
         "history_is_directory",
-        pytest.param(
-            "history_directory_read_only",
-            marks=pytest.mark.skipif(
-                os.geteuid() == 0, reason="root ignores permissions"
-            ),
-        ),
+        "history_directory_read_only",
         "history_directory_sticky_and_file_not_owned",
+        "run_history_read_only",
+        "run_history_wal_read_only",
         "run_history_shm_is_directory",
+        "run_history_journal_is_directory",
         "run_history_symlink_target_shm_is_directory",
+        "db_directory_read_only",
+        "db_directory_sticky_and_journal_not_owned",
         "proposals_is_fifo",
+        "proposals_shm_read_only",
         "session_file_is_fifo",
+        "session_file_unreadable",
         "session_lock_is_directory",
+        "session_lock_read_only",
+        "sessions_directory_read_only",
+        "sessions_directory_sticky_and_file_not_owned",
         "merge_log_is_directory",
         "merge_records_not_updatable",
     ],
@@ -985,7 +1021,12 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     graph.record_staged("1234-5678")
     graph.stage("1234-5678", [_layer_entry("node-a", ACTOR)])
     merge_log = tmp_path / "graph" / "graph.merges.ndjson"
-    if broken == "history_is_directory":
+    db = tmp_path / "db"
+    _owner_permissions(monkeypatch)
+    if broken == "session_file_dangling_symlink":
+        # load() skips it, so the erasure has nothing to open there.
+        (sessions / "2222-3333.json").symlink_to(tmp_path / "missing.json")
+    elif broken == "history_is_directory":
         history.unlink()
         history.mkdir()
     elif broken == "history_directory_read_only":
@@ -994,8 +1035,21 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         history.parent.chmod(0o1777)
         # An owner of neither the directory nor the file, root or not.
         monkeypatch.setattr(os, "geteuid", lambda: 4242)
+    elif broken == "run_history_read_only":
+        (db / "runs.db").chmod(0o444)
+    elif broken == "run_history_wal_read_only":
+        (db / "runs.db-wal").write_bytes(b"")
+        (db / "runs.db-wal").chmod(0o444)
     elif broken == "run_history_shm_is_directory":
         (tmp_path / "db" / "runs.db-shm").mkdir()
+    elif broken == "run_history_journal_is_directory":
+        (db / "runs.db-journal").mkdir()
+    elif broken == "db_directory_read_only":
+        db.chmod(0o555)
+    elif broken == "db_directory_sticky_and_journal_not_owned":
+        (db / "runs.db-journal").write_bytes(b"")
+        db.chmod(0o1777)
+        monkeypatch.setattr(os, "geteuid", lambda: 4242)
     elif broken == "run_history_symlink_target_shm_is_directory":
         # SQLite keeps the sidecars of a symlinked database beside its target.
         (tmp_path / "target").mkdir()
@@ -1005,11 +1059,23 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     elif broken == "proposals_is_fifo":
         (tmp_path / "db" / "proposals.db").unlink()
         os.mkfifo(tmp_path / "db" / "proposals.db")
+    elif broken == "proposals_shm_read_only":
+        (db / "proposals.db-shm").write_bytes(b"")
+        (db / "proposals.db-shm").chmod(0o444)
     elif broken == "session_file_is_fifo":
         os.mkfifo(sessions / "2222-3333.json")
+    elif broken == "session_file_unreadable":
+        (sessions / "1234-5678.json").chmod(0o200)
     elif broken == "session_lock_is_directory":
         (sessions / ".sessions.lock").unlink()
         (sessions / ".sessions.lock").mkdir()
+    elif broken == "session_lock_read_only":
+        (sessions / ".sessions.lock").chmod(0o444)
+    elif broken == "sessions_directory_read_only":
+        sessions.chmod(0o555)
+    elif broken == "sessions_directory_sticky_and_file_not_owned":
+        sessions.chmod(0o1777)
+        monkeypatch.setattr(os, "geteuid", lambda: 4242)
     elif broken == "merge_log_is_directory":
         merge_log.unlink(missing_ok=True)
         merge_log.mkdir()
@@ -1033,10 +1099,11 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     try:
         code = main(args)
     finally:
-        history.parent.chmod(0o755)
+        for directory in (history.parent, db, sessions):
+            directory.chmod(0o755)
     captured = capsys.readouterr()
     assert ACTOR not in captured.out + captured.err
-    if broken is None:
+    if broken in (None, "session_file_dangling_symlink"):
         assert code == 0
         assert set(json.loads(captured.out)["counts"].values()) == {1}
         assert _FakeMergeRecords.made[0].erased == [ACTOR]
