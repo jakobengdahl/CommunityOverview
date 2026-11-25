@@ -114,11 +114,13 @@ logger = logging.getLogger(__name__)
 # estimate; it is not a bound — see _NODE_WIDTH_BOUNDS.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
 
-# The rendered width range of a graph node's outer box, which the canvas CSS
+# The rendered width range of a card node's outer box, which the canvas CSS
 # guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
 # min-width/max-width under box-sizing: border-box, border included). Unlike
 # _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` never
-# overlaps horizontally. Height wraps with the label, so it has no bound.
+# overlaps horizontally between card nodes. A node drawn with a configured shape
+# takes its width from the shape and its scale instead, so it is not covered.
+# Height wraps with the label, so it has no bound.
 _NODE_WIDTH_BOUNDS = {"min": 150, "max": 250}
 
 # summon_session_viewport: who summoned, when the caller names no one, and the
@@ -2312,10 +2314,12 @@ def register_mcp_tools(
           in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
         - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
         - Node width/height are not server-owned, so they are not returned per
-          node. A node's rendered width always lies within
+          node. A card node's rendered width always lies within
           ``node_width_bounds``; a column pitch of ``node_width_bounds.max``
-          plus a gap never overlaps horizontally. ``assumed_node_size`` is a
-          typical box, not a bound, and height grows with the label.
+          plus a gap never overlaps two card nodes horizontally. A node drawn
+          with a configured shape is sized by that shape and its scale and is
+          not covered. ``assumed_node_size`` is a typical box, not a bound, and
+          height grows with the label.
         - ``revision`` is a monotonic counter. Pass it back as
           ``expected_revision`` to ``apply_visualization_layout`` for optimistic
           concurrency (the write is rejected if someone else changed the session
@@ -2351,8 +2355,9 @@ def register_mcp_tools(
         Returns:
             Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
             selected_node_ids, assumed_node_size, node_width_bounds (the
-            rendered min/max outer width; space columns at ``max`` to rule out
-            horizontal overlap — height has no bound)
+            rendered min/max outer width of a card node; space columns at
+            ``max`` to rule out horizontal overlap between card nodes — shaped
+            nodes are not covered and height has no bound)
         """
         if session_manager is None:
             return {"error": "Session manager not available"}

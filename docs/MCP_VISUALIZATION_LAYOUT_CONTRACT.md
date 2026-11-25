@@ -72,8 +72,13 @@ node label, the active theme and the client's rendered `CustomNode`. Therefore:
 - Instead it advertises a typical box, **`assumed_node_size`** — currently
   `{ "width": 220, "height": 120 }` — and **`node_width_bounds`** — currently
   `{ "min": 150, "max": 250 }` — the outer width range the canvas guarantees for
-  every graph node (`.graph-custom-node`: `min-width`/`max-width`, pinned to
+  every **card** node (`.graph-custom-node`: `min-width`/`max-width`, pinned to
   `box-sizing: border-box` so the border is included).
+- The bound does **not** cover a node drawn with a configured shape (a type,
+  session, per-node or library shape): its width comes from the shape's base
+  size and scale, not from the card CSS, and can be far wider. The read does not
+  report which nodes are shaped, so a session that uses node shapes cannot rely
+  on `node_width_bounds` for collision-free spacing.
 - `assumed_node_size` is a *typical* size, not a bound: a node with a long label
   renders wider (up to `node_width_bounds.max`) and taller. For a grid or DAG
   that must not overlap horizontally, use a column pitch of
@@ -103,7 +108,7 @@ DAG/grid/swimlane layouts the initiative targets.
 | `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden, type, status }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). `type`/`status` are the semantic projection below. |
 | `selected_node_ids` | string[] | The **nodes** currently selected in the session — the same value `get_visualization_session_state` reports (§4.2). Always a subset of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` typical node box (§3); not a bound. |
-| `node_width_bounds` | object | `{ min, max }` rendered outer width of every node; pitch at `max` never overlaps horizontally (§3). |
+| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; pitch at `max` never overlaps card nodes horizontally. Shaped nodes are not covered (§3). |
 | `coordinate_space` | string | Human-readable restatement of §2, e.g. `"model-space, pixels at zoom 1, x/y = node top-left"`. |
 | `connected_clients` | int | How many browsers are attached. When `> 0`, prefer placing nodes relative to related nodes over guessing a viewport (§8). |
 

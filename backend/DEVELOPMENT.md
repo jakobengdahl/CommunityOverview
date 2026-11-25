@@ -1507,7 +1507,7 @@ rearranging the canvas is just another collaborator. Coordinates are model space
 carries the move as one `layout_applied` op with a monotonic `revision`;
 pass the `revision` from a prior read as `expected_revision` for optimistic
 concurrency. Node width/height are not server-owned, so the read tool advertises
-`node_width_bounds` (the guaranteed width range) and a typical
+`node_width_bounds` (the guaranteed width range of a card node) and a typical
 `assumed_node_size` for spacing instead. A write carries an
 animation hint (`animate`/`duration_ms`/`easing`); the canvas tweens the batch
 from the nodes' current positions to the targets, and a viewer who asked for
@@ -1595,7 +1595,7 @@ positions and the annotations themselves are untouched.
 | `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
 | `selected_node_ids` | string[] | Currently selected **nodes**, same value as `get_visualization_session_state`. Selection claims are taken on elements, so edge claims are filtered out — every id here is one of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` of a typical node box; not a bound. |
-| `node_width_bounds` | object | `{ min, max }` rendered outer node width; a column pitch of `max` never overlaps horizontally. Height has no bound. |
+| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; a column pitch of `max` never overlaps card nodes horizontally. Nodes drawn with a configured shape are not covered; height has no bound. |
 | `coordinate_space` | string | Restatement of the coordinate model. |
 | `connected_clients` | int | How many browsers are attached. |
 
@@ -1608,9 +1608,10 @@ fields respect graph-scope narrowing: a node the caller may not read keeps its
 geometry entry with `type`/`status` `null`, so a layout never silently drops a
 node it must still place. Per-node measured `width`/`height` remain unavailable —
 the browser does not upload rendered geometry and node boxes size to their
-content. `node_width_bounds` is the width range the canvas CSS guarantees, so
-space columns at its `max` when they must not overlap; `assumed_node_size` is a
-typical box and height has no bound.
+content. `node_width_bounds` is the width range the canvas CSS guarantees for
+card nodes, so space columns at its `max` when they must not overlap (a node
+drawn with a configured shape is sized by its shape and scale and is not
+covered); `assumed_node_size` is a typical box and height has no bound.
 
 `selected_node_ids` is merged in so "what is here and where is it" is one call.
 The visible set is deliberately not duplicated here — it is already the `nodes`
@@ -1625,9 +1626,10 @@ into a node argument such as `apply_visualization_layout`'s positions map.
 Coordinates are model space with `x`/`y` at the node **top-left**, so spacing is
 computed from the node size plus a gap — offset by the full size, not half, to
 leave a visible gutter. Take the column pitch from `node_width_bounds.max` so no
-two columns can overlap, and the row pitch from `assumed_node_size.height` plus a
-generous gap (height has no bound). Read the layout first to get both and the
-current `revision`, then pass that
+two columns of card nodes can overlap (shaped nodes are not covered), and the
+row pitch from `assumed_node_size.height` plus a generous gap (height has no
+bound). Read the layout first to get both and the current `revision`, then pass
+that
 `revision` as `expected_revision` on the write. A single write is capped at 500
 moves / 256 KiB (`too_large` beyond that), and a write that passes those caps and
 fits the full budget draws from the tool's
