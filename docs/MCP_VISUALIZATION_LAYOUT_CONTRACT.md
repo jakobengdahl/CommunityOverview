@@ -71,9 +71,9 @@ node label, the active theme and the client's rendered `CustomNode`. Therefore:
 - The read tool does **not** return a per-node `width`/`height` or bounding box.
 - Instead it advertises a typical box, **`assumed_node_size`** — currently
   `{ "width": 220, "height": 120 }` — and **`node_width_bounds`** — currently
-  `{ "min": 154, "max": 254 }` — the outer width range the canvas guarantees for
-  every graph node (`.graph-custom-node`: `min-width`/`max-width` plus its 2px
-  border on each side).
+  `{ "min": 150, "max": 250 }` — the outer width range the canvas guarantees for
+  every graph node (`.graph-custom-node`: `min-width`/`max-width`, pinned to
+  `box-sizing: border-box` so the border is included).
 - `assumed_node_size` is a *typical* size, not a bound: a node with a long label
   renders wider (up to `node_width_bounds.max`) and taller. For a grid or DAG
   that must not overlap horizontally, use a column pitch of

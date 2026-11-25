@@ -146,15 +146,16 @@ class TestGetVisualizationLayout:
                 re.search(rf"(?<![-\w]){prop}:\s*(\d+)px", rule.group(1)).group(1)
             )
 
-        border = 2 * px("border")  # content-box: the border adds to the width
+        # border-box makes min/max-width the outer width, independent of the host.
+        assert re.search(r"box-sizing:\s*border-box", rule.group(1))
         tools_map, manager = layout_tools
         session = _session_with_nodes(manager, ["a"])
 
         result = tools_map["get_visualization_layout"](session_id=session.id)
 
         assert result["node_width_bounds"] == {
-            "min": px("min-width") + border,
-            "max": px("max-width") + border,
+            "min": px("min-width"),
+            "max": px("max-width"),
         }
 
     def test_unresolvable_node_ref_keeps_geometry_with_null_semantics(

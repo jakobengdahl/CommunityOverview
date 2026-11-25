@@ -109,17 +109,17 @@ from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 logger = logging.getLogger(__name__)
 
 # Server-owned session state records node x/y but not rendered node dimensions
-# (design §3.8: the browser no longer uploads canvas geometry). Agents still need
-# a size to space nodes without overlap, so the layout tools advertise this
-# assumed default — model-space units at zoom 1, matching the canvas node box.
+# (design §3.8: the browser no longer uploads canvas geometry). The layout tools
+# advertise this typical node box (model-space units at zoom 1) as a spacing
+# estimate; it is not a bound — see _NODE_WIDTH_BOUNDS.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
 
 # The rendered width range of a graph node's outer box, which the canvas CSS
 # guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
-# min/max-width plus a 2px border each side, content-box). Unlike
+# min-width/max-width under box-sizing: border-box, border included). Unlike
 # _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` never
 # overlaps horizontally. Height wraps with the label, so it has no bound.
-_NODE_WIDTH_BOUNDS = {"min": 154, "max": 254}
+_NODE_WIDTH_BOUNDS = {"min": 150, "max": 250}
 
 # summon_session_viewport: who summoned, when the caller names no one, and the
 # largest node set one summon may frame (the add_nodes_to_session batch size).

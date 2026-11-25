@@ -1507,7 +1507,8 @@ rearranging the canvas is just another collaborator. Coordinates are model space
 carries the move as one `layout_applied` op with a monotonic `revision`;
 pass the `revision` from a prior read as `expected_revision` for optimistic
 concurrency. Node width/height are not server-owned, so the read tool advertises
-an `assumed_node_size` for collision-free spacing instead. A write carries an
+`node_width_bounds` (the guaranteed width range) and a typical
+`assumed_node_size` for spacing instead. A write carries an
 animation hint (`animate`/`duration_ms`/`easing`); the canvas tweens the batch
 from the nodes' current positions to the targets, and a viewer who asked for
 reduced motion snaps to the final positions instead (a client-side decision — an
