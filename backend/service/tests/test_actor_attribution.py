@@ -1000,6 +1000,8 @@ class _FakeMergeRecords:
         "run_history_wal_read_only",
         "run_history_shm_is_directory",
         "run_history_journal_is_directory",
+        "run_history_wal_symlink_to_writable_file",
+        "run_history_journal_dangling_symlink",
         "run_history_symlink_target_shm_is_directory",
         pytest.param(
             "run_history_foreign_in_sticky_directory", marks=_protected_regular
@@ -1076,6 +1078,11 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         (tmp_path / "db" / "runs.db-shm").mkdir()
     elif broken == "run_history_journal_is_directory":
         (db / "runs.db-journal").mkdir()
+    elif broken == "run_history_wal_symlink_to_writable_file":
+        (tmp_path / "wal").write_bytes(b"")
+        (db / "runs.db-wal").symlink_to(tmp_path / "wal")
+    elif broken == "run_history_journal_dangling_symlink":
+        (db / "runs.db-journal").symlink_to(tmp_path / "missing-journal")
     elif broken == "db_directory_read_only":
         db.chmod(0o555)
     elif broken == "db_directory_sticky_and_journal_not_owned":

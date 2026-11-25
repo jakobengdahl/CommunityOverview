@@ -23,7 +23,9 @@ def validate_erasure(actor_id: str, replacement_token: str) -> None:
         raise ValueError("Erasure requires a nonempty actor and a distinct replacement")
 
 
-def preflight_file(path: str | Path, *, write: bool = False) -> None:
+def preflight_file(
+    path: str | Path, *, write: bool = False, follow_symlinks: bool = True
+) -> None:
     """Open regular file *path* as an erasure will, changing nothing.
 
     Anything but a regular file is refused before the open, since opening a
@@ -31,11 +33,14 @@ def preflight_file(path: str | Path, *, write: bool = False) -> None:
     fstat() after the open catches a swap in between, and O_NONBLOCK keeps a
     FIFO swapped in from blocking it. Writers open with O_CREAT, which
     fs.protected_regular refuses in a sticky directory even for root, so a
-    write open adds it too.
+    write open adds it too. Without *follow_symlinks* a symlink is refused
+    and the open adds O_NOFOLLOW, as SQLite opens its sidecars.
     """
-    if not stat.S_ISREG(os.stat(path).st_mode):
+    if not stat.S_ISREG(os.stat(path, follow_symlinks=follow_symlinks).st_mode):
         raise OSError("not a regular file")
     flags = os.O_RDWR | os.O_CREAT if write else os.O_RDONLY
+    if not follow_symlinks:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -76,7 +81,8 @@ def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
     read-write, the directory must take new journal files and let SQLite
     remove its own, and *path* must be a store owning *table* at schema
     *version*: the read-write constructors create and migrate schema in
-    whatever file they are given.
+    whatever file they are given. SQLite opens sidecars with O_NOFOLLOW,
+    so a sidecar symlink, dangling or not, fails the preflight.
     """
     if not Path(path).exists():
         return False
@@ -87,11 +93,11 @@ def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
     sidecars = [
         f"{path}{s}"
         for s in ("-journal", "-wal", "-shm")
-        if Path(f"{path}{s}").exists()
+        if os.path.lexists(f"{path}{s}")
     ]
     preflight_directory(Path(path).parent, replaces=sidecars)
     for sidecar in sidecars:
-        preflight_file(sidecar, write=True)
+        preflight_file(sidecar, write=True, follow_symlinks=False)
     if not _sqlite_schema_matches(path, table, version):
         raise ValueError("not a current-schema store")
     return True
