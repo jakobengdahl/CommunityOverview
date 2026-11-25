@@ -2384,6 +2384,7 @@ _IMPORT_ERROR_STATUS = {
     "import_preview_busy": 503,
     "plan_digest_required": 422,
     "import_merge_blocked": 422,
+    "import_merge_too_large": 422,
     "import_plan_stale": 409,
     "import_merge_busy": 503,
     "import_merge_not_supported": 501,

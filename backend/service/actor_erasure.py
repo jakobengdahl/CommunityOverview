@@ -35,6 +35,7 @@ class ActorErasureService:
         proposals: Optional[ActorErasureStore] = None,
         session_activity: Optional[ActorErasureStore] = None,
         staged_layers: Optional[ActorErasureStore] = None,
+        merge_records: Optional[ActorErasureStore] = None,
     ):
         self._stores = {
             "mutation_history": mutation_history,
@@ -42,6 +43,7 @@ class ActorErasureService:
             "proposals": proposals,
             "session_activity": session_activity,
             "staged_layers": staged_layers,
+            "merge_records": merge_records,
         }
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> dict:
@@ -123,6 +125,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Staged-session layers sidecar (<graph>.layers.json); "
         "the merge log beside it is included",
     )
+    parser.add_argument(
+        "--postgres-schema",
+        help="PostgreSQL graph store schema whose staged-merge records to "
+        "include; connects with GRAPH_POSTGRES_DSN and GRAPH_POSTGRES_SCOPE",
+    )
     args = parser.parse_args(argv)
     try:
         validate_erasure(args.actor_id, args.replacement_token)
@@ -181,6 +188,41 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("error: a store path is not a store of its kind", file=sys.stderr)
             return 2
         targets.append((name, path, factory))
+
+    if args.postgres_schema:
+        # Checked last, so an exit 2 above leaves no connection to close.
+        # The DSN comes only from the environment: argv is visible to other
+        # local users and it usually carries a password.
+        dsn = (os.getenv("GRAPH_POSTGRES_DSN") or "").strip()
+        merge_records = None
+        try:
+            if not dsn:
+                raise ValueError("no DSN")
+            from backend.core.postgres_backend import PostgresMergeRecords
+
+            merge_records = PostgresMergeRecords(
+                dsn,
+                schema=args.postgres_schema,
+                scope=os.getenv("GRAPH_POSTGRES_SCOPE"),
+            )
+            present = merge_records.exists()
+            if present:
+                merge_records.erase_actor(
+                    args.actor_id, args.replacement_token, dry_run=True
+                )
+        except Exception:
+            # Connection errors can quote the DSN, password included.
+            if merge_records is not None:
+                merge_records.close()
+            print(
+                "error: the PostgreSQL graph store is unavailable or not writable",
+                file=sys.stderr,
+            )
+            return 2
+        if present:
+            targets.append(("merge_records", None, lambda _: merge_records))
+        else:
+            merge_records.close()
 
     # From here on stores may be modified, so every failure is reported per
     # store with exit 1; exit 2 is reserved for runs that touched nothing.

@@ -78,6 +78,7 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 from backend.core import layer_store
+from backend.core.actor_attribution import validate_erasure
 from backend.core.storage_backends import (
     BackendCapabilities,
     BatchConditions,
@@ -3233,8 +3234,82 @@ class PostgresGraphPersistenceBackend:
         self._pool.close()
 
 
+class PostgresMergeRecords:
+    """Actor erasure over a PostgreSQL graph store's staged-merge records.
+
+    Operator maintenance with writers stopped, the counterpart of the file
+    backend's StagedLayersFile merge log: only the merging `actor` of rows in
+    graph_merge_records is rewritten, in place. Nothing is created, so a
+    schema without the table is an absent store. Only rows of this scope
+    (unscoped rows when none is given) are touched.
+    """
+
+    def __init__(
+        self, conninfo: str, *, schema: str = "public", scope: Optional[str] = None
+    ):
+        self._backend = PostgresGraphPersistenceBackend(
+            conninfo, schema=schema, scope=scope, pool_size=1
+        )
+
+    def exists(self) -> bool:
+        backend = self._backend
+        with backend._pool.connection() as conn:
+            return (
+                conn.execute(
+                    "SELECT to_regclass(%s)",
+                    (
+                        sql.Identifier(backend.schema, "graph_merge_records").as_string(
+                            conn
+                        ),
+                    ),
+                ).fetchone()[0]
+                is not None
+            )
+
+    def erase_actor(
+        self, actor_id: str, replacement_token: str, *, dry_run: bool = False
+    ) -> int:
+        """Return the rows changed; a dry run rolls the same UPDATE back.
+
+        The dry run is the CLI's pre-check: to_regclass needs no privilege on
+        the table, but the UPDATE fails on a missing privilege, a read-only
+        server or a replica before any other store has been touched.
+        """
+        validate_erasure(actor_id, replacement_token)
+        if not self.exists():
+            return 0
+        backend = self._backend
+        with backend._pool.connection() as conn:
+            with conn.transaction():
+                backend._layer_transaction(conn)
+                # The predicate as well as the policy: a role that bypasses
+                # row-level security would otherwise reach every scope.
+                scope, params = backend._layer_scope()
+                # A JSON string comparison, as the file log's `==`: an actor
+                # stored as another JSON type is not this actor.
+                cursor = conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET doc = jsonb_set(doc, '{{actor}}', %s)"
+                        " WHERE doc->'actor' = %s{}"
+                    ).format(backend._table("graph_merge_records"), scope),
+                    (
+                        psycopg.types.json.Jsonb(replacement_token),
+                        psycopg.types.json.Jsonb(actor_id),
+                        *params,
+                    ),
+                )
+                count = cursor.rowcount
+                if dry_run:
+                    raise psycopg.Rollback()
+        return count
+
+    def close(self) -> None:
+        self._backend.close()
+
+
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    "PostgresMergeRecords",
     # The two a host must be able to catch, so they belong in a curated list
     # as much as the tuning constants do.
     "CrossScopeWriteRefused",

@@ -45,12 +45,13 @@ capacity reservation, access assignment and durable publication form one
 serialized operation. Hold the source mutation lock and the persistence
 transaction across the check and snapshot; coordinate staged-layer mutations
 under the same exclusion. If the source has unmerged staged changes, reject the
-save with `staged_changes` (409) and publish no destination. The backend must
-atomically commit the destination and its access assignment, or compensate
-before making it visible. A file rename
-alone does not make multi-resource writes atomic. On failure, including a crash,
-recovery must leave no visible partial session, leaked access grant, or consumed
-capacity. Implementations unable to guarantee this must refuse the operation.
+save with `staged_changes` (409) and publish no destination. Publish the
+destination before assigning access. The session can briefly be visible before
+its grants exist; publication and access assignment are not atomic. If grant
+assignment fails, revoke the grants made for the save and remove the destination
+before reporting failure, so no grant or capacity outlives a failed save. A
+crash before grant assignment leaves no grant; a failure before publication
+leaves no visible destination or consumed capacity.
 All source edits, including staged changes, must serialize with this boundary;
 otherwise the operation must refuse rather than capture a mixture. A successful
 capture is from the stated revision even if an edit follows immediately.
@@ -80,12 +81,14 @@ ID: `invalid_request` (REST 400), `access_denied` (403), `session_not_found`
 `session_busy` (409), `staged_changes` (409), `invalid_presentation` (422),
 `session_too_large` (413), `too_many_sessions` (503), or `storage_error` (503).
 A revision conflict includes `current_revision` only after source authorization.
-The source is unchanged and no partial copy is visible on every failure. A busy
-caller may retry; a stale caller must inspect and explicitly retry with the new
-revision. Existing session count, document and annotation limits apply; do not
-truncate to fit. Deletion, retention and normal revision ordering remain as
-before. No automatic retry after an ambiguous transport failure is safe without
-an idempotency key; callers must reconcile before repeating a save.
+The source is unchanged on failure. A destination may be briefly visible before
+access assignment; if assignment fails, it is removed before failure is reported,
+as described above. A busy caller may retry; a stale caller must inspect and
+explicitly retry with the new revision. Existing session count, document and
+annotation limits apply; do not truncate to fit. Deletion, retention and normal
+revision ordering remain as before. No automatic retry after an ambiguous
+transport failure is safe without an idempotency key; callers must reconcile
+before repeating a save.
 
 ## Existing save and read surfaces
 

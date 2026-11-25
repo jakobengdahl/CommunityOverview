@@ -68,6 +68,11 @@ logger = logging.getLogger(__name__)
 
 BACKUP_SUBDIR = "import-backups"
 
+# The ADR 0013 §8 measured document had 10,000 nodes and 17,998 edges.
+MERGE_COMMIT_MAX_ENTITIES = int(os.environ.get("MERGE_COMMIT_MAX_ENTITIES", "27998"))
+if MERGE_COMMIT_MAX_ENTITIES < 1:
+    raise ValueError("MERGE_COMMIT_MAX_ENTITIES must be a positive integer")
+
 _PREVIEW_SLOT = threading.BoundedSemaphore(1)
 _COMMIT_SLOT = threading.BoundedSemaphore(1)
 
@@ -855,6 +860,17 @@ def _commit_merge(
         return _stale(plan)
     # Without a caller digest the commit binds to the plan just computed.
     bound_digest = plan.digest
+
+    entity_count = len(document["nodes"]) + len(document.get("edges") or [])
+    if entity_count > MERGE_COMMIT_MAX_ENTITIES:
+        return {
+            "success": False,
+            "error_code": "import_merge_too_large",
+            "message": (
+                f"Merge has {entity_count} nodes and edges; the commit limit is "
+                f"{MERGE_COMMIT_MAX_ENTITIES}. Nothing was changed."
+            ),
+        }
 
     if not _plan_writes(plan.report):
         # Every entry is skipped, unchanged or excluded: no backup, lock or
