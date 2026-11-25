@@ -409,7 +409,9 @@ def test_creation_storage_failure_is_safe(
 
 @pytest.mark.parametrize("operation", ["rename", "mcp_rename", "mcp_describe"])
 @pytest.mark.parametrize("existing", [False, True])
-def test_materialization_update_storage_failure(test_app, monkeypatch, operation, existing):
+def test_materialization_update_storage_failure(
+    test_app, monkeypatch, operation, existing
+):
     from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 
     manager = test_app.app.state.session_manager
@@ -436,7 +438,9 @@ def test_materialization_update_storage_failure(test_app, monkeypatch, operation
             assert response.json()["detail"]["error"] == "storage_error"
             assert "private storage detail" not in response.text
         else:
-            tool = test_app.app.state.tools_map[operation.replace("mcp_", "") + "_visualization_session"]
+            tool = test_app.app.state.tools_map[
+                operation.replace("mcp_", "") + "_visualization_session"
+            ]
             assert tool(sid, "value") == {"success": False, "error": "storage_error"}
 
     fresh = SessionStore(FileSessionPersistenceBackend(backend.directory))
