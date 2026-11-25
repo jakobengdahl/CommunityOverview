@@ -929,6 +929,7 @@ class SessionManager:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
             raise SessionNotFound()
+        self.store.check_capacity(self._max_sessions)
         # Check before allocating an id or cloning embedded images. History is
         # deliberately excluded from both the copy and its document budget.
         # Measured as apply_ops measures the document (ASCII-escaped), so a

@@ -963,9 +963,7 @@ class SessionStore:
                 if existing is not None:
                     return existing, False
                 self._refuse_retired(session_id)
-            ids = set(self._backend.list_ids()) | self._sessions.keys()
-            if max_sessions is not None and len(ids) >= max_sessions:
-                raise SessionLimitReached()
+            self._check_capacity(max_sessions)
             session = Session(
                 id=session_id if session_id is not None else self._new_id(),
                 name=name,
@@ -981,6 +979,19 @@ class SessionStore:
             self._rings[session.id] = deque(maxlen=self._ring_size)
             self._meta_cache = None
             return session, True
+
+    def _check_capacity(self, max_sessions: Optional[int]) -> None:
+        ids = set(self._backend.list_ids()) | self._sessions.keys()
+        if max_sessions is not None and len(ids) >= max_sessions:
+            raise SessionLimitReached()
+
+    def check_capacity(self, max_sessions: int) -> None:
+        """Refuse a full store before doing preparatory work for a create.
+
+        Creation must still recheck under its own transaction.
+        """
+        with self._lock, self._backend.transaction():
+            self._check_capacity(max_sessions)
 
     def get_or_create(
         self,
