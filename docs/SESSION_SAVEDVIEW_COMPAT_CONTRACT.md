@@ -81,12 +81,14 @@ ID: `invalid_request` (REST 400), `access_denied` (403), `session_not_found`
 `session_busy` (409), `staged_changes` (409), `invalid_presentation` (422),
 `session_too_large` (413), `too_many_sessions` (503), or `storage_error` (503).
 A revision conflict includes `current_revision` only after source authorization.
-The source is unchanged and no partial copy is visible on every failure. A busy
-caller may retry; a stale caller must inspect and explicitly retry with the new
-revision. Existing session count, document and annotation limits apply; do not
-truncate to fit. Deletion, retention and normal revision ordering remain as
-before. No automatic retry after an ambiguous transport failure is safe without
-an idempotency key; callers must reconcile before repeating a save.
+The source is unchanged on failure. A destination may be briefly visible before
+access assignment; if assignment fails, it is removed before failure is reported,
+as described above. A busy caller may retry; a stale caller must inspect and
+explicitly retry with the new revision. Existing session count, document and
+annotation limits apply; do not truncate to fit. Deletion, retention and normal
+revision ordering remain as before. No automatic retry after an ambiguous
+transport failure is safe without an idempotency key; callers must reconcile
+before repeating a save.
 
 ## Existing save and read surfaces
 
