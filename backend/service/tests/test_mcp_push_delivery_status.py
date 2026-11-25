@@ -1423,22 +1423,33 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failing", ["get_or_create", "_apply_command_membership"])
+@pytest.mark.parametrize(
+    "failing",
+    [
+        ["get_or_create"],
+        ["_apply_command_membership"],
+        ["_apply_command_membership", "store.delete"],
+    ],
+)
 async def test_push_reports_storage_failure_without_publishing(
     tmp_path, monkeypatch, failing
 ):
     """Failing to materialise the session or to write its membership is
-    storage_error, and the session materialised for the push does not stay."""
+    storage_error, and the session materialised for the push does not stay
+    unless the storage refuses that cleanup too."""
     tools, registry, manager = _wire(tmp_path)
 
     def fail(*_args):
         raise OSError("private storage detail")
 
-    monkeypatch.setattr(manager, failing, fail)
+    for name in failing:
+        owner, _, attr = name.rpartition(".")
+        monkeypatch.setattr(manager.store if owner else manager, attr, fail)
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
         result = _search(tools, UNKNOWN_SESSION_ID)
         assert result["success"] is False
         assert result["error"] == "storage_error"
         assert result["visualization_delivery"]["delivered"] is False
         assert received == []
-        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+        if "store.delete" not in failing:
+            assert manager.get_session(UNKNOWN_SESSION_ID) is None

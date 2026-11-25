@@ -1097,7 +1097,12 @@ class SessionManager:
             return
         del self._tentative[session.id]
         if failed and self.store.get(session.id) is session and session.seq == 0:
-            self.store.delete(session.id)
+            try:
+                self.store.delete(session.id)
+            except OSError:
+                # The caller is already reporting the write's storage_error; a
+                # storage that refused the write may refuse this cleanup too.
+                logger.warning("could not drop failed session %s", session.id)
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
         """The write mode a response describing ``session`` reports (§5.1).
