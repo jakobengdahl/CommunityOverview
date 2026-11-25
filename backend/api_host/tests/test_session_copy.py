@@ -153,7 +153,10 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
 
 
 def test_capture_contract_describes_visibility_on_failure():
-    contract_path = Path(__file__).resolve().parents[3] / "docs/SESSION_SAVEDVIEW_COMPAT_CONTRACT.md"
+    contract_path = (
+        Path(__file__).resolve().parents[3]
+        / "docs/SESSION_SAVEDVIEW_COMPAT_CONTRACT.md"
+    )
     contract = contract_path.read_text()
     text = " ".join(contract.split())
     assert "A destination may be briefly visible before access assignment" in text
