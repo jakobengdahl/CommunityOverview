@@ -114,6 +114,13 @@ logger = logging.getLogger(__name__)
 # assumed default — model-space units at zoom 1, matching the canvas node box.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
 
+# The rendered width range of a graph node's outer box, which the canvas CSS
+# guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
+# min/max-width plus a 2px border each side, content-box). Unlike
+# _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` never
+# overlaps horizontally. Height wraps with the label, so it has no bound.
+_NODE_WIDTH_BOUNDS = {"min": 154, "max": 254}
+
 # summon_session_viewport: who summoned, when the caller names no one, and the
 # largest node set one summon may frame (the add_nodes_to_session batch size).
 _SUMMON_DEFAULT_DISPLAY_NAME = "AI assistant"
@@ -2305,7 +2312,10 @@ def register_mcp_tools(
           in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
         - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
         - Node width/height are not server-owned, so they are not returned per
-          node. Use ``assumed_node_size`` to leave collision-free spacing.
+          node. A node's rendered width always lies within
+          ``node_width_bounds``; a column pitch of ``node_width_bounds.max``
+          plus a gap never overlaps horizontally. ``assumed_node_size`` is a
+          typical box, not a bound, and height grows with the label.
         - ``revision`` is a monotonic counter. Pass it back as
           ``expected_revision`` to ``apply_visualization_layout`` for optimistic
           concurrency (the write is rejected if someone else changed the session
@@ -2340,7 +2350,9 @@ def register_mcp_tools(
 
         Returns:
             Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
-            selected_node_ids, assumed_node_size
+            selected_node_ids, assumed_node_size, node_width_bounds (the
+            rendered min/max outer width; space columns at ``max`` to rule out
+            horizontal overlap — height has no bound)
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
@@ -2406,6 +2418,7 @@ def register_mcp_tools(
             "nodes": nodes,
             "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
+            "node_width_bounds": _NODE_WIDTH_BOUNDS,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
         }

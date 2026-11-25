@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """
 Tests for the MCP visualization-layout tools (``get_visualization_layout`` and
 ``apply_visualization_layout``) registered in ``backend/service/mcp_tools.py``.
@@ -10,6 +11,8 @@ are covered in ``backend/core/tests/test_session_manager.py``.
 
 import asyncio
 import os
+import re
+from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -128,6 +131,31 @@ class TestGetVisualizationLayout:
         # The pre-existing geometry projection is unchanged alongside the new fields.
         assert by_id["beta"]["x"] is None and by_id["beta"]["hidden"] is False
         assert result["assumed_node_size"] == {"width": 220, "height": 120}
+
+    def test_node_width_bounds_match_the_canvas_node_box(self, layout_tools):
+        """The advertised width bounds are the outer box the canvas CSS renders."""
+        css_path = (
+            Path(__file__).resolve().parents[3]
+            / "packages/ui-graph-canvas/src/components/CustomNode.css"
+        )
+        rule = re.search(r"\.graph-custom-node\s*\{([^}]*)\}", css_path.read_text())
+        assert rule, "the .graph-custom-node rule must exist"
+
+        def px(prop):
+            return int(
+                re.search(rf"(?<![-\w]){prop}:\s*(\d+)px", rule.group(1)).group(1)
+            )
+
+        border = 2 * px("border")  # content-box: the border adds to the width
+        tools_map, manager = layout_tools
+        session = _session_with_nodes(manager, ["a"])
+
+        result = tools_map["get_visualization_layout"](session_id=session.id)
+
+        assert result["node_width_bounds"] == {
+            "min": px("min-width") + border,
+            "max": px("max-width") + border,
+        }
 
     def test_unresolvable_node_ref_keeps_geometry_with_null_semantics(
         self, layout_tools

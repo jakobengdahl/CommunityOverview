@@ -69,14 +69,22 @@ The server does **not** own or measure node width/height — those depend on the
 node label, the active theme and the client's rendered `CustomNode`. Therefore:
 
 - The read tool does **not** return a per-node `width`/`height` or bounding box.
-- Instead it advertises a single **`assumed_node_size`** — currently
-  `{ "width": 220, "height": 120 }` — that an agent uses as a conservative box
-  for **collision-free spacing**. Grid pitch and DAG rank/served spacing should
-  be computed from this size plus the agent's chosen padding, e.g. a horizontal
-  grid step of `assumed_node_size.width + gap`.
-- `assumed_node_size` is a server-provided constant so that if the default node
-  size changes, agents pick up the new value from the read tool rather than
-  hard-coding `220 × 120`.
+- Instead it advertises a typical box, **`assumed_node_size`** — currently
+  `{ "width": 220, "height": 120 }` — and **`node_width_bounds`** — currently
+  `{ "min": 154, "max": 254 }` — the outer width range the canvas guarantees for
+  every graph node (`.graph-custom-node`: `min-width`/`max-width` plus its 2px
+  border on each side).
+- `assumed_node_size` is a *typical* size, not a bound: a node with a long label
+  renders wider (up to `node_width_bounds.max`) and taller. For a grid or DAG
+  that must not overlap horizontally, use a column pitch of
+  `node_width_bounds.max + gap`; `assumed_node_size.width + gap` is fine when a
+  denser layout matters more than a guarantee.
+- Height has **no bound**: it grows as the label and type badge wrap, so row
+  pitch from `assumed_node_size.height` stays an estimate. Leave generous vertical
+  gaps when rows must not touch.
+- Both values are server-provided constants so that if the node styling changes,
+  agents pick up the new values from the read tool rather than hard-coding them.
+  The hover lift (`scale(1.02)`) is transient and not included.
 
 Precise per-node measured dimensions and true collision bounds are a **reserved,
 deferred** extension (§10): they would require the canvas to report measured
@@ -94,7 +102,8 @@ DAG/grid/swimlane layouts the initiative targets.
 | `node_count` | int | Number of nodes referenced by the session. |
 | `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden, type, status }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). `type`/`status` are the semantic projection below. |
 | `selected_node_ids` | string[] | The **nodes** currently selected in the session — the same value `get_visualization_session_state` reports (§4.2). Always a subset of this response's `nodes`. |
-| `assumed_node_size` | object | `{ width, height }` for collision spacing (§3). |
+| `assumed_node_size` | object | `{ width, height }` typical node box (§3); not a bound. |
+| `node_width_bounds` | object | `{ min, max }` rendered outer width of every node; pitch at `max` never overlaps horizontally (§3). |
 | `coordinate_space` | string | Human-readable restatement of §2, e.g. `"model-space, pixels at zoom 1, x/y = node top-left"`. |
 | `connected_clients` | int | How many browsers are attached. When `> 0`, prefer placing nodes relative to related nodes over guessing a viewport (§8). |
 
@@ -123,7 +132,8 @@ A layout therefore never silently drops a node it must still position.
 
 Per-node measured `width`/`height` remain **out of this projection** (§3): the
 server has no measured size to report, and inventing one would be worse than the
-honest `assumed_node_size` constant. That extension stays reserved (§10, §14).
+honest `assumed_node_size` and `node_width_bounds` constants. That extension
+stays reserved (§10, §14).
 
 ### 4.2 Why the selection is merged but the visible set is not
 
