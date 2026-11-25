@@ -1595,7 +1595,7 @@ positions and the annotations themselves are untouched.
 | `nodes[].status` | string \| null | The node's `metadata["status"]` when the deployment stores one as a non-blank string, whitespace-trimmed; `null` otherwise. |
 | `selected_node_ids` | string[] | Currently selected **nodes**, same value as `get_visualization_session_state`. Selection claims are taken on elements, so edge claims are filtered out — every id here is one of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` of a typical node box; not a bound. |
-| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; a column pitch of `max` never overlaps card nodes horizontally. Nodes drawn with a configured shape are not covered; height has no bound. |
+| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; a column pitch of `max` plus a gap never overlaps card nodes horizontally. Nodes drawn with a configured shape are not covered; height has no bound. |
 | `coordinate_space` | string | Restatement of the coordinate model. |
 | `connected_clients` | int | How many browsers are attached. |
 

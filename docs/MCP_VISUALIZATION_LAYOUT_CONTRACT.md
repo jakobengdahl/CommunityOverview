@@ -108,7 +108,7 @@ DAG/grid/swimlane layouts the initiative targets.
 | `nodes` | object[] | One entry per referenced node: `{ id, x, y, hidden, type, status }`. `x`/`y` are model-space top-left, or `null` when unset (§2). `hidden` is `true` when the node is currently hidden in the session (§8). `type`/`status` are the semantic projection below. |
 | `selected_node_ids` | string[] | The **nodes** currently selected in the session — the same value `get_visualization_session_state` reports (§4.2). Always a subset of this response's `nodes`. |
 | `assumed_node_size` | object | `{ width, height }` typical node box (§3); not a bound. |
-| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; pitch at `max` never overlaps card nodes horizontally. Shaped nodes are not covered (§3). |
+| `node_width_bounds` | object | `{ min, max }` rendered outer width of a card node; a column pitch of `max` plus a gap never overlaps card nodes horizontally. Shaped nodes are not covered (§3). |
 | `coordinate_space` | string | Human-readable restatement of §2, e.g. `"model-space, pixels at zoom 1, x/y = node top-left"`. |
 | `connected_clients` | int | How many browsers are attached. When `> 0`, prefer placing nodes relative to related nodes over guessing a viewport (§8). |
 
