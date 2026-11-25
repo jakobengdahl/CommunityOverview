@@ -103,7 +103,7 @@ from backend.runtime.authorization import (
 )
 from . import access, graph_merge_plan
 from .service import GraphService
-from .staging import refusal_result, session_storage_error
+from .staging import outside_storage, refusal_result, session_storage_error
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 logger = logging.getLogger(__name__)
@@ -3320,8 +3320,8 @@ def register_mcp_tools(
         try:
             session = session_manager.copy_session(
                 session_id,
-                authorize_staging=authorize_staging,
-                assign_access=assign_access,
+                authorize_staging=outside_storage(authorize_staging),
+                assign_access=outside_storage(assign_access),
                 staged_by=access.build_mutation_actor_id(
                     target="copy_visualization_session"
                 ),

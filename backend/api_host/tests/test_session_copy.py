@@ -9,6 +9,7 @@ import pytest
 from backend.core import session_manager as manager_module
 from backend.core.session_annotations import image_annotation_error
 from backend.core.write_modes import STAGED_UNSUPPORTED
+from backend.service.staging import HookFailed
 from backend.runtime.authorization import GraphAuthorizationDecision
 
 
@@ -268,7 +269,25 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     assert (context.actor["actor_id"], context.session_id) == ("copier", source)
     assert kwargs["copy_session_id"] == copied.get("id", copied.get("session_id"))
 
+    # A hook's own OSError is no storage failure; a failed document save is
+    # storage_error and leaves no staged record or entries behind.
     layer = manager.write_modes.layer_store
+    count = manager.store.session_count()
+    assign.side_effect = ConnectionError()
+    with pytest.raises(HookFailed):
+        copy_as(source, "copier")
+    assign.side_effect = None
+    assert manager.store.session_count() == count
+    with patch.object(manager.store._backend, "save", side_effect=OSError("x")):
+        succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    refusal = result["detail"] if transport == "rest" else result
+    assert refusal["error"] == "storage_error"
+    failed_id = assign.call_args.kwargs["copy_session_id"]
+    assert manager.write_modes.is_retired(failed_id)
+    assert layer.load_layer(failed_id) == []
+    assert manager.store.session_count() == count
+
     (staged,) = layer.load_layer(source)
     assert staged["stage_token"] not in {
         e["stage_token"] for e in layer.load_layer(copied_id)
@@ -407,15 +426,25 @@ def test_creation_storage_failure_is_safe(
     assert manager.create_session()
 
 
+@pytest.mark.parametrize("existing", [True, False])
 @pytest.mark.parametrize("operation", ["rename", "mcp_rename", "mcp_describe"])
-def test_update_storage_failure_is_storage_error(test_app, monkeypatch, operation):
-    """A failed write to an existing session is ``storage_error`` and keeps it."""
+def test_update_storage_failure_is_storage_error(
+    test_app, monkeypatch, operation, existing
+):
+    """A failed op write is ``storage_error``; it keeps an existing session and
+    removes one materialised for the call."""
     manager = test_app.app.state.session_manager
     sid = "1111-2222"
-    manager.get_or_create(sid)
+    if existing:
+        manager.get_or_create(sid)
     backend = manager.store._backend
+    real_replace = backend._replace_locked
+    writes = []
 
     def fail(*args, **kwargs):
+        writes.append(args)
+        if not existing and len(writes) == 1:
+            return real_replace(*args, **kwargs)
         raise OSError("private storage detail")
 
     with monkeypatch.context() as patch:
@@ -429,5 +458,5 @@ def test_update_storage_failure_is_storage_error(test_app, monkeypatch, operatio
                 operation.replace("mcp_", "") + "_visualization_session"
             ]
             assert tool(sid, "value") == {"success": False, "error": "storage_error"}
-    assert manager.store.get(sid) is not None
-    assert manager.store.session_count() == 1
+    assert (manager.store.get(sid) is not None) is existing
+    assert manager.store.session_count() == int(existing)

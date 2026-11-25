@@ -1244,6 +1244,23 @@ def session_storage_error() -> Dict[str, Any]:
     return {"success": False, "error": "storage_error"}
 
 
+class HookFailed(RuntimeError):
+    """A deployment hook raised OSError (a network error, say): not a session
+    storage failure, so it must not be answered as ``storage_error``."""
+
+
+def outside_storage(callback: Callable[..., Any]) -> Callable[..., Any]:
+    """``callback`` with an OSError it raises re-raised as HookFailed."""
+
+    def call(*args: Any) -> Any:
+        try:
+            return callback(*args)
+        except OSError as exc:
+            raise HookFailed() from exc
+
+    return call
+
+
 def refusal_result(exc: Exception, **defaults: Any) -> Optional[Dict[str, Any]]:
     """The result a session or staging refusal answers with, or None when
     ``exc`` is not one."""

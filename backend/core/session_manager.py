@@ -995,17 +995,20 @@ class SessionManager:
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
 
+        staged_copies = []
+
         def allocate(copy_id: str) -> None:
             if mode == WRITE_MODE_STAGED:
                 allocate_staged(copy_id)
-            if assign_access is None:
-                return
-            try:
-                assign_access(copy_id)
-            except BaseException:
-                if mode == WRITE_MODE_STAGED:
-                    self.write_modes.retire(copy_id, require_empty=False)
-                raise
+            if assign_access is not None:
+                try:
+                    assign_access(copy_id)
+                except BaseException:
+                    if mode == WRITE_MODE_STAGED:
+                        self.write_modes.retire(copy_id, require_empty=False)
+                    raise
+            if mode == WRITE_MODE_STAGED:
+                staged_copies.append(copy_id)
 
         def allocate_staged(copy_id: str) -> None:
             self.write_modes.record_staged(copy_id)
@@ -1035,15 +1038,22 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
                 raise
 
-        return self.store.create_with_capacity(
-            name,
-            max_sessions=self._max_sessions,
-            description=source.description,
-            state=state,
-            write_mode=mode,
-            write_mode_source="explicit",
-            on_allocate=allocate,
-        )[0]
+        try:
+            return self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                description=source.description,
+                state=state,
+                write_mode=mode,
+                write_mode_source="explicit",
+                on_allocate=allocate,
+            )[0]
+        except BaseException:
+            # The document save failed after allocation: the staged record and
+            # copied entries must not outlive the copy that was never published.
+            for copy_id in staged_copies:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
@@ -1351,16 +1361,29 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        self.get_or_create(session_id)
-        await self.apply_ops(
-            session_id,
-            client_id or "rest",
-            None,
-            [
-                {"op": "session_renamed", "name": name},
-            ],
-        )
+        session, created = self.get_or_create(session_id)
+        try:
+            await self.apply_ops(
+                session_id,
+                client_id or "rest",
+                None,
+                [
+                    {"op": "session_renamed", "name": name},
+                ],
+            )
+        except OSError:
+            if created:
+                async with self._lock(session_id):
+                    self._discard_failed_materialization(session)
+            raise
         return self.store.get(session_id)
+
+    def _discard_failed_materialization(self, session: Session) -> None:
+        # A session materialised for an op whose write then failed is not
+        # reported as created, so it must not stay visible or counted. One that
+        # was replaced or written to meanwhile is no longer this call's to drop.
+        if self.store.get(session.id) is session and session.seq == 0:
+            self.store.delete(session.id)
 
     async def delete_session(
         self,
@@ -1442,7 +1465,7 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
+        _, created = self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
         session = self.store.get(session_id)
@@ -1450,7 +1473,12 @@ class SessionManager:
             raise SessionNotFound()
 
         op = {"op": "session_renamed", "name": name, "client_id": actor}
-        self._apply_op_sync(session, session_id, actor, op)
+        try:
+            self._apply_op_sync(session, session_id, actor, op)
+        except OSError:
+            if created:
+                self._discard_failed_materialization(session)
+            raise
         return session
 
     def describe_session_sync(
@@ -1480,7 +1508,7 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
+        _, created = self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
         session = self.store.get(session_id)
@@ -1488,7 +1516,12 @@ class SessionManager:
             raise SessionNotFound()
 
         op = {"op": "session_described", "description": description, "client_id": actor}
-        self._apply_op_sync(session, session_id, actor, op)
+        try:
+            self._apply_op_sync(session, session_id, actor, op)
+        except OSError:
+            if created:
+                self._discard_failed_materialization(session)
+            raise
         return session
 
     def delete_session_sync(

@@ -81,7 +81,7 @@ from . import attachments as attachment_ops
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
-from .staging import refusal_result, session_storage_error
+from .staging import outside_storage, refusal_result, session_storage_error
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -1501,15 +1501,19 @@ def _register_session_endpoints(
                 request.name if request else None,
                 # Copied staged changes are staged by the copier: never more
                 # than the copier may stage.
-                authorize_staging=lambda: _authorize_session_change(
-                    http_request,
-                    "copy_visualization_session",
-                    session_id,
-                    GRAPH_OPERATION_STAGE,
+                authorize_staging=outside_storage(
+                    lambda: _authorize_session_change(
+                        http_request,
+                        "copy_visualization_session",
+                        session_id,
+                        GRAPH_OPERATION_STAGE,
+                    )
                 ),
                 staged_by=staged_by,
-                assign_access=lambda copy_id: _assign_copy_access(
-                    http_request, session_id, copy_id
+                assign_access=outside_storage(
+                    lambda copy_id: _assign_copy_access(
+                        http_request, session_id, copy_id
+                    )
                 ),
             )
         except SessionNotFound:
