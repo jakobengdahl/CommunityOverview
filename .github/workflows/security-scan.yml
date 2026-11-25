@@ -12,9 +12,8 @@
 #
 # Every scanner is blocking: no step here carries `continue-on-error`. A secret
 # in the range gitleaks scans (see the reusable workflow for that range), a
-# known-vulnerable dependency, or a medium+ bandit finding fails the workflow.
-# The reporting-only stage is over - a green run now means nothing was found,
-# which is what makes the run's conclusion worth watching.
+# unbaselined or expired dependency advisory, or a medium+ bandit finding fails
+# the workflow. The production npm audit does not use a baseline.
 #
 # Every scanner step that tees its report into the job summary exits with the
 # SCANNER's status (`exit "${PIPESTATUS[0]}"`), not tee's. Without that the
@@ -85,7 +84,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # npm audit – JS dependency advisories. The root lockfile covers every
   # workspace, so a single root audit reports across web, widget, canvas and xr.
-  # --omit=dev limits the report to dependencies that ship at runtime.
+  # The production audit is separate from the full audit and its baseline.
   # ---------------------------------------------------------------------------
   npm-audit:
     name: npm audit (JS deps)
@@ -94,17 +93,41 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: '20'
 
+      - name: Warn about lockfile-only changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! git diff --quiet "$BASE_SHA" HEAD -- package-lock.json && git diff --quiet "$BASE_SHA" HEAD -- package.json; then
+            echo "::warning file=package-lock.json::The lockfile changed without a package.json change."
+          fi
+
       - name: Audit production dependencies
         run: |
           echo "## npm audit (--omit=dev, all workspaces)" >> "$GITHUB_STEP_SUMMARY"
           npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
+
+      - name: Audit all dependencies against baseline
+        if: success() || failure()
+        run: |
+          set +e
+          npm audit --json > npm-audit-report.json
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -gt 1 ]; then
+            cat npm-audit-report.json
+            exit "$audit_status"
+          fi
+          python3 scripts/check_npm_audit.py npm-audit-report.json scripts/npm-audit-baseline.json
 
   # Scanner check names now include this caller prefix: "Secret and SAST / ".
   # The required checks documented in CLAUDE.md belong to ci.yml and are unchanged.
