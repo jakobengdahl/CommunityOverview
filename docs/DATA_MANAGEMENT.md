@@ -372,11 +372,19 @@ What happens, in order:
    the parameters or a live entity the plan relied on changed, or the graph
    was replaced — is refused with `import_plan_stale`, carrying the current
    plan and its digest to review and commit instead. Nothing has been
-   written either way. A plan that writes nothing — every entry skipped,
-   unchanged or excluded — returns here with `success: true`, zero counts
-   and no `import_id`: no backup, no lock, no record.
-3. **Back up.** The whole current graph is written to `import-backups/`
-   exactly as `POST /api/import` does, and the merge is refused
+   written either way.
+3. **Check commit size and back up.** A commit is refused with 422
+   `import_merge_too_large` before backup and the write lock when its document
+   contains more than `MERGE_COMMIT_MAX_ENTITIES` nodes and edges combined.
+   Set this positive integer environment variable before starting the service;
+   the default is 27,998 entries, the 10,000 nodes plus 17,998 edges in the
+   ADR 0013 section 8 benchmark, whose median lock time was 12.8 seconds.
+   This measurement is a sizing reference, not a time guarantee: hardware,
+   graph contents and event subscribers affect the actual time. Preview has
+   its own limits and can still inspect a larger document. A plan that writes
+   nothing returns `success: true`, zero counts and no `import_id`, backup,
+   lock or record. Otherwise, the whole current graph is written to
+   `import-backups/` exactly as `POST /api/import` does, and the merge is refused
    (`backup_failed`) if it cannot be. Every entity the merge overwrites is
    in it at the version the merge replaces. Restoring it with
    `POST /api/import` is a *replace*: it also undoes every write made after
