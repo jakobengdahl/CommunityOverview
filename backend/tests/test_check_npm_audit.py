@@ -10,10 +10,26 @@ from scripts.check_npm_audit import check_audit
     ("baseline", "report_package", "fails"),
     [
         ([], "example", True),
-        ([{"package": "example", "reason": "Pending fix", "expires": "2026-12-01"}], "example", True),
-        ([{"advisory": 123, "reason": "Pending fix", "expires": "2026-12-01"}], "example", True),
-        ([{"advisory": 123, "package": "example", "expires": "2026-12-01"}], "example", True),
-        ([{"advisory": 123, "package": "example", "reason": "Pending fix"}], "example", True),
+        (
+            [{"package": "example", "reason": "Pending fix", "expires": "2026-12-01"}],
+            "example",
+            True,
+        ),
+        (
+            [{"advisory": 123, "reason": "Pending fix", "expires": "2026-12-01"}],
+            "example",
+            True,
+        ),
+        (
+            [{"advisory": 123, "package": "example", "expires": "2026-12-01"}],
+            "example",
+            True,
+        ),
+        (
+            [{"advisory": 123, "package": "example", "reason": "Pending fix"}],
+            "example",
+            True,
+        ),
         (
             [
                 {
@@ -79,7 +95,9 @@ def test_advisories_require_valid_unexpired_matching_entries(
     problems = check_audit(report, baseline, date(2026, 11, 25))
     assert bool(problems) is fails
     if baseline and set(baseline[0]) != {"advisory", "package", "reason", "expires"}:
-        assert any(problem.startswith("Invalid baseline entry:") for problem in problems)
+        assert any(
+            problem.startswith("Invalid baseline entry:") for problem in problems
+        )
 
 
 def test_invalid_report_and_unused_expired_entry_fail():
