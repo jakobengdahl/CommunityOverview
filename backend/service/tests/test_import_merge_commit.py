@@ -1,4 +1,4 @@
-# covers: backend/service/import_service.py, backend/service/graph_merge_plan.py, backend/core/storage.py, backend/service/rest_api.py
+# covers: backend/service/import_service.py, backend/service/rest_api.py
 """
 REST and service tests for the merge import commit (``POST /import/merge``)
 of docs/adr/0013-graph-import-merge-mode.md, slice 2.
@@ -1036,8 +1036,10 @@ class TestRefusals:
         digest = _preview(client, body)["plan_digest"]
         before = _state(storage)
         if status == 422:
+
             def no_lock(*args, **kwargs):
                 pytest.fail("oversized commit reached the write lock")
+
             monkeypatch.setattr(storage, "apply_import_merge", no_lock)
         response = client.post(URL, json={**body, "plan_digest": digest})
         assert response.status_code == status
