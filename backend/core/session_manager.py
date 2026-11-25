@@ -1351,26 +1351,16 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        session, created = self.get_or_create(session_id)
-        try:
-            await self.apply_ops(
-                session_id,
-                client_id or "rest",
-                None,
-                [{"op": "session_renamed", "name": name}],
-            )
-        except OSError:
-            if created:
-                async with self._lock(session_id):
-                    self._discard_failed_materialization(session)
-            raise
+        self.get_or_create(session_id)
+        await self.apply_ops(
+            session_id,
+            client_id or "rest",
+            None,
+            [
+                {"op": "session_renamed", "name": name},
+            ],
+        )
         return self.store.get(session_id)
-
-    def _discard_failed_materialization(self, session: Session) -> None:
-        # Do not delete a replacement or a session another writer has changed
-        # while the async operation was waiting for its lock.
-        if self.store.get(session.id) is session and session.seq == 0:
-            self.store.delete(session.id)
 
     async def delete_session(
         self,
@@ -1452,7 +1442,7 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        session, created = self.get_or_create(session_id)
+        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
         session = self.store.get(session_id)
@@ -1460,12 +1450,7 @@ class SessionManager:
             raise SessionNotFound()
 
         op = {"op": "session_renamed", "name": name, "client_id": actor}
-        try:
-            self._apply_op_sync(session, session_id, actor, op)
-        except OSError:
-            if created:
-                self._discard_failed_materialization(session)
-            raise
+        self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def describe_session_sync(
@@ -1495,7 +1480,7 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        session, created = self.get_or_create(session_id)
+        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
         session = self.store.get(session_id)
@@ -1503,12 +1488,7 @@ class SessionManager:
             raise SessionNotFound()
 
         op = {"op": "session_described", "description": description, "client_id": actor}
-        try:
-            self._apply_op_sync(session, session_id, actor, op)
-        except OSError:
-            if created:
-                self._discard_failed_materialization(session)
-            raise
+        self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def delete_session_sync(

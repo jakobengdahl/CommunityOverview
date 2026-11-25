@@ -445,13 +445,17 @@ def _unlock_file(f) -> None:
 def _fsync_directory(directory: str | Path) -> None:
     """Make the renames in ``directory`` durable.
 
-    Windows cannot open a directory for fsync.
+    Windows cannot open a directory, and some filesystems refuse to fsync one;
+    there the rename stands as before rather than failing a write it completed.
     """
     if sys.platform == "win32":  # pragma: no cover - platform specific
         return
     fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
     finally:
         os.close(fd)
 
