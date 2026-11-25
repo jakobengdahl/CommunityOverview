@@ -1082,8 +1082,12 @@ class SessionManager:
             if applied:
                 self.bus.publish(
                     session.id,
-                    {"type": "op", "client_id": initial_op["client_id"],
-                     "op": applied[0], "seq": applied[0]["seq"]},
+                    {
+                        "type": "op",
+                        "client_id": initial_op["client_id"],
+                        "op": applied[0],
+                        "seq": applied[0]["seq"],
+                    },
                 )
 
         try:
@@ -1393,7 +1397,10 @@ class SessionManager:
         op = {**rename_op, "client_id": actor}
         if self.store.get(session_id) is None:
             # Charge and validate before publishing, as apply_ops does.
-            if 1 > self._max_ops or len(json.dumps(rename_op)) > self._max_op_batch_bytes:
+            if (
+                1 > self._max_ops
+                or len(json.dumps(rename_op)) > self._max_op_batch_bytes
+            ):
                 raise OpBatchTooLarge()
             if not isinstance(actor, str) or not actor:
                 raise OpError("client_id is required")

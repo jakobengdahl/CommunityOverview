@@ -451,12 +451,15 @@ async def test_legacy_only_session_is_delivered_and_its_membership_applied_by_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refusal,code", [
-    (SessionLimitReached, "too_many_sessions"),
-    (OpBatchTooLarge, "session_too_large"),
-    (OSError, "storage_error"),
-    (SessionNotFound, None),
-])
+@pytest.mark.parametrize(
+    "refusal,code",
+    [
+        (SessionLimitReached, "too_many_sessions"),
+        (OpBatchTooLarge, "session_too_large"),
+        (OSError, "storage_error"),
+        (SessionNotFound, None),
+    ],
+)
 async def test_a_push_the_server_cannot_store_reaches_no_browser(
     tmp_path, monkeypatch, refusal, code
 ):

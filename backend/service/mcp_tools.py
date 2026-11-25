@@ -6616,9 +6616,11 @@ def _push_to_session(
                 )
             except (OSError, SessionLimitReached, OpBatchTooLarge) as exc:
                 materialization_error = (
-                    "storage_error" if isinstance(exc, OSError) else
-                    "too_many_sessions" if isinstance(exc, SessionLimitReached) else
-                    "session_too_large"
+                    "storage_error"
+                    if isinstance(exc, OSError)
+                    else "too_many_sessions"
+                    if isinstance(exc, SessionLimitReached)
+                    else "session_too_large"
                 )
                 membership_unapplied = True
             except Exception:

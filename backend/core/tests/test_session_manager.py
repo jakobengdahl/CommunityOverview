@@ -2962,7 +2962,10 @@ class TestRenameSession:
         def write():
             session = other.get(sid)
             with other.writing(sid):
-                op = other.apply_state_op(session, {"op": "session_renamed", "name": "second", "client_id": "other"})
+                op = other.apply_state_op(
+                    session,
+                    {"op": "session_renamed", "name": "second", "client_id": "other"},
+                )
                 other.persist(session)
                 events.append(op["seq"])
             writer_done.set()
