@@ -1,3 +1,4 @@
+# covers: .github/workflows/ci.yml, .github/workflows/gateway-deps-audit.yml, services/mcp_oauth_gateway/Dockerfile
 """
 Offline guards for the gateway's hash-locked dependency files.
 
@@ -56,7 +57,11 @@ _ENVIRONMENTS = [
         "python_full_version": version,
         "implementation_version": version,
     }
-    for (platform, system, os_name), machine, implementation, version in itertools.product(
+    for (
+        platform,
+        system,
+        os_name,
+    ), machine, implementation, version in itertools.product(
         [
             ("linux", "Linux", "posix"),
             ("darwin", "Darwin", "posix"),
@@ -73,19 +78,27 @@ _ENVIRONMENTS = [
 
 # The final stage's base image, which the image runs on. ci.yml's image-python
 # step applies the same rule in shell; TestImagePythonStep holds them together.
-_PYTHON_BASE = re.compile(r"\s*(?i:FROM)\s+(?:--platform=\S+\s+)?(?:\S*/)?python:(\d+)\.(\d+)", re.ASCII)
+_PYTHON_BASE = re.compile(
+    r"\s*(?i:FROM)\s+(?:--platform=\S+\s+)?(?:\S*/)?python:(\d+)\.(\d+)", re.ASCII
+)
 
 
 def _image_python(dockerfile):
     """(major, minor) of the Python on the Dockerfile's last FROM line."""
     # awk's records and default fields: lines on \n only, fields on space and tab only.
     lines = dockerfile.split("\n")
-    froms = [line for line in lines if re.split(r"[ \t]+", line.strip(" \t"))[0].upper() == "FROM"]
+    froms = [
+        line
+        for line in lines
+        if re.split(r"[ \t]+", line.strip(" \t"))[0].upper() == "FROM"
+    ]
     if not froms:
         raise AssertionError("Dockerfile: no FROM line to read the image's Python from")
     match = _PYTHON_BASE.match(froms[-1])
     if not match:
-        raise AssertionError(f"Dockerfile: the last FROM line is not a python:X.Y image: {froms[-1]!r}")
+        raise AssertionError(
+            f"Dockerfile: the last FROM line is not a python:X.Y image: {froms[-1]!r}"
+        )
     return match.groups()
 
 
@@ -128,7 +141,9 @@ def _parse_lock(name):
         h = _HASH_LINE.match(line)
         if continued:
             if not h:
-                raise AssertionError(f"{name}:{number}: expected a --hash continuation line, got {line!r}")
+                raise AssertionError(
+                    f"{name}:{number}: expected a --hash continuation line, got {line!r}"
+                )
             current[2].append(h.group(1))
             continued = bool(h.group(2))
             continue
@@ -142,7 +157,9 @@ def _parse_lock(name):
         if m:
             package = canonicalize_name(m.group(1))
             if not m.group(4):
-                raise AssertionError(f"{name}:{number}: {package} does not continue onto its --hash lines")
+                raise AssertionError(
+                    f"{name}:{number}: {package} does not continue onto its --hash lines"
+                )
             current = (m.group(2), m.group(3), [])
             others = [marker for _, marker, _ in entries.get(package, [])]
             if (
@@ -150,16 +167,21 @@ def _parse_lock(name):
                 or (others and m.group(3) is None)
                 or m.group(3) in others
                 or any(
-                    _applies(m.group(3), env) and any(_applies(other, env) for other in others)
+                    _applies(m.group(3), env)
+                    and any(_applies(other, env) for other in others)
                     for env in _ENVIRONMENTS
                 )
             ):
-                raise AssertionError(f"{name}:{number}: {package} is locked twice for the same environment")
+                raise AssertionError(
+                    f"{name}:{number}: {package} is locked twice for the same environment"
+                )
             entries.setdefault(package, []).append(current)
             continued = True
             continue
         if h:
-            raise AssertionError(f"{name}:{number}: --hash line outside an entry's continuation")
+            raise AssertionError(
+                f"{name}:{number}: --hash line outside an entry's continuation"
+            )
         raise AssertionError(f"{name}:{number}: unrecognised lock line {line!r}")
     if continued:
         raise AssertionError(f"{name}: ends inside a continuation")
@@ -207,11 +229,25 @@ class _CommandChecks:
     def assert_commands(self, lock, source):
         _, header = _parse_lock(lock)
         self.assertEqual(header, _recorded_header(lock, source))
-        self.assertEqual((HERE / lock).read_text().count("uv pip compile"), 1, f"{lock}: more than one command")
+        self.assertEqual(
+            (HERE / lock).read_text().count("uv pip compile"),
+            1,
+            f"{lock}: more than one command",
+        )
         text = (HERE / source).read_text()
-        self.assertEqual(text.count(_documented_block(lock, source)), 1, f"{source}: documented command drifted")
-        self.assertEqual(text.count("uv pip compile"), 1, f"{source}: more than one compile command")
-        self.assertEqual(len(re.findall(r"^\s*#\s*cd\b", text, re.MULTILINE)), 1, f"{source}: more than one cd line")
+        self.assertEqual(
+            text.count(_documented_block(lock, source)),
+            1,
+            f"{source}: documented command drifted",
+        )
+        self.assertEqual(
+            text.count("uv pip compile"), 1, f"{source}: more than one compile command"
+        )
+        self.assertEqual(
+            len(re.findall(r"^\s*#\s*cd\b", text, re.MULTILINE)),
+            1,
+            f"{source}: more than one cd line",
+        )
 
 
 class TestRuntimeLock(_CommandChecks, unittest.TestCase):
@@ -221,15 +257,21 @@ class TestRuntimeLock(_CommandChecks, unittest.TestCase):
 
     def test_direct_dependencies_are_exact_pins_matching_the_lock(self):
         self.assertEqual(self.includes, [])
-        self.assertIn("python-multipart", {canonicalize_name(r.name) for r in self.reqs})
+        self.assertIn(
+            "python-multipart", {canonicalize_name(r.name) for r in self.reqs}
+        )
         for req in self.reqs:
             self.assertIsNone(req.marker, f"{req.name} must apply everywhere")
             specs = list(req.specifier)
             self.assertEqual(
-                [s.operator for s in specs], ["=="], f"{req.name} must be exact-pinned in requirements.in"
+                [s.operator for s in specs],
+                ["=="],
+                f"{req.name} must be exact-pinned in requirements.in",
             )
             name = canonicalize_name(req.name)
-            self.assertIn(name, self.lock, f"{req.name} is missing from requirements.txt")
+            self.assertIn(
+                name, self.lock, f"{req.name} is missing from requirements.txt"
+            )
             self.assertEqual(
                 {Version(v) for v, _, _ in self.lock[name]},
                 {Version(specs[0].version)},
@@ -253,7 +295,11 @@ class TestDevLock(_CommandChecks, unittest.TestCase):
         # Versions only: a dev dependency may legitimately widen a runtime
         # package's marker without changing what the image installs.
         for name, entries in self.runtime.items():
-            self.assertIn(name, self.dev, f"{name} is in requirements.txt but not requirements-dev.txt")
+            self.assertIn(
+                name,
+                self.dev,
+                f"{name} is in requirements.txt but not requirements-dev.txt",
+            )
             self.assertEqual(
                 {Version(v) for v, _, _ in self.dev[name]},
                 {Version(v) for v, _, _ in entries},
@@ -273,14 +319,18 @@ class TestLockIntegrity(unittest.TestCase):
                 for _, _, hashes in entries:
                     self.assertTrue(hashes, f"{lock_name}: {name} has no --hash")
                     for h in hashes:
-                        self.assertRegex(h, _VALID_HASH, f"{lock_name}: {name} has a malformed hash")
+                        self.assertRegex(
+                            h, _VALID_HASH, f"{lock_name}: {name} has a malformed hash"
+                        )
 
     def test_security_floors_hold_in_both_locks(self):
         image = _image_environment()
         for lock_name in ("requirements.txt", "requirements-dev.txt"):
             lock, _ = _parse_lock(lock_name)
             for name, floor in SECURITY_FLOORS.items():
-                self.assertIn(name, lock, f"{lock_name}: floor package {name} is not locked")
+                self.assertIn(
+                    name, lock, f"{lock_name}: floor package {name} is not locked"
+                )
                 # A marker could keep the fixed version off the image's platform.
                 self.assertEqual(
                     sum(_applies(marker, image) for _, marker, _ in lock[name]),
@@ -304,14 +354,20 @@ def _runner_str(value):
 
 def _step_env(workflow, job, step):
     """The env a step runs with: workflow, then job, then step env."""
-    merged = {**(workflow.get("env") or {}), **(job.get("env") or {}), **(step.get("env") or {})}
+    merged = {
+        **(workflow.get("env") or {}),
+        **(job.get("env") or {}),
+        **(step.get("env") or {}),
+    }
     return {k: _runner_str(v) for k, v in merged.items()}
 
 
 def _assert_expanded(step_env):
     """The runner expands ``${{ }}`` before the step runs; a local run would pass it through literally."""
     for key, value in step_env.items():
-        assert "${{" not in value, f"env {key} holds an unexpanded expression: {value!r}"
+        assert "${{" not in value, (
+            f"env {key} holds an unexpanded expression: {value!r}"
+        )
 
 
 class TestStepEnvHelpers(unittest.TestCase):
@@ -323,11 +379,19 @@ class TestStepEnvHelpers(unittest.TestCase):
 
     def test_step_env_wins_over_job_env_which_wins_over_workflow_env(self):
         self.assertEqual(
-            _step_env({"env": {"A": True, "B": None, "C": 1}}, {"env": {"C": 2}}, {"env": {"C": 3}}),
+            _step_env(
+                {"env": {"A": True, "B": None, "C": 1}},
+                {"env": {"C": 2}},
+                {"env": {"C": 3}},
+            ),
             {"A": "true", "B": "", "C": "3"},
         )
-        self.assertEqual(_step_env({"env": {"C": 1}}, {"env": {"C": 2}}, {}), {"C": "2"})
-        self.assertEqual(_step_env({}, {"env": {"C": 2}}, {"env": {"C": None}}), {"C": ""})
+        self.assertEqual(
+            _step_env({"env": {"C": 1}}, {"env": {"C": 2}}, {}), {"C": "2"}
+        )
+        self.assertEqual(
+            _step_env({}, {"env": {"C": 2}}, {"env": {"C": None}}), {"C": ""}
+        )
 
     def test_an_unexpanded_expression_is_rejected(self):
         _assert_expanded({"A": "x", "B": ""})
@@ -344,7 +408,10 @@ class TestImagePythonStep(unittest.TestCase):
         ("from python:3.13\n", "3.13"),
         ("  FROM --platform=linux/amd64 python:3.11-slim\n", "3.11"),
         ("FROM docker.io/library/python:3.12-slim\n", "3.12"),
-        ("FROM python:3.11 AS build\nRUN true\n# FROM python:3.10\nFROM python:3.12-slim\n", "3.12"),
+        (
+            "FROM python:3.11 AS build\nRUN true\n# FROM python:3.10\nFROM python:3.12-slim\n",
+            "3.12",
+        ),
         ("FROM python:3.12\nRUN echo from python:3.10\n", "3.12"),
         ("From python:3.12\n", "3.12"),
         ("FROM python:3.12.10-slim\n", "3.12.10"),
@@ -367,21 +434,41 @@ class TestImagePythonStep(unittest.TestCase):
         "FROM \u2003python:3.12\n",
     ]
 
-    def _step(self):
+    def _step(self, workflow=None):
         """The image-python step and the env it runs with: workflow, then job, then step env."""
-        workflow = yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text())
+        if workflow is None:
+            workflow = yaml.safe_load(
+                (HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+            )
         job = workflow["jobs"]["gateway-tests-run"]
         (step,) = [s for s in job["steps"] if s.get("id") == "image-python"]
         self.assertEqual(step["working-directory"], "services/mcp_oauth_gateway")
-        return step, _step_env(workflow, job, step)
+        step_env = _step_env(workflow, job, step)
+        references = set(
+            re.findall(
+                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\b|([A-Za-z_][A-Za-z0-9_]*))",
+                step["run"],
+            )
+        )
+        referenced_keys = {braced or plain for braced, plain in references}
+        _assert_expanded(
+            {key: value for key, value in step_env.items() if key in referenced_keys}
+        )
+        return step, step_env
 
     def _run_step(self, dockerfile):
         step, step_env = self._step()
         # Start from a runner whose every locale variable says C.UTF-8, whatever
         # the caller's locale, so only a pin that overrides all of them (LC_ALL)
         # keeps [[:space:]] to ASCII.
-        env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")}
-        env.update({"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C.UTF-8", **step_env})
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")
+        }
+        env.update(
+            {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C.UTF-8", **step_env}
+        )
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "Dockerfile").write_text(dockerfile)
             output = Path(tmp, "github_output")
@@ -399,8 +486,13 @@ class TestImagePythonStep(unittest.TestCase):
     def test_step_and_parser_agree_on_the_final_stage(self):
         for dockerfile, version in self.CASES:
             with self.subTest(dockerfile=dockerfile):
-                self.assertEqual(self._run_step(dockerfile), (0, f"version={version}\n"))
-                self.assertEqual(".".join(_image_python(dockerfile)), ".".join(version.split(".")[:2]))
+                self.assertEqual(
+                    self._run_step(dockerfile), (0, f"version={version}\n")
+                )
+                self.assertEqual(
+                    ".".join(_image_python(dockerfile)),
+                    ".".join(version.split(".")[:2]),
+                )
 
     def test_step_and_parser_reject_a_final_stage_without_python(self):
         for dockerfile in self.REJECTED:
@@ -416,20 +508,43 @@ class TestImagePythonStep(unittest.TestCase):
         _, step_env = self._step()
         self.assertIn(step_env.get("LC_ALL"), ("C", "POSIX"))
 
+    def test_only_referenced_environment_values_must_be_expanded(self):
+        workflow = yaml.safe_load(
+            (HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+        )
+        step, _ = self._step(workflow)
+        workflow["env"]["PROBE"] = "${{ github.repository }}"
+        self._step(workflow)
+        for reference in ("$PROBE", "${PROBE:-fallback}"):
+            with self.subTest(reference=reference):
+                original = step["run"]
+                step["run"] += f'\necho "{reference}"\n'
+                with self.assertRaises(AssertionError):
+                    self._step(workflow)
+                step["run"] = original
+
     def test_step_reads_the_gateway_dockerfile(self):
         dockerfile = (HERE / "Dockerfile").read_text()
         code, output = self._run_step(dockerfile)
         self.assertEqual(code, 0)
         self.assertRegex(output, r"^version=(\d+\.\d+)(\.\d+)?\n$")
-        self.assertEqual(output.strip().split("=")[1].split(".")[:2], list(_image_python(dockerfile)))
+        self.assertEqual(
+            output.strip().split("=")[1].split(".")[:2], list(_image_python(dockerfile))
+        )
 
 
 def _audit_workflow():
-    return yaml.safe_load((HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml").read_text())
+    return yaml.safe_load(
+        (
+            HERE.parents[1] / ".github" / "workflows" / "gateway-deps-audit.yml"
+        ).read_text()
+    )
 
 
 def _audit_step(job, step_id):
-    (step,) = [s for s in _audit_workflow()["jobs"][job]["steps"] if s.get("id") == step_id]
+    (step,) = [
+        s for s in _audit_workflow()["jobs"][job]["steps"] if s.get("id") == step_id
+    ]
     return step
 
 
@@ -454,11 +569,21 @@ def _run_audit_step(job, step, files, extra_env=None):
         Path(work, name).write_text(text)
     output = Path(tmp, "github_output")
     output.write_text("")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("LC_") and k not in ("LANG", "LANGUAGE")
+    }
     env.update({"LANG": "C.UTF-8", **step_env})
     env.update({"GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(Path(tmp, "runner"))})
     env.update(extra_env or {})
-    result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=work, env=env, capture_output=True, text=True)
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
     return result.returncode, output.read_text(), Path(tmp)
 
 
@@ -479,12 +604,17 @@ class TestAuditMarkerStripStep(unittest.TestCase):
 
     def test_markers_are_dropped_and_everything_else_kept(self):
         files = {lock: (HERE / lock).read_text() for lock in _LOCKS}
-        self.assertTrue(any(" ; " in text for text in files.values()), "fixture needs a marker to drop")
+        self.assertTrue(
+            any(" ; " in text for text in files.values()),
+            "fixture needs a marker to drop",
+        )
         code, output, tmp = self._run(files)
         self.assertEqual(code, 0)
         self.assertEqual(output, f"dir={tmp / 'runner' / 'gateway-audit'}\n")
         for lock, text in files.items():
-            stripped = (tmp / "runner" / "gateway-audit" / lock).read_text().splitlines()
+            stripped = (
+                (tmp / "runner" / "gateway-audit" / lock).read_text().splitlines()
+            )
             original = text.splitlines()
             self.assertEqual(len(stripped), len(original))
             for before, after in zip(original, stripped):
@@ -495,14 +625,22 @@ class TestAuditMarkerStripStep(unittest.TestCase):
                     self.assertEqual(after, before)
 
     def test_an_entry_the_rewrite_cannot_read_fails_the_step(self):
-        good = "pyjwt==2.15.0 ; sys_platform == 'win32' \\\n    --hash=sha256:" + "0" * 64 + "\n"
+        good = (
+            "pyjwt==2.15.0 ; sys_platform == 'win32' \\\n    --hash=sha256:"
+            + "0" * 64
+            + "\n"
+        )
         for bad in [
-            "pyjwt==2.15.0 ; sys_platform == 'win32'\n    --hash=sha256:" + "0" * 64 + "\n",
+            "pyjwt==2.15.0 ; sys_platform == 'win32'\n    --hash=sha256:"
+            + "0" * 64
+            + "\n",
             "pyjwt>=2.15.0 \\\n    --hash=sha256:" + "0" * 64 + "\n",
             "# only comments\n",
         ]:
             with self.subTest(bad=bad):
-                code, output, _ = self._run({"requirements.txt": good, "requirements-dev.txt": bad})
+                code, output, _ = self._run(
+                    {"requirements.txt": good, "requirements-dev.txt": bad}
+                )
                 self.assertNotEqual(code, 0)
                 self.assertEqual(output, "")
 
@@ -529,7 +667,11 @@ class TestAuditSteps(unittest.TestCase):
         for step in [self.strip, *self.audits]:
             self.assertNotIn("shell", step)
 
-        code, output, tmp = _run_audit_step("pip-audit", self.strip, {lock: (HERE / lock).read_text() for lock in _LOCKS})
+        code, output, tmp = _run_audit_step(
+            "pip-audit",
+            self.strip,
+            {lock: (HERE / lock).read_text() for lock in _LOCKS},
+        )
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         self.assertEqual(code, 0)
         self.assertTrue(output.startswith("dir="))
@@ -555,7 +697,12 @@ class TestAuditSteps(unittest.TestCase):
         # that redirected either would leave nothing real to assert on.
         self.assertNotIn("PATH", step_env)
         self.assertNotIn("GITHUB_STEP_SUMMARY", step_env)
-        env = {**os.environ, **step_env, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(summary)}
+        env = {
+            **os.environ,
+            **step_env,
+            "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+            "GITHUB_STEP_SUMMARY": str(summary),
+        }
         # A path that left the temp dir would be created on the host and never
         # cleaned up; an unexpanded expression would pass through literally.
         workdir = step.get("working-directory", "")
@@ -565,11 +712,21 @@ class TestAuditSteps(unittest.TestCase):
         _assert_expanded(step_env)
         cwd = tmp / "work" / workdir
         cwd.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
-        argv = (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
+        result = subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        argv = (
+            (tmp / "argv").read_text().splitlines() if (tmp / "argv").exists() else None
+        )
         return result.returncode, argv, summary.read_text()
 
-    def test_each_lock_is_audited_strictly_from_the_marker_free_copy_with_hashes_required(self):
+    def test_each_lock_is_audited_strictly_from_the_marker_free_copy_with_hashes_required(
+        self,
+    ):
         for step, lock in zip(self.audits, _LOCKS):
             with self.subTest(lock=lock):
                 code, argv, summary = self._run(step, 0)
@@ -600,7 +757,9 @@ class TestAuditSteps(unittest.TestCase):
         self.assertNotIn("if", runtime)
         # The dev lock is audited even when the runtime audit failed, but not
         # when there is no marker-free copy to audit.
-        self.assertEqual(dev["if"], "${{ !cancelled() && steps.strip-markers.outcome == 'success' }}")
+        self.assertEqual(
+            dev["if"], "${{ !cancelled() && steps.strip-markers.outcome == 'success' }}"
+        )
 
 
 class TestRecompileStep(unittest.TestCase):
@@ -616,15 +775,31 @@ class TestRecompileStep(unittest.TestCase):
         log = bindir / "calls"
         # uv logs its arguments; the other stubs log their name too, so a header
         # naming another binary is caught when it runs, not only when it is missing.
-        for name, prefix in [("uv", ""), ("uvx", "uvx "), ("sh", "sh "), ("xuv", "xuv ")]:
+        for name, prefix in [
+            ("uv", ""),
+            ("uvx", "uvx "),
+            ("sh", "sh "),
+            ("xuv", "xuv "),
+        ]:
             stub = bindir / name
-            stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "{prefix}$*" >> "{log}"\nexit {uv_exit}\n')
+            stub.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "{prefix}$*" >> "{log}"\nexit {uv_exit}\n'
+            )
             stub.chmod(0o755)
-        code, _, tmp = _run_audit_step("lock-freshness", self.step, files, {"PATH": f"{bindir}:{os.environ['PATH']}"})
+        code, _, tmp = _run_audit_step(
+            "lock-freshness",
+            self.step,
+            files,
+            {"PATH": f"{bindir}:{os.environ['PATH']}"},
+        )
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
         return code, log.read_text().splitlines() if log.exists() else []
 
-    def _lock(self, command, banner="# This file was autogenerated by uv via the following command:"):
+    def _lock(
+        self,
+        command,
+        banner="# This file was autogenerated by uv via the following command:",
+    ):
         return f"{banner}\n#    {command}\nfoo==1.0 \\\n    --hash=sha256:{'0' * 64}\n"
 
     def _real(self):
@@ -637,13 +812,18 @@ class TestRecompileStep(unittest.TestCase):
         expected = []
         for lock in _LOCKS:
             recorded = files[lock].splitlines()[1]
-            self.assertEqual(recorded, _recorded_header(lock, lock.replace(".txt", ".in")).splitlines()[1])
+            self.assertEqual(
+                recorded,
+                _recorded_header(lock, lock.replace(".txt", ".in")).splitlines()[1],
+            )
             expected.append(recorded.removeprefix("#    uv "))
         self.assertEqual(calls, expected)
 
     def test_another_python_version_is_accepted(self):
         files = self._real()
-        files["requirements.txt"] = files["requirements.txt"].replace("--python-version 3.11", "--python-version 3.12")
+        files["requirements.txt"] = files["requirements.txt"].replace(
+            "--python-version 3.11", "--python-version 3.12"
+        )
         code, calls = self._run(files)
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 2)
@@ -692,7 +872,10 @@ class TestRecompileStep(unittest.TestCase):
         ]:
             with self.subTest(command=command):
                 code, calls = self._run(
-                    {"requirements.txt": self._lock(command), "requirements-dev.txt": self._lock(ok)}
+                    {
+                        "requirements.txt": self._lock(command),
+                        "requirements-dev.txt": self._lock(ok),
+                    }
                 )
                 self.assertNotEqual(code, 0)
                 self.assertEqual(calls, [])
@@ -708,7 +891,9 @@ class TestRecompileStep(unittest.TestCase):
 
     def test_a_lock_without_uvs_banner_runs_nothing(self):
         files = self._real()
-        files["requirements.txt"] = "# hand-written\n" + files["requirements.txt"].split("\n", 1)[1]
+        files["requirements.txt"] = (
+            "# hand-written\n" + files["requirements.txt"].split("\n", 1)[1]
+        )
         code, calls = self._run(files)
         self.assertNotEqual(code, 0)
         self.assertEqual(calls, [])
@@ -719,13 +904,17 @@ class TestAuditWorkflowShape(unittest.TestCase):
 
     def setUp(self):
         workflows = HERE.parents[1] / ".github" / "workflows"
-        self.workflow = yaml.safe_load((workflows / "gateway-deps-audit.yml").read_text())
+        self.workflow = yaml.safe_load(
+            (workflows / "gateway-deps-audit.yml").read_text()
+        )
         self.ci = yaml.safe_load((workflows / "ci.yml").read_text())
 
     def test_triggers_cover_every_lock_input(self):
         # PyYAML reads the bare key `on` as True; a quoted "on" stays a string.
         triggers = self.workflow.get("on", self.workflow.get(True))
-        self.assertEqual(set(triggers), {"pull_request", "schedule", "workflow_dispatch"})
+        self.assertEqual(
+            set(triggers), {"pull_request", "schedule", "workflow_dispatch"}
+        )
         self.assertEqual(
             triggers["pull_request"],
             {
@@ -822,11 +1011,25 @@ class TestLockChangedStep(unittest.TestCase):
         # The step's env is the STEP's: handing it to git init/add/commit as well
         # would let a key that only breaks the step build a matching fixture, and
         # the run would pass on both halves being wrong together.
-        fixture_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(tmp)]
+        fixture_env = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        git = [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-C",
+            str(tmp),
+        ]
         subprocess.run([*git, "init", "-q"], check=True, env=fixture_env)
         subprocess.run([*git, "add", "."], check=True, env=fixture_env)
-        subprocess.run([*git, "commit", "-q", "-m", "init"], check=True, env=fixture_env)
+        subprocess.run(
+            [*git, "commit", "-q", "-m", "init"], check=True, env=fixture_env
+        )
         change(work)
         result = subprocess.run(
             ["bash", "-e", "-c", self.step["run"]],
@@ -852,7 +1055,9 @@ class TestLockChangedStep(unittest.TestCase):
         """
         self.assertEqual(self._run(lambda work: None), 0)
         self.assertNotEqual(
-            self._run(lambda work: None, workflow_env={"GIT_INDEX_FILE": "no-such-index"}),
+            self._run(
+                lambda work: None, workflow_env={"GIT_INDEX_FILE": "no-such-index"}
+            ),
             0,
         )
 
