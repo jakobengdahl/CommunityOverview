@@ -2,6 +2,7 @@
 """Copy guarantees across the REST and MCP boundaries."""
 
 import copy
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -128,7 +129,9 @@ def test_copy_preserves_canvas_and_isolates_identity_and_history(test_app, trans
 def test_copy_requires_source_read_access(test_app, transport, denied_action):
     """Permission to create alone cannot copy an unreadable source, nor a copy
     whose access assignments the hook refuses."""
-    source = test_app.app.state.session_manager.create_session()
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    before = copy.deepcopy(source.to_dict())
     hook = Mock()
     hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
         allowed=not (
@@ -145,7 +148,20 @@ def test_copy_requires_source_read_access(test_app, transport, denied_action):
     if transport == "mcp":
         assert result["error_code"] == "access_denied"
         assert "session" not in result
-    assert test_app.app.state.session_manager.store.session_count() == 1
+    assert manager.store.session_count() == 1
+    assert source.to_dict() == before
+
+
+def test_capture_contract_describes_visibility_on_failure():
+    contract_path = (
+        Path(__file__).resolve().parents[3]
+        / "docs/SESSION_SAVEDVIEW_COMPAT_CONTRACT.md"
+    )
+    contract = contract_path.read_text()
+    text = " ".join(contract.split())
+    assert "A destination may be briefly visible before access assignment" in text
+    assert "if assignment fails, it is removed before failure is reported" in text
+    assert "no partial copy is visible on every failure" not in text
 
 
 @pytest.mark.parametrize("description", ["x" * 2000, "å" * 200])
