@@ -948,7 +948,9 @@ class _FakeMergeRecords:
                 os.geteuid() == 0, reason="root ignores permissions"
             ),
         ),
+        "history_directory_sticky_and_file_not_owned",
         "run_history_shm_is_directory",
+        "run_history_symlink_target_shm_is_directory",
         "proposals_is_fifo",
         "session_file_is_fifo",
         "session_lock_is_directory",
@@ -988,8 +990,18 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         history.mkdir()
     elif broken == "history_directory_read_only":
         history.parent.chmod(0o555)
+    elif broken == "history_directory_sticky_and_file_not_owned":
+        history.parent.chmod(0o1777)
+        # An owner of neither the directory nor the file, root or not.
+        monkeypatch.setattr(os, "geteuid", lambda: 4242)
     elif broken == "run_history_shm_is_directory":
         (tmp_path / "db" / "runs.db-shm").mkdir()
+    elif broken == "run_history_symlink_target_shm_is_directory":
+        # SQLite keeps the sidecars of a symlinked database beside its target.
+        (tmp_path / "target").mkdir()
+        (tmp_path / "db" / "runs.db").rename(tmp_path / "target" / "runs.db")
+        (tmp_path / "db" / "runs.db").symlink_to(tmp_path / "target" / "runs.db")
+        (tmp_path / "target" / "runs.db-shm").mkdir()
     elif broken == "proposals_is_fifo":
         (tmp_path / "db" / "proposals.db").unlink()
         os.mkfifo(tmp_path / "db" / "proposals.db")

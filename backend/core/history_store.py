@@ -481,7 +481,7 @@ class GraphHistoryStore:
         if not Path(history_path).exists():
             return False
         preflight_file(history_path)
-        preflight_directory(Path(history_path).parent)
+        preflight_directory(Path(history_path).parent, replaces=[history_path])
         return True
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:

@@ -2035,10 +2035,12 @@ class StagedLayersFile:
         """
         if not self.path.exists():
             return False
-        preflight_file(self.path)
+        replaces = [self.path]
         if self.merge_log_path is not None and self.merge_log_path.exists():
-            preflight_file(self.merge_log_path)
-        preflight_directory(self.path.parent)
+            replaces.append(self.merge_log_path)
+        for path in replaces:
+            preflight_file(path)
+        preflight_directory(self.path.parent, replaces=replaces)
         return True
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:

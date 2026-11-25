@@ -8,7 +8,7 @@ import sqlite3
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def validate_erasure(actor_id: str, replacement_token: str) -> None:
@@ -38,34 +38,49 @@ def preflight_file(path: str | Path, *, write: bool = False) -> None:
         os.close(fd)
 
 
-def preflight_directory(path: str | Path) -> None:
+def preflight_directory(path: str | Path, replaces: Iterable[str | Path] = ()) -> None:
     """Check that *path* is a directory an erasure can list and add files to.
 
-    Write access is asked of the kernel rather than tried, since creating a
-    probe file would change the directory.
+    Write access is asked of the kernel for the effective ids rather than
+    tried, since creating a probe file would change the directory. In a
+    sticky directory, renaming over or removing a file in *replaces* also
+    needs the process to own that file or the directory.
     """
     if not Path(path).is_dir():
         raise OSError("not a directory")
     os.listdir(path)
-    if not os.access(path, os.W_OK | os.X_OK):
+    effective = os.access in os.supports_effective_ids
+    if not os.access(path, os.W_OK | os.X_OK, effective_ids=effective):
         raise PermissionError("directory is not writable")
+    info = os.stat(path)
+    if not info.st_mode & stat.S_ISVTX or not hasattr(os, "geteuid"):
+        return
+    euid = os.geteuid()
+    if euid in (0, info.st_uid):
+        return
+    for target in replaces:
+        if os.lstat(target).st_uid != euid:
+            raise PermissionError("sticky directory holds a file of another owner")
 
 
 def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
     """Preflight a read-write SQLite store: False if absent, raise if unusable.
 
     The database and existing -wal/-shm sidecars are opened read-write, the
-    directory must take new journal files, and *path* must be a store owning
+    directory must take new journal files and let SQLite remove its own, and *path* must be a store owning
     *table* at schema *version*: the read-write constructors create and
     migrate schema in whatever file they are given.
     """
     if not Path(path).exists():
         return False
+    # SQLite follows a symlinked database and keeps its sidecars beside the
+    # target, so that is the directory and those are the files checked.
+    path = os.path.realpath(path)
     preflight_file(path, write=True)
-    preflight_directory(Path(path).parent)
-    for suffix in ("-wal", "-shm"):
-        if Path(f"{path}{suffix}").exists():
-            preflight_file(f"{path}{suffix}", write=True)
+    sidecars = [f"{path}{s}" for s in ("-wal", "-shm") if Path(f"{path}{s}").exists()]
+    preflight_directory(Path(path).parent, replaces=sidecars)
+    for sidecar in sidecars:
+        preflight_file(sidecar, write=True)
     if not _sqlite_schema_matches(path, table, version):
         raise ValueError("not a current-schema store")
     return True

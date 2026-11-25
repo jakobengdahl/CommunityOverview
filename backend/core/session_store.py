@@ -517,11 +517,13 @@ class FileSessionPersistenceBackend:
         directory = Path(directory)
         if not directory.exists():
             return False
-        preflight_directory(directory)
+        sessions = _session_files(directory)
+        leftovers = [p for p in directory.glob("session_*.json") if p.is_file()]
+        preflight_directory(directory, replaces=sessions + leftovers)
         lock = directory / ".sessions.lock"
         if os.path.lexists(lock):
             preflight_file(lock, write=True)
-        for path in _session_files(directory):
+        for path in sessions:
             preflight_file(path)
         return True
 
