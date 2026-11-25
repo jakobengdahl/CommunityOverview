@@ -209,6 +209,7 @@ def test_erasure_replaces_all_attribution_and_preserves_graph_bytes(
             "proposals": 1,
             "session_activity": 1,
             "staged_layers": 0,
+            "merge_records": 0,
         },
         "failed_stores": [],
     }
@@ -256,6 +257,7 @@ def test_erasure_handles_absent_stores_and_unloaded_sessions(tmp_path):
         "proposals": 0,
         "session_activity": 1,
         "staged_layers": 0,
+        "merge_records": 0,
     }
     assert cold.get(session.id).activity_log[0]["actor"] == TOKEN
     missing = GraphHistoryStore(tmp_path / "absent" / "history.ndjson")
@@ -352,6 +354,7 @@ def test_cli_close_failure_after_erasure_reports_store_with_exit_1(
             "proposals": None,
             "session_activity": 0,
             "staged_layers": 0,
+            "merge_records": 0,
         },
         "failed_stores": ["proposals"],
     }
@@ -430,6 +433,7 @@ def test_cli_erases_durable_stores_and_outputs_only_counts(
         "proposals": 1,
         "session_activity": 0,
         "staged_layers": 0,
+        "merge_records": 0,
     }
     assert main(args) == 0
     assert set(json.loads(capsys.readouterr().out)["counts"].values()) == {0}
@@ -645,6 +649,7 @@ def test_erasure_preserves_entity_and_execution_content(erasure_stores, tmp_path
             "proposals": 0,
             "session_activity": 1,
             "staged_layers": 0,
+            "merge_records": 0,
         }
         cleaned = history.get_recent()[0]
         for key in ("before", "after", "patch"):
