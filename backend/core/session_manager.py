@@ -1055,16 +1055,46 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
             raise
 
-    def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
+    def get_or_create(
+        self, session_id: str, *, initial_op: Optional[Dict[str, Any]] = None
+    ) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
         if session is not None:
             return session, False
         # Materialising a session the browser already holds is never a create
         # request, so it is direct whatever the graph default (§5.1): a staged
         # session is created explicitly, where the hook is asked.
+        applied = []
+
+        def prepare(session: Session) -> None:
+            if initial_op is not None:
+                op = self.store.apply_state_op(session, initial_op)
+                _check_session_totals(
+                    session,
+                    _detached_snapshot(session),
+                    max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                    max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                )
+                if op is not None:
+                    applied.append(op)
+
+        def publish_initial(session: Session) -> None:
+            if applied:
+                self.bus.publish(
+                    session.id,
+                    {
+                        "type": "op",
+                        "client_id": initial_op["client_id"],
+                        "op": applied[0],
+                        "seq": applied[0]["seq"],
+                    },
+                )
+
         try:
-            return self.store.get_or_create(
+            session, created = self.store.get_or_create(
                 session_id,
+                prepare=prepare,
+                on_publish=publish_initial,
                 max_sessions=self._max_sessions,
                 write_mode_source=(
                     "explicit"
@@ -1074,6 +1104,7 @@ class SessionManager:
             )
         except SessionRetired:
             raise SessionNotFound() from None
+        return session, created
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
         """The write mode a response describing ``session`` reports (§5.1).
@@ -1361,14 +1392,36 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        self.get_or_create(session_id)
+        actor = client_id or "rest"
+        rename_op = {"op": "session_renamed", "name": name}
+        op = {**rename_op, "client_id": actor}
+        if self.store.get(session_id) is None:
+            # Charge and validate before publishing, as apply_ops does.
+            if (
+                1 > self._max_ops
+                or len(json.dumps(rename_op)) > self._max_op_batch_bytes
+            ):
+                raise OpBatchTooLarge()
+            if not isinstance(actor, str) or not actor:
+                raise OpError("client_id is required")
+            if 1 > self._bucket.capacity:
+                raise OpBatchTooLarge()
+            if not self._bucket.consume(actor, 1):
+                raise RateLimited()
+            session, created = self.get_or_create(session_id, initial_op=op)
+            if created:
+                return session
+            precharged = True
+        else:
+            precharged = False
         await self.apply_ops(
             session_id,
-            client_id or "rest",
+            actor,
             None,
             [
                 {"op": "session_renamed", "name": name},
             ],
+            precharged=precharged,
         )
         return self.store.get(session_id)
 
@@ -1452,14 +1505,12 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
         op = {"op": "session_renamed", "name": name, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
@@ -1490,14 +1541,12 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
         op = {"op": "session_described", "description": description, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
@@ -1576,6 +1625,7 @@ class SessionManager:
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         appearance_version: Optional[int] = None,
         authorize_appearance: Optional[Callable[[], None]] = None,
+        precharged: bool = False,
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1612,7 +1662,7 @@ class SessionManager:
         # retryable rate limit — the same rule as ``_consume_mcp_budget``.
         if cost > self._bucket.capacity:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, cost):
+        if not precharged and not self._bucket.consume(client_id, cost):
             raise RateLimited()
 
         if self.store.get(session_id) is None:
@@ -3135,11 +3185,53 @@ class SessionManager:
 
     # ---------------- MCP push ----------------
 
+    def materialize_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        """Publish a missing session with the pushed membership already applied."""
+        result = command.get("result") or {}
+        action = result.get("action")
+        node_ids = list(
+            dict.fromkeys(
+                node["id"]
+                for node in result.get("nodes") or []
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            )
+        )
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        op = None
+        if action in _REPLACING_ACTIONS:
+            op = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            op = {
+                "op": "nodes_added",
+                "node_ids": node_ids,
+                "client_id": actor,
+                "positions": _pushed_view(result).get("positions") or {},
+            }
+        return self.get_or_create(session_id, initial_op=op)[1]
+
     def push_command(
         self,
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        *,
+        membership_applied: bool = False,
     ) -> bool:
         """Apply server-owned membership once, then broadcast the command.
 
@@ -3163,7 +3255,11 @@ class SessionManager:
             # with apply_ops: the push is accepted and applied on the loop.
             command = copy.deepcopy(command)
             loop.call_soon_threadsafe(
-                self._push_command_on_loop, session_id, command, on_published
+                self._push_command_on_loop,
+                session_id,
+                command,
+                on_published,
+                membership_applied,
             )
             return True
         queue_name = f"session-push:{session_id}"
@@ -3175,22 +3271,29 @@ class SessionManager:
             # rolls back, preserving op/command order for every subscriber.
             command = copy.deepcopy(command)
             task = asyncio.get_running_loop().create_task(
-                self._push_command_after_batch(session_id, command, on_published),
+                self._push_command_after_batch(
+                    session_id, command, on_published, membership_applied
+                ),
                 name=queue_name,
             )
             self._pending_pushes.add(task)
             task.add_done_callback(self._pending_pushes.discard)
             return True
-        return self._publish_command(session_id, command, on_published)
+        return self._publish_command(
+            session_id, command, on_published, membership_applied
+        )
 
     def _push_command_on_loop(
         self,
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]],
+        membership_applied: bool,
     ) -> None:
         try:
-            self.push_command(session_id, command, on_published)
+            self.push_command(
+                session_id, command, on_published, membership_applied=membership_applied
+            )
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
@@ -3199,10 +3302,13 @@ class SessionManager:
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
     ) -> None:
         try:
             async with self._lock(session_id):
-                self._publish_command(session_id, command, on_published)
+                self._publish_command(
+                    session_id, command, on_published, membership_applied
+                )
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
@@ -3211,11 +3317,13 @@ class SessionManager:
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
     ) -> bool:
         session = self.store.get(session_id)
         if session is None:
             return False
-        self._apply_command_membership(session, command)
+        if not membership_applied:
+            self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
         if on_published is not None:
             on_published()

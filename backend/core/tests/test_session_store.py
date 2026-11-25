@@ -1135,3 +1135,89 @@ def test_failed_directory_flush_removes_new_session(tmp_path, monkeypatch):
             store.create_with_capacity(max_sessions=1)
     assert store.session_count() == 0
     assert store.create_with_capacity(max_sessions=1)[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_implicit_creation_publishes_initial_operation(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    observer = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    saved = store._backend.save
+    visible = []
+
+    def observe(document):
+        saved(document)
+        visible.append(json.loads((tmp_path / "sessions" / f"{sid}.json").read_text()))
+
+    monkeypatch.setattr(store._backend, "save", observe)
+    if operation == "rest":
+        await manager.rename_session(sid, "named")
+    elif operation == "rename":
+        manager.rename_session_sync(sid, "named")
+    elif operation == "describe":
+        manager.describe_session_sync(sid, "described")
+    else:
+        assert manager.materialize_command(
+            sid, {"result": {"action": "add_to_visualization", "nodes": [{"id": "n"}]}}
+        )
+    assert len(visible) == 1
+    assert observer.get(sid).to_dict() == visible[0]
+    assert visible[0]["seq"] == 1
+    if operation in ("rest", "rename"):
+        assert visible[0]["name"] == "named"
+    elif operation == "describe":
+        assert visible[0]["description"] == "described"
+    else:
+        assert visible[0]["state"]["node_refs"] == ["n"]
+    before = store.get(sid).to_dict()
+    session, created = manager.get_or_create(
+        sid, initial_op={"op": "session_renamed", "name": "other", "client_id": "test"}
+    )
+    assert not created and session.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_failed_implicit_creation_does_not_publish_or_delete(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    deleted = []
+    with monkeypatch.context() as patch:
+
+        def fail(_document):
+            raise OSError()
+
+        patch.setattr(store._backend, "save", fail)
+        patch.setattr(store, "delete", lambda session_id: deleted.append(session_id))
+        with pytest.raises(OSError):
+            if operation == "rest":
+                await manager.rename_session(sid, "named")
+            elif operation == "rename":
+                manager.rename_session_sync(sid, "named")
+            elif operation == "describe":
+                manager.describe_session_sync(sid, "described")
+            else:
+                manager.materialize_command(
+                    sid,
+                    {
+                        "result": {
+                            "action": "add_to_visualization",
+                            "nodes": [{"id": "n"}],
+                        }
+                    },
+                )
+    assert not deleted
+    assert _store(tmp_path).get(sid) is None
+    assert store.session_count() == 0
+    assert manager.create_session()

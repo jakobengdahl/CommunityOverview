@@ -1776,3 +1776,17 @@ def test_history_requires_capability_after_appearance_activity_pruned(
     )
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "appearance_version_required"
+
+
+def test_implicit_rename_reports_storage_failure(test_app, monkeypatch):
+    store = test_app.app.state.session_manager.store
+    sid = "9999-9996"
+
+    def fail(_document):
+        raise OSError()
+
+    monkeypatch.setattr(store._backend, "save", fail)
+    response = test_app.patch(f"/api/sessions/{sid}", json={"name": "named"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "storage_error"
+    assert store.get(sid) is None

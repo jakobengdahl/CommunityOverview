@@ -39,6 +39,7 @@ from backend.service.mcp_widget import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import (
     AnnotationFieldConflict,
+    AnnotationLimitReached,
     OpError,
     is_valid_session_id,
 )
@@ -520,6 +521,8 @@ def register_mcp_tools(
         )
         if session_id and isinstance(result, dict):
             result["visualization_delivery"] = delivery
+            if "error_code" in delivery:
+                result.update(success=False, error=delivery["error_code"])
         return delivery
 
     def _claimed_node_ids(session_id, node_refs):
@@ -3549,6 +3552,8 @@ def register_mcp_tools(
                 "error": "too_many_sessions",
                 "message": "The session limit has been reached; delete unused sessions and retry.",
             }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
         except SessionNotFound:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         except OpError as exc:
@@ -3620,6 +3625,8 @@ def register_mcp_tools(
                 "error": "too_many_sessions",
                 "message": "The session limit has been reached; delete unused sessions and retry.",
             }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
         except SessionNotFound:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         except OpError as exc:
@@ -6560,6 +6567,7 @@ def _push_to_session(
     hub_publish_failed = False
     hub_presence_read = True
     membership_unapplied = False
+    materialization_error = None
     legacy_withheld = False
     # A push carrying membership reaches a legacy browser only after the hub
     # applied it: legacy browsers render without writing membership back, so a
@@ -6593,6 +6601,7 @@ def _push_to_session(
             logger.exception("legacy push failed for session %s", session_id)
 
     if session_manager is not None:
+        membership_applied = False
         if (
             legacy_gated
             and session_registry
@@ -6603,7 +6612,23 @@ def _push_to_session(
                 # The server is the only writer of pushed membership, so a
                 # session a browser holds but never stored is materialised here
                 # rather than by whichever browser renders the push first.
-                session_manager.get_or_create(session_id)
+                membership_applied = session_manager.materialize_command(
+                    session_id, command
+                )
+            except (
+                OSError,
+                SessionLimitReached,
+                OpBatchTooLarge,
+                AnnotationLimitReached,
+            ) as exc:
+                materialization_error = (
+                    "storage_error"
+                    if isinstance(exc, OSError)
+                    else "too_many_sessions"
+                    if isinstance(exc, SessionLimitReached)
+                    else "session_too_large"
+                )
+                membership_unapplied = True
             except Exception:
                 # Retired id, session limit: no browser writes membership back,
                 # so a legacy render alone would show nodes the session never
@@ -6619,7 +6644,10 @@ def _push_to_session(
                 if legacy_gated:
                     hub_published = bool(
                         session_manager.push_command(
-                            session_id, command, on_published=_send_legacy_after_apply
+                            session_id,
+                            command,
+                            on_published=_send_legacy_after_apply,
+                            membership_applied=membership_applied,
                         )
                     )
                 else:
@@ -6684,4 +6712,6 @@ def _push_to_session(
                 legacy_withheld=legacy_withheld,
             )
         )
+    if materialization_error is not None:
+        delivery["error_code"] = materialization_error
     return delivery
