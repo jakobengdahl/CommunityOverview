@@ -1,7 +1,13 @@
-"""Shared validation and structured actor-attribution replacement."""
+"""Shared validation, store preflight and structured actor-attribution replacement."""
 
 from __future__ import annotations
 
+import os
+import shutil
+import sqlite3
+import stat
+import tempfile
+from pathlib import Path
 from typing import Any
 
 
@@ -15,6 +21,85 @@ def validate_erasure(actor_id: str, replacement_token: str) -> None:
         or actor_id in replacement_token
     ):
         raise ValueError("Erasure requires a nonempty actor and a distinct replacement")
+
+
+def preflight_file(path: str | Path, *, write: bool = False) -> None:
+    """Open regular file *path* as an erasure will, changing nothing.
+
+    O_NONBLOCK keeps a FIFO from blocking the open; it is then refused as not
+    a regular file, like a directory, which the read-write open refuses.
+    """
+    flags = os.O_RDWR if write else os.O_RDONLY
+    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+    finally:
+        os.close(fd)
+
+
+def preflight_directory(path: str | Path) -> None:
+    """Check that *path* is a directory an erasure can list and add files to.
+
+    Write access is asked of the kernel rather than tried, since creating a
+    probe file would change the directory.
+    """
+    if not Path(path).is_dir():
+        raise OSError("not a directory")
+    os.listdir(path)
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise PermissionError("directory is not writable")
+
+
+def preflight_sqlite(path: str | Path, table: str, version: int) -> bool:
+    """Preflight a read-write SQLite store: False if absent, raise if unusable.
+
+    The database and existing -wal/-shm sidecars are opened read-write, the
+    directory must take new journal files, and *path* must be a store owning
+    *table* at schema *version*: the read-write constructors create and
+    migrate schema in whatever file they are given.
+    """
+    if not Path(path).exists():
+        return False
+    preflight_file(path, write=True)
+    preflight_directory(Path(path).parent)
+    for suffix in ("-wal", "-shm"):
+        if Path(f"{path}{suffix}").exists():
+            preflight_file(f"{path}{suffix}", write=True)
+    if not _sqlite_schema_matches(path, table, version):
+        raise ValueError("not a current-schema store")
+    return True
+
+
+def _sqlite_schema_matches(path: str | Path, table: str, version: int) -> bool:
+    """Check that *path* is a current-schema store owning *table*.
+
+    Nothing next to *path* is created or changed. immutable=1 keeps SQLite
+    from creating -shm/-wal sidecars, but it also ignores a pending WAL,
+    which may hold the schema; such a store is probed as a private copy.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        if Path(f"{path}-wal").exists():
+            probe = Path(scratch) / "probe.db"
+            shutil.copyfile(path, probe)
+            shutil.copyfile(f"{path}-wal", f"{probe}-wal")
+            # The copy is private, so SQLite may recover the WAL into it.
+            uri = probe.as_uri()
+        else:
+            uri = f"{Path(path).resolve().as_uri()}?mode=ro&immutable=1"
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                found = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()
+                current = conn.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
+    return found is not None and current == version
 
 
 def replace_attribution(

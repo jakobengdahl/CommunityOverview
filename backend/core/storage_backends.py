@@ -49,7 +49,7 @@ from typing import (
 
 from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
 
-from .actor_attribution import validate_erasure
+from .actor_attribution import preflight_directory, preflight_file, validate_erasure
 
 logger = logging.getLogger(__name__)
 
@@ -2027,6 +2027,19 @@ class StagedLayersFile:
             if self.path.name.endswith(suffix)
             else None
         )
+
+    def preflight(self) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        Both files are only read; replacements are renamed in beside them.
+        """
+        if not self.path.exists():
+            return False
+        preflight_file(self.path)
+        if self.merge_log_path is not None and self.merge_log_path.exists():
+            preflight_file(self.merge_log_path)
+        preflight_directory(self.path.parent)
+        return True
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:
         validate_erasure(actor_id, replacement_token)

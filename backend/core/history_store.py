@@ -28,7 +28,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
 
-from .actor_attribution import replace_attribution, validate_erasure
+from .actor_attribution import (
+    preflight_directory,
+    preflight_file,
+    replace_attribution,
+    validate_erasure,
+)
 from .storage_backends import _lock_file, _unlock_file, dumps_storable
 
 if TYPE_CHECKING:
@@ -466,6 +471,18 @@ class GraphHistoryStore:
                         continue
             finally:
                 _unlock_file(f)
+
+    @staticmethod
+    def preflight(history_path: str | Path) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        The sidecar is only read; its replacement is renamed in beside it.
+        """
+        if not Path(history_path).exists():
+            return False
+        preflight_file(history_path)
+        preflight_directory(Path(history_path).parent)
+        return True
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:
         """Atomically replace attribution, streaming without loading the sidecar."""

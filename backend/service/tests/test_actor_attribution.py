@@ -3,7 +3,12 @@
 
 import copy
 import json
+import os
 import sqlite3
+import stat
+import sys
+import types
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +21,7 @@ from backend.agents.governance.store import InMemoryProposalStore, SqliteProposa
 from backend.agents.governance.store import _SCHEMA_VERSION as proposal_schema_version
 from backend.core import Node, Edge, NodeType, RelationshipType
 from backend.core.events import EventContext, EventAttribution, EventActorAttribution
+from backend.core import actor_attribution
 from backend.core.history_store import GraphHistoryStore
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
@@ -23,7 +29,6 @@ from backend.core.session_store import (
     SessionStore,
 )
 from backend.core.storage_backends import FileGraphPersistenceBackend
-from backend.service import actor_erasure
 from backend.service.actor_erasure import ActorErasureService, main
 
 from typing import TYPE_CHECKING
@@ -902,29 +907,132 @@ def test_layer_erasure_fails_malformed_file_without_rewriting(tmp_path, capsys):
     assert path.read_bytes() == before
 
 
-def test_cli_refuses_unreadable_store_path_with_exit_2(tmp_path, monkeypatch, capsys):
-    """A permission error while checking a path is an invocation error, not a traceback."""
+def _tree(root):
+    """Every entry under *root*: file bytes, or the kind of anything else."""
+    tree = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            path = Path(dirpath) / name
+            mode = path.lstat().st_mode
+            key = str(path.relative_to(root))
+            tree[key] = path.read_bytes() if stat.S_ISREG(mode) else stat.S_IFMT(mode)
+    return tree
+
+
+class _FakeMergeRecords:
+    def __init__(self, dsn, *, schema, scope):
+        self.erased = []
+        _FakeMergeRecords.made.append(self)
+
+    def preflight(self):
+        if _FakeMergeRecords.refuse:
+            raise PermissionError("UPDATE refused")
+        return True
+
+    def erase_actor(self, actor_id, replacement_token):
+        self.erased.append(actor_id)
+        return 1
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        None,
+        "history_is_directory",
+        pytest.param(
+            "history_directory_read_only",
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root ignores permissions"
+            ),
+        ),
+        "run_history_shm_is_directory",
+        "proposals_is_fifo",
+        "session_file_is_fifo",
+        "session_lock_is_directory",
+        "merge_log_is_directory",
+        "merge_records_not_updatable",
+    ],
+)
+def test_cli_runs_every_store_preflight_before_touching_any_store(
+    tmp_path, monkeypatch, capsys, broken
+):
+    """One unusable store target is exit 2 with every store unchanged; else all erase."""
     monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
     monkeypatch.delenv("AGENTS_GOVERNANCE_DB", raising=False)
-    history = tmp_path / "history.ndjson"
+    for name in ("history", "db", "sessions", "graph"):
+        (tmp_path / name).mkdir()
+    history = tmp_path / "history" / "history.ndjson"
     history.write_text(json.dumps({"actor": ACTOR}) + "\n")
-    blocked = tmp_path / ACTOR / "runs.db"
-    real_exists = actor_erasure.Path.exists
-
-    def exists(self):
-        if self == blocked:
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_exists(self)
-
-    monkeypatch.setattr(actor_erasure.Path, "exists", exists)
-    before = _cli_store_bytes(tmp_path)
+    runs = SqliteExecutionStore(tmp_path / "db" / "runs.db")
+    proposals = SqliteProposalStore(tmp_path / "db" / "proposals.db")
+    _run(runs)
+    _proposal(proposals)
+    runs.close()
+    proposals.close()
+    sessions = tmp_path / "sessions"
+    FileSessionPersistenceBackend(sessions).save(
+        {"id": "1234-5678", "activity_log": [{"id": "a", "actor": ACTOR}]}
+    )
+    graph = FileGraphPersistenceBackend(
+        tmp_path / "graph" / "graph.json", staged_sessions=True
+    )
+    graph.save_graph_data({"nodes": [], "edges": []})
+    graph.record_staged("1234-5678")
+    graph.stage("1234-5678", [_layer_entry("node-a", ACTOR)])
+    merge_log = tmp_path / "graph" / "graph.merges.ndjson"
+    if broken == "history_is_directory":
+        history.unlink()
+        history.mkdir()
+    elif broken == "history_directory_read_only":
+        history.parent.chmod(0o555)
+    elif broken == "run_history_shm_is_directory":
+        (tmp_path / "db" / "runs.db-shm").mkdir()
+    elif broken == "proposals_is_fifo":
+        (tmp_path / "db" / "proposals.db").unlink()
+        os.mkfifo(tmp_path / "db" / "proposals.db")
+    elif broken == "session_file_is_fifo":
+        os.mkfifo(sessions / "2222-3333.json")
+    elif broken == "session_lock_is_directory":
+        (sessions / ".sessions.lock").unlink()
+        (sessions / ".sessions.lock").mkdir()
+    elif broken == "merge_log_is_directory":
+        merge_log.unlink(missing_ok=True)
+        merge_log.mkdir()
+    fake_module = types.ModuleType("backend.core.postgres_backend")
+    fake_module.PostgresMergeRecords = _FakeMergeRecords
+    monkeypatch.setitem(sys.modules, "backend.core.postgres_backend", fake_module)
+    monkeypatch.setattr(_FakeMergeRecords, "made", [], raising=False)
+    monkeypatch.setattr(
+        _FakeMergeRecords,
+        "refuse",
+        broken == "merge_records_not_updatable",
+        raising=False,
+    )
+    monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql://localhost/graph")
+    before = _tree(tmp_path)
     args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
-    args += ["--history-path", str(history), "--run-history-db", str(blocked)]
-    assert main(args) == 2
+    args += ["--history-path", str(history), "--sessions-dir", str(sessions)]
+    args += ["--run-history-db", str(tmp_path / "db" / "runs.db")]
+    args += ["--governance-db", str(tmp_path / "db" / "proposals.db")]
+    args += ["--layers-path", str(graph.layers_path), "--postgres-schema", "public"]
+    try:
+        code = main(args)
+    finally:
+        history.parent.chmod(0o755)
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert ACTOR not in captured.err
-    assert _cli_store_bytes(tmp_path) == before
+    assert ACTOR not in captured.out + captured.err
+    if broken is None:
+        assert code == 0
+        assert set(json.loads(captured.out)["counts"].values()) == {1}
+        assert _FakeMergeRecords.made[0].erased == [ACTOR]
+    else:
+        assert code == 2
+        assert captured.out == ""
+        assert _tree(tmp_path) == before
+        assert all(not made.erased for made in _FakeMergeRecords.made)
 
 
 def _crashed_wal_copy(store_cls, source, target):
@@ -960,7 +1068,7 @@ def test_schema_probe_with_leftover_wal_leaves_sidecars_untouched(
     _crashed_wal_copy(store_cls, live / "source.db", target)
     before = _cli_store_bytes(store_dir)
     assert (
-        actor_erasure._sqlite_schema_matches(
+        actor_attribution._sqlite_schema_matches(
             str(target), "proposals", proposal_schema_version
         )
         is matches
