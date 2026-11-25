@@ -1078,10 +1078,19 @@ class SessionManager:
                 if op is not None:
                     applied.append(op)
 
+        def publish_initial(session: Session) -> None:
+            if applied:
+                self.bus.publish(
+                    session.id,
+                    {"type": "op", "client_id": initial_op["client_id"],
+                     "op": applied[0], "seq": applied[0]["seq"]},
+                )
+
         try:
             session, created = self.store.get_or_create(
                 session_id,
                 prepare=prepare,
+                on_publish=publish_initial,
                 max_sessions=self._max_sessions,
                 write_mode_source=(
                     "explicit"
@@ -1091,16 +1100,6 @@ class SessionManager:
             )
         except SessionRetired:
             raise SessionNotFound() from None
-        if created and applied:
-            self.bus.publish(
-                session_id,
-                {
-                    "type": "op",
-                    "client_id": initial_op["client_id"],
-                    "op": applied[0],
-                    "seq": applied[0]["seq"],
-                },
-            )
         return session, created
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
@@ -1390,10 +1389,11 @@ class SessionManager:
         session later materialises with a null server name.
         """
         actor = client_id or "rest"
-        op = {"op": "session_renamed", "name": name, "client_id": actor}
+        rename_op = {"op": "session_renamed", "name": name}
+        op = {**rename_op, "client_id": actor}
         if self.store.get(session_id) is None:
             # Charge and validate before publishing, as apply_ops does.
-            if len(json.dumps(op)) > self._max_op_batch_bytes:
+            if 1 > self._max_ops or len(json.dumps(rename_op)) > self._max_op_batch_bytes:
                 raise OpBatchTooLarge()
             if not isinstance(actor, str) or not actor:
                 raise OpError("client_id is required")

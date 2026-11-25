@@ -520,6 +520,8 @@ def register_mcp_tools(
         )
         if session_id and isinstance(result, dict):
             result["visualization_delivery"] = delivery
+            if "error_code" in delivery:
+                result.update(success=False, error=delivery["error_code"])
         return delivery
 
     def _claimed_node_ids(session_id, node_refs):
@@ -6564,6 +6566,7 @@ def _push_to_session(
     hub_publish_failed = False
     hub_presence_read = True
     membership_unapplied = False
+    materialization_error = None
     legacy_withheld = False
     # A push carrying membership reaches a legacy browser only after the hub
     # applied it: legacy browsers render without writing membership back, so a
@@ -6611,6 +6614,13 @@ def _push_to_session(
                 membership_applied = session_manager.materialize_command(
                     session_id, command
                 )
+            except (OSError, SessionLimitReached, OpBatchTooLarge) as exc:
+                materialization_error = (
+                    "storage_error" if isinstance(exc, OSError) else
+                    "too_many_sessions" if isinstance(exc, SessionLimitReached) else
+                    "session_too_large"
+                )
+                membership_unapplied = True
             except Exception:
                 # Retired id, session limit: no browser writes membership back,
                 # so a legacy render alone would show nodes the session never
@@ -6694,4 +6704,6 @@ def _push_to_session(
                 legacy_withheld=legacy_withheld,
             )
         )
+    if materialization_error is not None:
+        delivery["error_code"] = materialization_error
     return delivery

@@ -954,6 +954,7 @@ class SessionStore:
         state: Optional[Dict[str, Any]] = None,
         description: Optional[str] = None,
         prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
     ) -> "tuple[Session, bool]":
         """Check capacity and publish a new document under the store transaction."""
         if session_id is not None and not is_valid_session_id(session_id):
@@ -985,6 +986,8 @@ class SessionStore:
             self._sessions[session.id] = session
             self._rings.setdefault(session.id, deque(maxlen=self._ring_size))
             self._meta_cache = None
+            if on_publish is not None:
+                on_publish(session)
             return session, True
 
     def _check_capacity(self, max_sessions: Optional[int]) -> None:
@@ -1009,6 +1012,7 @@ class SessionStore:
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
         prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
     ) -> "tuple[Session, bool]":
         return self.create_with_capacity(
             session_id=session_id,
@@ -1017,6 +1021,7 @@ class SessionStore:
             write_mode_source=write_mode_source,
             on_allocate=on_allocate,
             prepare=prepare,
+            on_publish=on_publish,
         )
 
     def get(self, session_id: str) -> Optional[Session]:

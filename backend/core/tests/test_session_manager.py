@@ -2922,6 +2922,62 @@ class TestRenameSession:
         with pytest.raises(SessionLimitReached):
             await mgr.rename_session("9999-9999", "x")
 
+    @pytest.mark.parametrize("exists", [False, True])
+    async def test_rename_uses_batch_admission_limits(self, exists):
+        op = {"op": "session_renamed", "name": "x"}
+        mgr = _manager(max_op_batch_bytes=len(json.dumps(op)))
+        sid = "1234-5678"
+        if exists:
+            mgr.get_or_create(sid)
+        await mgr.rename_session(sid, "x", client_id="long-client-id")
+        assert mgr.get_session(sid).name == "x"
+
+        mgr = _manager(max_ops_per_batch=0)
+        if exists:
+            mgr.get_or_create(sid)
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.rename_session(sid, "x")
+        assert (mgr.get_session(sid) is not None) == exists
+
+    async def test_initial_event_precedes_a_concurrent_store_writer(self):
+        backend = InMemorySessionPersistenceBackend()
+        mgr = SessionManager(SessionStore(backend))
+        other = SessionStore(backend)
+        entered = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        events = []
+
+        def publish(_sid, event):
+            events.append(event["seq"])
+            entered.set()
+            assert release.wait(5)
+
+        mgr.bus.publish = publish
+        sid = "1234-5678"
+        creator = threading.Thread(target=lambda: mgr.rename_session_sync(sid, "first"))
+        creator.start()
+        assert entered.wait(5)
+
+        def write():
+            session = other.get(sid)
+            with other.writing(sid):
+                op = other.apply_state_op(session, {"op": "session_renamed", "name": "second", "client_id": "other"})
+                other.persist(session)
+                events.append(op["seq"])
+            writer_done.set()
+
+        writer = threading.Thread(target=write)
+        writer.start()
+        try:
+            assert not writer_done.wait(0.1)
+        finally:
+            release.set()
+            creator.join(5)
+            writer.join(5)
+        assert writer_done.is_set()
+        assert events == [1, 2]
+
 
 class TestRenameSessionSync:
     """The MCP rename path shares ``_apply_op_sync``'s rollback, name included."""

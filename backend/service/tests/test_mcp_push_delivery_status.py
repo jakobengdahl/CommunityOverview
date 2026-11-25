@@ -17,6 +17,7 @@ from backend.core.session_manager import (
     SessionLimitReached,
     SessionManager,
     SessionNotFound,
+    OpBatchTooLarge,
 )
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
@@ -450,24 +451,34 @@ async def test_legacy_only_session_is_delivered_and_its_membership_applied_by_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refusal", [SessionLimitReached, SessionNotFound])
+@pytest.mark.parametrize("refusal,code", [
+    (SessionLimitReached, "too_many_sessions"),
+    (OpBatchTooLarge, "session_too_large"),
+    (OSError, "storage_error"),
+    (SessionNotFound, None),
+])
 async def test_a_push_the_server_cannot_store_reaches_no_browser(
-    tmp_path, monkeypatch, refusal
+    tmp_path, monkeypatch, refusal, code
 ):
     """When the server cannot store the session it would apply a push's
     membership to, no browser renders that push and it is not delivered."""
     tools, registry, manager = _wire(tmp_path)
 
-    def refuse(_session_id):
-        raise refusal()
+    def refuse(_session_id, **_kwargs):
+        raise refusal("private path and session id")
 
     monkeypatch.setattr(manager, "get_or_create", refuse)
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
-        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+        result = _search(tools, UNKNOWN_SESSION_ID)
+        delivery = result["visualization_delivery"]
 
         assert delivery["delivered"] is False
         assert delivery["status"] == "not_delivered"
-        assert set(delivery) == UNDELIVERED_KEYS
+        assert set(delivery) == UNDELIVERED_KEYS | ({"error_code"} if code else set())
+        if code:
+            assert result["success"] is False
+            assert result["error"] == delivery["error_code"] == code
+            assert "private path" not in str(result)
         await _settle(lambda: bool(received), turns=50)
         assert received == []
         assert manager.get_session(UNKNOWN_SESSION_ID) is None
