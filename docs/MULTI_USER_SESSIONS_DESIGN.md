@@ -712,7 +712,8 @@ steps 6–8.
   realtime and presence.
 - **D13** *(2026-07-04)* No automatic session retention/eviction in v1 — sessions
   persist until explicitly deleted, since some sessions may evolve into de-facto
-  saved visualizations. Revisit together with session/SavedView convergence (3.2).
+  saved visualizations. Session/SavedView convergence is specified in the
+  [compatibility contract](SESSION_SAVEDVIEW_COMPAT_CONTRACT.md) (3.2).
 - **D14** *(2026-07-06)* The empty-canvas persistence guard (R4, §8.1) applies
   **only** while a session has never materialised server-side (no connected
   sync client): a fresh, never-edited session must not register (D13). Once a
