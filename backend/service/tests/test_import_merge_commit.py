@@ -1017,7 +1017,38 @@ class TestRefusals:
         assert os.path.exists(detail["backup_path"])
         assert job_store.list_jobs() == []
 
-    def test_one_commit_at_a_time(self, storage, job_store, monkeypatch):
+    def test_one_commit_at_a_time(self, storage, job_store):
+        assert import_service._COMMIT_SLOT.acquire(blocking=False)
+        try:
+            response = _client(storage, job_store).post(
+                URL, json=_body(policy={"default": "skip"})
+            )
+        finally:
+            import_service._COMMIT_SLOT.release()
+        assert response.status_code == 503
+        assert response.json()["detail"]["error_code"] == "import_merge_busy"
+
+    @pytest.mark.parametrize("limit, status", [(2, 422), (3, 200), (4, 200)])
+    def test_commit_entity_limit(self, storage, job_store, monkeypatch, limit, status):
+        monkeypatch.setattr(import_service, "MERGE_COMMIT_MAX_ENTITIES", limit)
+        client = _client(storage, job_store)
+        body = _body()
+        digest = _preview(client, body)["plan_digest"]
+        before = _state(storage)
+        if status == 422:
+            def no_lock(*args, **kwargs):
+                pytest.fail("oversized commit reached the write lock")
+            monkeypatch.setattr(storage, "apply_import_merge", no_lock)
+        response = client.post(URL, json={**body, "plan_digest": digest})
+        assert response.status_code == status
+        if status == 422:
+            assert response.json()["detail"]["error_code"] == "import_merge_too_large"
+            assert _state(storage) == before
+            assert _backups(storage) == []
+        else:
+            assert response.json()["counts"]["nodes_created"] == 1
+
+    def test_concurrent_digest_commit_is_busy(self, storage, job_store, monkeypatch):
         entered = Event()
         release = Event()
         real_backup = import_service._write_backup
