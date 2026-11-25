@@ -75,6 +75,7 @@ from .session_store import (
     SessionRetired,
     SessionLimitReached as SessionLimitReached,
     SessionStore,
+    _empty_state,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -259,6 +260,31 @@ class RevisionConflict(Exception):
         super().__init__(f"expected revision {expected}, session is at {actual}")
         self.expected = expected
         self.actual = actual
+
+
+class CaptureRefused(Exception):
+    """A saved-view capture refused before anything was published; ``code``
+    is its stable error code (``staged_changes``, ``invalid_presentation``)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+# The presentation a saved-view capture keeps. Everything else in the state
+# (annotations until slice 2, appearance receipts) starts empty.
+_CAPTURED_STATE = (
+    "node_refs",
+    "positions",
+    "hidden_node_ids",
+    "hidden_edge_ids",
+    "dimmed_node_ids",
+    "dimmed_edge_ids",
+    "edge_intensity",
+    "shape_overrides",
+    "type_shapes",
+    "shape_revisions",
+)
 
 
 class LeaseConflict(Exception):
@@ -1054,6 +1080,86 @@ class SessionManager:
             for copy_id in staged_copies:
                 self.write_modes.retire(copy_id, require_empty=False)
             raise
+
+    def save_session_view(
+        self,
+        session_id: str,
+        name: str,
+        expected_revision: int,
+        *,
+        authorize_capture: Callable[[Dict[str, Any]], List[str]],
+        assign_access: Callable[[str], None],
+        revoke_access: Callable[[str], None],
+    ) -> Tuple[Session, List[str]]:
+        """Capture a session's presentation at ``expected_revision`` into a
+        new session named ``name``; returns it and the missing node ids
+        ``authorize_capture`` reported for the captured state.
+
+        Runs without yielding and refuses an in-flight state batch, so the
+        checks, snapshot and publication see one revision. Access is assigned
+        only after publication; if that fails, ``revoke_access`` runs and the
+        copy is removed before the failure propagates.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if source.seq != expected_revision:
+            raise RevisionConflict(expected_revision, source.seq)
+        try:
+            mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        except WriteModeRefused:
+            # A staged source whose layer this deployment cannot read.
+            raise CaptureRefused("staged_changes")
+        if mode == WRITE_MODE_STAGED and self.write_modes.layer_store.load_layer(
+            session_id
+        ):
+            raise CaptureRefused("staged_changes")
+        if source.state.get("annotations"):
+            raise CaptureRefused("invalid_presentation")
+        self.store.check_capacity(self._max_sessions)
+        state = _empty_state()
+        state.update(
+            copy.deepcopy(
+                {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
+            )
+        )
+        document = {"state": state, "name": name, "description": source.description}
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        missing = authorize_capture(state)
+        staged = []
+
+        def allocate(copy_id: str) -> None:
+            self.write_modes.record_staged(copy_id)
+            staged.append(copy_id)
+
+        try:
+            session = self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                description=source.description,
+                state=state,
+                write_mode=mode,
+                write_mode_source="explicit",
+                on_allocate=allocate if mode == WRITE_MODE_STAGED else None,
+            )[0]
+        except BaseException:
+            for copy_id in staged:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        try:
+            assign_access(session.id)
+        except BaseException:
+            try:
+                revoke_access(session.id)
+            finally:
+                self.store.delete(session.id)
+                for copy_id in staged:
+                    self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        return session, missing
 
     def get_or_create(
         self, session_id: str, *, initial_op: Optional[Dict[str, Any]] = None

@@ -1,8 +1,11 @@
 # Session and saved-view compatibility contract
 
-**Status:** Accepted design; implementation pending. This contract specifies the
-transition under [ADR 0015](adr/0015-sessions-as-node-clusters.md). It does not
-change current APIs. The existing session lifecycle and canonical link rules
+**Status:** Accepted design, partly implemented: `save_session_view` and
+`POST /api/sessions/{session_id}/save-view` exist, but annotation capture does
+not yet, so a source with annotations is refused as `invalid_presentation`.
+Legacy import and retirement are pending. This contract specifies the
+transition under [ADR 0015](adr/0015-sessions-as-node-clusters.md). It keeps
+the existing APIs unchanged. The existing session lifecycle and canonical link rules
 are in [MCP session lifecycle](MCP_SESSION_LIFECYCLE_CONTRACT.md); session
 state and sequencing are in [the multi-user design](MULTI_USER_SESSIONS_DESIGN.md).
 

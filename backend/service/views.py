@@ -131,6 +131,38 @@ def resolve_session_nodes(
     return {"success": True, "nodes": nodes, "edges": edges}
 
 
+def authorize_capture_refs(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    node_ids: List[str],
+) -> Dict[str, Any]:
+    """Whether a saved-view capture may keep every node reference.
+
+    One existing but invisible node denies the whole capture. A missing node
+    is reported only without graph narrowing: under narrowing its absence
+    could stand for a node the caller may not see, so it is denied too.
+    """
+    target = "save_session_view"
+    decision = access.evaluate_graph_access(
+        hook, action=GRAPH_ACTION_READ, target=target
+    )
+    denied = access.build_access_denied_result(
+        action=GRAPH_ACTION_READ, target=target, decision=decision
+    )
+    if not decision.allowed:
+        return denied
+    missing = []
+    for node_id in node_ids:
+        node = storage.get_node(node_id)
+        if node is None:
+            if decision.graph_access.enabled:
+                return denied
+            missing.append(node_id)
+        elif not access.is_node_visible(node, decision.graph_access):
+            return denied
+    return {"success": True, "missing_node_ids": missing}
+
+
 def resolve_session_node_semantics(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
