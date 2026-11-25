@@ -73,6 +73,7 @@ from .session_store import (
     OpError,
     Session,
     SessionRetired,
+    SessionLimitReached as SessionLimitReached,
     SessionStore,
     is_valid_session_id,
 )
@@ -177,10 +178,6 @@ class RateLimited(Exception):
 
 
 class OpBatchTooLarge(Exception):
-    pass
-
-
-class SessionLimitReached(Exception):
     pass
 
 
@@ -870,16 +867,15 @@ class SessionManager:
         Raises WriteModeRefused for a mode this deployment cannot hold.
         """
         mode, source = self.write_modes.choose(write_mode)
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
-        return self.store.create(
+        return self.store.create_with_capacity(
             name,
+            max_sessions=self._max_sessions,
             write_mode=mode,
             write_mode_source=source,
             on_allocate=(
                 self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
             ),
-        )
+        )[0]
 
     def copy_session(
         self,
@@ -933,8 +929,7 @@ class SessionManager:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
             raise SessionNotFound()
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
+        self.store.check_capacity(self._max_sessions)
         # Check before allocating an id or cloning embedded images. History is
         # deliberately excluded from both the copy and its document budget.
         # Measured as apply_ops measures the document (ASCII-escaped), so a
@@ -1040,27 +1035,27 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
                 raise
 
-        return self.store.create(
+        return self.store.create_with_capacity(
             name,
+            max_sessions=self._max_sessions,
             description=source.description,
             state=state,
             write_mode=mode,
             write_mode_source="explicit",
             on_allocate=allocate,
-        )
+        )[0]
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
         if session is not None:
             return session, False
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
         # Materialising a session the browser already holds is never a create
         # request, so it is direct whatever the graph default (§5.1): a staged
         # session is created explicitly, where the hook is asked.
         try:
             return self.store.get_or_create(
                 session_id,
+                max_sessions=self._max_sessions,
                 write_mode_source=(
                     "explicit"
                     if self.write_modes.default_mode == WRITE_MODE_STAGED

@@ -2559,11 +2559,23 @@ class TestLifecycle:
         assert events[0]["deleted_by"] == "c1"
         assert mgr.get_session(s.id) is None
 
-    async def test_session_limit(self):
+    async def test_session_limit(self, monkeypatch):
         mgr = _manager(max_sessions=1)
-        mgr.create_session()
+        source = mgr.create_session()
         with pytest.raises(SessionLimitReached):
             mgr.create_session()
+        # Capacity wins over copy validation, for both copy entry points.
+        source.state["annotations"] = [{"id": "invalid", "type": "image"}]
+        with pytest.raises(SessionLimitReached):
+            mgr.copy_session(source.id)
+        with pytest.raises(SessionLimitReached):
+            await mgr.copy_session_async(source.id)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "backend.core.session_manager.DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 1
+            )
+            with pytest.raises(SessionLimitReached):
+                mgr.copy_session(source.id)
 
     async def test_push_command_unknown_session(self):
         mgr = _manager()
@@ -5772,6 +5784,12 @@ async def test_copy_session_refused_staging_creates_nothing():
     def refuse():
         raise PermissionError
 
+    mgr._max_sessions = 1
+    with pytest.raises(SessionLimitReached):
+        mgr.copy_session(source.id, authorize_staging=refuse)
+    with pytest.raises(SessionLimitReached):
+        await mgr.copy_session_async(source.id, authorize_staging=refuse)
+    mgr._max_sessions = 100
     with pytest.raises(PermissionError):
         mgr.copy_session(source.id, authorize_staging=refuse)
     assert mgr.store.session_count() == 1

@@ -332,3 +332,20 @@ def test_copy_refuses_legacy_remote_image_url_before_creating(test_app, transpor
         assert result["error"] == image_annotation_error(source.state["annotations"][0])
     assert manager.store.session_count() == 1
     assert source.to_dict() == before
+
+
+@pytest.mark.parametrize("copy", [False, True])
+def test_session_capacity_refusals_reach_rest_and_mcp(test_app, copy):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    manager._max_sessions = 1
+    if copy:
+        response = test_app.post(f"/api/sessions/{source.id}/copy")
+        result = test_app.app.state.tools_map["copy_visualization_session"](source.id)
+    else:
+        response = test_app.post("/api/sessions", json={})
+        result = test_app.app.state.tools_map["create_visualization_session"]()
+    assert response.status_code == 503
+    assert result["success"] is False
+    assert result["error"] == "too_many_sessions"
+    assert manager.store.session_count() == 1

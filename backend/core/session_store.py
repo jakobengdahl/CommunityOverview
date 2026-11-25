@@ -472,6 +472,10 @@ def _make_directory(directory: Path) -> None:
         _fsync_directory(created.parent)
 
 
+class SessionLimitReached(Exception):
+    pass
+
+
 class FileSessionPersistenceBackend:
     """One JSON file per session under ``directory`` with atomic writes.
 
@@ -484,6 +488,10 @@ class FileSessionPersistenceBackend:
         self.directory = Path(directory)
         self._lock = threading.RLock()
         self._depth = 0
+        with self.transaction():
+            for path in self.directory.glob("session_*.json"):
+                if path.is_file():
+                    path.unlink()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -924,16 +932,40 @@ class SessionStore:
         state: Optional[Dict[str, Any]] = None,
         description: Optional[str] = None,
     ) -> Session:
-        """Create a session under a fresh id.
+        session, _ = self.create_with_capacity(
+            name,
+            write_mode=write_mode,
+            write_mode_source=write_mode_source,
+            on_allocate=on_allocate,
+            state=state,
+            description=description,
+        )
+        return session
 
-        ``on_allocate`` runs with the id before the document is saved - the
-        staged-session record is written there, so a document never names a
-        staged session the graph backend has no record of. If it raises,
-        nothing is saved.
-        """
-        with self._lock:
+    def create_with_capacity(
+        self,
+        name: Optional[str] = None,
+        *,
+        max_sessions: Optional[int] = None,
+        session_id: Optional[str] = None,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
+    ) -> "tuple[Session, bool]":
+        """Check capacity and publish a new document under the store transaction."""
+        if session_id is not None and not is_valid_session_id(session_id):
+            raise OpError(f"invalid session id: {session_id!r}")
+        with self._lock, self._backend.transaction():
+            if session_id is not None:
+                existing = self.get(session_id)
+                if existing is not None:
+                    return existing, False
+                self._refuse_retired(session_id)
+            self._check_capacity(max_sessions)
             session = Session(
-                id=self._new_id(),
+                id=session_id if session_id is not None else self._new_id(),
                 name=name,
                 description=description,
                 state=state if state is not None else _empty_state(),
@@ -942,49 +974,41 @@ class SessionStore:
             )
             if on_allocate is not None:
                 on_allocate(session.id)
+            self._backend.save(session.to_dict())
             self._sessions[session.id] = session
             self._rings[session.id] = deque(maxlen=self._ring_size)
-            self._backend.save(session.to_dict())
             self._meta_cache = None
-            return session
+            return session, True
+
+    def _check_capacity(self, max_sessions: Optional[int]) -> None:
+        ids = set(self._backend.list_ids()) | self._sessions.keys()
+        if max_sessions is not None and len(ids) >= max_sessions:
+            raise SessionLimitReached()
+
+    def check_capacity(self, max_sessions: int) -> None:
+        """Refuse a full store before doing preparatory work for a create.
+
+        Creation must still recheck under its own transaction.
+        """
+        with self._lock, self._backend.transaction():
+            self._check_capacity(max_sessions)
 
     def get_or_create(
         self,
         session_id: str,
         *,
+        max_sessions: Optional[int] = None,
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
     ) -> "tuple[Session, bool]":
-        """Return ``(session, created)``, creating it with the given id if absent.
-
-        Supports the connect-by-ID / share-URL flow where a client joins a
-        specific session id that may not exist server-side yet (design 3.6).
-        A session created here takes ``write_mode``; ``on_allocate`` runs
-        before its document is saved, as in ``create``.
-        """
-        if not is_valid_session_id(session_id):
-            raise OpError(f"invalid session id: {session_id!r}")
-        existing = self.get(session_id)
-        if existing is not None:
-            return existing, False
-        self._refuse_retired(session_id)
-        with self._lock:
-            existing = self._sessions.get(session_id)
-            if existing is not None:
-                return existing, False
-            session = Session(
-                id=session_id,
-                write_mode=write_mode,
-                write_mode_source=write_mode_source,
-            )
-            if on_allocate is not None:
-                on_allocate(session_id)
-            self._sessions[session_id] = session
-            self._rings[session_id] = deque(maxlen=self._ring_size)
-            self._backend.save(session.to_dict())
-            self._meta_cache = None
-            return session, True
+        return self.create_with_capacity(
+            session_id=session_id,
+            max_sessions=max_sessions,
+            write_mode=write_mode,
+            write_mode_source=write_mode_source,
+            on_allocate=on_allocate,
+        )
 
     def get(self, session_id: str) -> Optional[Session]:
         if not is_valid_session_id(session_id):

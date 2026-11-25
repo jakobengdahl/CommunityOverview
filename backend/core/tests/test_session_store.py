@@ -1,4 +1,4 @@
-# covers: backend/core/session_store.py
+# covers: backend/core/session_store.py, backend/core/session_manager.py
 """
 Tests for the server-side session store (step 1) and op state transforms
 (step 3) in ``backend/core/session_store.py``.
@@ -1042,8 +1042,63 @@ def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
         assert set(positions) == {0}
         assert os.lseek(f.fileno(), 0, os.SEEK_CUR) == eof > 0
     if module is session_store:
+        outcomes[:] = [None, None]
+        backend = FileSessionPersistenceBackend(tmp_path / "s")
         calls.clear()
         outcomes[:] = [errno.EDEADLOCK, None, None]
-        with FileSessionPersistenceBackend(tmp_path / "s").transaction():
+        with backend.transaction():
             pass
         assert calls == [FakeMsvcrt.LK_LOCK] * 2 + [FakeMsvcrt.LK_UNLCK]
+
+
+def test_creation_paths_share_capacity_across_stores(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.core.session_manager import SessionLimitReached, SessionManager
+
+    first = SessionManager(_store(tmp_path), max_sessions=2)
+    source = first.create_session()
+    second = SessionManager(_store(tmp_path), max_sessions=2)
+    barrier = threading.Barrier(2)
+
+    def create(copy):
+        barrier.wait()
+        try:
+            return second.copy_session(source.id) if copy else first.create_session()
+        except SessionLimitReached:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, (False, True)))
+    assert sum(result is not None for result in results) == 1
+    assert len(_store(tmp_path).list_meta()) == 2
+
+    roomy = SessionManager(_store(tmp_path), max_sessions=4)
+    assert roomy.create_session()
+    assert roomy.copy_session(source.id)
+
+
+def test_unpublished_document_is_invisible_and_swept_on_restart(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    published = store.create()
+    directory = tmp_path / "sessions"
+    original_rename = session_store.os.rename
+
+    def crash_before_publish(source, destination):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(session_store.os, "rename", crash_before_publish)
+    with pytest.raises(KeyboardInterrupt):
+        store.create_with_capacity(max_sessions=2)
+    monkeypatch.setattr(session_store.os, "rename", original_rename)
+    assert store.session_count() == 1
+    assert [m["id"] for m in store.list_meta()] == [published.id]
+    orphan = list(directory.glob("session_*.json"))
+    assert len(orphan) == 1
+    partial = directory / "session_partial.json"
+    partial.write_text("{")
+    restarted = _store(tmp_path)
+    assert not orphan[0].exists()
+    assert not partial.exists()
+    assert restarted.get(published.id) is not None
+    assert restarted.create_with_capacity(max_sessions=2)[1]
