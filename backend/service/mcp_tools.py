@@ -6595,6 +6595,14 @@ def _push_to_session(
         except Exception:
             logger.exception("legacy push failed for session %s", session_id)
 
+    storage_failure = {
+        "requested": True,
+        "delivered": False,
+        "status": "not_delivered",
+        "live_consumers": 0,
+        "error": "storage_error",
+    }
+    materialized = None
     if session_manager is not None:
         if (
             legacy_gated
@@ -6606,15 +6614,11 @@ def _push_to_session(
                 # The server is the only writer of pushed membership, so a
                 # session a browser holds but never stored is materialised here
                 # rather than by whichever browser renders the push first.
-                session_manager.get_or_create(session_id)
+                materialized, created = session_manager.materialize(session_id)
+                if not created:
+                    materialized = None
             except OSError:
-                return {
-                    "requested": True,
-                    "delivered": False,
-                    "status": "not_delivered",
-                    "live_consumers": 0,
-                    "error": "storage_error",
-                }
+                return storage_failure
             except Exception:
                 # Retired id, session limit: no browser writes membership back,
                 # so a legacy render alone would show nodes the session never
@@ -6637,13 +6641,20 @@ def _push_to_session(
                     hub_published = bool(
                         session_manager.push_command(session_id, command)
                     )
-            except Exception:
+            except Exception as exc:
+                if materialized is not None and isinstance(exc, OSError):
+                    # Writing the membership into the session materialised for
+                    # this push failed: neither the push nor the session stands.
+                    session_manager.settle_materialization(materialized, failed=True)
+                    return storage_failure
                 # Best-effort mirror to the hub; never break the legacy push path.
                 hub_published = False
                 hub_publish_failed = True
                 # Applying the membership may be what failed (and rolled back),
                 # so a gated push is not sent to a legacy browser either.
                 legacy_withheld = legacy_gated and not legacy["sent"]
+        if materialized is not None:
+            session_manager.settle_materialization(materialized, failed=False)
     if hub_published and legacy_gated and not legacy["sent"]:
         # Queued behind an in-flight batch: the legacy send follows the apply.
         # Like the queued hub publish, acceptance stands in for delivery.

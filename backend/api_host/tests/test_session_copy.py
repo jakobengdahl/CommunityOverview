@@ -426,15 +426,17 @@ def test_creation_storage_failure_is_safe(
     assert manager.create_session()
 
 
-@pytest.mark.parametrize("existing", [True, False])
+@pytest.mark.parametrize("prior", ["existing", "materialised", "joined"])
 @pytest.mark.parametrize("operation", ["rename", "mcp_rename", "mcp_describe"])
 def test_update_storage_failure_is_storage_error(
-    test_app, monkeypatch, operation, existing
+    test_app, monkeypatch, operation, prior
 ):
-    """A failed op write is ``storage_error``; it keeps an existing session and
-    removes one materialised for the call."""
+    """A failed op write is ``storage_error``; it keeps an existing session or
+    one another caller joined meanwhile, and removes one materialised only for
+    the call."""
     manager = test_app.app.state.session_manager
     sid = "1111-2222"
+    existing = prior == "existing"
     if existing:
         manager.get_or_create(sid)
     backend = manager.store._backend
@@ -445,6 +447,9 @@ def test_update_storage_failure_is_storage_error(
         writes.append(args)
         if not existing and len(writes) == 1:
             return real_replace(*args, **kwargs)
+        if prior == "joined":
+            # A stream client joins while the call's op write is in flight.
+            assert manager.get_or_create(sid)[1] is False
         raise OSError("private storage detail")
 
     with monkeypatch.context() as patch:
@@ -458,5 +463,6 @@ def test_update_storage_failure_is_storage_error(
                 operation.replace("mcp_", "") + "_visualization_session"
             ]
             assert tool(sid, "value") == {"success": False, "error": "storage_error"}
-    assert (manager.store.get(sid) is not None) is existing
-    assert manager.store.session_count() == int(existing)
+    kept = prior != "materialised"
+    assert (manager.store.get(sid) is not None) is kept
+    assert manager.store.session_count() == int(kept)

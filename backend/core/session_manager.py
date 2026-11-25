@@ -747,6 +747,9 @@ class SessionManager:
         # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        # Sessions materialised for one write that no other caller has been
+        # handed yet; only these may be dropped when that write fails.
+        self._tentative: Dict[str, Session] = {}
         self._pending_pushes: set[asyncio.Task] = set()
         # The app's loop, so a push from a worker thread is applied there.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1058,6 +1061,9 @@ class SessionManager:
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
         if session is not None:
+            # Another caller now holds it as existing, so a failed write by
+            # whoever materialised it must no longer drop it.
+            self._tentative.pop(session_id, None)
             return session, False
         # Materialising a session the browser already holds is never a create
         # request, so it is direct whatever the graph default (§5.1): a staged
@@ -1074,6 +1080,24 @@ class SessionManager:
             )
         except SessionRetired:
             raise SessionNotFound() from None
+
+    def materialize(self, session_id: str) -> Tuple[Session, bool]:
+        """``get_or_create`` for a caller about to write the session; pair it
+        with ``settle_materialization`` once that write ends."""
+        session, created = self.get_or_create(session_id)
+        if created:
+            self._tentative[session_id] = session
+        return session, created
+
+    def settle_materialization(self, session: Session, failed: bool) -> None:
+        """End a ``materialize``. A session materialised for a write that then
+        failed is not reported as created, so it must not stay visible or
+        counted, unless another caller was handed it or it was written to."""
+        if self._tentative.get(session.id) is not session:
+            return
+        del self._tentative[session.id]
+        if failed and self.store.get(session.id) is session and session.seq == 0:
+            self.store.delete(session.id)
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
         """The write mode a response describing ``session`` reports (§5.1).
@@ -1361,7 +1385,7 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        session, created = self.get_or_create(session_id)
+        session, _ = self.materialize(session_id)
         try:
             await self.apply_ops(
                 session_id,
@@ -1372,18 +1396,12 @@ class SessionManager:
                 ],
             )
         except OSError:
-            if created:
-                async with self._lock(session_id):
-                    self._discard_failed_materialization(session)
+            async with self._lock(session_id):
+                self.settle_materialization(session, failed=True)
             raise
+        finally:
+            self.settle_materialization(session, failed=False)
         return self.store.get(session_id)
-
-    def _discard_failed_materialization(self, session: Session) -> None:
-        # A session materialised for an op whose write then failed is not
-        # reported as created, so it must not stay visible or counted. One that
-        # was replaced or written to meanwhile is no longer this call's to drop.
-        if self.store.get(session.id) is session and session.seq == 0:
-            self.store.delete(session.id)
 
     async def delete_session(
         self,
@@ -1465,20 +1483,21 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        _, created = self.get_or_create(session_id)
-        if self._lock(session_id).locked():
-            raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
-        op = {"op": "session_renamed", "name": name, "client_id": actor}
+        materialized, _ = self.materialize(session_id)
         try:
+            if self._lock(session_id).locked():
+                raise LayoutBusy()
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+
+            op = {"op": "session_renamed", "name": name, "client_id": actor}
             self._apply_op_sync(session, session_id, actor, op)
         except OSError:
-            if created:
-                self._discard_failed_materialization(session)
+            self.settle_materialization(materialized, failed=True)
             raise
+        finally:
+            self.settle_materialization(materialized, failed=False)
         return session
 
     def describe_session_sync(
@@ -1508,20 +1527,25 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        _, created = self.get_or_create(session_id)
-        if self._lock(session_id).locked():
-            raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
-        op = {"op": "session_described", "description": description, "client_id": actor}
+        materialized, _ = self.materialize(session_id)
         try:
+            if self._lock(session_id).locked():
+                raise LayoutBusy()
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+
+            op = {
+                "op": "session_described",
+                "description": description,
+                "client_id": actor,
+            }
             self._apply_op_sync(session, session_id, actor, op)
         except OSError:
-            if created:
-                self._discard_failed_materialization(session)
+            self.settle_materialization(materialized, failed=True)
             raise
+        finally:
+            self.settle_materialization(materialized, failed=False)
         return session
 
     def delete_session_sync(
