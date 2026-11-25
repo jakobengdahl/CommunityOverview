@@ -994,7 +994,7 @@ async def test_a_membership_push_the_hub_failed_to_apply_reaches_no_browser(tmp_
         assert delivery["status"] == "not_delivered"
         await _settle(lambda: bool(received), turns=50)
         assert received == []
-        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == []
+        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == ["alpha"]
 
 
 @pytest.mark.asyncio
@@ -1420,3 +1420,24 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
     # Guards the enumeration itself: a tightened precondition that silently
     # skipped every state would otherwise pass vacuously.
     assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"
+
+
+@pytest.mark.parametrize(
+    "tool,field",
+    [
+        ("rename_visualization_session", "name"),
+        ("describe_visualization_session", "description"),
+    ],
+)
+def test_implicit_metadata_creation_reports_storage_failure(
+    tmp_path, monkeypatch, tool, field
+):
+    tools, _, manager = _wire(tmp_path)
+
+    def fail(_document):
+        raise OSError()
+
+    monkeypatch.setattr(manager.store._backend, "save", fail)
+    result = tools[tool](session_id=UNKNOWN_SESSION_ID, **{field: "value"})
+    assert result["error"] == "storage_error"
+    assert manager.get_session(UNKNOWN_SESSION_ID) is None

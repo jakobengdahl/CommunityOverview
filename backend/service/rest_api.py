@@ -1730,7 +1730,9 @@ def _register_session_endpoints(
         except OSError:
             _staged_answer(session_storage_error())
         except SessionLimitReached:
-            raise HTTPException(status_code=503, detail="too many sessions")
+            raise _session_refusal("too_many_sessions", "too many sessions", 503)
+        except OpBatchTooLarge:
+            raise _session_refusal("session_too_large", "session too large", 413)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
         except RateLimited:

@@ -3549,6 +3549,8 @@ def register_mcp_tools(
                 "error": "too_many_sessions",
                 "message": "The session limit has been reached; delete unused sessions and retry.",
             }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
         except SessionNotFound:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         except OpError as exc:
@@ -3620,6 +3622,8 @@ def register_mcp_tools(
                 "error": "too_many_sessions",
                 "message": "The session limit has been reached; delete unused sessions and retry.",
             }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
         except SessionNotFound:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         except OpError as exc:
@@ -6593,6 +6597,7 @@ def _push_to_session(
             logger.exception("legacy push failed for session %s", session_id)
 
     if session_manager is not None:
+        membership_applied = False
         if (
             legacy_gated
             and session_registry
@@ -6603,7 +6608,9 @@ def _push_to_session(
                 # The server is the only writer of pushed membership, so a
                 # session a browser holds but never stored is materialised here
                 # rather than by whichever browser renders the push first.
-                session_manager.get_or_create(session_id)
+                membership_applied = session_manager.materialize_command(
+                    session_id, command
+                )
             except Exception:
                 # Retired id, session limit: no browser writes membership back,
                 # so a legacy render alone would show nodes the session never
@@ -6619,7 +6626,10 @@ def _push_to_session(
                 if legacy_gated:
                     hub_published = bool(
                         session_manager.push_command(
-                            session_id, command, on_published=_send_legacy_after_apply
+                            session_id,
+                            command,
+                            on_published=_send_legacy_after_apply,
+                            membership_applied=membership_applied,
                         )
                     )
                 else:
