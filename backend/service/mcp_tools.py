@@ -117,8 +117,8 @@ _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
 # The rendered width range of a card node's outer box, which the canvas CSS
 # guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
 # min-width/max-width under box-sizing: border-box, border included). Unlike
-# _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` never
-# overlaps horizontally between card nodes. A node drawn with a configured shape
+# _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` plus a
+# gap never overlaps horizontally between card nodes. A node drawn with a configured shape
 # takes its width from the shape and its scale instead, so it is not covered.
 # Height wraps with the label, so it has no bound.
 _NODE_WIDTH_BOUNDS = {"min": 150, "max": 250}
@@ -2356,7 +2356,7 @@ def register_mcp_tools(
             Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
             selected_node_ids, assumed_node_size, node_width_bounds (the
             rendered min/max outer width of a card node; space columns at
-            ``max`` to rule out horizontal overlap between card nodes — shaped
+            ``max`` plus a gap to rule out horizontal overlap between card nodes — shaped
             nodes are not covered and height has no bound)
         """
         if session_manager is None:

@@ -1609,8 +1609,8 @@ geometry entry with `type`/`status` `null`, so a layout never silently drops a
 node it must still place. Per-node measured `width`/`height` remain unavailable —
 the browser does not upload rendered geometry and node boxes size to their
 content. `node_width_bounds` is the width range the canvas CSS guarantees for
-card nodes, so space columns at its `max` when they must not overlap (a node
-drawn with a configured shape is sized by its shape and scale and is not
+card nodes, so space columns at its `max` plus a gap when they must not overlap
+(a node drawn with a configured shape is sized by its shape and scale and is not
 covered); `assumed_node_size` is a typical box and height has no bound.
 
 `selected_node_ids` is merged in so "what is here and where is it" is one call.
