@@ -45,12 +45,13 @@ capacity reservation, access assignment and durable publication form one
 serialized operation. Hold the source mutation lock and the persistence
 transaction across the check and snapshot; coordinate staged-layer mutations
 under the same exclusion. If the source has unmerged staged changes, reject the
-save with `staged_changes` (409) and publish no destination. The backend must
-atomically commit the destination and its access assignment, or compensate
-before making it visible. A file rename
-alone does not make multi-resource writes atomic. On failure, including a crash,
-recovery must leave no visible partial session, leaked access grant, or consumed
-capacity. Implementations unable to guarantee this must refuse the operation.
+save with `staged_changes` (409) and publish no destination. Publish the
+destination before assigning access. The session can briefly be visible before
+its grants exist; publication and access assignment are not atomic. If grant
+assignment fails, revoke the grants made for the save and remove the destination
+before reporting failure, so no grant or capacity outlives a failed save. A
+crash before grant assignment leaves no grant; a failure before publication
+leaves no visible destination or consumed capacity.
 All source edits, including staged changes, must serialize with this boundary;
 otherwise the operation must refuse rather than capture a mixture. A successful
 capture is from the stated revision even if an edit follows immediately.
