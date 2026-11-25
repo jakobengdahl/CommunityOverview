@@ -26,15 +26,16 @@ def validate_erasure(actor_id: str, replacement_token: str) -> None:
 def preflight_file(path: str | Path, *, write: bool = False) -> None:
     """Open regular file *path* as an erasure will, changing nothing.
 
-    O_NONBLOCK keeps a FIFO from blocking the open; it is then refused as not
-    a regular file, like a directory, which the read-write open refuses.
-    Writers open with O_CREAT, which fs.protected_regular refuses in a sticky
-    directory even for root, so a write open of an existing file adds it; a
-    dangling symlink is opened without it, so nothing is ever created.
+    Anything but a regular file is refused before the open, since opening a
+    device can have side effects; a missing or dangling path raises there too.
+    fstat() after the open catches a swap in between, and O_NONBLOCK keeps a
+    FIFO swapped in from blocking it. Writers open with O_CREAT, which
+    fs.protected_regular refuses in a sticky directory even for root, so a
+    write open adds it too.
     """
-    flags = os.O_RDWR if write else os.O_RDONLY
-    if write and os.path.exists(path):
-        flags |= os.O_CREAT
+    if not stat.S_ISREG(os.stat(path).st_mode):
+        raise OSError("not a regular file")
+    flags = os.O_RDWR | os.O_CREAT if write else os.O_RDONLY
     fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

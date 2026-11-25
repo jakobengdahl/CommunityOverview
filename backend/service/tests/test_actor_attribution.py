@@ -920,8 +920,12 @@ def _tree(root):
 
 
 def _owner_permissions(monkeypatch):
-    """Make os.open and os.access honour owner mode bits even for root."""
+    """Make os.open and os.access honour owner mode bits even for root.
+
+    Returns the resolved paths passed to os.open, in order.
+    """
     real_open, real_access = os.open, os.access
+    opened = []
 
     def allowed(path, want_read, want_write, want_exec=False):
         try:
@@ -935,6 +939,7 @@ def _owner_permissions(monkeypatch):
         )
 
     def fake_open(path, flags, *args, **kwargs):
+        opened.append(os.path.realpath(path))
         access = flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)
         if not allowed(path, access != os.O_WRONLY, access != os.O_RDONLY):
             raise PermissionError(13, "Permission denied")
@@ -947,6 +952,7 @@ def _owner_permissions(monkeypatch):
 
     monkeypatch.setattr(os, "open", fake_open)
     monkeypatch.setattr(os, "access", fake_access)
+    return opened
 
 
 def _protected_regular_applies_to_root():
@@ -1001,17 +1007,22 @@ class _FakeMergeRecords:
         "db_directory_read_only",
         "db_directory_sticky_and_journal_not_owned",
         "proposals_is_fifo",
+        "proposals_is_device_symlink",
         "proposals_shm_read_only",
         "session_file_is_fifo",
         "session_file_unreadable",
         "session_lock_is_directory",
         "session_lock_read_only",
+        "session_lock_dangling_symlink",
         pytest.param(
             "session_lock_foreign_in_sticky_directory", marks=_protected_regular
         ),
         "sessions_directory_read_only",
         "sessions_directory_sticky_and_file_not_owned",
+        "sessions_directory_sticky_and_leftover_not_owned",
         "merge_log_is_directory",
+        "layers_directory_read_only",
+        "layers_directory_sticky_and_file_not_owned",
         "merge_records_not_updatable",
     ],
 )
@@ -1043,7 +1054,7 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     graph.stage("1234-5678", [_layer_entry("node-a", ACTOR)])
     merge_log = tmp_path / "graph" / "graph.merges.ndjson"
     db = tmp_path / "db"
-    _owner_permissions(monkeypatch)
+    opened = _owner_permissions(monkeypatch)
     if broken == "session_file_dangling_symlink":
         # load() skips it, so the erasure has nothing to open there.
         (sessions / "2222-3333.json").symlink_to(tmp_path / "missing.json")
@@ -1083,18 +1094,22 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     elif broken == "proposals_is_fifo":
         (tmp_path / "db" / "proposals.db").unlink()
         os.mkfifo(tmp_path / "db" / "proposals.db")
+    elif broken == "proposals_is_device_symlink":
+        (db / "proposals.db").unlink()
+        (db / "proposals.db").symlink_to(os.devnull)
     elif broken == "proposals_shm_read_only":
         (db / "proposals.db-shm").write_bytes(b"")
         (db / "proposals.db-shm").chmod(0o444)
     elif broken == "session_file_is_fifo":
         os.mkfifo(sessions / "2222-3333.json")
-    elif broken == "session_file_unreadable":
-        (sessions / "1234-5678.json").chmod(0o200)
     elif broken == "session_lock_is_directory":
         (sessions / ".sessions.lock").unlink()
         (sessions / ".sessions.lock").mkdir()
     elif broken == "session_lock_read_only":
         (sessions / ".sessions.lock").chmod(0o444)
+    elif broken == "session_lock_dangling_symlink":
+        (sessions / ".sessions.lock").unlink()
+        (sessions / ".sessions.lock").symlink_to(tmp_path / "missing.lock")
     elif broken == "session_lock_foreign_in_sticky_directory":
         sessions.chmod(0o1777)
         os.chown(sessions / ".sessions.lock", 4242, 4242)
@@ -1103,9 +1118,20 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     elif broken == "sessions_directory_sticky_and_file_not_owned":
         sessions.chmod(0o1777)
         monkeypatch.setattr(os, "geteuid", lambda: 4242)
+    elif broken == "sessions_directory_sticky_and_leftover_not_owned":
+        # The leftover temp file is the only file the directory replaces.
+        (sessions / "1234-5678.json").unlink()
+        (sessions / "session_tmp.json").write_text("{}")
+        sessions.chmod(0o1777)
+        monkeypatch.setattr(os, "geteuid", lambda: 4242)
     elif broken == "merge_log_is_directory":
         merge_log.unlink(missing_ok=True)
         merge_log.mkdir()
+    elif broken == "layers_directory_read_only":
+        graph.layers_path.parent.chmod(0o555)
+    elif broken == "layers_directory_sticky_and_file_not_owned":
+        graph.layers_path.parent.chmod(0o1777)
+        monkeypatch.setattr(os, "geteuid", lambda: 4242)
     fake_module = types.ModuleType("backend.core.postgres_backend")
     fake_module.PostgresMergeRecords = _FakeMergeRecords
     monkeypatch.setitem(sys.modules, "backend.core.postgres_backend", fake_module)
@@ -1118,6 +1144,9 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     )
     monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql://localhost/graph")
     before = _tree(tmp_path)
+    # Mode 0o200 after the snapshot: _tree cannot read the file unless root.
+    if broken == "session_file_unreadable":
+        (sessions / "1234-5678.json").chmod(0o200)
     args = ["--actor-id", ACTOR, "--replacement-token", TOKEN]
     args += ["--history-path", str(history), "--sessions-dir", str(sessions)]
     args += ["--run-history-db", str(tmp_path / "db" / "runs.db")]
@@ -1126,8 +1155,10 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
     try:
         code = main(args)
     finally:
-        for directory in (history.parent, db, sessions):
+        for directory in (history.parent, db, sessions, graph.layers_path.parent):
             directory.chmod(0o755)
+        if broken == "session_file_unreadable":
+            (sessions / "1234-5678.json").chmod(0o644)
     captured = capsys.readouterr()
     assert ACTOR not in captured.out + captured.err
     if broken in (None, "session_file_dangling_symlink"):
@@ -1139,6 +1170,7 @@ def test_cli_runs_every_store_preflight_before_touching_any_store(
         assert captured.out == ""
         assert _tree(tmp_path) == before
         assert all(not made.erased for made in _FakeMergeRecords.made)
+        assert os.devnull not in opened
 
 
 def _crashed_wal_copy(store_cls, source, target):
