@@ -1240,6 +1240,10 @@ class SessionGate:
         self.layer_vectors.schedule(session_id, load)
 
 
+def session_storage_error() -> Dict[str, Any]:
+    return {"success": False, "error": "storage_error"}
+
+
 def refusal_result(exc: Exception, **defaults: Any) -> Optional[Dict[str, Any]]:
     """The result a session or staging refusal answers with, or None when
     ``exc`` is not one."""

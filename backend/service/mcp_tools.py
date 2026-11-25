@@ -103,7 +103,7 @@ from backend.runtime.authorization import (
 )
 from . import access, graph_merge_plan
 from .service import GraphService
-from .staging import refusal_result
+from .staging import refusal_result, session_storage_error
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
 logger = logging.getLogger(__name__)
@@ -519,6 +519,9 @@ def register_mcp_tools(
             session_registry, session_id, tool_name, result, session_manager
         )
         if session_id and isinstance(result, dict):
+            if delivery.get("error") == "storage_error":
+                result.clear()
+                result.update(session_storage_error())
             result["visualization_delivery"] = delivery
         return delivery
 
@@ -3255,6 +3258,8 @@ def register_mcp_tools(
             )
         except WriteModeRefused as exc:
             return exc.to_result()
+        except OSError:
+            return session_storage_error()
         except SessionLimitReached:
             return {
                 "success": False,
@@ -3321,6 +3326,8 @@ def register_mcp_tools(
                     target="copy_visualization_session"
                 ),
             )
+        except OSError:
+            return session_storage_error()
         except _CopyDenied as exc:
             return exc.result
         except layer_store.LayerFull as exc:
@@ -3537,6 +3544,8 @@ def register_mcp_tools(
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
             }
+        except OSError:
+            return session_storage_error()
         except SessionLimitReached:
             return {
                 "success": False,
@@ -3606,6 +3615,8 @@ def register_mcp_tools(
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
             }
+        except OSError:
+            return session_storage_error()
         except SessionLimitReached:
             return {
                 "success": False,
@@ -6596,6 +6607,14 @@ def _push_to_session(
                 # session a browser holds but never stored is materialised here
                 # rather than by whichever browser renders the push first.
                 session_manager.get_or_create(session_id)
+            except OSError:
+                return {
+                    "requested": True,
+                    "delivered": False,
+                    "status": "not_delivered",
+                    "live_consumers": 0,
+                    "error": "storage_error",
+                }
             except Exception:
                 # Retired id, session limit: no browser writes membership back,
                 # so a legacy render alone would show nodes the session never

@@ -1420,3 +1420,20 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
     # Guards the enumeration itself: a tightened precondition that silently
     # skipped every state would otherwise pass vacuously.
     assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"
+
+
+@pytest.mark.asyncio
+async def test_push_reports_storage_failure_without_publishing(tmp_path, monkeypatch):
+    tools, registry, manager = _wire(tmp_path)
+
+    def fail(_session_id):
+        raise OSError("private storage detail")
+
+    monkeypatch.setattr(manager, "get_or_create", fail)
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
+        result = _search(tools, UNKNOWN_SESSION_ID)
+        assert result["success"] is False
+        assert result["error"] == "storage_error"
+        assert result["visualization_delivery"]["delivered"] is False
+        assert received == []
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
