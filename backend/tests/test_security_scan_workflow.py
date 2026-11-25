@@ -1,3 +1,4 @@
+# covers: .github/workflows/security-scan.yml, .github/workflows/reusable-secret-sast-scan.yml
 """Execute core and reusable scanner steps to pin blocking and summary behavior."""
 
 import os
