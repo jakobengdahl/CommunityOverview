@@ -10,6 +10,7 @@ import pytest
 from backend.core import session_manager as manager_module
 from backend.core.session_annotations import image_annotation_error
 from backend.core.write_modes import STAGED_UNSUPPORTED
+from backend.service.staging import HookFailed
 from backend.runtime.authorization import GraphAuthorizationDecision
 
 
@@ -284,7 +285,25 @@ def test_copy_carries_staged_changes_only_for_a_copier_who_may_stage(
     assert (context.actor["actor_id"], context.session_id) == ("copier", source)
     assert kwargs["copy_session_id"] == copied.get("id", copied.get("session_id"))
 
+    # A hook's own OSError is no storage failure; a failed document save is
+    # storage_error and leaves no staged record or entries behind.
     layer = manager.write_modes.layer_store
+    count = manager.store.session_count()
+    assign.side_effect = ConnectionError()
+    with pytest.raises(HookFailed):
+        copy_as(source, "copier")
+    assign.side_effect = None
+    assert manager.store.session_count() == count
+    with patch.object(manager.store._backend, "save", side_effect=OSError("x")):
+        succeeded, result = copy_as(source, "copier")
+    assert not succeeded
+    refusal = result["detail"] if transport == "rest" else result
+    assert refusal["error"] == "storage_error"
+    failed_id = assign.call_args.kwargs["copy_session_id"]
+    assert manager.write_modes.is_retired(failed_id)
+    assert layer.load_layer(failed_id) == []
+    assert manager.store.session_count() == count
+
     (staged,) = layer.load_layer(source)
     assert staged["stage_token"] not in {
         e["stage_token"] for e in layer.load_layer(copied_id)
@@ -364,4 +383,86 @@ def test_session_capacity_refusals_reach_rest_and_mcp(test_app, copy):
     assert response.status_code == 503
     assert result["success"] is False
     assert result["error"] == "too_many_sessions"
+    assert manager.store.session_count() == 1
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create",
+        "copy",
+        "rename",
+        "stream",
+        "mcp_create",
+        "mcp_copy",
+        "mcp_rename",
+        "mcp_describe",
+    ],
+)
+@pytest.mark.parametrize("failure_point", ["_replace_locked", "load"])
+def test_creation_storage_failure_is_safe(
+    test_app, monkeypatch, operation, failure_point
+):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session("source")
+    manager._max_sessions = 2
+    backend = manager.store._backend
+
+    def fail(*args, **kwargs):
+        raise OSError("private storage detail")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, failure_point, fail)
+        if operation == "create":
+            response = test_app.post("/api/sessions", json={})
+        elif operation == "copy":
+            response = test_app.post(f"/api/sessions/{source.id}/copy")
+        elif operation == "rename":
+            response = test_app.patch("/api/sessions/1111-2222", json={"name": "name"})
+        elif operation == "stream":
+            response = test_app.get("/api/sessions/1111-2222/stream?client_id=c")
+        else:
+            tools = test_app.app.state.tools_map
+            result = {
+                "mcp_create": lambda: tools["create_visualization_session"](),
+                "mcp_copy": lambda: tools["copy_visualization_session"](source.id),
+                "mcp_rename": lambda: tools["rename_visualization_session"](
+                    "1111-2222", "name"
+                ),
+                "mcp_describe": lambda: tools["describe_visualization_session"](
+                    "1111-2222", "description"
+                ),
+            }[operation]()
+        if operation.startswith("mcp_"):
+            assert result == {"success": False, "error": "storage_error"}
+        else:
+            assert response.status_code == 503
+            assert response.json()["detail"] == {"error": "storage_error"}
+    assert manager.store.session_count() == 1
+    assert manager.create_session()
+
+
+@pytest.mark.parametrize("operation", ["rename", "mcp_rename", "mcp_describe"])
+def test_update_storage_failure_is_storage_error(test_app, monkeypatch, operation):
+    """A failed op write on an existing session is ``storage_error`` and keeps
+    the session."""
+    manager = test_app.app.state.session_manager
+    sid = "1111-2222"
+    manager.get_or_create(sid)
+
+    def fail(*args, **kwargs):
+        raise OSError("private storage detail")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager.store._backend, "_replace_locked", fail)
+        if operation == "rename":
+            response = test_app.patch(f"/api/sessions/{sid}", json={"name": "name"})
+            assert response.status_code == 503
+            assert response.json()["detail"] == {"error": "storage_error"}
+        else:
+            tool = test_app.app.state.tools_map[
+                operation.replace("mcp_", "") + "_visualization_session"
+            ]
+            assert tool(sid, "value") == {"success": False, "error": "storage_error"}
+    assert manager.store.get(sid) is not None
     assert manager.store.session_count() == 1

@@ -1102,3 +1102,36 @@ def test_unpublished_document_is_invisible_and_swept_on_restart(tmp_path, monkey
     assert not partial.exists()
     assert restarted.get(published.id) is not None
     assert restarted.create_with_capacity(max_sessions=2)[1]
+
+
+def test_publication_flushes_and_is_visible_to_another_store(tmp_path, monkeypatch):
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    calls = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd):
+        calls.append(os.fstat(fd).st_mode)
+        real_fsync(fd)
+
+    monkeypatch.setattr(session_store.os, "fsync", record_fsync)
+    session = first.create()
+    import stat
+
+    assert any(stat.S_ISREG(mode) for mode in calls)
+    assert any(stat.S_ISDIR(mode) for mode in calls)
+    assert second.get(session.id).id == session.id
+
+
+def test_failed_directory_flush_removes_new_session(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_store,
+            "_fsync_directory",
+            lambda _: (_ for _ in ()).throw(OSError()),
+        )
+        with pytest.raises(OSError):
+            store.create_with_capacity(max_sessions=1)
+    assert store.session_count() == 0
+    assert store.create_with_capacity(max_sessions=1)[1]

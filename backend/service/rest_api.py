@@ -81,7 +81,7 @@ from . import attachments as attachment_ops
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
-from .staging import refusal_result
+from .staging import outside_storage, refusal_result, session_storage_error
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -738,6 +738,7 @@ _WRITE_ERROR_STATUS = {
     "entity_revision_conflict": 409,
     "write_failed": 502,
     "write_outcome_unknown": 503,
+    "storage_error": 503,
     # A write made in a session (§9, §16.3).
     "session_not_found": 404,
     "session_not_supported": 400,
@@ -1458,6 +1459,8 @@ def _register_session_endpoints(
             )
         try:
             session = session_manager.create_session(request.name, request.write_mode)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except WriteModeRefused as exc:
@@ -1498,19 +1501,25 @@ def _register_session_endpoints(
                 request.name if request else None,
                 # Copied staged changes are staged by the copier: never more
                 # than the copier may stage.
-                authorize_staging=lambda: _authorize_session_change(
-                    http_request,
-                    "copy_visualization_session",
-                    session_id,
-                    GRAPH_OPERATION_STAGE,
+                authorize_staging=outside_storage(
+                    lambda: _authorize_session_change(
+                        http_request,
+                        "copy_visualization_session",
+                        session_id,
+                        GRAPH_OPERATION_STAGE,
+                    )
                 ),
                 staged_by=staged_by,
-                assign_access=lambda copy_id: _assign_copy_access(
-                    http_request, session_id, copy_id
+                assign_access=outside_storage(
+                    lambda copy_id: _assign_copy_access(
+                        http_request, session_id, copy_id
+                    )
                 ),
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except OpBatchTooLarge:
@@ -1718,6 +1727,8 @@ def _register_session_endpoints(
             await session_manager.rename_session(
                 session_id, request.name, request.client_id
             )
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except SessionNotFound:
@@ -2209,6 +2220,8 @@ def _register_session_endpoints(
         _rate_limit_lookup(request)
         try:
             session_manager.get_or_create(session_id)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except SessionNotFound:

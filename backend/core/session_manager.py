@@ -995,17 +995,20 @@ class SessionManager:
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
 
+        staged_copies = []
+
         def allocate(copy_id: str) -> None:
             if mode == WRITE_MODE_STAGED:
                 allocate_staged(copy_id)
-            if assign_access is None:
-                return
-            try:
-                assign_access(copy_id)
-            except BaseException:
-                if mode == WRITE_MODE_STAGED:
-                    self.write_modes.retire(copy_id, require_empty=False)
-                raise
+            if assign_access is not None:
+                try:
+                    assign_access(copy_id)
+                except BaseException:
+                    if mode == WRITE_MODE_STAGED:
+                        self.write_modes.retire(copy_id, require_empty=False)
+                    raise
+            if mode == WRITE_MODE_STAGED:
+                staged_copies.append(copy_id)
 
         def allocate_staged(copy_id: str) -> None:
             self.write_modes.record_staged(copy_id)
@@ -1035,15 +1038,22 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
                 raise
 
-        return self.store.create_with_capacity(
-            name,
-            max_sessions=self._max_sessions,
-            description=source.description,
-            state=state,
-            write_mode=mode,
-            write_mode_source="explicit",
-            on_allocate=allocate,
-        )[0]
+        try:
+            return self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                description=source.description,
+                state=state,
+                write_mode=mode,
+                write_mode_source="explicit",
+                on_allocate=allocate,
+            )[0]
+        except BaseException:
+            # The document save failed after allocation: the staged record and
+            # copied entries must not outlive the copy that was never published.
+            for copy_id in staged_copies:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
 
     def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
