@@ -1028,11 +1028,16 @@ class TestRefusals:
         assert response.status_code == 503
         assert response.json()["detail"]["error_code"] == "import_merge_busy"
 
-    @pytest.mark.parametrize("limit, status", [(2, 422), (3, 200), (4, 200)])
-    def test_commit_entity_limit(self, storage, job_store, monkeypatch, limit, status):
+    @pytest.mark.parametrize(
+        "limit, edges, status",
+        [(2, ..., 422), (3, ..., 200), (4, ..., 200), (1, None, 422), (2, None, 200)],
+    )
+    def test_commit_entity_limit(
+        self, storage, job_store, monkeypatch, limit, edges, status
+    ):
         monkeypatch.setattr(import_service, "MERGE_COMMIT_MAX_ENTITIES", limit)
         client = _client(storage, job_store)
-        body = _body()
+        body = _body() if edges is ... else _body(_document(edges=edges))
         digest = _preview(client, body)["plan_digest"]
         before = _state(storage)
         if status == 422:

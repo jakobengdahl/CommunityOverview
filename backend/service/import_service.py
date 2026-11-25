@@ -861,7 +861,7 @@ def _commit_merge(
     # Without a caller digest the commit binds to the plan just computed.
     bound_digest = plan.digest
 
-    entity_count = len(document["nodes"]) + len(document.get("edges", []))
+    entity_count = len(document["nodes"]) + len(document.get("edges") or [])
     if entity_count > MERGE_COMMIT_MAX_ENTITIES:
         return {
             "success": False,
