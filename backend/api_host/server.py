@@ -739,3 +739,16 @@ def get_app() -> FastAPI:
         uvicorn backend.api_host.server:get_app --factory
     """
     return create_app()
+
+
+def main() -> None:
+    """Run the application server with environment configuration."""
+    import uvicorn
+
+    config = AppConfig.from_env()
+    uvicorn.run(
+        "backend.api_host.server:get_app",
+        factory=True,
+        host=config.host,
+        port=config.port,
+    )
