@@ -1414,11 +1414,13 @@ class GraphService:
             edges=[],
         )
 
-    def authorize_capture_refs(self, node_ids: List[str]) -> Dict[str, Any]:
+    def authorize_capture_refs(
+        self, node_ids: List[str], edge_ids: List[str]
+    ) -> Dict[str, Any]:
         return self._read(
             "save_session_view",
             lambda storage: views.authorize_capture_refs(
-                storage, self._authorization_hook, node_ids
+                storage, self._authorization_hook, node_ids, edge_ids
             ),
         )
 

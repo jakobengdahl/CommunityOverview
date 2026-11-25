@@ -607,26 +607,44 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-@pytest.mark.parametrize("refusal", ["create", "hidden_node", "missing_node"])
+@pytest.mark.parametrize(
+    "refusal, refs",
+    [
+        ("create", {"node_refs": ["node-1"]}),
+        ("narrowed", {"node_refs": ["node-1"]}),
+        ("narrowed", {"node_refs": ["gone"]}),
+        ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
+        ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
+        ("narrowed", {"shape_revisions": {"node:node-1": 1}}),
+        ("hook_raises", {}),
+    ],
+)
 def test_save_view_denial_publishes_nothing_and_discloses_nothing(
-    test_app, transport, refusal
+    test_app, transport, refusal, refs
 ):
-    """A denied destination create, or a ref the caller cannot read (or, under
-    narrowing, cannot be shown missing), is one generic access_denied."""
+    """A denied destination create, a node or edge ref the caller cannot read
+    (or, under narrowing, cannot be shown missing), or a raising hook is one
+    generic access_denied."""
     from backend.runtime.authorization import GraphAccessNarrowing
 
     manager = test_app.app.state.session_manager
     source = manager.create_session()
-    source.state["node_refs"] = ["gone" if refusal == "missing_node" else "node-1"]
+    source.state.update(refs)
     narrowed = GraphAccessNarrowing(enabled=True, allow_local_graph=False)
     hook = Mock()
-    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
-        allowed=not (refusal == "create" and ctx.action == "mutate"),
-        reason="node-1 is secret",
-        graph_access=narrowed
-        if refusal != "create" and ctx.target == "save_session_view"
-        else GraphAccessNarrowing(),
-    )
+
+    def evaluate(ctx):
+        if refusal == "hook_raises":
+            raise RuntimeError("hook down at /srv/secret")
+        return GraphAuthorizationDecision(
+            allowed=not (refusal == "create" and ctx.action == "mutate"),
+            reason="node-1 is secret",
+            graph_access=narrowed
+            if refusal == "narrowed" and ctx.target == "save_session_view"
+            else GraphAccessNarrowing(),
+        )
+
+    hook.evaluate.side_effect = evaluate
     test_app.app.state.graph_service._authorization_hook = hook
     status, result = save_view(
         test_app, source.id, {"name": "V", "expected_revision": 0}, transport
@@ -638,12 +656,13 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-@pytest.mark.parametrize("failure", ["refused", "raised"])
+@pytest.mark.parametrize("failure", [None, ConnectionError, ValueError])
 def test_save_view_grants_after_publishing_and_revokes_on_failure(
     test_app, transport, failure
 ):
-    """Access is assigned to the published copy; a failed assignment revokes
-    the grants made for it and removes the copy before failing."""
+    """Access is assigned to the published copy; a refused or raising
+    assignment revokes the grants made for it (a raising revoke does not
+    replace the denial) and removes the copy before failing."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     hook = Mock()
@@ -652,11 +671,13 @@ def test_save_view_grants_after_publishing_and_revokes_on_failure(
 
     def assign(context, *, copy_session_id):
         published.append(manager.store._backend.load(copy_session_id) is not None)
-        if failure == "raised":
-            raise ConnectionError()
+        if failure:
+            raise failure()
         return GraphAuthorizationDecision(allowed=False)
 
     hook.assign_copied_session_access.side_effect = assign
+    if failure is ValueError:
+        hook.revoke_copied_session_access.side_effect = RuntimeError()
     test_app.app.state.graph_service._authorization_hook = hook
     status, result = save_view(
         test_app, source.id, {"name": "V", "expected_revision": 0}, transport

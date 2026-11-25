@@ -5,7 +5,8 @@ so the same input gives the same result on either surface
 (docs/SESSION_SAVEDVIEW_COMPAT_CONTRACT.md, "Identity and capture").
 """
 
-from typing import Any, Dict, List
+import logging
+from typing import Any, Callable, Dict, List
 
 from backend.config.config_loader import build_session_url
 from backend.core.session_manager import (
@@ -21,7 +22,9 @@ from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
 from . import access
-from .staging import HookFailed, outside_storage
+from .staging import HookFailed
+
+logger = logging.getLogger(__name__)
 
 INVALID_SESSION_ID_MESSAGE = (
     "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
@@ -68,7 +71,35 @@ def captured_node_ids(state: Dict[str, Any]) -> List[str]:
         ids.update(dict.fromkeys(state.get(key) or []))
     for key in ("positions", "shape_overrides"):
         ids.update(dict.fromkeys(state.get(key) or {}))
+    ids.update(
+        dict.fromkeys(
+            key[len("node:") :]
+            for key in state.get("shape_revisions") or {}
+            if isinstance(key, str) and key.startswith("node:")
+        )
+    )
     return [i for i in ids if isinstance(i, str) and not i.startswith("group-")]
+
+
+def captured_edge_ids(state: Dict[str, Any]) -> List[str]:
+    """Every graph edge id the captured presentation names, first use first."""
+    ids: Dict[str, None] = {}
+    for key in ("hidden_edge_ids", "dimmed_edge_ids"):
+        ids.update(dict.fromkeys(state.get(key) or []))
+    return [i for i in ids if isinstance(i, str)]
+
+
+def _hook_call(callback: Callable[..., Any]) -> Callable[..., Any]:
+    """``callback`` with anything it raises re-raised as HookFailed: a hook
+    that could not answer has not authorized the capture."""
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return callback(*args, **kwargs)
+        except Exception as exc:
+            raise HookFailed() from exc
+
+    return call
 
 
 def _valid(name: Any, expected_revision: Any) -> bool:
@@ -103,55 +134,62 @@ def save_session_view(
     if not _valid(name, expected_revision):
         return _refused("invalid_request")
     hook = service.authorization_hook
-    # Graph reads for the capture run outside any session the caller is in.
-    with session_context.bind_session(None):
-        # A source the caller may not read is concealed as missing.
-        if access.authorize_graph_access(
+    authorize = _hook_call(access.authorize_graph_access)
+
+    def authorize_capture(state: Dict[str, Any]) -> List[str]:
+        result = service.authorize_capture_refs(
+            captured_node_ids(state), captured_edge_ids(state)
+        )
+        if not result.get("success"):
+            raise _Denied()
+        return result["missing_node_ids"]
+
+    def assign_access(copy_id: str) -> None:
+        if access.assign_copied_session_access(
             hook,
-            action=GRAPH_ACTION_READ,
-            target="get_visualization_session",
-            session_id=session_id,
+            source_session_id=session_id,
+            copy_session_id=copy_id,
+            target=TARGET,
         ):
-            return _refused("session_not_found")
-        if access.authorize_graph_access(
-            hook, action=GRAPH_ACTION_MUTATE, target="create_visualization_session"
-        ):
-            return _refused("access_denied")
+            raise _Denied()
 
-        def authorize_capture(state: Dict[str, Any]) -> List[str]:
-            result = service.authorize_capture_refs(captured_node_ids(state))
-            if not result.get("success"):
-                raise _Denied()
-            return result["missing_node_ids"]
-
-        def assign_access(copy_id: str) -> None:
-            if access.assign_copied_session_access(
-                hook,
-                source_session_id=session_id,
-                copy_session_id=copy_id,
-                target=TARGET,
-            ):
-                raise _Denied()
-
-        def revoke_access(copy_id: str) -> None:
+    def revoke_access(copy_id: str) -> None:
+        # The assignment failure is what the caller is answered with; a revoke
+        # that also fails must not replace it.
+        try:
             access.revoke_copied_session_access(
                 hook,
                 source_session_id=session_id,
                 copy_session_id=copy_id,
                 target=TARGET,
             )
+        except Exception:
+            logger.exception("Revoking access to a failed saved-view copy failed")
 
+    # Graph reads for the capture run outside any session the caller is in.
+    with session_context.bind_session(None):
         try:
+            # A source the caller may not read is concealed as missing.
+            if authorize(
+                hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=session_id,
+            ):
+                return _refused("session_not_found")
+            if authorize(
+                hook, action=GRAPH_ACTION_MUTATE, target="create_visualization_session"
+            ):
+                return _refused("access_denied")
             session, missing = session_manager.save_session_view(
                 session_id,
                 name.strip(),
                 expected_revision,
-                authorize_capture=outside_storage(authorize_capture),
-                assign_access=outside_storage(assign_access),
-                revoke_access=outside_storage(revoke_access),
+                authorize_capture=_hook_call(authorize_capture),
+                assign_access=_hook_call(assign_access),
+                revoke_access=revoke_access,
             )
         except (_Denied, HookFailed):
-            # A hook that could not answer has not authorized the capture.
             return _refused("access_denied")
         except RevisionConflict as exc:
             return _refused("revision_conflict", current_revision=exc.actual)

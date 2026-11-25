@@ -135,12 +135,14 @@ def authorize_capture_refs(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
     node_ids: List[str],
+    edge_ids: List[str],
 ) -> Dict[str, Any]:
-    """Whether a saved-view capture may keep every node reference.
+    """Whether a saved-view capture may keep every node and edge reference.
 
-    One existing but invisible node denies the whole capture. A missing node
-    is reported only without graph narrowing: under narrowing its absence
-    could stand for a node the caller may not see, so it is denied too.
+    One existing but invisible node or edge denies the whole capture. A
+    missing node is reported only without graph narrowing: under narrowing its
+    absence could stand for a node the caller may not see, so it is denied
+    too. A missing edge is kept, unreported, on the same terms.
     """
     target = "save_session_view"
     decision = access.evaluate_graph_access(
@@ -159,6 +161,13 @@ def authorize_capture_refs(
                 return denied
             missing.append(node_id)
         elif not access.is_node_visible(node, decision.graph_access):
+            return denied
+    narrowed = decision.graph_access.enabled
+    for edge_id in edge_ids:
+        edge = storage.edges.get(edge_id)
+        if narrowed and not access.is_edge_visible(
+            edge, storage, decision.graph_access
+        ):
             return denied
     return {"success": True, "missing_node_ids": missing}
 
