@@ -3365,7 +3365,11 @@ def register_mcp_tools(
 
     @register_tool
     def save_session_view(
-        session_id: Any = None, name: Any = None, expected_revision: Any = None
+        # Plain ``str``: FastMCP JSON-decodes a string argument for any other
+        # annotation, so a name such as "null" would differ from REST.
+        session_id: str = None,  # type: ignore[assignment]
+        name: str = None,  # type: ignore[assignment]
+        expected_revision: Any = None,
     ) -> Dict[str, Any]:
         """Save a session's current view as a new, independently editable session.
 

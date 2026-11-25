@@ -65,19 +65,16 @@ def _refused(code: str, **extra: Any) -> Dict[str, Any]:
 
 
 def captured_node_ids(state: Dict[str, Any]) -> List[str]:
-    """Every graph node id the captured presentation names, first use first."""
+    """Every graph node id the captured canvas names, first use first.
+
+    ``shape_revisions`` keys are not read: they outlive a node's removal from
+    the canvas, so a removed node would be checked and reported missing.
+    """
     ids: Dict[str, None] = {}
     for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
         ids.update(dict.fromkeys(state.get(key) or []))
     for key in ("positions", "shape_overrides"):
         ids.update(dict.fromkeys(state.get(key) or {}))
-    ids.update(
-        dict.fromkeys(
-            key[len("node:") :]
-            for key in state.get("shape_revisions") or {}
-            if isinstance(key, str) and key.startswith("node:")
-        )
-    )
     return [i for i in ids if isinstance(i, str) and not i.startswith("group-")]
 
 

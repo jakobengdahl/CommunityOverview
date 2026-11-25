@@ -537,6 +537,25 @@ def test_save_view_captures_presentation_as_a_new_session(test_app):
     assert status == 200 and result["missing_node_ids"] == []
 
 
+def test_save_view_mcp_arguments_keep_json_like_names_as_rest_does(test_app):
+    """Through FastMCP's argument layer a JSON-looking name is saved verbatim,
+    as REST saves it."""
+    import asyncio
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    for name in ("null", "[1]", '{"a": 1}'):
+        body = {"name": name, "expected_revision": 0}
+        status, rest = save_view(test_app, source.id, body, "rest")
+        _, mcp = asyncio.run(
+            test_app.app.state.mcp.call_tool(
+                "save_session_view", {"session_id": source.id, **body}
+            )
+        )
+        saved = [manager.get_session(r["session_id"]) for r in (rest, mcp["result"])]
+        assert status == 200 and [s.name for s in saved] == [name, name]
+
+
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
 @pytest.mark.parametrize(
     "body",
@@ -615,7 +634,7 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
         ("narrowed", {"node_refs": ["gone"]}),
         ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
         ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
-        ("narrowed", {"shape_revisions": {"node:node-1": 1}}),
+        ("removed", {"shape_revisions": {"node:node-1": 1}}),
         ("hook_raises", {}),
     ],
 )
@@ -624,7 +643,8 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
 ):
     """A denied destination create, a node or edge ref the caller cannot read
     (or, under narrowing, cannot be shown missing), or a raising hook is one
-    generic access_denied."""
+    generic access_denied. A node only left in shape_revisions is off the
+    canvas: neither checked nor reported missing."""
     from backend.runtime.authorization import GraphAccessNarrowing
 
     manager = test_app.app.state.session_manager
@@ -640,7 +660,7 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
             allowed=not (refusal == "create" and ctx.action == "mutate"),
             reason="node-1 is secret",
             graph_access=narrowed
-            if refusal == "narrowed" and ctx.target == "save_session_view"
+            if refusal in ("narrowed", "removed") and ctx.target == "save_session_view"
             else GraphAccessNarrowing(),
         )
 
@@ -649,6 +669,9 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
     status, result = save_view(
         test_app, source.id, {"name": "V", "expected_revision": 0}, transport
     )
+    if refusal == "removed":
+        assert status == 200 and result["missing_node_ids"] == []
+        return
     assert status in (403, None)
     assert result == {"success": False, "error": "access_denied"}
     assert manager.store.session_count() == 1
