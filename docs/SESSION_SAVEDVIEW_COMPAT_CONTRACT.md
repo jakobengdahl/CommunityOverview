@@ -44,8 +44,10 @@ All source state, the revision comparison, staged-layer check, destination
 capacity reservation, access assignment and durable publication form one
 serialized operation. Hold the source mutation lock and the persistence
 transaction across the check and snapshot; coordinate staged-layer mutations
-under the same exclusion. The backend must atomically commit the destination and
-its access assignment, or compensate before making it visible. A file rename
+under the same exclusion. If the source has unmerged staged changes, reject the
+save with `staged_changes` (409) and publish no destination. The backend must
+atomically commit the destination and its access assignment, or compensate
+before making it visible. A file rename
 alone does not make multi-resource writes atomic. On failure, including a crash,
 recovery must leave no visible partial session, leaked access grant, or consumed
 capacity. Implementations unable to guarantee this must refuse the operation.
