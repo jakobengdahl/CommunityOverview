@@ -117,5 +117,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 # Start server
-# Using shell form so ${PORT} and ${HOST} env vars are expanded at runtime
-CMD uvicorn backend.api_host.server:get_app --factory --host ${HOST:-0.0.0.0} --port ${PORT:-8000}
+CMD ["python", "-c", "from backend.api_host.server import main; main()"]
