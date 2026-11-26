@@ -73,6 +73,9 @@ def open_restore(hook, output):
                 def publish():
                     destination = root / "result"
                     shutil.copytree(sessions.directory.parent, destination)
+                    (destination / "templates").rename(
+                        destination / "sessions" / "templates"
+                    )
                     _publish(destination, output)
 
                 yield service, sessions, modes, publish

@@ -480,6 +480,8 @@ def test_file_workspace_restores_templates_and_rejects_profile_collision(
     doc = template_document()
     source = InMemorySessionPersistenceBackend()
     source.save({"id": doc["template_id"], "document": doc})
+    tombstone = {"id": "9999-9999", "deleted": True, "revision": 2}
+    source.save(tombstone)
     document = create_backup(
         Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
     )
@@ -509,12 +511,9 @@ def test_file_workspace_restores_templates_and_rejects_profile_collision(
             profile_template_ids=service.backup_profile_template_ids,
         )
         publish()
-    assert (
-        FileSessionPersistenceBackend(output / "templates").load(doc["template_id"])[
-            "document"
-        ]
-        == doc
-    )
+    restored = FileSessionPersistenceBackend(output / "sessions" / "templates")
+    assert restored.load(doc["template_id"])["document"] == doc
+    assert restored.load(tombstone["id"]) == tombstone
 
 
 def test_command_restores_version_one_with_legacy_integration(tmp_path, monkeypatch):
