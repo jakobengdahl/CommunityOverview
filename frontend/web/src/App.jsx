@@ -66,6 +66,7 @@ import {
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
 import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
+import { createCaptureFlushQueue } from './utils/captureFlush';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2247,7 +2248,22 @@ function App() {
   const requestSessionSnapshot = useCallback((onDone) => {
     snapshotCallbacksRef.current.push(onDone);
     setSaveViewSignal((prev) => prev + 1);
+    return () => {
+      snapshotCallbacksRef.current = snapshotCallbacksRef.current.filter((cb) => cb !== onDone);
+    };
   }, []);
+
+  const [captureFlushQueue] = useState(createCaptureFlushQueue);
+  const flushBeforeCapture = useCallback(() => {
+    const targetId = sessionIdRef.current;
+    const epoch = useGraphStore.getState().sessionEpoch;
+    return captureFlushQueue({
+      getSync: () => syncRef.current,
+      isCurrent: () =>
+        sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
+      requestSnapshot: requestSessionSnapshot,
+    });
+  }, [captureFlushQueue, requestSessionSnapshot, syncRef]);
 
   // Callback from GraphCanvas when the saveViewSignal round-trip completes.
   // Always persists the session snapshot; additionally opens the Save View
@@ -4030,6 +4046,7 @@ function App() {
   );
 
   const shellProps = {
+    flushBeforeCapture,
     sessionId,
     onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,

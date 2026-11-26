@@ -1,3 +1,4 @@
+# covers: .github/workflows/security-scan.yml, .github/workflows/reusable-secret-sast-scan.yml
 """Execute core and reusable scanner steps to pin blocking and summary behavior."""
 
 import os
@@ -27,11 +28,11 @@ CORE_INPUTS = {
 
 SCANNERS = ("pip-audit", "npm", "bandit", "gitleaks")
 # Stubbed too, so every `run:` step - the installs included - can be executed.
-STUBBED = SCANNERS + ("pip",)
+STUBBED = SCANNERS + ("pip", "git", "python3")
 # The only real tools on a step's PATH. Anything else - git, curl, rm - is not
 # found, so a step that starts using one fails here until it is stubbed or
 # listed, instead of running for real inside the test process.
-REAL_TOOLS = ("tee",)
+REAL_TOOLS = ("tee", "cat")
 
 # `|tee`, `| tee` and `|& tee` alike; a spelling the discovery missed would
 # escape every exit-status check below.
@@ -99,7 +100,10 @@ AUDIT_COMMANDS = {
         'pip-audit -r backend/requirements-dev.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
         'pip-audit -r services/mcp_oauth_gateway/requirements.txt -f markdown 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
     ],
-    "npm-audit": ['npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"'],
+    "npm-audit": [
+        'npm audit --omit=dev 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"',
+        "npm audit --json > npm-audit-report.json",
+    ],
 }
 
 # bandit's scope, pinned for the same reason and now that it blocks: the cheapest
@@ -160,7 +164,7 @@ AUDIT_JOB_ACTION_INPUTS = {
         ("actions/setup-python", {"python-version": "3.11", "cache": "pip"}),
     ],
     "npm-audit": [
-        ("actions/checkout", {}),
+        ("actions/checkout", {"fetch-depth": 0}),
         ("actions/setup-node", {"node-version": "20"}),
     ],
 }
@@ -467,8 +471,11 @@ def _run_step(step, tmp_path, scanner_exit, timeout=30, inputs=None):
     )
     for key, value in (step.get("env") or {}).items():
         match = re.fullmatch(r"\$\{\{ inputs\.([\w-]+) \}\}", value)
-        assert match, f"unhandled step env expression: {value}"
-        env[key] = call_inputs[match[1]]
+        if value == "${{ github.event.pull_request.base.sha }}":
+            env[key] = "base-sha"
+        else:
+            assert match, f"unhandled step env expression: {value}"
+            env[key] = call_inputs[match[1]]
     # Its own process group, waited on until empty: a background writer that
     # closed its fds would otherwise land after the check below.
     proc = subprocess.Popen(
@@ -554,7 +561,18 @@ def test_dependency_audits_cannot_be_skipped(job_id):
     assert "if" not in job, f"job {job_id!r} is conditional"
     assert "needs" not in job, f"job {job_id!r} is skipped when what it needs fails"
     for step in job["steps"]:
-        assert "if" not in step, f"{job_id}:{step.get('name')} is conditional"
+        if (
+            job_id == "npm-audit"
+            and step.get("name") == "Warn about lockfile-only changes"
+        ):
+            assert step.get("if") == "github.event_name == 'pull_request'"
+        elif (
+            job_id == "npm-audit"
+            and step.get("name") == "Audit all dependencies against baseline"
+        ):
+            assert step.get("if") == "success() || failure()"
+        else:
+            assert "if" not in step, f"{job_id}:{step.get('name')} is conditional"
 
 
 @pytest.mark.parametrize("job_id", sorted(AUDIT_COMMANDS))
@@ -580,6 +598,16 @@ def test_every_line_that_could_run_an_audit_is_a_pinned_command():
         }
         for step in job.get("steps", []):
             body = step.get("run", "").replace("\\\n", "")
+            if (
+                job_id == "npm-audit"
+                and step.get("name") == "Audit all dependencies against baseline"
+            ):
+                pinned.add(
+                    _normalised(
+                        "python3 scripts/check_npm_audit.py npm-audit-report.json scripts/npm-audit-baseline.json"
+                    )
+                )
+                pinned.add(_normalised("cat npm-audit-report.json"))
             for line in body.splitlines():
                 line = line.strip()
                 if not line:
@@ -642,7 +670,13 @@ def test_dependency_audit_scope_is_not_narrowed_by_configuration(job_id, path):
     assert not job.get("defaults"), f"job {job_id!r} sets defaults"
     for step in job["steps"]:
         where = f"{job_id}:{step.get('name')}"
-        assert not step.get("env"), f"{where} sets env"
+        expected_env = (
+            {"BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
+            if job_id == "npm-audit"
+            and step.get("name") == "Warn about lockfile-only changes"
+            else {}
+        )
+        assert (step.get("env") or {}) == expected_env, f"{where} sets env"
         # npm run from a workspace directory audits only that workspace.
         assert "working-directory" not in step, f"{where} sets working-directory"
         body = step.get("run", "")
@@ -901,7 +935,13 @@ def test_no_env_switches_on_pipefail_behind_the_default_shell(path):
             # A static first line only: shell can reach a file through too many
             # spellings, so the runtime test below executes every step.
             for target in _write_targets(body):
-                assert target == STEP_SUMMARY, f"{where} writes to {target}"
+                allowed = {STEP_SUMMARY}
+                if (
+                    job_id == "npm-audit"
+                    and step.get("name") == "Audit all dependencies against baseline"
+                ):
+                    allowed.add("npm-audit-report.json")
+                assert target in allowed, f"{where} writes to {target}"
             assert "GITHUB_ENV" not in body and "github.env" not in body, where
             # The runner's command files by their on-disk location.
             assert "_runner_file_commands" not in body, where
@@ -1059,6 +1099,13 @@ def test_no_step_turns_on_job_control_or_reaches_past_the_stubs():
         reaches = COMMAND_P.search(normalised)
         assert not reaches, f"{where} runs `{reaches.group(1)} -p`"
         for word in _command_words(body):
+            if word in {"git", "python3", "cat"}:
+                expected = {
+                    "git": "npm-audit:Warn about lockfile-only changes",
+                    "python3": "npm-audit:Audit all dependencies against baseline",
+                    "cat": "npm-audit:Audit all dependencies against baseline",
+                }
+                assert where == expected[word], f"{where} runs {word}"
             assert not word.startswith("/"), (
                 f"{where} runs {word} by absolute path, past the stubs"
             )
@@ -1303,3 +1350,39 @@ def test_a_timed_out_step_is_killed_with_its_background_children(tmp_path):
         _run_step(step, tmp_path, scanner_exit=0, timeout=1)
     # Well inside the 30 s group drain: the timeout path killed the group itself.
     assert time.monotonic() - started < 10
+
+
+def test_full_npm_audit_step_is_pinned():
+    steps = _jobs()["npm-audit"]["steps"]
+    matches = [s for s in steps if "npm audit --json" in s.get("run", "")]
+    assert len(matches) == 1
+    step = matches[0]
+    assert step["name"] == "Audit all dependencies against baseline"
+    assert _normalised_body_lines(step["run"]) == [
+        _normalised(line)
+        for line in [
+            "set +e",
+            "npm audit --json > npm-audit-report.json",
+            "audit_status=$?",
+            "set -e",
+            'if [ "$audit_status" -gt 1 ]; then',
+            "cat npm-audit-report.json",
+            'exit "$audit_status"',
+            "fi",
+            "python3 scripts/check_npm_audit.py npm-audit-report.json scripts/npm-audit-baseline.json",
+        ]
+    ]
+
+
+def test_lockfile_warning_step_is_pinned():
+    steps = _jobs()["npm-audit"]["steps"]
+    matches = [s for s in steps if s.get("name") == "Warn about lockfile-only changes"]
+    assert len(matches) == 1
+    assert _normalised_body_lines(matches[0]["run"]) == [
+        _normalised(line)
+        for line in [
+            'if ! git diff --quiet "$BASE_SHA" HEAD -- package-lock.json && git diff --quiet "$BASE_SHA" HEAD -- package.json; then',
+            'echo "::warning file=package-lock.json::The lockfile changed without a package.json change."',
+            "fi",
+        ]
+    ]

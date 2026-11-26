@@ -11,6 +11,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
 
@@ -192,3 +194,21 @@ def test_webhook_database_rejects_actual_graph_and_config_directories(
     )
     other_storage.shutdown_events()
     storage.shutdown_events()
+
+
+@pytest.mark.parametrize("host", [None, "127.0.0.1"])
+def test_server_binds_configured_host_and_default(monkeypatch, host):
+    from unittest.mock import Mock
+
+    import uvicorn
+
+    from backend.api_host.server import main
+
+    if host is None:
+        monkeypatch.delenv("HOST", raising=False)
+    else:
+        monkeypatch.setenv("HOST", host)
+    run = Mock()
+    monkeypatch.setattr(uvicorn, "run", run)
+    main()
+    assert run.call_args.kwargs["host"] == (host or "0.0.0.0")

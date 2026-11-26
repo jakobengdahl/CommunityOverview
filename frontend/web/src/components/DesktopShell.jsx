@@ -43,6 +43,7 @@ function DesktopShell({
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
+  flushBeforeCapture,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
@@ -93,7 +94,12 @@ function DesktopShell({
           />
         </>
       )}
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      {llmAvailable && (
+        <ChatPanel
+          collectionShortName={akcShortName || undefined}
+          flushBeforeCapture={flushBeforeCapture}
+        />
+      )}
     </>
   );
 }

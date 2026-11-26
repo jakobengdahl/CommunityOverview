@@ -56,6 +56,8 @@ from .session_annotations import (
     image_annotation_error,
     is_embedded_image_url,
     reference_annotation_error,
+    sanitize_saved_view_metadata,
+    _validate_generic_content,
 )
 from .session_hub import (
     ClaimMap,
@@ -73,7 +75,11 @@ from .session_store import (
     OpError,
     Session,
     SessionRetired,
+    SessionLimitReached as SessionLimitReached,
     SessionStore,
+    _empty_state,
+    _now_iso,
+    _validate_annotation,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -180,10 +186,6 @@ class OpBatchTooLarge(Exception):
     pass
 
 
-class SessionLimitReached(Exception):
-    pass
-
-
 class AnnotationNotFound(Exception):
     """No annotation with the given id exists in this session (or it was just deleted)."""
 
@@ -262,6 +264,32 @@ class RevisionConflict(Exception):
         super().__init__(f"expected revision {expected}, session is at {actual}")
         self.expected = expected
         self.actual = actual
+
+
+class CaptureRefused(Exception):
+    """A saved-view capture refused before anything was published; ``code``
+    is its stable error code (``staged_changes``, ``invalid_presentation``)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+# The presentation a saved-view capture keeps. Everything else in the state
+# (appearance receipts and other bookkeeping) starts empty.
+_CAPTURED_STATE = (
+    "node_refs",
+    "annotations",
+    "positions",
+    "hidden_node_ids",
+    "hidden_edge_ids",
+    "dimmed_node_ids",
+    "dimmed_edge_ids",
+    "edge_intensity",
+    "shape_overrides",
+    "type_shapes",
+    "shape_revisions",
+)
 
 
 class LeaseConflict(Exception):
@@ -686,6 +714,53 @@ _ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"
 AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
 
 
+def _refresh_annotation_ids(
+    state: Dict[str, Any], *, relink: bool = True
+) -> Dict[str, str]:
+    """Give every annotation a fresh id; returns source id to fresh id.
+    ``relink=False`` leaves references to annotations for the caller."""
+    ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
+
+    # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
+    # resolved by id alone, so any reference naming a copied annotation
+    # follows it; a node-typed one keeps the shared node id.
+    def remap_attachment(value):
+        if isinstance(value, dict):
+            if value.get("target_type") in (None, "annotation"):
+                target = value.get("target_id")
+                if isinstance(target, str) and target in ids:
+                    value["target_id"] = ids[target]
+            for child in value.values():
+                remap_attachment(child)
+        elif isinstance(value, list):
+            for child in value:
+                remap_attachment(child)
+
+    # Every copied annotation lands on a fresh id, so it is a new write as
+    # duplicate_annotation's is: a legacy non-embedded image URL or an
+    # unsafe reference target refuses the whole copy before anything
+    # is allocated.
+    for annotation in state["annotations"]:
+        error = image_annotation_error(annotation) or reference_annotation_error(
+            annotation, require_complete=True
+        )
+        if error:
+            raise OpError(error)
+    for annotation in state["annotations"]:
+        annotation["id"] = ids[annotation["id"]]
+        annotation["version"] = 1
+        annotation["field_versions"] = {}
+        annotation.pop("created_by", None)
+        annotation.pop("updated_by", None)
+        if relink:
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
+            remap_attachment(annotation)
+    return ids
+
+
 class SessionManager:
     """High-level façade over the session store, event bus, presence, selection
     claims and edit leases."""
@@ -870,16 +945,15 @@ class SessionManager:
         Raises WriteModeRefused for a mode this deployment cannot hold.
         """
         mode, source = self.write_modes.choose(write_mode)
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
-        return self.store.create(
+        return self.store.create_with_capacity(
             name,
+            max_sessions=self._max_sessions,
             write_mode=mode,
             write_mode_source=source,
             on_allocate=(
                 self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
             ),
-        )
+        )[0]
 
     def copy_session(
         self,
@@ -933,8 +1007,7 @@ class SessionManager:
         source = self.get_session(session_id)
         if source is None or self.write_modes.is_retired(session_id):
             raise SessionNotFound()
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
+        self.store.check_capacity(self._max_sessions)
         # Check before allocating an id or cloning embedded images. History is
         # deliberately excluded from both the copy and its document budget.
         # Measured as apply_ops measures the document (ASCII-escaped), so a
@@ -958,59 +1031,25 @@ class SessionManager:
         state = copy.deepcopy(source.state)
         # Appearance receipts deduplicate the source's own op retries.
         state["shape_operation_ids"] = {}
-        ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
-
-        # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
-        # resolved by id alone, so any reference naming a copied annotation
-        # follows it; a node-typed one keeps the shared node id.
-        def remap_attachment(value):
-            if isinstance(value, dict):
-                if value.get("target_type") in (None, "annotation"):
-                    target = value.get("target_id")
-                    if isinstance(target, str) and target in ids:
-                        value["target_id"] = ids[target]
-                for child in value.values():
-                    remap_attachment(child)
-            elif isinstance(value, list):
-                for child in value:
-                    remap_attachment(child)
-
-        # Every copied annotation lands on a fresh id, so it is a new write as
-        # duplicate_annotation's is: a legacy non-embedded image URL or an
-        # unsafe reference target refuses the whole copy before anything
-        # is allocated.
-        for annotation in state["annotations"]:
-            error = image_annotation_error(annotation) or reference_annotation_error(
-                annotation, require_complete=True
-            )
-            if error:
-                raise OpError(error)
-        for annotation in state["annotations"]:
-            annotation["id"] = ids[annotation["id"]]
-            for key in ("startAnchor", "endAnchor"):
-                anchor = annotation.get(key)
-                if isinstance(anchor, str) and anchor in ids:
-                    annotation[key] = ids[anchor]
-            annotation["version"] = 1
-            annotation["field_versions"] = {}
-            annotation.pop("created_by", None)
-            annotation.pop("updated_by", None)
-            remap_attachment(annotation)
+        _refresh_annotation_ids(state)
         document["state"] = state
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
 
+        staged_copies = []
+
         def allocate(copy_id: str) -> None:
             if mode == WRITE_MODE_STAGED:
                 allocate_staged(copy_id)
-            if assign_access is None:
-                return
-            try:
-                assign_access(copy_id)
-            except BaseException:
-                if mode == WRITE_MODE_STAGED:
-                    self.write_modes.retire(copy_id, require_empty=False)
-                raise
+            if assign_access is not None:
+                try:
+                    assign_access(copy_id)
+                except BaseException:
+                    if mode == WRITE_MODE_STAGED:
+                        self.write_modes.retire(copy_id, require_empty=False)
+                    raise
+            if mode == WRITE_MODE_STAGED:
+                staged_copies.append(copy_id)
 
         def allocate_staged(copy_id: str) -> None:
             self.write_modes.record_staged(copy_id)
@@ -1040,27 +1079,199 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
                 raise
 
-        return self.store.create(
-            name,
-            description=source.description,
-            state=state,
-            write_mode=mode,
-            write_mode_source="explicit",
-            on_allocate=allocate,
-        )
+        try:
+            return self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                description=source.description,
+                state=state,
+                write_mode=mode,
+                write_mode_source="explicit",
+                on_allocate=allocate,
+            )[0]
+        except BaseException:
+            # The document save failed after allocation: the staged record and
+            # copied entries must not outlive the copy that was never published.
+            for copy_id in staged_copies:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
 
-    def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
+    def save_session_view(
+        self,
+        session_id: str,
+        name: str,
+        expected_revision: int,
+        *,
+        authorize_capture: Callable[[Dict[str, Any]], List[str]],
+        relink_capture: Callable[[Dict[str, Any], Dict[str, str]], None],
+        assign_access: Callable[[str], None],
+        revoke_access: Callable[[str], None],
+    ) -> Tuple[Session, List[str]]:
+        """Capture a session's presentation at ``expected_revision`` into a
+        new session named ``name``; returns it and the missing node ids
+        ``authorize_capture`` reported for the captured state.
+        ``relink_capture`` points the copied annotations' links at their fresh
+        ids.
+
+        Runs without yielding and refuses an in-flight state batch, so the
+        checks, snapshot and publication see one revision. Access is assigned
+        only after publication; if that fails, ``revoke_access`` runs and the
+        copy is removed before the failure propagates.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if source.seq != expected_revision:
+            raise RevisionConflict(expected_revision, source.seq)
+        try:
+            mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        except WriteModeRefused:
+            # A staged source whose layer this deployment cannot read.
+            raise CaptureRefused("staged_changes")
+        if mode == WRITE_MODE_STAGED and self.write_modes.layer_store.load_layer(
+            session_id
+        ):
+            raise CaptureRefused("staged_changes")
+        self.store.check_capacity(self._max_sessions)
+        state = _empty_state()
+        state.update(
+            copy.deepcopy(
+                {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
+            )
+        )
+        annotations = state["annotations"]
+        if not isinstance(annotations, list):
+            raise CaptureRefused("invalid_presentation")
+        if len(annotations) > self.store._max_annotations:
+            raise OpBatchTooLarge()
+        try:
+            seen = set()
+            for annotation in annotations:
+                validated = _validate_annotation(annotation, require_id=True)
+                ann_id = validated["id"]
+                if not ann_id or ann_id in seen:
+                    raise OpError("invalid annotation id")
+                seen.add(ann_id)
+                members = annotation.get("member_node_ids", [])
+                if not isinstance(members, list) or any(
+                    not isinstance(member, str) for member in members
+                ):
+                    raise OpError("invalid group members")
+                if _validate_generic_content(validated["type"], annotation):
+                    raise OpError("invalid annotation content")
+                content = annotation.get("content")
+                if isinstance(content, dict) and validated["type"] != "reference":
+                    if _validate_generic_content(validated["type"], content):
+                        raise OpError("invalid annotation content")
+            metadata = {"annotations": annotations}
+            if sanitize_saved_view_metadata(metadata) != metadata:
+                raise OpError("unsafe annotation")
+            _check_op_image_sizes({"op": "nodes_replaced", "annotations": annotations})
+            if (
+                sum(_annotation_embedded_image_bytes(a) for a in annotations)
+                > DEFAULT_MAX_SESSION_IMAGE_BYTES
+            ):
+                raise OpBatchTooLarge()
+        except (OpError, TypeError, ValueError) as exc:
+            raise CaptureRefused("invalid_presentation") from exc
+        # A removed node's revision outlives it; copying it would carry an id
+        # the capture neither authorizes nor reports.
+        on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}
+        state["shape_revisions"] = {
+            k: v
+            for k, v in state["shape_revisions"].items()
+            if k.startswith("type:") or k in on_canvas
+        }
+        document = {"state": state, "name": name, "description": source.description}
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        # Authorize the original references before filtering group membership.
+        missing = authorize_capture(state)
+        try:
+            ids = _refresh_annotation_ids(state, relink=False)
+        except OpError as exc:
+            raise CaptureRefused("invalid_presentation") from exc
+        relink_capture(state, ids)
+        for annotation in annotations:
+            annotation["updated_at"] = _now_iso()
+        # Fresh annotation ids and timestamps can grow the document: checked again.
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        staged = []
+
+        def allocate(copy_id: str) -> None:
+            self.write_modes.record_staged(copy_id)
+            staged.append(copy_id)
+
+        try:
+            session = self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                description=source.description,
+                state=state,
+                write_mode=mode,
+                write_mode_source="explicit",
+                on_allocate=allocate if mode == WRITE_MODE_STAGED else None,
+            )[0]
+        except BaseException:
+            for copy_id in staged:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        try:
+            assign_access(session.id)
+        except BaseException:
+            try:
+                revoke_access(session.id)
+            finally:
+                self.store.delete(session.id)
+                for copy_id in staged:
+                    self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        return session, missing
+
+    def get_or_create(
+        self, session_id: str, *, initial_op: Optional[Dict[str, Any]] = None
+    ) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
         if session is not None:
             return session, False
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
         # Materialising a session the browser already holds is never a create
         # request, so it is direct whatever the graph default (§5.1): a staged
         # session is created explicitly, where the hook is asked.
+        applied = []
+
+        def prepare(session: Session) -> None:
+            if initial_op is not None:
+                op = self.store.apply_state_op(session, initial_op)
+                _check_session_totals(
+                    session,
+                    _detached_snapshot(session),
+                    max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                    max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                )
+                if op is not None:
+                    applied.append(op)
+
+        def publish_initial(session: Session) -> None:
+            if applied:
+                self.bus.publish(
+                    session.id,
+                    {
+                        "type": "op",
+                        "client_id": initial_op["client_id"],
+                        "op": applied[0],
+                        "seq": applied[0]["seq"],
+                    },
+                )
+
         try:
-            return self.store.get_or_create(
+            session, created = self.store.get_or_create(
                 session_id,
+                prepare=prepare,
+                on_publish=publish_initial,
+                max_sessions=self._max_sessions,
                 write_mode_source=(
                     "explicit"
                     if self.write_modes.default_mode == WRITE_MODE_STAGED
@@ -1069,6 +1280,7 @@ class SessionManager:
             )
         except SessionRetired:
             raise SessionNotFound() from None
+        return session, created
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
         """The write mode a response describing ``session`` reports (§5.1).
@@ -1356,14 +1568,36 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        self.get_or_create(session_id)
+        actor = client_id or "rest"
+        rename_op = {"op": "session_renamed", "name": name}
+        op = {**rename_op, "client_id": actor}
+        if self.store.get(session_id) is None:
+            # Charge and validate before publishing, as apply_ops does.
+            if (
+                1 > self._max_ops
+                or len(json.dumps(rename_op)) > self._max_op_batch_bytes
+            ):
+                raise OpBatchTooLarge()
+            if not isinstance(actor, str) or not actor:
+                raise OpError("client_id is required")
+            if 1 > self._bucket.capacity:
+                raise OpBatchTooLarge()
+            if not self._bucket.consume(actor, 1):
+                raise RateLimited()
+            session, created = self.get_or_create(session_id, initial_op=op)
+            if created:
+                return session
+            precharged = True
+        else:
+            precharged = False
         await self.apply_ops(
             session_id,
-            client_id or "rest",
+            actor,
             None,
             [
                 {"op": "session_renamed", "name": name},
             ],
+            precharged=precharged,
         )
         return self.store.get(session_id)
 
@@ -1447,14 +1681,12 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
         op = {"op": "session_renamed", "name": name, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
@@ -1485,14 +1717,12 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
         op = {"op": "session_described", "description": description, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
@@ -1571,6 +1801,7 @@ class SessionManager:
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         appearance_version: Optional[int] = None,
         authorize_appearance: Optional[Callable[[], None]] = None,
+        precharged: bool = False,
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1607,7 +1838,7 @@ class SessionManager:
         # retryable rate limit — the same rule as ``_consume_mcp_budget``.
         if cost > self._bucket.capacity:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, cost):
+        if not precharged and not self._bucket.consume(client_id, cost):
             raise RateLimited()
 
         if self.store.get(session_id) is None:
@@ -3130,11 +3361,53 @@ class SessionManager:
 
     # ---------------- MCP push ----------------
 
+    def materialize_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        """Publish a missing session with the pushed membership already applied."""
+        result = command.get("result") or {}
+        action = result.get("action")
+        node_ids = list(
+            dict.fromkeys(
+                node["id"]
+                for node in result.get("nodes") or []
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            )
+        )
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        op = None
+        if action in _REPLACING_ACTIONS:
+            op = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            op = {
+                "op": "nodes_added",
+                "node_ids": node_ids,
+                "client_id": actor,
+                "positions": _pushed_view(result).get("positions") or {},
+            }
+        return self.get_or_create(session_id, initial_op=op)[1]
+
     def push_command(
         self,
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        *,
+        membership_applied: bool = False,
     ) -> bool:
         """Apply server-owned membership once, then broadcast the command.
 
@@ -3158,7 +3431,11 @@ class SessionManager:
             # with apply_ops: the push is accepted and applied on the loop.
             command = copy.deepcopy(command)
             loop.call_soon_threadsafe(
-                self._push_command_on_loop, session_id, command, on_published
+                self._push_command_on_loop,
+                session_id,
+                command,
+                on_published,
+                membership_applied,
             )
             return True
         queue_name = f"session-push:{session_id}"
@@ -3170,22 +3447,29 @@ class SessionManager:
             # rolls back, preserving op/command order for every subscriber.
             command = copy.deepcopy(command)
             task = asyncio.get_running_loop().create_task(
-                self._push_command_after_batch(session_id, command, on_published),
+                self._push_command_after_batch(
+                    session_id, command, on_published, membership_applied
+                ),
                 name=queue_name,
             )
             self._pending_pushes.add(task)
             task.add_done_callback(self._pending_pushes.discard)
             return True
-        return self._publish_command(session_id, command, on_published)
+        return self._publish_command(
+            session_id, command, on_published, membership_applied
+        )
 
     def _push_command_on_loop(
         self,
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]],
+        membership_applied: bool,
     ) -> None:
         try:
-            self.push_command(session_id, command, on_published)
+            self.push_command(
+                session_id, command, on_published, membership_applied=membership_applied
+            )
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
@@ -3194,10 +3478,13 @@ class SessionManager:
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
     ) -> None:
         try:
             async with self._lock(session_id):
-                self._publish_command(session_id, command, on_published)
+                self._publish_command(
+                    session_id, command, on_published, membership_applied
+                )
         except Exception:
             logger.exception("queued command failed for session %s", session_id)
 
@@ -3206,11 +3493,13 @@ class SessionManager:
         session_id: str,
         command: Dict[str, Any],
         on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
     ) -> bool:
         session = self.store.get(session_id)
         if session is None:
             return False
-        self._apply_command_membership(session, command)
+        if not membership_applied:
+            self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
         if on_published is not None:
             on_published()

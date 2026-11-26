@@ -1,10 +1,11 @@
 # ADR 0015 — Sessions as node clusters and saved views
 
-- **Status:** Proposed
+- **Status:** Accepted (option 3), 2026-11-25
 - **Date:** 2026-11-25
 - **Scope:** Open-source core
 - **Related:** [`MULTI_USER_SESSIONS_DESIGN.md`](../MULTI_USER_SESSIONS_DESIGN.md)
   decision D13; [`MCP_SESSION_LIFECYCLE_CONTRACT.md`](../MCP_SESSION_LIFECYCLE_CONTRACT.md);
+  [`Session and saved-view compatibility contract`](../SESSION_SAVEDVIEW_COMPAT_CONTRACT.md);
   [ADR 0005](0005-sessions-may-stage-graph-changes.md)
 
 ## Context
@@ -42,11 +43,11 @@ nodes, groups and annotations, and their readers resolve referenced graph nodes.
    retaining a point-in-time capture of membership and presentation; the copy
    still references live graph nodes.
 
-## Recommendation
+## Decision
 
-Subject to the owner's decision, choose option 3. This ADR is a proposal, not an
-approval to build it. The owner must decide whether to build the proposal and
-approve a detailed compatibility contract before behavior changes.
+Option 3 was accepted on 2026-11-25, with retiring SavedView as the first goal.
+Behavior changes still follow a detailed compatibility contract, written and
+reviewed before the implementation slices.
 
 - Treat a session ID as the identity of a cluster. Names are display labels and
   need not be unique. Membership is explicit `node_refs`, including hidden

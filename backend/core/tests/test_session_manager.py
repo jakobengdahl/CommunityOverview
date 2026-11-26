@@ -2559,11 +2559,23 @@ class TestLifecycle:
         assert events[0]["deleted_by"] == "c1"
         assert mgr.get_session(s.id) is None
 
-    async def test_session_limit(self):
+    async def test_session_limit(self, monkeypatch):
         mgr = _manager(max_sessions=1)
-        mgr.create_session()
+        source = mgr.create_session()
         with pytest.raises(SessionLimitReached):
             mgr.create_session()
+        # Capacity wins over copy validation, for both copy entry points.
+        source.state["annotations"] = [{"id": "invalid", "type": "image"}]
+        with pytest.raises(SessionLimitReached):
+            mgr.copy_session(source.id)
+        with pytest.raises(SessionLimitReached):
+            await mgr.copy_session_async(source.id)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "backend.core.session_manager.DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 1
+            )
+            with pytest.raises(SessionLimitReached):
+                mgr.copy_session(source.id)
 
     async def test_push_command_unknown_session(self):
         mgr = _manager()
@@ -2909,6 +2921,65 @@ class TestRenameSession:
         mgr = _manager(max_sessions=0)
         with pytest.raises(SessionLimitReached):
             await mgr.rename_session("9999-9999", "x")
+
+    @pytest.mark.parametrize("exists", [False, True])
+    async def test_rename_uses_batch_admission_limits(self, exists):
+        op = {"op": "session_renamed", "name": "x"}
+        mgr = _manager(max_op_batch_bytes=len(json.dumps(op)))
+        sid = "1234-5678"
+        if exists:
+            mgr.get_or_create(sid)
+        await mgr.rename_session(sid, "x", client_id="long-client-id")
+        assert mgr.get_session(sid).name == "x"
+
+        mgr = _manager(max_ops_per_batch=0)
+        if exists:
+            mgr.get_or_create(sid)
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.rename_session(sid, "x")
+        assert (mgr.get_session(sid) is not None) == exists
+
+    async def test_initial_event_precedes_a_concurrent_store_writer(self):
+        backend = InMemorySessionPersistenceBackend()
+        mgr = SessionManager(SessionStore(backend))
+        other = SessionStore(backend)
+        entered = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        events = []
+
+        def publish(_sid, event):
+            events.append(event["seq"])
+            entered.set()
+            assert release.wait(5)
+
+        mgr.bus.publish = publish
+        sid = "1234-5678"
+        creator = threading.Thread(target=lambda: mgr.rename_session_sync(sid, "first"))
+        creator.start()
+        assert entered.wait(5)
+
+        def write():
+            session = other.get(sid)
+            with other.writing(sid):
+                op = other.apply_state_op(
+                    session,
+                    {"op": "session_renamed", "name": "second", "client_id": "other"},
+                )
+                other.persist(session)
+                events.append(op["seq"])
+            writer_done.set()
+
+        writer = threading.Thread(target=write)
+        writer.start()
+        try:
+            assert not writer_done.wait(0.1)
+        finally:
+            release.set()
+            creator.join(5)
+            writer.join(5)
+        assert writer_done.is_set()
+        assert events == [1, 2]
 
 
 class TestRenameSessionSync:
@@ -3949,7 +4020,7 @@ _MCP_UNMETERED_CALLS = {
     "copy_session",
     "create_session",
     # A push materialises the browser's session so the server applies it.
-    "get_or_create",
+    "materialize_command",
     "get_session",
     "list_activity",
     "list_sessions",
@@ -4028,7 +4099,9 @@ _MCP_UNMETERED_RUNS = {
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
     "copy_session": lambda mgr, sid: mgr.copy_session(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
-    "get_or_create": lambda mgr, sid: mgr.get_or_create(sid),
+    "materialize_command": lambda mgr, sid: mgr.materialize_command(
+        sid, {"result": {"action": "add_to_visualization", "nodes": [{"id": "n"}]}}
+    ),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_activity": lambda mgr, sid: mgr.list_activity(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),
@@ -5772,6 +5845,12 @@ async def test_copy_session_refused_staging_creates_nothing():
     def refuse():
         raise PermissionError
 
+    mgr._max_sessions = 1
+    with pytest.raises(SessionLimitReached):
+        mgr.copy_session(source.id, authorize_staging=refuse)
+    with pytest.raises(SessionLimitReached):
+        await mgr.copy_session_async(source.id, authorize_staging=refuse)
+    mgr._max_sessions = 100
     with pytest.raises(PermissionError):
         mgr.copy_session(source.id, authorize_staging=refuse)
     assert mgr.store.session_count() == 1

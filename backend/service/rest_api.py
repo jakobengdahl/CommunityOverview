@@ -45,7 +45,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 from pydantic import BaseModel, Field, RootModel, field_validator
@@ -78,10 +78,11 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
+from . import session_capture
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
-from .staging import refusal_result
+from .staging import outside_storage, refusal_result, session_storage_error
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -738,6 +739,7 @@ _WRITE_ERROR_STATUS = {
     "entity_revision_conflict": 409,
     "write_failed": 502,
     "write_outcome_unknown": 503,
+    "storage_error": 503,
     # A write made in a session (§9, §16.3).
     "session_not_found": 404,
     "session_not_supported": 400,
@@ -1458,6 +1460,8 @@ def _register_session_endpoints(
             )
         try:
             session = session_manager.create_session(request.name, request.write_mode)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except WriteModeRefused as exc:
@@ -1498,19 +1502,25 @@ def _register_session_endpoints(
                 request.name if request else None,
                 # Copied staged changes are staged by the copier: never more
                 # than the copier may stage.
-                authorize_staging=lambda: _authorize_session_change(
-                    http_request,
-                    "copy_visualization_session",
-                    session_id,
-                    GRAPH_OPERATION_STAGE,
+                authorize_staging=outside_storage(
+                    lambda: _authorize_session_change(
+                        http_request,
+                        "copy_visualization_session",
+                        session_id,
+                        GRAPH_OPERATION_STAGE,
+                    )
                 ),
                 staged_by=staged_by,
-                assign_access=lambda copy_id: _assign_copy_access(
-                    http_request, session_id, copy_id
+                assign_access=outside_storage(
+                    lambda copy_id: _assign_copy_access(
+                        http_request, session_id, copy_id
+                    )
                 ),
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except OpBatchTooLarge:
@@ -1524,6 +1534,28 @@ def _register_session_endpoints(
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
+
+    @router.post("/sessions/{session_id}/save-view")
+    async def save_session_view(session_id: str, http_request: Request) -> Response:
+        """MCP twin: ``save_session_view``; the body is validated raw there."""
+        try:
+            body = await http_request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        with use_request_authorization(headers=http_request.headers):
+            result = session_capture.save_session_view(
+                service,
+                session_manager,
+                session_id,
+                body.get("name"),
+                body.get("expected_revision"),
+            )
+        status = (
+            200 if result["success"] else session_capture.ERROR_STATUS[result["error"]]
+        )
+        return JSONResponse(result, status_code=status)
 
     @router.get("/shape-library")
     def get_shape_library() -> Dict[str, Any]:
@@ -1718,8 +1750,12 @@ def _register_session_endpoints(
             await session_manager.rename_session(
                 session_id, request.name, request.client_id
             )
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
-            raise HTTPException(status_code=503, detail="too many sessions")
+            raise _session_refusal("too_many_sessions", "too many sessions", 503)
+        except OpBatchTooLarge:
+            raise _session_refusal("session_too_large", "session too large", 413)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
         except RateLimited:
@@ -2209,6 +2245,8 @@ def _register_session_endpoints(
         _rate_limit_lookup(request)
         try:
             session_manager.get_or_create(session_id)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except SessionNotFound:
@@ -2371,6 +2409,7 @@ _IMPORT_ERROR_STATUS = {
     "import_preview_busy": 503,
     "plan_digest_required": 422,
     "import_merge_blocked": 422,
+    "import_merge_too_large": 422,
     "import_plan_stale": 409,
     "import_merge_busy": 503,
     "import_merge_not_supported": 501,

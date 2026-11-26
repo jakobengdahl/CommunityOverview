@@ -1,4 +1,4 @@
-# covers: backend/core/session_store.py
+# covers: backend/core/session_store.py, backend/core/session_manager.py
 """
 Tests for the server-side session store (step 1) and op state transforms
 (step 3) in ``backend/core/session_store.py``.
@@ -1042,8 +1042,182 @@ def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
         assert set(positions) == {0}
         assert os.lseek(f.fileno(), 0, os.SEEK_CUR) == eof > 0
     if module is session_store:
+        outcomes[:] = [None, None]
+        backend = FileSessionPersistenceBackend(tmp_path / "s")
         calls.clear()
         outcomes[:] = [errno.EDEADLOCK, None, None]
-        with FileSessionPersistenceBackend(tmp_path / "s").transaction():
+        with backend.transaction():
             pass
         assert calls == [FakeMsvcrt.LK_LOCK] * 2 + [FakeMsvcrt.LK_UNLCK]
+
+
+def test_creation_paths_share_capacity_across_stores(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.core.session_manager import SessionLimitReached, SessionManager
+
+    first = SessionManager(_store(tmp_path), max_sessions=2)
+    source = first.create_session()
+    second = SessionManager(_store(tmp_path), max_sessions=2)
+    barrier = threading.Barrier(2)
+
+    def create(copy):
+        barrier.wait()
+        try:
+            return second.copy_session(source.id) if copy else first.create_session()
+        except SessionLimitReached:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, (False, True)))
+    assert sum(result is not None for result in results) == 1
+    assert len(_store(tmp_path).list_meta()) == 2
+
+    roomy = SessionManager(_store(tmp_path), max_sessions=4)
+    assert roomy.create_session()
+    assert roomy.copy_session(source.id)
+
+
+def test_unpublished_document_is_invisible_and_swept_on_restart(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    published = store.create()
+    directory = tmp_path / "sessions"
+    original_rename = session_store.os.rename
+
+    def crash_before_publish(source, destination):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(session_store.os, "rename", crash_before_publish)
+    with pytest.raises(KeyboardInterrupt):
+        store.create_with_capacity(max_sessions=2)
+    monkeypatch.setattr(session_store.os, "rename", original_rename)
+    assert store.session_count() == 1
+    assert [m["id"] for m in store.list_meta()] == [published.id]
+    orphan = list(directory.glob("session_*.json"))
+    assert len(orphan) == 1
+    partial = directory / "session_partial.json"
+    partial.write_text("{")
+    restarted = _store(tmp_path)
+    assert not orphan[0].exists()
+    assert not partial.exists()
+    assert restarted.get(published.id) is not None
+    assert restarted.create_with_capacity(max_sessions=2)[1]
+
+
+def test_publication_flushes_and_is_visible_to_another_store(tmp_path, monkeypatch):
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    calls = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd):
+        calls.append(os.fstat(fd).st_mode)
+        real_fsync(fd)
+
+    monkeypatch.setattr(session_store.os, "fsync", record_fsync)
+    session = first.create()
+    import stat
+
+    assert any(stat.S_ISREG(mode) for mode in calls)
+    assert any(stat.S_ISDIR(mode) for mode in calls)
+    assert second.get(session.id).id == session.id
+
+
+def test_failed_directory_flush_removes_new_session(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_store,
+            "_fsync_directory",
+            lambda _: (_ for _ in ()).throw(OSError()),
+        )
+        with pytest.raises(OSError):
+            store.create_with_capacity(max_sessions=1)
+    assert store.session_count() == 0
+    assert store.create_with_capacity(max_sessions=1)[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_implicit_creation_publishes_initial_operation(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    observer = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    saved = store._backend.save
+    visible = []
+
+    def observe(document):
+        saved(document)
+        visible.append(json.loads((tmp_path / "sessions" / f"{sid}.json").read_text()))
+
+    monkeypatch.setattr(store._backend, "save", observe)
+    if operation == "rest":
+        await manager.rename_session(sid, "named")
+    elif operation == "rename":
+        manager.rename_session_sync(sid, "named")
+    elif operation == "describe":
+        manager.describe_session_sync(sid, "described")
+    else:
+        assert manager.materialize_command(
+            sid, {"result": {"action": "add_to_visualization", "nodes": [{"id": "n"}]}}
+        )
+    assert len(visible) == 1
+    assert observer.get(sid).to_dict() == visible[0]
+    assert visible[0]["seq"] == 1
+    if operation in ("rest", "rename"):
+        assert visible[0]["name"] == "named"
+    elif operation == "describe":
+        assert visible[0]["description"] == "described"
+    else:
+        assert visible[0]["state"]["node_refs"] == ["n"]
+    before = store.get(sid).to_dict()
+    session, created = manager.get_or_create(
+        sid, initial_op={"op": "session_renamed", "name": "other", "client_id": "test"}
+    )
+    assert not created and session.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_failed_implicit_creation_does_not_publish_or_delete(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    deleted = []
+    with monkeypatch.context() as patch:
+
+        def fail(_document):
+            raise OSError()
+
+        patch.setattr(store._backend, "save", fail)
+        patch.setattr(store, "delete", lambda session_id: deleted.append(session_id))
+        with pytest.raises(OSError):
+            if operation == "rest":
+                await manager.rename_session(sid, "named")
+            elif operation == "rename":
+                manager.rename_session_sync(sid, "named")
+            elif operation == "describe":
+                manager.describe_session_sync(sid, "described")
+            else:
+                manager.materialize_command(
+                    sid,
+                    {
+                        "result": {
+                            "action": "add_to_visualization",
+                            "nodes": [{"id": "n"}],
+                        }
+                    },
+                )
+    assert not deleted
+    assert _store(tmp_path).get(sid) is None
+    assert store.session_count() == 0
+    assert manager.create_session()

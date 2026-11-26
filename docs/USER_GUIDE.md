@@ -1054,7 +1054,8 @@ with it; graph history is the permanent audit trail.
 `backend/service/actor_erasure.py` replaces matching structured actor identifiers
 in mutation history, nested run-history attribution, proposal `decided_by` and
 the attribution in applied proposal results, session activity (including sessions not currently loaded), the `staged_by` of pending entries in
-staged sessions' layers and the merging `actor` of staged-merge records. Supply the optional
+staged sessions' layers and the merging `actor` of staged-merge records (file
+merge log and PostgreSQL `graph_merge_records`). Supply the optional
 stores to its constructor. An absent store returns zero; PostgreSQL graph storage
 has no mutation-history sidecar, so omit that store. Graph nodes and edges are
 never written. Record IDs, timestamps, decision status and unrelated actors are
@@ -1062,8 +1063,18 @@ preserved. This replaces attribution, including actor/delegation objects,
 `staged_by` in event origins and activity records, client IDs and matching
 `agent:<id>` origins; it does not search free text or erase graph content.
 The CLI reaches the layers of the file graph backend (`<graph>.layers.json`
-next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`); layers held in PostgreSQL graph storage are not local
-files, so merge or discard open staged sessions there before maintenance.
+next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`).
+With `--postgres-schema` it also replaces the merging `actor` of the staged-merge
+records in that schema of the PostgreSQL graph store (`merge_records`),
+connecting with `GRAPH_POSTGRES_DSN` and `GRAPH_POSTGRES_SCOPE` from the
+environment; a DSN is never taken from the command line. It changes only the
+records of that scope (unscoped records when `GRAPH_POSTGRES_SCOPE` is unset),
+so run it once per scope. Pending entries of staged
+sessions held in PostgreSQL are not reached, so merge or discard open staged
+sessions there before maintenance: a merged session's merge record is then
+scrubbed like any other. In code, `PostgresMergeRecords.erase_actor(...,
+dry_run=True)` returns the number of merge records that would change without
+changing any.
 
 Stop application processes, workers and other writers before maintenance, and
 use a non-personal replacement token that does not contain the original actor
@@ -1076,7 +1087,8 @@ python -m backend.service.actor_erasure \
   --run-history-db /path/to/runs.db \
   --governance-db /path/to/proposals.db \
   --sessions-dir /path/to/sessions \
-  --layers-path /path/to/graph.layers.json
+  --layers-path /path/to/graph.layers.json \
+  --postgres-schema public
 ```
 
 The database flags default to `AGENTS_RUN_HISTORY_DB` and
@@ -1086,7 +1098,9 @@ not created. Output contains only per-store changed-record `counts` and
 Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
 A path of the wrong kind (a file given as `--sessions-dir`, or a database that
 is not a current-schema store of that flag's kind, or a path that cannot be
-read) is an invocation error: no store is opened or migrated. Start the application once to migrate an older
+read) is an invocation error, as is a PostgreSQL store that cannot be reached or whose merge records
+this connection may not update (a missing privilege, a read-only server or a
+replica): no store is opened, changed or migrated. Start the application once to migrate an older
 database before running maintenance.
 A failed store has a `null` count because partial changes may have happened;
 other stores are still processed. Repair any reported store failure and rerun
