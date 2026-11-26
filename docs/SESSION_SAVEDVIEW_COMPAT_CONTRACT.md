@@ -3,7 +3,7 @@
 **Status:** The save-view transition is in place: `save_session_view` and
 `POST /api/sessions/{session_id}/save-view` capture annotations and groups.
 `save_view` now requests browser capture, and the browser saves through session capture.
-Legacy import and retirement are pending. This contract specifies the
+Session backup is in place; restore, legacy import and retirement are pending. This contract specifies the
 transition under [ADR 0015](adr/0015-sessions-as-node-clusters.md). It keeps
 the existing APIs unchanged. The existing session lifecycle and canonical link rules
 are in [MCP session lifecycle](MCP_SESSION_LIFECYCLE_CONTRACT.md); session
