@@ -714,35 +714,6 @@ export async function exportGraph() {
 }
 
 /**
- * Save a view
- * @param {string} name - View name
- * @returns {Promise<{success: boolean}>}
- */
-export async function saveView(name) {
-  return apiFetch(`${API_BASE}/views/save`, {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  });
-}
-
-/**
- * Get a saved view
- * @param {string} name - View name
- * @returns {Promise<Object>}
- */
-export async function getSavedView(name) {
-  return apiFetch(`${API_BASE}/views/${encodeURIComponent(name)}`);
-}
-
-/**
- * List all saved views
- * @returns {Promise<{views: Array}>}
- */
-export async function listSavedViews() {
-  return apiFetch(`${API_BASE}/views`);
-}
-
-/**
  * Execute a backend tool directly (for MCP tool compatibility)
  * @param {string} toolName - Tool name
  * @param {Object} args - Tool arguments

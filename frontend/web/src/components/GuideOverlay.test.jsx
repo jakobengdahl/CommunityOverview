@@ -116,25 +116,6 @@ describe('GuideOverlay', () => {
     expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['n1']);
   });
 
-  it('sends a tour-loaded saved view with its layout and clears nothing locally', async () => {
-    const metadata = { node_ids: ['n1'], positions: { n1: { x: 5, y: 6 } } };
-    api.searchGraph.mockResolvedValueOnce({ nodes: [{ id: 'v1', name: 'View', metadata }] });
-    api.getNodeDetails.mockResolvedValueOnce({ success: true, node: { id: 'n1' } });
-    const publisher = vi.fn(() => true);
-    useGraphStore.getState().setMembershipPublisher(publisher);
-    useGraphStore.setState({ hiddenNodeIds: ['n9'] });
-    render(<GuideOverlay />);
-    start([{ type: 'load_saved_view', view_name: 'View', text: 'Loaded' }, { text: 'Next' }]);
-
-    expect(await screen.findByText('Loaded')).toBeInTheDocument();
-    expect(publisher).toHaveBeenCalledTimes(1);
-    const [op, ids, { view }] = publisher.mock.calls[0];
-    expect([op, ids]).toEqual(['nodes_replaced', ['n1']]);
-    expect(view.positions).toEqual(metadata.positions);
-    expect(useGraphStore.getState().hiddenNodeIds).toEqual(['n9']);
-    useGraphStore.getState().setMembershipPublisher(null);
-  });
-
   it('shows a failed action error and lets the visitor move on', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     api.searchGraph.mockRejectedValueOnce(new Error('search down'));

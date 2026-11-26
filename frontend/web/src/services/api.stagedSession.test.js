@@ -213,7 +213,7 @@ describe('a direct session the server holds, where staging exists', () => {
     api.setActiveSessionForRequests('5555-6666-7777-8888');
     api.setSessionOnServer('5555-6666-7777-8888');
     await api.updateNode('n1', { name: 'x' });
-    await api.saveView('v');
+    await api.saveSessionView('5555-6666-7777-8888', 'v');
     expect(headerOf(calls[0])).toBe('5555-6666-7777-8888');
     // A route that neither stages nor composes keeps working in a direct session.
     expect(headerOf(calls[1])).toBeUndefined();

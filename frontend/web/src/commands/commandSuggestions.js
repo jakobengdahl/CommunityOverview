@@ -103,9 +103,7 @@ export function commandSuggestion(command, t) {
  */
 export async function searchVisibleNodes(query, { limit = 10, federationDepth } = {}) {
   const result = await api.searchGraph(query, { limit, federationDepth });
-  return (result.nodes || []).filter(
-    (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
-  );
+  return (result.nodes || []).filter((n) => n.type !== 'Community');
 }
 
 /**

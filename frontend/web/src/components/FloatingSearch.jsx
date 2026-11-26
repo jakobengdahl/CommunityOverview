@@ -6,7 +6,6 @@ import * as api from '../services/api';
 import { searchVisibleNodes } from '../commands/commandSuggestions';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
-import { savedViewLayout, savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
 import { isFederatedNode, originGraphName } from '@community-graph/ui-graph-canvas';
 
 function FloatingSearch({ variant = 'floating', onTeleport }) {
@@ -16,10 +15,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
     hiddenNodeIds,
     addNodesToVisualization,
     publishMembership,
-    clearVisualization,
     setFocusNodeId,
-    setPendingGroups,
-    setPendingAnnotations,
     federationDepth,
     stats,
     schema,
@@ -269,91 +265,6 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
     async (node) => {
       const selectionId = selectionRef.current + 1;
       selectionRef.current = selectionId;
-      // SavedView: clear canvas and load the saved view's nodes with positions and edges
-      if (node.type === 'SavedView') {
-        try {
-          const nodeIds = node.metadata?.node_ids || [];
-          const positions = node.metadata?.positions || {};
-          const savedEdges = node.metadata?.edges || [];
-          const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
-          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(node.metadata || {});
-          const details =
-            nodeIds.length > 0
-              ? await Promise.all(nodeIds.map((id) => api.getNodeDetails(id).catch(() => null)))
-              : [];
-          if (selectionRef.current !== selectionId) return;
-
-          let loadedNodes = [];
-          let loadedEdges = [];
-          if (nodeIds.length > 0) {
-            loadedNodes = details
-              .filter((d) => d?.success)
-              .map((d) => {
-                const n = d.node;
-                if (positions[n.id]) {
-                  return { ...n, _savedPosition: positions[n.id] };
-                }
-                return n;
-              });
-            if (loadedNodes.length > 0) {
-              let edgesToLoad = [];
-              if (savedEdges.length > 0) {
-                // Use saved edges directly
-                edgesToLoad = savedEdges;
-              } else {
-                // Discover edges between loaded nodes
-                const loadedIds = new Set(loadedNodes.map((n) => n.id));
-                for (const d of details) {
-                  if (d?.edges) {
-                    const relevant = d.edges.filter(
-                      (e) =>
-                        loadedIds.has(e.source) &&
-                        loadedIds.has(e.target) &&
-                        (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-                    );
-                    edgesToLoad.push(...relevant);
-                  }
-                }
-              }
-              const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-              loadedEdges = Array.from(edgeMap.values());
-            }
-          }
-          // A session stores the view's layout with the replace's one record
-          // and every browser renders it from there, so none is saved back.
-          const sent = publishMembership(
-            'nodes_replaced',
-            loadedNodes.map((n) => n.id),
-            {
-              nodes: loadedNodes,
-              edges: loadedEdges,
-              view: savedViewLayout(node.metadata),
-            }
-          );
-          if (!sent) {
-            clearVisualization({ keepNodes: true });
-            if (savedViewAnnotations.groups.length > 0) {
-              setPendingGroups({
-                groups: savedViewAnnotations.groups,
-                parentIds: savedViewAnnotations.parentIds,
-              });
-            }
-            if (savedViewAnnotations.annotations.length > 0) {
-              setPendingAnnotations(savedViewAnnotations.annotations);
-            }
-          }
-        } catch (err) {
-          if (selectionRef.current !== selectionId) return;
-          console.error('Error loading saved view:', err);
-        }
-        if (selectionRef.current !== selectionId) return;
-        setQuery('');
-        setResults([]);
-        setResultsQuery(null);
-        setShowDropdown(false);
-        return;
-      }
-
       const existsInViz = vizNodes.some((n) => n.id === node.id);
       const isHidden = hiddenNodeIds.includes(node.id);
 
@@ -392,16 +303,7 @@ function FloatingSearch({ variant = 'floating', onTeleport }) {
       setResultsQuery(null);
       setShowDropdown(false);
     },
-    [
-      vizNodes,
-      hiddenNodeIds,
-      addNodesToVisualization,
-      publishMembership,
-      clearVisualization,
-      setFocusNodeId,
-      setPendingGroups,
-      setPendingAnnotations,
-    ]
+    [vizNodes, hiddenNodeIds, addNodesToVisualization, publishMembership, setFocusNodeId]
   );
 
   const handleKeyDown = (e) => {

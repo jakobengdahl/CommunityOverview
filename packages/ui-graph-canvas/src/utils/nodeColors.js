@@ -18,8 +18,6 @@ export const NODE_COLORS = Object.assign(Object.create(null), {
   ActiveKnowledgeCollection: '#F59E0B',
   Agent: '#EC4899',
   EventSubscription: '#8B5CF6',
-  SavedView: '#6B7280',
-  VisualizationView: '#6B7280', // Legacy support
   Group: '#646cff',
 });
 
