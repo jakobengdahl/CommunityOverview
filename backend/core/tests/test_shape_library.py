@@ -745,7 +745,12 @@ def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
     assert created.status_code == 201 and "owner" not in created.json()
     assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
     usage = client.get("/shape-library/card/usage")
-    assert usage.json() == {"revision": 1, "usage": 2, "template_usage": 0, "template_usage_token": None}
+    assert usage.json() == {
+        "revision": 1,
+        "usage": 2,
+        "template_usage": 0,
+        "template_usage_token": None,
+    }
     edit = {"name": "Flat", "definition": {**DEFINITION, "base": "rectangle-flat"}}
     stale = client.put(
         "/shape-library/card",
@@ -905,9 +910,13 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path, action):
     other = templates.save(other, 0)
     assert restarted.template_usage("card") == 1
     with pytest.raises(LibraryConflict):
-        options = dict(identity="owner", expected_revision=entry["revision"],
-                       expected_usage=0, expected_template_usage=1,
-                       expected_template_usage_token=token)
+        options = dict(
+            identity="owner",
+            expected_revision=entry["revision"],
+            expected_usage=0,
+            expected_template_usage=1,
+            expected_template_usage_token=token,
+        )
         if action == "delete":
             restarted.delete("card", **options)
         else:
@@ -931,13 +940,19 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path, action):
     assert restarted.template_usage("card") == 0
 
 
-def test_session_creation_and_shape_writes_lock_sessions_before_templates(tmp_path, monkeypatch):
+def test_session_creation_and_shape_writes_lock_sessions_before_templates(
+    tmp_path, monkeypatch
+):
     sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
     store = SessionStore(sessions)
     manager = SessionManager(store)
     templates = manager.template_store
-    library = ShapeLibrary(FileShapeLibraryPersistenceBackend(tmp_path / "library"),
-                           sessions, templates=templates, writes_enabled=True)
+    library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+        sessions,
+        templates=templates,
+        writes_enabled=True,
+    )
     transaction = templates._backend.transaction
     acquisitions = []
 
@@ -951,6 +966,7 @@ def test_session_creation_and_shape_writes_lock_sessions_before_templates(tmp_pa
     monkeypatch.setattr(templates._backend, "transaction", checked_transaction)
     manager.create_session()
     entry = library.put("card", "Card", DEFINITION, identity="owner")
-    library.delete("card", identity="owner", expected_revision=entry["revision"],
-                   expected_usage=0)
+    library.delete(
+        "card", identity="owner", expected_revision=entry["revision"], expected_usage=0
+    )
     assert len(acquisitions) >= 3
