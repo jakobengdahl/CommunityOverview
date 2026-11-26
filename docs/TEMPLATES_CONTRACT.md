@@ -5,8 +5,8 @@ outside the graph, alongside sessions. Its visibility follows the session scope
 in open core. It is not a live session or a graph node. A template carries both
 source node IDs for a future reference insertion and snapshots for a future copy
 insertion; copy will be the default. Reading a template does not require the
-source session or nodes to exist. Capture, insertion, authorization at those
-boundaries, and transport and UI are outside this contract's implementation.
+source session or nodes to exist. Capture, reference insertion, authorization and transport are implemented;
+copy insertion and the UI follow later.
 
 ## JSON document
 
@@ -57,7 +57,7 @@ must explicitly handle rejected data.
 
 ## Shape resolution
 
-On future insertion, resolve a valid reference to its current definition and
+On insertion, resolve a valid reference to its current definition and
 use the inline copy when the reference is unknown. A tombstoned saved shape
 instead resolves to the built-in card; it does not resurrect the inline copy.
 An inline-only selection uses its copy and a builtin selection uses the card.
@@ -81,3 +81,21 @@ Read-only profile templates belong as individual v1 JSON documents in
 `config/<profile>/templates/`. Their IDs must not collide with mutable or other
 profile templates; a loader must reject collisions and invalid documents rather
 than silently override one. Profile loading and content are not shipped here.
+
+## Reference insertion
+
+`insert_template` and `POST /api/sessions/{id}/insert-template` insert existing
+source nodes into a writable session without changing the graph. The caller must
+be able to read the template; source nodes use the same access filter as adding
+nodes to a session. Missing, archived, or inaccessible nodes are reported as
+`missing`, and nodes already present are reported as `already_present` and left
+unchanged. Graph edges between session nodes remain those in the graph.
+
+Supply both `x` and `y` to place the template bounds at an origin; otherwise the
+server places it to the right of existing content. Annotation IDs are minted
+fresh and links remapped; links to missing nodes are removed. Shape selections
+become per-node overrides, with `tombstoned` and `missing_shape` entries in the
+shape report for fallbacks. The result includes `added`, `annotation_id_map`,
+`skipped`, `shapes`, and the session `revision`. Optional `expected_revision`
+and `template_revision` reject stale writes atomically with `revision_conflict`.
+Only `reference` mode is available; `copy` returns `unsupported_mode`.

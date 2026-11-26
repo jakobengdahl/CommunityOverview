@@ -388,6 +388,7 @@ def capture_template(
 
 # The session authorization seam also governs templates in open core.
 ERROR_STATUS = {
+    "unsupported_mode": 400,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -399,6 +400,7 @@ ERROR_STATUS = {
     "nodes_limit": 413,
     "edges_limit": 413,
     "annotations_limit": 413,
+    "session_too_large": 413,
     "storage_error": 503,
 }
 
@@ -717,4 +719,223 @@ def delete_template(service, manager, template_id, expected_revision):
             return _failure("template_not_found")
         return _conflict(manager.template_store, template_id)
     except Exception:
+        return _failure("storage_error")
+
+
+def insert_template(
+    service,
+    manager,
+    session_id,
+    template_id,
+    mode="reference",
+    x=None,
+    y=None,
+    expected_revision=None,
+    template_revision=None,
+):
+    """Insert a template's existing nodes and presentation in one session write."""
+    import math
+    import secrets
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+    from backend.core.session_store import OpError, AnnotationLimitReached
+    from backend.core.session_manager import OpBatchTooLarge, _check_op_image_sizes
+    from .session_capture import relink_capture
+
+    if manager is None:
+        return _failure("storage_error")
+    if not isinstance(session_id, str) or not is_valid_session_id(session_id):
+        return _failure("invalid_request", message=INVALID_SESSION_ID_MESSAGE)
+    if (
+        not isinstance(template_id, str)
+        or not is_valid_session_id(template_id)
+        or any(
+            v is not None and (type(v) is not int or v < 0)
+            for v in (expected_revision, template_revision)
+        )
+        or any(
+            v is not None and (type(v) not in (int, float) or not math.isfinite(v))
+            for v in (x, y)
+        )
+        or (x is None) != (y is None)
+    ):
+        return _failure("invalid_request")
+    if mode != "reference":
+        return _failure("unsupported_mode" if mode == "copy" else "invalid_request")
+    if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
+        return _failure("access_denied")
+    try:
+        # Hold both stores through the check and publication so neither revision
+        # can change between validation and the session write.
+        with (
+            manager.template_store._backend.transaction(),
+            manager.store._lock,
+            manager.store._backend.transaction(),
+        ):
+            result = get_template(service, manager, template_id)
+            if not result["success"]:
+                return result
+            doc = result["template"]
+            if template_revision is not None and template_revision != doc["revision"]:
+                return _failure("revision_conflict", current_revision=doc["revision"])
+            if manager._lock(session_id).locked():
+                return _failure("session_busy")
+            session = manager.get_session(session_id)
+            if session is None or manager.write_modes.is_retired(session_id):
+                return _failure("session_not_found")
+            if expected_revision is not None and session.seq != expected_revision:
+                return _failure("revision_conflict", current_revision=session.seq)
+            ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))
+            with service.reading_in(session_id):
+                resolved = service.resolve_session_node_semantics(
+                    ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+                )
+            if not resolved.get("success"):
+                return _failure("access_denied")
+            known = resolved.get("nodes") or {}
+            present = set(session.state.get("node_refs", []))
+            added, skipped, keys = [], [], {}
+            positions, overrides = {}, {}
+            hidden = list(session.state.get("hidden_node_ids", []))
+            if x is None:
+                right = [
+                    p.get("x", 0)
+                    for p in (session.state.get("positions") or {}).values()
+                ]
+                for annotation in session.state.get("annotations", []):
+                    p = annotation.get("position") or annotation.get("geometry") or {}
+                    size = annotation.get("size") or annotation.get("geometry") or {}
+                    right.append(p.get("x", 0) + size.get("width", size.get("w", 0)))
+                x = max(right, default=-200) + 200
+                y = 0
+            dx, dy = x - doc["bounds"]["x"], y - doc["bounds"]["y"]
+            library = manager.shape_library
+            entries = library.backend.read()["entries"] if library else {}
+            config = ConfigLoader().config.node_shapes
+            shape_report = []
+            for node in doc["nodes"]:
+                node_id = node["source_node_id"]
+                graph_node = service._storage.get_node(node_id)
+                if (
+                    node_id not in known
+                    or graph_node is None
+                    or getattr(graph_node, "archived", False)
+                ):
+                    skipped.append({"node_id": node_id, "reason": "missing"})
+                    continue
+                keys[node["key"]] = node_id
+                if node_id in present:
+                    skipped.append({"node_id": node_id, "reason": "already_present"})
+                    continue
+                present.add(node_id)
+                added.append(node_id)
+                p = node["position"]
+                positions[node_id] = {"x": p["x"] + dx, "y": p["y"] + dy}
+                if node["hidden"]:
+                    hidden.append(node_id)
+                shape = node["shape"]
+                if shape is None:
+                    continue
+                ref = shape["ref"]
+                if shape["builtin"]:
+                    selection = {"builtin": True}
+                elif ref:
+                    namespace, name = ref.split(":", 1)
+                    entry = entries.get(name) if namespace == "saved" else None
+                    if entry and entry.get("deleted"):
+                        selection = {"builtin": True}
+                        shape_report.append(
+                            {"node_id": node_id, "ref": ref, "reason": "tombstoned"}
+                        )
+                    elif (entry and not entry.get("deleted")) or (
+                        namespace == "config" and name in config
+                    ):
+                        selection = {"ref": ref}
+                    else:
+                        selection = {"inline": shape["inline"]}
+                        shape_report.append(
+                            {"node_id": node_id, "ref": ref, "reason": "missing_shape"}
+                        )
+                else:
+                    selection = {"inline": shape["inline"]}
+                overrides[node_id] = selection
+            source = copy.deepcopy(doc["annotation_document"]["annotations"])
+            occupied = (
+                present
+                | {a.get("id") for a in session.state.get("annotations", [])}
+                | set(session._deleted_annotation_ids)
+                | {a["id"] for a in source}
+                | {n["key"] for n in doc["nodes"]}
+            )
+            fresh = {}
+            for a in source:
+                new_id = secrets.token_hex(16)
+                while new_id in occupied:
+                    new_id = secrets.token_hex(16)
+                occupied.add(new_id)
+                fresh[a["id"]] = new_id
+            relink_capture(
+                {
+                    "annotations": source,
+                    "node_refs": [n["key"] for n in doc["nodes"]],
+                    "shape_overrides": {},
+                },
+                fresh,
+            )
+            for a in source:
+                a["id"] = fresh[a["id"]]
+            annotations, _ = _annotations(source, source, keys)
+            kept = {a["id"] for a in annotations}
+            fresh = {old: new for old, new in fresh.items() if new in kept}
+            for a in annotations:
+                points = [a.get("position"), a.get("geometry")]
+                if annotation_type_of(a) == "line":
+                    for payload in (a, a.get("content")):
+                        if not isinstance(payload, dict):
+                            continue
+                        points.extend(payload.get(k) for k in ("from", "to"))
+                        for field in ("start", "end", "startEndpoint", "endEndpoint"):
+                            endpoint = payload.get(field)
+                            if isinstance(endpoint, dict):
+                                points.append(
+                                    endpoint.get("point")
+                                    or endpoint.get("position")
+                                    or endpoint
+                                )
+                seen = set()
+                for p in points:
+                    if isinstance(p, dict) and id(p) not in seen:
+                        seen.add(id(p))
+                        if "x" in p:
+                            p["x"] += dx
+                        if "y" in p:
+                            p["y"] += dy
+            op = {
+                "op": "nodes_replaced",
+                "client_id": "mcp-agent",
+                "node_ids": session.state.get("node_refs", []) + added,
+                "positions": positions,
+                "hidden_node_ids": hidden,
+                "annotations": session.state.get("annotations", []) + annotations,
+                "inserted_shape_overrides": overrides,
+            }
+            _check_op_image_sizes(op)
+            manager._apply_op_sync(
+                session, session_id, "mcp-agent", op, enforce_session_budgets=True
+            )
+            return {
+                "success": True,
+                "added": added,
+                "annotation_id_map": fresh,
+                "skipped": skipped,
+                "shapes": shape_report,
+                "revision": session.seq,
+            }
+    except AnnotationLimitReached:
+        return _failure("annotations_limit")
+    except OpBatchTooLarge:
+        return _failure("session_too_large")
+    except (OpError, TypeError, ValueError, KeyError):
+        return _failure("invalid_presentation")
+    except Exception:
+        logger.exception("Template insertion failed")
         return _failure("storage_error")

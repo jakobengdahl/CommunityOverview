@@ -543,3 +543,225 @@ def test_unreadable_stored_template_is_a_storage_error(capture):
         ),
     ):
         assert result == {"success": False, "error": "storage_error"}
+
+
+def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    saved = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    target.state.update(
+        node_refs=["a"],
+        positions={"a": {"x": 500, "y": 20}},
+        hidden_node_ids=["a"],
+        shape_overrides={"a": {"builtin": True}},
+    )
+    before = __import__("copy").deepcopy(target.state)
+    tid = saved["template_id"]
+    assert (
+        templates.insert_template(
+            service, manager, target.id, tid, expected_revision=99
+        )["error"]
+        == "revision_conflict"
+    )
+    assert (
+        templates.insert_template(
+            service, manager, target.id, tid, template_revision=99
+        )["error"]
+        == "revision_conflict"
+    )
+    assert (
+        templates.insert_template(service, manager, target.id, tid, mode="copy")[
+            "error"
+        ]
+        == "unsupported_mode"
+    )
+    assert target.state == before
+    result = templates.insert_template(service, manager, target.id, tid, x=100, y=200)
+    assert result["success"] and result["added"] == ["b"]
+    assert result["skipped"] == [{"node_id": "a", "reason": "already_present"}]
+    assert target.state["positions"]["a"] == before["positions"]["a"]
+    assert target.state["hidden_node_ids"] == ["a"]
+    assert target.state["shape_overrides"]["a"] == {"builtin": True}
+    annotation = target.state["annotations"][0]
+    assert annotation["id"] == result["annotation_id_map"]["note"] != "note"
+    assert annotation["attachment"]["target_id"] == "a"
+    assert target.state["positions"]["b"] == {"x": 100, "y": 200}
+
+
+def test_insert_skips_missing_and_remaps_links(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    del service._storage.nodes["a"]
+    target = manager.create_session("target")
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"] and result["added"] == ["b"]
+    assert result["skipped"] == [{"node_id": "a", "reason": "missing"}]
+    assert "attachment" not in target.state["annotations"][0]
+    assert target.state["positions"]["b"] == {"x": 0, "y": 0}
+
+
+@pytest.mark.parametrize(
+    "entry,ref,expected,reason",
+    [
+        ({"deleted": False}, "saved:card", {"ref": "saved:card"}, None),
+        ({"deleted": True}, "saved:card", {"builtin": True}, "tombstoned"),
+        (None, "saved:card", None, "missing_shape"),
+        (None, "config:unknown", None, "missing_shape"),
+        (None, None, None, None),
+    ],
+)
+def test_insert_resolves_captured_shapes(capture, entry, ref, expected, reason):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    definition = {
+        "version": 1,
+        "base": "rectangle",
+        "scale": 1.0,
+        "placement": "top-left",
+        "areas": {"first": "name", "second": None, "third": None},
+    }
+    source.state["shape_overrides"] = {"a": {"inline": definition}}
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    doc["nodes"][0]["shape"]["ref"] = ref
+    doc = manager.template_store.save(doc, doc["revision"])
+    manager.shape_library = SimpleNamespace(
+        backend=SimpleNamespace(
+            read=lambda: {"entries": {"card": entry} if entry else {}}
+        )
+    )
+    target = manager.create_session("target")
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"]
+    assert target.state["shape_overrides"]["a"] == (expected or {"inline": definition})
+    assert target.state["type_shapes"] == {}
+    assert [item["reason"] for item in result["shapes"]] == ([reason] if reason else [])
+
+
+def test_insert_rest_matches_service_and_maps_errors(capture):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.service import templates
+    from backend.service.rest_api import create_rest_router
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(service, session_manager=manager), prefix="/api"
+    )
+    client = TestClient(app)
+    url = f"/api/sessions/{target.id}/insert-template"
+    conflict = client.post(
+        url, json={"template_id": doc["template_id"], "expected_revision": 1}
+    )
+    assert (
+        conflict.status_code == 409 and conflict.json()["error"] == "revision_conflict"
+    )
+    result = client.post(
+        url, json={"template_id": doc["template_id"], "x": 20, "y": 30}
+    )
+    assert result.status_code == 200 and result.json()["added"] == ["a", "b"]
+
+
+def test_insert_denial_and_persistence_failure_leave_session_unchanged(capture):
+    import copy
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    before = copy.deepcopy(target.state)
+    with patch(
+        "backend.service.templates.access.authorize_graph_access", return_value=True
+    ):
+        assert (
+            templates.insert_template(service, manager, target.id, doc["template_id"])[
+                "error"
+            ]
+            == "access_denied"
+        )
+    with patch.object(manager.store, "persist", side_effect=OSError):
+        assert (
+            templates.insert_template(service, manager, target.id, doc["template_id"])[
+                "error"
+            ]
+            == "storage_error"
+        )
+    assert target.state == before and target.seq == 0
+
+
+def test_insert_remaps_groups_and_line_endpoints(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state["annotations"] = [
+        {"id": "group", "type": "group", "member_node_ids": ["a", "b"]},
+        {
+            "id": "line",
+            "type": "line",
+            "from": {"x": 1, "y": 2},
+            "start": {
+                "point": {"x": 1, "y": 2},
+                "attachment": {"target_id": "group", "target_type": "annotation"},
+            },
+            "end": {
+                "point": {"x": 4, "y": 5},
+                "attachment": {"target_id": "b", "target_type": "node"},
+            },
+        },
+    ]
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=100, y=200
+    )
+    assert result["success"]
+    group, line = target.state["annotations"]
+    assert group["member_node_ids"] == ["a", "b"]
+    assert (
+        line["start"]["attachment"]["target_id"]
+        == group["id"]
+        == result["annotation_id_map"]["group"]
+    )
+    assert line["end"]["attachment"]["target_id"] == "b"
+    assert line["from"] == line["start"]["point"] == {"x": 101, "y": 202}
+    assert line["end"]["point"] == {"x": 104, "y": 205}
+
+
+def test_default_origin_is_right_of_existing_annotation(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    target.state["annotations"] = [
+        {
+            "id": "wide",
+            "type": "label",
+            "position": {"x": 100, "y": 0},
+            "size": {"w": 600, "h": 20},
+        }
+    ]
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"]
+    assert target.state["positions"]["b"]["x"] > 700

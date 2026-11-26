@@ -291,7 +291,9 @@ describe('applyOpToMirror', () => {
     };
     const m = applyOpToMirror(m0, {
       op: 'nodes_replaced',
-      node_ids: ['a'],
+      node_ids: ['a', 'b'],
+      inserted_shape_overrides: { b: { builtin: true } },
+      inserted_shape_revisions: { 'node:b': 1 },
       annotations: [{ id: 'edited', kind: 'note', text: 'new' }],
       removed_annotation_ids: ['dropped'],
     });
@@ -299,6 +301,8 @@ describe('applyOpToMirror', () => {
       kept: 'k',
       edited: 'new',
     });
+    expect(m.shape_overrides.b).toEqual({ builtin: true });
+    expect(m.shape_revisions['node:b']).toBe(1);
   });
 
   it('upserts and deletes annotations and updates group membership', () => {

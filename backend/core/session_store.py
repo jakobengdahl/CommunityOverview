@@ -1240,6 +1240,25 @@ class SessionStore:
             state["node_refs"] = kept
         state["positions"].update(given)
         _place_unplaced(state, state["node_refs"])
+        if "inserted_shape_overrides" in op:
+            for node_id in before["node_refs"]:
+                if node_id not in before["positions"]:
+                    state["positions"].pop(node_id, None)
+        overrides = op.get("inserted_shape_overrides", {})
+        if not isinstance(overrides, dict) or any(
+            key not in members - set(before["node_refs"]) for key in overrides
+        ):
+            raise OpError("invalid inserted shape overrides")
+        for key, selection in overrides.items():
+            try:
+                ShapeSelection.model_validate(selection)
+            except (ValidationError, ValueError, TypeError) as exc:
+                raise OpError("invalid inserted shape selection") from exc
+            state["shape_overrides"][key] = copy.deepcopy(selection)
+            rev_key = "node:" + key
+            state["shape_revisions"][rev_key] = (
+                state["shape_revisions"].get(rev_key, 0) + 1
+            )
         if hidden is not None:
             state["hidden_node_ids"] = [h for h in _union([], hidden) if h in members]
         tombstoned: List[str] = []
@@ -1544,6 +1563,14 @@ class SessionStore:
                 if n in state["positions"]
             }
             applied["hidden_node_ids"] = list(state["hidden_node_ids"])
+            if op.get("inserted_shape_overrides"):
+                applied["inserted_shape_overrides"] = copy.deepcopy(
+                    op["inserted_shape_overrides"]
+                )
+                applied["inserted_shape_revisions"] = {
+                    "node:" + key: state["shape_revisions"]["node:" + key]
+                    for key in op["inserted_shape_overrides"]
+                }
             if op.get("annotations") is not None:
                 # Only what this op changes: the op is kept in the ring and
                 # sent to every subscriber and catch-up, so repeating unchanged

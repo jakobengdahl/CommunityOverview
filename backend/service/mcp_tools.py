@@ -218,6 +218,7 @@ _RAW_SESSION_TOOLS = frozenset(
     {
         "save_session_view",
         "save_template",
+        "insert_template",
         "list_templates",
         "get_template",
         "update_template",
@@ -777,6 +778,7 @@ def register_mcp_tools(
                                 "name",
                                 "expected_revision",
                             ],
+                            "insert_template": ["session_id", "template_id"],
                             "list_templates": [],
                             "get_template": ["template_id"],
                             "update_template": ["template_id", "expected_revision"],
@@ -3487,6 +3489,29 @@ def register_mcp_tools(
             annotation_ids,
             description,
             tags,
+        )
+
+    @register_tool
+    def insert_template(
+        session_id: str,
+        template_id: str,
+        mode: str = "reference",
+        x: Any = None,
+        y: Any = None,
+        expected_revision: Any = None,
+        template_revision: Any = None,
+    ) -> Dict[str, Any]:
+        """Insert a template's source nodes into a session."""
+        return templates.insert_template(
+            service,
+            session_manager,
+            session_id,
+            template_id,
+            mode,
+            x,
+            y,
+            expected_revision,
+            template_revision,
         )
 
     @register_tool
