@@ -240,21 +240,54 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
 
-    it('still reports a genuine shape change on a server-created shape', () => {
-      const before = serverAnnotation('shape', { shape: 'rectangle' });
-      expect(
-        describeActivity(
-          record({ op: 'annotation_updated', before, after: { ...before, shape: 'ellipse' } })
-        ).key
-      ).toBe('history.desc.annotation_updated_shape');
-    });
-
-    it('still reports a genuine resize once the annotation has a real size', () => {
-      const before = serverAnnotation('shape', { shape: 'rectangle' });
-      before.geometry = { x: 10, y: 20, w: 160, h: 96, rotation: 0 };
-      const after = { ...before, geometry: { x: 10, y: 20, w: 400, h: 96, rotation: 0 } };
+    it.each([
+      {
+        name: 'shape change',
+        type: 'shape',
+        content: { shape: 'rectangle' },
+        changes: { shape: 'ellipse' },
+        expected: 'shape',
+      },
+      {
+        name: 'resize with a real size',
+        type: 'shape',
+        content: { shape: 'rectangle', geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } },
+        changes: { geometry: { x: 10, y: 20, w: 400, h: 96, rotation: 0 } },
+        expected: 'resized',
+      },
+      {
+        name: 'resize an unsized label',
+        type: 'label',
+        content: { text: 'hi' },
+        changes: { geometry: { x: 10, y: 20, w: 400, h: 220, rotation: 0 } },
+        expected: 'resized',
+      },
+      {
+        name: 'resize to zero',
+        type: 'shape',
+        content: { geometry: { x: 10, y: 20, w: 800, h: 400, rotation: 0 } },
+        changes: { geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } },
+        expected: 'resized',
+      },
+      {
+        name: 'style on an unsized label',
+        type: 'label',
+        content: { text: 'hi' },
+        changes: { style: { color: 'crimson' } },
+        expected: 'style',
+      },
+      {
+        name: 'resize an unsized label to 160x96',
+        type: 'label',
+        content: { text: 'hi' },
+        changes: { geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } },
+        expected: 'resized',
+      },
+    ])('classifies a server-created annotation: $name', ({ type, content, changes, expected }) => {
+      const before = serverAnnotation(type, content);
+      const after = { ...before, ...changes };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
-        'history.desc.annotation_updated_resized'
+        `history.desc.annotation_updated_${expected}`
       );
     });
 
@@ -315,59 +348,18 @@ describe('describeActivity', () => {
       );
     });
 
-    it('still reports a genuine resize of an annotation the server left unsized', () => {
-      const before = serverAnnotation('label', { text: 'hi' });
-      const after = {
-        ...before,
-        geometry: { x: 10, y: 20, w: 400, h: 220, rotation: 0 },
-      };
-      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
-        'history.desc.annotation_updated_resized'
-      );
-    });
-
-    it('still reports an agent resizing a dimension down to zero', () => {
-      const before = serverAnnotation('shape');
-      before.geometry = { x: 10, y: 20, w: 800, h: 400, rotation: 0 };
-      const after = { ...before, geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } };
-      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
-        'history.desc.annotation_updated_resized'
-      );
-    });
-
-    it('reads a move onto and off the origin as a move', () => {
-      const at = (x, y) => ({
+    it.each([
+      { from: [250, 80], to: [0, 0] },
+      { from: [0, 0], to: [250, 80] },
+    ])('reads a move from $from to $to', ({ from, to }) => {
+      const at = ([x, y]) => ({
         type: 'note',
         geometry: { x, y, w: 160, h: 96, rotation: 0 },
         position: { x, y },
       });
       expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(250, 80), after: at(0, 0) }))
-          .key
+        describeActivity(record({ op: 'annotation_updated', before: at(from), after: at(to) })).key
       ).toBe('history.desc.annotation_updated_moved');
-      expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(0, 0), after: at(250, 80) }))
-          .key
-      ).toBe('history.desc.annotation_updated_moved');
-    });
-
-    it('does not claim a resize when only the style changed on an unsized label', () => {
-      const before = serverAnnotation('label', { text: 'hi' });
-      const after = {
-        ...before,
-        style: { color: 'crimson' },
-      };
-      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
-        'history.desc.annotation_updated_style'
-      );
-    });
-
-    it('now reports a genuine resize to exactly 160x96 on a previously-unsized label', () => {
-      const before = serverAnnotation('label', { text: 'hi' });
-      const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
-      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
-        'history.desc.annotation_updated_resized'
-      );
     });
   });
   describe('annotation_updated classification, groups', () => {
@@ -400,15 +392,18 @@ describe('describeActivity', () => {
       });
     }
 
-    it('does not report renaming a LOCKED group as an unlock', () => {
-      const r = groupEdit(serverGroup({ label: 'Team', locked: true }), (g) => ({
-        ...g,
-        label: 'Team B',
-      }));
-      expect(r.before.locked).toBe(true);
-      expect(r.after.locked).toBe(true);
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
-    });
+    it.each([
+      { name: 'locked', fields: { locked: true }, field: 'locked', value: true, label: 'Team B' },
+      { name: 'with z', fields: { z: 4 }, field: 'z', value: 4, label: 'B' },
+    ])(
+      'does not report renaming a $name group as another change',
+      ({ fields, field, value, label }) => {
+        const r = groupEdit(serverGroup({ label: 'Team', ...fields }), (g) => ({ ...g, label }));
+        expect(r.before[field]).toBe(value);
+        expect(r.after[field]).toBe(value);
+        expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+      }
+    );
 
     it.each([
       {
@@ -420,13 +415,6 @@ describe('describeActivity', () => {
     ])('does not report $what a locked group as an unlock', ({ mutate, expected }) => {
       const r = groupEdit(serverGroup({ label: 'Team', locked: true }), mutate);
       expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
-    });
-
-    it('does not report renaming a group carrying a z as a layer change', () => {
-      const r = groupEdit(serverGroup({ label: 'Team', z: 4 }), (g) => ({ ...g, label: 'B' }));
-      expect(r.before.z).toBe(4);
-      expect(r.after.z).toBe(4);
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
 
     it.each([
@@ -442,29 +430,25 @@ describe('describeActivity', () => {
       ).toBe(`history.desc.annotation_updated_${c.expected}`);
     });
 
-    it('under-reports naming an unlabelled group literally "Group"', () => {
-      const at = (v) => serverGroup({ label: v });
+    it.each([
+      { from: '', to: 'Group', expected: 'generic' },
+      { from: '', to: 'Team', expected: 'text' },
+      { from: 'Group', to: '', expected: 'text' },
+    ])('classifies group label from $from to $to', ({ from, to, expected }) => {
+      const at = (label) => serverGroup({ label });
       expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Group') }))
-          .key
-      ).toBe('history.desc.annotation_updated_generic');
-      expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Team') }))
-          .key
-      ).toBe('history.desc.annotation_updated_text');
-      expect(
-        describeActivity(record({ op: 'annotation_updated', before: at('Group'), after: at('') }))
-          .key
-      ).toBe('history.desc.annotation_updated_text');
+        describeActivity(record({ op: 'annotation_updated', before: at(from), after: at(to) })).key
+      ).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
-    it('reports rotating and unrotating a group once the translators preserve rotation', () => {
-      const at = (v) => serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } });
+    it.each([
+      [0, 45],
+      [45, 0],
+    ])('reports group rotation from %s to %s', (from, to) => {
+      const at = (rotation) =>
+        serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation } });
       expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(0), after: at(45) })).key
-      ).toBe('history.desc.annotation_updated_rotated');
-      expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(45), after: at(0) })).key
+        describeActivity(record({ op: 'annotation_updated', before: at(from), after: at(to) })).key
       ).toBe('history.desc.annotation_updated_rotated');
     });
 
@@ -512,24 +496,24 @@ describe('describeActivity', () => {
       }
     );
 
-    it('does not report normalising freehand point metadata as a move', () => {
-      const stored = serverAnn('freehand', {
-        points: [
-          { x: 120, y: 340, pressure: 5 },
-          { x: 130, y: 350, t: 17 },
-        ],
-      });
-      expect(describeActivity(browserRoundTrip(stored)).key).toBe(
-        'history.desc.annotation_updated_generic'
-      );
-    });
-
-    it('does not report normalising a line endpoint as a move', () => {
-      const stored = serverAnn('line', {
-        from: { x: 100, y: 100, anchor: 'left' },
-        to: { x: 300, y: 100 },
-      });
-      expect(describeActivity(browserRoundTrip(stored)).key).toBe(
+    it.each([
+      {
+        name: 'freehand point metadata',
+        type: 'freehand',
+        content: {
+          points: [
+            { x: 120, y: 340, pressure: 5 },
+            { x: 130, y: 350, t: 17 },
+          ],
+        },
+      },
+      {
+        name: 'line endpoint',
+        type: 'line',
+        content: { from: { x: 100, y: 100, anchor: 'left' }, to: { x: 300, y: 100 } },
+      },
+    ])('does not report normalising $name as a move', ({ type, content }) => {
+      expect(describeActivity(browserRoundTrip(serverAnn(type, content))).key).toBe(
         'history.desc.annotation_updated_generic'
       );
     });
@@ -682,17 +666,30 @@ describe('describeActivity', () => {
       });
     }
 
-    it('reports a text edit from this build as a text edit', () => {
-      const r = browserEdit(label, (o) => ({ ...o, text: 'bye' }));
-      expect(r.after.style).toEqual(label.style);
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
-    });
-
-    it('still reports a restyle from this build as a restyle', () => {
-      const r = browserEdit(label, (o) => ({ ...o, color: 'blue' }));
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-      const lineRestyle = browserEdit(line, (o) => ({ ...o, opacity: 0.9 }));
-      expect(describeActivity(lineRestyle).key).toBe('history.desc.annotation_updated_style');
+    it.each([
+      {
+        name: 'text edit',
+        stored: label,
+        edit: (o) => ({ ...o, text: 'bye' }),
+        expected: 'text',
+        checkStyle: true,
+      },
+      {
+        name: 'label restyle',
+        stored: label,
+        edit: (o) => ({ ...o, color: 'blue' }),
+        expected: 'style',
+      },
+      {
+        name: 'line restyle',
+        stored: line,
+        edit: (o) => ({ ...o, opacity: 0.9 }),
+        expected: 'style',
+      },
+    ])('reports a $name from this build', ({ stored, edit, expected, checkStyle }) => {
+      const r = browserEdit(stored, edit);
+      if (checkStyle) expect(r.after.style).toEqual(label.style);
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
     const labelWithExtraWidth = { ...label, style: { ...label.style, width: 2 } };
@@ -761,63 +758,50 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
-    it("recognises an older build's drop on records that carry only type", () => {
-      const { kind: _kind, ...labelByType } = label;
-      const olderText = record({
-        op: 'annotation_updated',
-        before: labelByType,
-        after: { ...labelByType, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
-      });
-      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
-    });
-
-    it("recognises an older build's drop on records that carry only kind", () => {
-      const { type: _labelType, ...labelByKind } = label;
-      const { type: _lineType, ...lineByKind } = line;
-      const olderText = record({
-        op: 'annotation_updated',
-        before: labelByKind,
-        after: { ...labelByKind, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
-      });
-      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
-      const olderArrowhead = record({
-        op: 'annotation_updated',
-        before: lineByKind,
-        after: { ...lineByKind, endArrow: false, style: { color: 'red', opacity: 0.5 } },
-      });
-      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    it.each([
+      {
+        name: 'label with only type',
+        stored: label,
+        omit: 'kind',
+        changes: { text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+        expected: 'text',
+      },
+      {
+        name: 'label with only kind',
+        stored: label,
+        omit: 'type',
+        changes: { text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+        expected: 'text',
+      },
+      {
+        name: 'line with only kind',
+        stored: line,
+        omit: 'type',
+        changes: { endArrow: false, style: { color: 'red', opacity: 0.5 } },
+        expected: 'generic',
+      },
+    ])('recognises an older build style drop: $name', ({ stored, omit, changes, expected }) => {
+      const before = { ...stored };
+      delete before[omit];
+      const r = record({ op: 'annotation_updated', before, after: { ...before, ...changes } });
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
   });
 
   describe('shape spelling', () => {
-    it('does not report an agent respelling a shape it already is as a shape change', () => {
-      for (const [before, after] of [
-        ['rectangle', 'Rectangle'],
-        ['process_arrow', 'Process Arrow'],
-        ['process_arrow', 'process-arrow'],
-      ]) {
-        const r = record({
-          op: 'annotation_updated',
-          before: { type: 'shape', shape: before },
-          after: { type: 'shape', shape: after },
-        });
-        expect(describeActivity(r).key, `${before} -> ${after}`).toBe(
-          'history.desc.annotation_updated_generic'
-        );
-      }
-    });
-
-    it('still reports a genuine shape change, including to an out-of-set name', () => {
-      const change = (before, after) =>
-        describeActivity(
-          record({
-            op: 'annotation_updated',
-            before: { type: 'shape', shape: before },
-            after: { type: 'shape', shape: after },
-          })
-        ).key;
-      expect(change('circle', 'triangle')).toBe('history.desc.annotation_updated_shape');
-      expect(change('rectangle', 'blob')).toBe('history.desc.annotation_updated_shape');
+    it.each([
+      ['rectangle', 'Rectangle', 'generic'],
+      ['process_arrow', 'Process Arrow', 'generic'],
+      ['process_arrow', 'process-arrow', 'generic'],
+      ['circle', 'triangle', 'shape'],
+      ['rectangle', 'blob', 'shape'],
+    ])('classifies shape change from %s to %s', (before, after, expected) => {
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'shape', shape: before },
+        after: { type: 'shape', shape: after },
+      });
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
   });
 
@@ -951,22 +935,19 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_intensity');
     });
 
-    it('does not report the browser clamping a stored out-of-range intensity to 0 as an edit', () => {
-      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
+    it.each([
+      { name: 'clamped intensity', before: { intensity: -3 }, after: { intensity: 0 } },
+      { name: 'default intensity', before: {}, after: { intensity: 5 } },
+    ])('does not report $name as an edit', ({ before, after }) => {
+      const base = {
+        id: 'h1',
+        geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 },
+        type: 'heatmap',
+      };
       const r = record({
         op: 'annotation_updated',
-        before: { ...base, type: 'heatmap', intensity: -3 },
-        after: { ...base, type: 'heatmap', intensity: 0 },
-      });
-      expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
-    });
-
-    it('does not report the browser filling in a heat-map default intensity as an edit', () => {
-      const base = { id: 'h1', geometry: { x: 0, y: 0, w: 160, h: 160, rotation: 0 } };
-      const r = record({
-        op: 'annotation_updated',
-        before: { ...base, type: 'heatmap' },
-        after: { ...base, type: 'heatmap', intensity: 5 },
+        before: { ...base, ...before },
+        after: { ...base, ...after },
       });
       expect(describeActivity(r).key).not.toBe('history.desc.annotation_updated_intensity');
     });
