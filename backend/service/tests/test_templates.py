@@ -754,6 +754,16 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
     )
     assert result.status_code == 200 and result.json()["added"] == ["a", "b"]
     copy_target = manager.create_session("copy")
+    for error in ("write_failed", "write_outcome_unknown"):
+        with patch.object(
+            service, "add_nodes", return_value={"success": False, "error": error}
+        ):
+            failed = client.post(
+                f"/api/sessions/{copy_target.id}/insert-template",
+                json={"template_id": doc["template_id"], "x": 20, "y": 30},
+            )
+        assert failed.status_code == 503 and failed.json()["error"] == "storage_error"
+        assert copy_target.seq == 0
     result = client.post(
         f"/api/sessions/{copy_target.id}/insert-template",
         json={"template_id": doc["template_id"], "x": 20, "y": 30},

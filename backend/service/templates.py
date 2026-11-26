@@ -1156,13 +1156,11 @@ def insert_template(
                                 allow_federated_endpoints=False,
                             )
                         if not created.get("success"):
+                            error = created.get("error_code") or created.get("error")
+                            if error in ("write_failed", "write_outcome_unknown"):
+                                error = "storage_error"
                             raise _CopyRefused(
-                                created.get("error_code")
-                                or (
-                                    created.get("error")
-                                    if created.get("error") in ERROR_STATUS
-                                    else "invalid_request"
-                                )
+                                error if error in ERROR_STATUS else "invalid_request"
                             )
                         manager._apply_op_sync(
                             session,
