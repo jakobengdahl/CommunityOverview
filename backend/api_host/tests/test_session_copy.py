@@ -565,6 +565,8 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
                 "type": "line",
                 "startAnchor": "note",
                 "attachment": {"target_type": "annotation", "target_id": "group-a"},
+                "start": {"target_id": "note"},
+                "endEndpoint": {"attachment": {"targetId": "group-a"}},
             },
         ],
         shape_overrides={"group-a": {"shape": "box"}},
@@ -582,6 +584,8 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
     assert group["member_node_ids"] == ["node-1", note["id"]]
     assert line["startAnchor"] == note["id"]
     assert line["attachment"]["target_id"] == group["id"]
+    assert line["start"]["target_id"] == note["id"]
+    assert line["endEndpoint"]["attachment"]["targetId"] == group["id"]
     assert saved.state["shape_overrides"] == {group["id"]: {"shape": "box"}}
     assert all(
         a["version"] == 1 and a["field_versions"] == {} for a in (note, group, line)
@@ -608,6 +612,7 @@ def test_save_view_reads_graph_ids_only_from_explicit_link_fields(test_app, tran
                 "id": "l",
                 "type": "line",
                 "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
+                "parentId": "group-1",
             },
             {
                 "id": "r",
@@ -658,6 +663,7 @@ def test_save_view_enforces_annotation_limit(test_app, transport):
             "target": "javascript:alert(1)",
         },
         {"id": "a", "type": "unknown"},
+        {"id": "a", "type": "line", "start": {"target_id": 1.5}},
     ],
 )
 def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
@@ -685,6 +691,9 @@ def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
             "type": "line",
             "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
         },
+        {"id": "a", "type": "line", "start": {"target_id": "node-1"}},
+        {"id": "a", "type": "line", "endEndpoint": {"attachment": {"nodeId": 7}}},
+        {"id": "a", "type": "text", "anchor": {"targetId": "node-1"}},
     ],
 )
 def test_save_view_denies_inaccessible_annotation_targets(
