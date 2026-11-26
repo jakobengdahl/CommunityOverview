@@ -97,10 +97,36 @@ it('queues an unheld capture behind one in flight and skips the queue once it is
   h.draw();
   await Promise.all([first, second]);
   settled = false;
-  queue(h.options).then(() => (settled = true));
+  let ready = false;
+  queue({
+    ...h.options,
+    onReady: () => {
+      ready = true;
+    },
+  }).then(() => (settled = true));
+  expect(ready).toBe(true);
   await Promise.resolve();
   expect(settled).toBe(true);
   expect(h.sync.flushPending).toHaveBeenCalledTimes(1);
+});
+it('fails without capturing while the installed sync client belongs to another session', async () => {
+  const previous = { sessionId: 'old', _renderHolds: 0 };
+  const onReady = vi.fn();
+  await expect(
+    flushCanvasForCapture({
+      getSync: () => previous,
+      sessionId: 'new',
+      isCurrent: () => true,
+      onReady,
+    })
+  ).rejects.toThrow();
+  expect(onReady).not.toHaveBeenCalled();
+});
+it('captures without flushing when the session has no sync client at all', async () => {
+  const onReady = vi.fn(() => 'saved');
+  await expect(
+    flushCanvasForCapture({ getSync: () => null, sessionId: 'new', isCurrent: () => true, onReady })
+  ).resolves.toBe('saved');
 });
 it.each(['timeout', 'held', 'closed'])('fails and removes callbacks on %s', async (reason) => {
   const h = setup();

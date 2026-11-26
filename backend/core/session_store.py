@@ -51,7 +51,12 @@ from typing import (
 from backend.config.node_shapes import ShapeSelection
 from pydantic import ValidationError
 
-from .actor_attribution import replace_attribution, validate_erasure
+from .actor_attribution import (
+    preflight_directory,
+    preflight_file,
+    replace_attribution,
+    validate_erasure,
+)
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
@@ -480,6 +485,15 @@ class SessionLimitReached(Exception):
     pass
 
 
+def _session_files(directory: Path) -> List[Path]:
+    # A dangling symlink is no session, as load() treats it.
+    return [
+        p
+        for p in directory.iterdir()
+        if p.suffix == ".json" and is_valid_session_id(p.stem) and p.exists()
+    ]
+
+
 class FileSessionPersistenceBackend:
     """One JSON file per session under ``directory`` with atomic writes.
 
@@ -496,6 +510,27 @@ class FileSessionPersistenceBackend:
             for path in self.directory.glob("session_*.json"):
                 if path.is_file():
                     path.unlink()
+
+    @staticmethod
+    def preflight(directory: str | Path) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        Opens what an erasure opens: the lock file read-write and every
+        session file it lists for reading; rewrites are renamed in, and the
+        constructor removes leftover temp files, so the directory takes writes.
+        """
+        directory = Path(directory)
+        if not directory.exists():
+            return False
+        sessions = _session_files(directory)
+        leftovers = [p for p in directory.glob("session_*.json") if p.is_file()]
+        preflight_directory(directory, replaces=sessions + leftovers)
+        lock = directory / ".sessions.lock"
+        if os.path.lexists(lock):
+            preflight_file(lock, write=True)
+        for path in sessions:
+            preflight_file(path)
+        return True
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -596,11 +631,7 @@ class FileSessionPersistenceBackend:
         # session that the ordinary metadata listing tolerates.
         if not self.directory.exists():
             return []
-        return [
-            p.stem
-            for p in self.directory.iterdir()
-            if p.suffix == ".json" and is_valid_session_id(p.stem)
-        ]
+        return [p.stem for p in _session_files(self.directory)]
 
     def list_meta(self) -> List[Dict[str, Any]]:
         if not self.directory.exists():

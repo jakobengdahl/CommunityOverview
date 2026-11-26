@@ -110,10 +110,19 @@ from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 logger = logging.getLogger(__name__)
 
 # Server-owned session state records node x/y but not rendered node dimensions
-# (design §3.8: the browser no longer uploads canvas geometry). Agents still need
-# a size to space nodes without overlap, so the layout tools advertise this
-# assumed default — model-space units at zoom 1, matching the canvas node box.
+# (design §3.8: the browser no longer uploads canvas geometry). The layout tools
+# advertise this typical node box (model-space units at zoom 1) as a spacing
+# estimate; it is not a bound — see _NODE_WIDTH_BOUNDS.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
+
+# The rendered width range of a card node's outer box, which the canvas CSS
+# guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
+# min-width/max-width under box-sizing: border-box, border included). Unlike
+# _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` plus a
+# gap never overlaps horizontally between card nodes. A node drawn with a configured shape
+# takes its width from the shape and its scale instead, so it is not covered.
+# Height wraps with the label, so it has no bound.
+_NODE_WIDTH_BOUNDS = {"min": 150, "max": 250}
 
 # summon_session_viewport: who summoned, when the caller names no one, and the
 # largest node set one summon may frame (the add_nodes_to_session batch size).
@@ -2355,7 +2364,12 @@ def register_mcp_tools(
           in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
         - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
         - Node width/height are not server-owned, so they are not returned per
-          node. Use ``assumed_node_size`` to leave collision-free spacing.
+          node. A card node's rendered width always lies within
+          ``node_width_bounds``; a column pitch of ``node_width_bounds.max``
+          plus a gap never overlaps two card nodes horizontally. A node drawn
+          with a configured shape is sized by that shape and its scale and is
+          not covered. ``assumed_node_size`` is a typical box, not a bound, and
+          height grows with the label.
         - ``revision`` is a monotonic counter. Pass it back as
           ``expected_revision`` to ``apply_visualization_layout`` for optimistic
           concurrency (the write is rejected if someone else changed the session
@@ -2390,7 +2404,10 @@ def register_mcp_tools(
 
         Returns:
             Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
-            selected_node_ids, assumed_node_size
+            selected_node_ids, assumed_node_size, node_width_bounds (the
+            rendered min/max outer width of a card node; space columns at
+            ``max`` plus a gap to rule out horizontal overlap between card nodes — shaped
+            nodes are not covered and height has no bound)
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
@@ -2456,6 +2473,7 @@ def register_mcp_tools(
             "nodes": nodes,
             "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
+            "node_width_bounds": _NODE_WIDTH_BOUNDS,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
         }

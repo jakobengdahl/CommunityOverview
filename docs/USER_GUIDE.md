@@ -1096,11 +1096,16 @@ The database flags default to `AGENTS_RUN_HISTORY_DB` and
 not created. Output contains only per-store changed-record `counts` and
 `failed_stores`, never actor identifiers, replacement tokens or source data.
 Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
-A path of the wrong kind (a file given as `--sessions-dir`, or a database that
-is not a current-schema store of that flag's kind, or a path that cannot be
-read) is an invocation error, as is a PostgreSQL store that cannot be reached or whose merge records
-this connection may not update (a missing privilege, a read-only server or a
-replica): no store is opened, changed or migrated. Start the application once to migrate an older
+Before any store is opened, each selected store checks everything its erasure
+would open: the files it reads or rewrites (including a session directory's
+`.sessions.lock`, every session file and SQLite `-wal`/`-shm` sidecars), write
+access to the directories its replacements are written to, and that a database
+is a current-schema store of that flag's kind. A path of the wrong kind (a file
+given as `--sessions-dir`, a directory or FIFO where a file belongs) or one that
+cannot be read or written is an invocation error, as is a PostgreSQL store that
+cannot be reached or whose merge records this connection may not update (a
+missing privilege, a read-only server or a replica): no store is opened, changed
+or migrated. Start the application once to migrate an older
 database before running maintenance.
 A failed store has a `null` count because partial changes may have happened;
 other stores are still processed. Repair any reported store failure and rerun
