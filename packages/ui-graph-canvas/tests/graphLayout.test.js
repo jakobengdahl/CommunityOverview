@@ -775,12 +775,18 @@ describe('shared node shape geometry', () => {
   });
 });
 
-it('keeps previously unpositioned nodes in their original layout when positioned nodes are inserted', () => {
-  const existing = [{ id: 'a' }, { id: 'b' }];
-  const edges = [{ source: 'a', target: 'b' }];
-  const before = applyPartialLayout(existing, edges, new Set(), 'dagre');
-  const inserted = { id: 'c', position: { x: 900, y: 800 } };
-  const after = applyPartialLayout([...existing, inserted], edges, new Set(['c']), 'dagre');
-  expect(after.slice(0, 2)).toEqual(before);
-  expect(after[2]).toEqual(inserted);
+it('preserves supplied positions in mixed sessions, including after inserting positioned nodes', () => {
+  const existing = [
+    { id: 'a', position: { x: 0, y: 0 } },
+    { id: 'b', position: { x: 120, y: 240 } },
+    { id: 'c', position: { x: 0, y: 0 } },
+  ];
+  const edges = [{ source: 'a', target: 'b' }, { source: 'b', target: 'c' }];
+  const saved = new Set(['b']);
+  expect(applyPartialLayout(existing, edges, saved, 'dagre')).toEqual(existing);
+  const inserted = { id: 'd', position: { x: 900, y: 800 } };
+  expect(applyPartialLayout([...existing, inserted], edges, new Set(['b', 'd']), 'dagre'))
+    .toEqual([...existing, inserted]);
+  expect(applyPartialLayout(existing, edges, new Set(), 'dagre'))
+    .toEqual(applyLayout(existing, edges, 'dagre'));
 });

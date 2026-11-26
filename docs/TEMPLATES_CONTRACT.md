@@ -91,10 +91,10 @@ nodes to a session. Missing, archived, or inaccessible nodes are reported as
 `missing`, and nodes already present are reported as `already_present` and left
 unchanged. Graph edges between session nodes remain those in the graph.
 
-Supply both `x` and `y` to place the template bounds at an origin; otherwise the
-server places it to the right of existing content. Annotation IDs are minted
-fresh and links remapped; links to missing nodes are removed. Shape selections
-become per-node overrides, with `tombstoned` and `missing_shape` entries in the
+Supply both finite `x` and `y` coordinates to place the template bounds at an
+explicit origin; omitted or incomplete coordinates return `invalid_request`.
+Annotation IDs are minted fresh and links remapped; links to missing nodes are
+removed. Shape selections become per-node overrides, with `tombstoned` and `missing_shape` entries in the
 shape report for fallbacks. The result includes `added`, `annotation_id_map`,
 `skipped`, `shapes`, and the session `revision`. Optional `expected_revision`
 and `template_revision` reject stale writes atomically with `revision_conflict`.

@@ -147,18 +147,9 @@ export function applyLayout(nodes, edges, layoutType = null) {
   }
 }
 
-// Preserve saved positions while laying out the nodes that have none.
+// Existing mixed-position sessions use the supplied positions for every node.
 export function applyPartialLayout(nodes, edges, savedIds, layoutType = null) {
-  const unplaced = nodes.filter((node) => !savedIds.has(node.id));
-  if (!unplaced.length) return nodes;
-  const ids = new Set(unplaced.map((node) => node.id));
-  const layout = applyLayout(
-    unplaced,
-    edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
-    layoutType
-  );
-  const byId = new Map(layout.map((node) => [node.id, node]));
-  return nodes.map((node) => byId.get(node.id) || node);
+  return savedIds.size ? nodes : applyLayout(nodes, edges, layoutType);
 }
 
 /**
