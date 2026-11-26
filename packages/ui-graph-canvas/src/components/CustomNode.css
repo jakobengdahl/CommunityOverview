@@ -50,6 +50,9 @@
   background: var(--graph-card-surface);
   border: 2px solid var(--graph-card-border);
   border-radius: 8px;
+  /* Pinned here, not inherited from the host app: the MCP layout read
+     advertises min/max-width as the node's outer width (node_width_bounds). */
+  box-sizing: border-box;
   min-width: 150px;
   max-width: 250px;
   box-shadow: var(--graph-card-shadow);
