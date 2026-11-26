@@ -123,9 +123,8 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
   // A fresh identity also prevents a previous visit to the same query from resurfacing.
   const templateCache = useRef(NO_TEMPLATES);
   const request = useMemo(
-    () =>
-      enabled ? { waitForTemplates: templateCache.current.length > 0, displayed: false } : null,
-    [enabled, visible, input, mode, query, federationDepth]
+    () => (enabled ? { templates: templateCache.current, displayed: false } : null),
+    [enabled, input, mode, query, federationDepth]
   );
   const [search, setSearch] = useState({
     request: null,
@@ -171,7 +170,10 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
     };
   }, [request, mode, query, federationDepth]);
 
-  const templates = templateSearch.request === request ? templateSearch.templates : NO_TEMPLATES;
+  const templates =
+    templateSearch.request === request
+      ? templateSearch.templates
+      : request?.templates || NO_TEMPLATES;
   useEffect(() => {
     if (!registry || mode !== 'command' || !request) return undefined;
     const cleanups = templates.map((template) =>
@@ -209,10 +211,6 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
   }, [registry, registryVersion, mode, query, context, locale, t, templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!request) return { mode, items: [], status: 'idle' };
-  // Cached names must be revalidated before they can be shown on a new query.
-  if (request.waitForTemplates && templateSearch.request !== request) {
-    return { mode, items: [], status: 'loading' };
-  }
   if (mode === 'command') {
     // Wait for the registry effect before exposing a partially populated list.
     if (templates.some((template) => !registry.get(`template:insert:${template.template_id}`))) {

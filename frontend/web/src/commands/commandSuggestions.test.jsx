@@ -251,7 +251,7 @@ describe('useCommandSuggestions', () => {
     ]);
   });
 
-  it('revalidates late results on reopen and never exposes revoked cached templates', async () => {
+  it('caches late results on reopen and applies revocation on the next reopen', async () => {
     let resolveTemplates;
     api.listTemplates.mockImplementationOnce(
       () => new Promise((resolve) => (resolveTemplates = resolve))
@@ -267,17 +267,56 @@ describe('useCommandSuggestions', () => {
     rerender({ active: false });
     api.listTemplates.mockResolvedValueOnce({ templates: [{ template_id: 't1', name: 'Goal' }] });
     rerender({ active: true });
-    expect(result.current.items).toEqual([]);
-    await settle(1);
     expect(ids(result.current.items)).toEqual([
       'command:template:insert:t1',
       'command:goal-command',
     ]);
+    await settle(1);
     rerender({ active: false });
     api.listTemplates.mockResolvedValueOnce({ templates: [] });
     rerender({ active: true });
-    expect(result.current.items).toEqual([]);
+    expect(ids(result.current.items)).toEqual([
+      'command:template:insert:t1',
+      'command:goal-command',
+    ]);
+    await settle(1);
+    expect(ids(result.current.items)).toContain('command:template:insert:t1');
+    rerender({ active: false });
+    rerender({ active: true });
     await settle(1);
     expect(ids(result.current.items)).toEqual(['command:goal-command']);
   });
+
+  it.each(['/goal', 'goal'])(
+    'uses late cached templates without waiting for %s revalidation',
+    async (input) => {
+      let resolveTemplates;
+      api.listTemplates.mockImplementationOnce(
+        () => new Promise((resolve) => (resolveTemplates = resolve))
+      );
+      api.searchGraph.mockResolvedValue({ nodes: [{ id: 'n1', name: 'Goal', type: 'Goal' }] });
+      const { result, rerender } = renderHook(
+        ({ value, visible }) => useCommandSuggestions(value, context, nodeTypes, true, visible),
+        { wrapper, initialProps: { value: input, visible: true } }
+      );
+      await settle(NODE_QUERY_DEBOUNCE_MS);
+      const initial = ids(result.current.items);
+      await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
+      expect(ids(result.current.items)).toEqual(initial);
+      api.listTemplates.mockImplementation(() => new Promise(() => {}));
+      rerender({ value: `${input} `, visible: true });
+      await settle(NODE_QUERY_DEBOUNCE_MS);
+      expect(ids(result.current.items)).toEqual(
+        input.startsWith('/')
+          ? ['command:template:insert:t1', 'command:goal-command']
+          : ['node:n1', 'nodeType:Goal', 'template:t1']
+      );
+      const displayed = result.current.items;
+      rerender({ value: `${input} `, visible: false });
+      rerender({ value: `${input} `, visible: true });
+      expect(result.current.status).toBe('ready');
+      expect(ids(result.current.items)).toEqual(ids(displayed));
+      expect(api.searchGraph).toHaveBeenCalledTimes(input.startsWith('/') ? 0 : 2);
+    }
+  );
 });
