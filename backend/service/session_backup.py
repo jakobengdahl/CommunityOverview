@@ -133,6 +133,19 @@ def create_backup(service, session_backend, write_modes):
                 node_ids = session_capture.captured_node_ids(
                     state, include_legacy_groups=True
                 )
+                # Group members are node IDs even when an annotation has the
+                # same ID; capture's canvas link resolution can classify them
+                # as annotations instead.
+                for annotation in state.get("annotations") or []:
+                    if not isinstance(annotation, dict):
+                        continue
+                    members = annotation.get("member_node_ids")
+                    if isinstance(members, list):
+                        node_ids.extend(
+                            node_id
+                            for member in members
+                            if (node_id := session_capture._link_id(member)) is not None
+                        )
                 node_ids.extend(
                     key[5:]
                     for key in state.get("shape_revisions", {})

@@ -225,7 +225,7 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
         {"positions": {"group-secret": {"x": 1, "y": 1}}},
         {"shape_overrides": {"group-secret": "circle"}},
         {"shape_revisions": {"node:group-secret": 1}},
-        {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
+        {"annotations": [{"id": "group-secret", "member_node_ids": ["group-secret"]}]},
         {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
     ):
         session.state.update(
