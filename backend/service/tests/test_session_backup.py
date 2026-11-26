@@ -577,24 +577,35 @@ def test_authorization_runs_outside_session_transaction(backend):
     )
 
 
-def test_revision_change_during_authorization_is_captured(backend):
+@pytest.mark.parametrize("revoke", [False, True])
+def test_revision_change_during_authorization_is_captured(backend, revoke):
     session = Session("1234-5678", name="original")
     backend.save(session.to_dict())
     second = Session("1234-5679")
     backend.save(second.to_dict())
 
     class ChangingHook(Hook):
+        changed = False
+
         def evaluate(self, context):
-            if context.session_id == second.id:
+            if context.session_id == second.id and not self.changed:
                 changed = backend.load(session.id)
                 changed["seq"] += 1
                 backend.save(changed)
-            return GraphAuthorizationDecision(allowed=True)
+                self.changed = True
+            return GraphAuthorizationDecision(
+                allowed=not (revoke and context.session_id == session.id and self.changed)
+            )
 
     service = Service()
     service.authorization_hook = ChangingHook()
-    backup = create_backup(service, backend, WriteModes())
-    assert backup["sessions"][0]["revision"] == session.seq + 1
+    if revoke:
+        with pytest.raises(BackupRefused, match="^access denied$") as exc:
+            create_backup(service, backend, WriteModes())
+        assert session.id not in str(exc.value) and session.name not in str(exc.value)
+    else:
+        backup = create_backup(service, backend, WriteModes())
+        assert backup["sessions"][0]["revision"] == session.seq + 1
 
 
 def test_session_authorization_hook_can_read_store(backend):

@@ -110,6 +110,15 @@ def create_backup(service, session_backend, write_modes):
         for session_id in session_ids:
             raw = _load_session(session_backend, session_id)
             revisions[session_id] = copy.deepcopy(raw)
+        # Bind authorization to the records just read. A change after this
+        # pass is caught by the comparison inside the transaction; hooks may
+        # themselves read the store, so they must run outside its lock.
+        for session_id in session_ids:
+            _authorize(
+                service.authorization_hook,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
         with session_backend.transaction():
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")
