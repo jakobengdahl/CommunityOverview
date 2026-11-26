@@ -68,7 +68,7 @@ def _freehand_points(annotation):
     return points
 
 
-def _rendered_bounds(positions, annotations):
+def _rendered_bounds(positions, annotations, *, legacy=False):
     """Canvas-space bounds, including fallback geometry and point-based marks."""
     boxes = []
     # Dimensions mirror ui-graph-canvas's nodeShapeGeometry and include the
@@ -90,17 +90,19 @@ def _rendered_bounds(positions, annotations):
     for annotation in annotations:
         points = _line_points(annotation)
         points += _freehand_points(annotation)
-        if annotation_type_of(annotation) == "line" and len(points) < 2:
+        if annotation_type_of(annotation) == "line":
+            if not legacy:
+                points = []
             # The canvas derives absent endpoints from position and dx/dy.
             start = (
                 annotation.get("from")
                 or annotation.get("position")
-                or annotation.get("geometry")
+                or (annotation.get("geometry") if legacy else None)
                 or {}
             )
             end = annotation.get("to") or {
-                "x": start.get("x", 0) + annotation.get("dx", 160),
-                "y": start.get("y", 0) + annotation.get("dy", 0),
+                "x": start.get("x", 0) + (annotation.get("dx", 160) if legacy else 160),
+                "y": start.get("y", 0) + (annotation.get("dy", 0) if legacy else 0),
             }
             points.extend((start, end))
         if points:
@@ -130,9 +132,17 @@ def _rendered_bounds(positions, annotations):
         height = geometry.get(
             "h", geometry.get("height", size.get("h", size.get("height", default[1])))
         )
+        if not legacy and kind in {"icon", "vote_dot"}:
+            width, height = (32, 32) if kind == "icon" else (24, 24)
+        elif (
+            not legacy
+            and kind == "note"
+            and not any(key in size for key in ("w", "width", "h", "height"))
+        ):
+            width, height = 200, 140
         width, height = max(0, width), max(0, height)
         rotation = geometry.get("rotation", 0)
-        if kind in {"note", "label", "text", "shape", "icon", "vote_dot", "image"}:
+        if not legacy and kind in {"note", "label", "text", "shape", "icon", "image"}:
             angle = math.radians(_placement_number(rotation) % 360)
             rotated_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
             rotated_height = abs(width * math.sin(angle)) + abs(
@@ -969,33 +979,20 @@ def insert_template(
                     ).get(name) or shape.get("inline")
                 return shape.get("inline")
 
-            source_bounds = _rendered_bounds(
-                ((node["position"], source_definition(node)) for node in doc["nodes"]),
-                doc["annotation_document"]["annotations"],
-            ) or (0, 0, 0, 0)
-            if x is None:
-                state = session.state
-                existing_positions = state.get("positions") or {}
-
-                def existing_node_bounds():
-                    for node_id in state.get("node_refs", []):
-                        position = existing_positions.get(node_id)
-                        node = service._storage.get_node(node_id) if position else None
-                        shape = (
-                            _shape(node, state, shape_config, saved) if node else None
-                        )
-                        yield position, shape.get("inline") if shape else None
-
-                existing_bounds = _rendered_bounds(
-                    existing_node_bounds(), state.get("annotations") or []
-                )
-                x, y = (
-                    (existing_bounds[2] + 80, existing_bounds[1])
-                    if existing_bounds
-                    else (0, 0)
-                )
-            dx = _placement_number(x - source_bounds[0])
-            dy = _placement_number(y - source_bounds[1])
+            default_placement = x is None
+            if not default_placement:
+                source_bounds = _rendered_bounds(
+                    (
+                        (node["position"], source_definition(node))
+                        for node in doc["nodes"]
+                    ),
+                    doc["annotation_document"]["annotations"],
+                    legacy=True,
+                ) or (0, 0, 0, 0)
+                dx = _placement_number(x - source_bounds[0])
+                dy = _placement_number(y - source_bounds[1])
+            else:
+                dx = dy = 0
             config = config_data.node_shapes
             shape_report = []
             for node in doc["nodes"]:
@@ -1080,6 +1077,40 @@ def insert_template(
                 if new not in kept
             )
             fresh = {old: new for old, new in fresh.items() if new in kept}
+            if default_placement:
+                source_bounds = _rendered_bounds(
+                    (
+                        (node["position"], source_definition(node))
+                        for node in doc["nodes"]
+                        if node["source_node_id"] in added
+                    ),
+                    annotations,
+                ) or (0, 0, 0, 0)
+                state = session.state
+                existing_positions = state.get("positions") or {}
+
+                def existing_node_bounds():
+                    for node_id in state.get("node_refs", []):
+                        position = existing_positions.get(node_id)
+                        node = service._storage.get_node(node_id) if position else None
+                        shape = (
+                            _shape(node, state, shape_config, saved) if node else None
+                        )
+                        yield position, shape.get("inline") if shape else None
+
+                existing_bounds = _rendered_bounds(
+                    existing_node_bounds(), state.get("annotations") or []
+                )
+                x, y = (
+                    (existing_bounds[2] + 80, existing_bounds[1])
+                    if existing_bounds
+                    else (0, 0)
+                )
+                dx = _placement_number(x - source_bounds[0])
+                dy = _placement_number(y - source_bounds[1])
+                for position in positions.values():
+                    position["x"] = _placement_number(position["x"] + dx)
+                    position["y"] = _placement_number(position["y"] + dy)
             for a in annotations:
                 # The canvas defaults absent coordinates to zero. Materialize them
                 # before translating, including resize-only geometry records.
