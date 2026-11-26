@@ -177,6 +177,12 @@ A backup must be a consistent authorized snapshot and must not expose inaccessib
 references or annotation targets. Reject a backup containing unmerged staged
 changes until a separate overlay backup contract exists. Graph data is backed up
 separately; the operator must preserve both artifacts and their association.
+Version 2 backups include authorized mutable templates and, when present, a
+`template_tombstones` list of deleted template records (ID, deletion flag and
+revision). The integrity hash covers both lists. Restore preserves tombstones
+and checks their IDs for collisions, so deleted IDs remain reserved. Profile
+templates are excluded from backups. Version 2 backups without tombstones and
+version 1 backups remain supported.
 
 Restore validates version, integrity, authorization, limits, annotation safety
 and references before any publication. Preserve IDs and revisions on an empty

@@ -12,7 +12,7 @@ import json
 from urllib.parse import unquote_to_bytes
 
 from backend.core.session_annotations import annotation_type_of
-from backend.core.session_store import Session, _empty_state
+from backend.core.session_store import Session, _empty_state, is_valid_session_id
 from backend.core.template_store import validate_template
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
@@ -121,6 +121,7 @@ def create_backup(service, session_backend, write_modes, *, template_backend=Non
                 session_id=session_id,
             )
         templates = []
+        tombstones = []
         if template_backend is not None:
             ids = sorted(template_backend.list_ids())
             for template_id in ids:
@@ -186,6 +187,15 @@ def create_backup(service, session_backend, write_modes, *, template_backend=Non
                                 ):
                                     raise BackupRefused("invalid template record")
                                 if record.get("deleted"):
+                                    if (
+                                        set(record) != {"id", "deleted", "revision"}
+                                        or record["deleted"] is not True
+                                        or not is_valid_session_id(key)
+                                        or type(record["revision"]) is not int
+                                        or record["revision"] < 1
+                                    ):
+                                        raise BackupRefused("invalid template record")
+                                    tombstones.append(copy.deepcopy(record))
                                     continue
                                 doc = validate_template(record["document"])
                                 if doc["template_id"] != key:
@@ -251,6 +261,8 @@ def create_backup(service, session_backend, write_modes, *, template_backend=Non
     if template_backend is not None:
         document["format_version"] = 2
         document["templates"] = templates
+        if tombstones:
+            document["template_tombstones"] = tombstones
     document["integrity"] = {
         "algorithm": "sha256",
         "sha256": hashlib.sha256(canonical_bytes(document)).hexdigest(),

@@ -814,6 +814,10 @@ def test_templates_are_authorized_validated_and_integrity_protected(backend):
             WriteModes(),
             template_backend=templates,
         )
+    templates.save({"id": "9999-9999", "deleted": True, "revision": True})
+    with pytest.raises(BackupRefused):
+        create_backup(Service(), backend, WriteModes(), template_backend=templates)
+    templates.delete("9999-9999")
     templates.save({"id": doc["template_id"], "document": {}})
     with pytest.raises(BackupRefused):
         create_backup(Service(), backend, WriteModes(), template_backend=templates)

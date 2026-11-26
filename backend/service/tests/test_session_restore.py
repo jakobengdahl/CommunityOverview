@@ -371,7 +371,20 @@ def test_write_failure_discards_unpublished_workspace(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "damage", [None, "invalid", "duplicate", "profile", "integrity", "denied"]
+    "damage",
+    [
+        None,
+        "invalid",
+        "duplicate",
+        "profile",
+        "integrity",
+        "denied",
+        "tombstone_invalid",
+        "tombstone_profile",
+        "tombstone_duplicate",
+        "tombstone_denied",
+        "tombstone_integrity",
+    ],
 )
 def test_templates_restore_atomically_with_sessions(damage):
     from backend.core.tests.test_template_store import document as template_document
@@ -380,24 +393,36 @@ def test_templates_restore_atomically_with_sessions(damage):
     source = InMemorySessionPersistenceBackend()
     doc = template_document()
     source.save({"id": doc["template_id"], "document": doc})
+    tombstone = {"id": "9999-9999", "deleted": True, "revision": 2}
+    source.save(tombstone)
     document = create_backup(
         service, InMemorySessionPersistenceBackend(), Modes(), template_backend=source
     )
     document["sessions"] = backup()["sessions"]
+    assert document["template_tombstones"] == [tombstone]
     profiles = set()
-    if damage == "invalid":
+    if damage == "tombstone_invalid":
+        document["template_tombstones"][0]["revision"] = True
+    elif damage == "tombstone_profile":
+        profiles.add(tombstone["id"])
+    elif damage == "tombstone_duplicate":
+        document["template_tombstones"].append(copy.deepcopy(tombstone))
+    elif damage == "invalid":
         document["templates"][0]["revision"] = -1
     elif damage == "duplicate":
         document["templates"].append(copy.deepcopy(doc))
     elif damage == "profile":
         profiles.add(doc["template_id"])
-    if damage != "integrity":
+    if damage == "tombstone_integrity":
+        document["template_tombstones"][0]["revision"] += 1
+    if damage not in ("integrity", "tombstone_integrity"):
         sign(document)
-    if damage == "denied":
+    if damage in ("denied", "tombstone_denied"):
         original = service.authorization_hook.evaluate
         service.authorization_hook.evaluate = lambda context: (
             GraphAuthorizationDecision(allowed=False)
-            if context.session_id == doc["template_id"]
+            if context.session_id
+            == (tombstone["id"] if damage == "tombstone_denied" else doc["template_id"])
             else original(context)
         )
     sessions, templates = (
@@ -426,6 +451,13 @@ def test_templates_restore_atomically_with_sessions(damage):
         )
         assert sessions.load("1234-5678") is not None
         assert templates.load(doc["template_id"])["document"] == doc
+        assert templates.load(tombstone["id"]) == tombstone
+        from backend.core.template_store import TemplateError, TemplateStore
+
+        replacement = copy.deepcopy(doc)
+        replacement["template_id"] = tombstone["id"]
+        with pytest.raises(TemplateError, match="deleted"):
+            TemplateStore(templates).save(replacement, expected_revision=0)
 
 
 def test_file_workspace_restores_templates_and_rejects_profile_collision(
@@ -483,3 +515,43 @@ def test_file_workspace_restores_templates_and_rejects_profile_collision(
         ]
         == doc
     )
+
+
+def test_command_restores_version_one_with_legacy_integration(tmp_path, monkeypatch):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from scripts import restore_sessions
+
+    service = Service()
+    target = InMemorySessionPersistenceBackend()
+    published = []
+    source = tmp_path / "backup.json"
+    source.write_text(json.dumps(backup()))
+
+    @contextmanager
+    def open_restore(hook, output):
+        yield service, target, Modes(), lambda: published.append(True)
+
+    integration = SimpleNamespace(
+        authorization_hook=lambda: service.authorization_hook, open_restore=open_restore
+    )
+    monkeypatch.setattr(
+        restore_sessions.importlib, "import_module", lambda _: integration
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "restore_sessions",
+            "--integration",
+            "test",
+            "--input",
+            str(source),
+            "--output",
+            str(tmp_path / "out"),
+        ],
+    )
+    restore_sessions.main()
+    assert published == [True]
+    assert target.load("1234-5678") is not None

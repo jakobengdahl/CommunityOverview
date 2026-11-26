@@ -47,13 +47,20 @@ def main():
             if service.authorization_hook is not hook:
                 raise RestoreRefused("access denied")
             restoring = True
+            template_options = (
+                {
+                    "template_backend": service.backup_template_backend,
+                    "profile_template_ids": service.backup_profile_template_ids,
+                }
+                if document.get("format_version") == 2
+                else {}
+            )
             report = restore_backup(
                 service,
                 sessions,
                 modes,
                 document,
-                template_backend=service.backup_template_backend,
-                profile_template_ids=service.backup_profile_template_ids,
+                **template_options,
             )
             authorized = True
             publish()

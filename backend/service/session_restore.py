@@ -186,6 +186,12 @@ def restore_backup(
                         target="get_visualization_session",
                         session_id=template["template_id"],
                     )
+                for tombstone in document.get("template_tombstones", []):
+                    _authorize(
+                        service.authorization_hook,
+                        target="get_visualization_session",
+                        session_id=tombstone["id"],
+                    )
         except Exception:
             raise RestoreRefused("access denied") from None
 
@@ -212,11 +218,14 @@ def restore_backup(
             }
             if document["format_version"] == 2:
                 expected_fields.add("templates")
+                if "template_tombstones" in document:
+                    expected_fields.add("template_tombstones")
             if set(document) != expected_fields:
                 raise RestoreRefused("invalid format")
             if document["import_mappings"] != [] or document["import_reports"] != []:
                 raise RestoreRefused("unsupported mappings")
             templates = []
+            tombstones = []
             if document["format_version"] == 2:
                 if template_backend is None or not isinstance(
                     document["templates"], list
@@ -233,6 +242,23 @@ def restore_backup(
                         raise RestoreRefused("template collision")
                     template_ids.add(doc["template_id"])
                     templates.append(doc)
+                raw_tombstones = document.get("template_tombstones", [])
+                if not isinstance(raw_tombstones, list):
+                    raise RestoreRefused("invalid templates")
+                for record in raw_tombstones:
+                    if (
+                        not isinstance(record, dict)
+                        or set(record) != {"id", "deleted", "revision"}
+                        or not is_valid_session_id(record["id"])
+                        or record["deleted"] is not True
+                        or type(record["revision"]) is not int
+                        or record["revision"] < 1
+                    ):
+                        raise RestoreRefused("invalid templates")
+                    if record["id"] in template_ids:
+                        raise RestoreRefused("template collision")
+                    template_ids.add(record["id"])
+                    tombstones.append(copy.deepcopy(record))
             assets, records, seen = {}, [], set()
             for item in sessions:
                 if set(item) != {
@@ -340,6 +366,8 @@ def restore_backup(
                 )
             ):
                 raise RestoreRefused("target collision")
+            for record in tombstones:
+                template_backend.save(record)
             for doc in templates:
                 template_backend.save({"id": doc["template_id"], "document": doc})
             for record, mode in records:
