@@ -586,7 +586,9 @@ controls.
 
 Click **Save view** in the toolbar or ask the AI assistant to save the current layout,
 then confirm the name in the browser. The view is saved as an independently editable
-session. Open the returned session link to return to it. If the session has staged
+session. Open the link in the confirmation to return to it. When the server has no
+public address configured, no link is shown; the saved session is listed by its name
+under **Recent sessions** in the session menu. If the session has staged
 changes, merge or discard them first. A failed or interrupted request may require
 checking the session list before trying again.
 

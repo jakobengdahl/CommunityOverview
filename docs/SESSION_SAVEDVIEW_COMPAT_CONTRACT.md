@@ -28,10 +28,8 @@ revision is the source session's `seq` as returned by session inspection. The
 result is an object with `success: true`, `kind: "saved_session"`,
 `source_session_id`, `source_revision`, `session_id`, `revision` (the new
 session's initial revision), and `session_url` (the canonical server-generated
-link or null when unavailable). Callers use the returned link when available.
-When it is null, the browser may build a link from its current origin and app
-path using the returned session ID, as it does for session sharing. Names may
-collide. This operation is distinct from existing
+link or null when unavailable). The caller must use the returned link, not
+construct one; when it is null the browser shows no link. Names may collide. This operation is distinct from existing
 `copy_visualization_session` and `POST /api/sessions/{id}/copy`, which currently
 also copy staged changes and do not require a revision.
 

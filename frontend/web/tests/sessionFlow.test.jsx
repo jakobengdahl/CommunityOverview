@@ -353,6 +353,9 @@ describe('Server-backed session lifecycle', () => {
         expect(screen.queryByRole('link', { name: 'Open session' })).toBeNull();
       }
       expect(api.saveSessionView).toHaveBeenCalledWith(expect.any(String), 'Overview', 7);
+      expect(sessionStore.listSessions()).toContainEqual(
+        expect.objectContaining({ id: '9876-5432', name: 'Overview' })
+      );
     }
   );
 

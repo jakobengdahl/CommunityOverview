@@ -2519,6 +2519,9 @@ function App() {
           save: api.saveSessionView,
         });
         if (!result.success) throw Object.assign(new Error(), { code: result.error });
+        // Listed under recent sessions so it can be found when no link is returned.
+        sessionStore.touchSession(result.session_id, { name });
+        setSessionsVersion((v) => v + 1);
         clearTimeout(notificationTimeoutRef.current);
         setNotification({
           type: 'success',
@@ -2872,15 +2875,6 @@ function App() {
   const handleToolbarSaveView = useCallback(() => {
     viewDialogRequestedRef.current = true;
     setSaveViewSignal((prev) => prev + 1);
-  }, []);
-
-  useEffect(() => {
-    const request = (event) => {
-      viewDialogRequestedRef.current = event.detail?.name || true;
-      setSaveViewSignal((prev) => prev + 1);
-    };
-    window.addEventListener('request-save-view', request);
-    return () => window.removeEventListener('request-save-view', request);
   }, []);
 
   // ── Session navigation ──────────────────────────────────────────────────
