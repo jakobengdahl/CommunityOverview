@@ -1830,6 +1830,15 @@ def _register_session_endpoints(
     async def list_sessions(http_request: Request) -> Dict[str, Any]:
         from backend.config.config_loader import build_session_url
 
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="list_visualization_sessions",
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+
         return {
             "sessions": [
                 {**meta, "session_url": build_session_url(meta["id"])}

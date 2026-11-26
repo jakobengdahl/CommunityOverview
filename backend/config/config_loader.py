@@ -1078,15 +1078,15 @@ def build_session_url(session_id: str) -> Optional[str]:
     (see ``docs/MCP_SESSION_LIFECYCLE_CONTRACT.md`` §5). Returns ``None`` when no
     public base URL is configured.
     """
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from urllib.parse import urlencode, urlsplit, urlunsplit
 
     base = get_public_base_url()
     if not base or not session_id:
         return None
     parts = urlsplit(base)
-    query = dict(parse_qsl(parts.query))
-    query.pop("view", None)
-    query["session"] = session_id
+    # A configured base is an origin and optional path, not an app route.
+    # Discard query parameters that could change how the session opens.
+    query = {"session": session_id}
     # Preserve any base path; ensure a "/" path when the base is a bare origin so
     # the result is "https://host/?session=<id>" rather than "https://host?...".
     return urlunsplit(

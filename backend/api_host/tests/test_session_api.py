@@ -23,7 +23,7 @@ from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
-    @pytest.mark.parametrize("base", [None, "/root?view=old"])
+    @pytest.mark.parametrize("base", [None, "/root?view=old&collect=kiosk&node=n"])
     def test_create_and_get(self, test_app: TestClient, monkeypatch, base):
         from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
 
@@ -45,6 +45,8 @@ class TestSessionCrud:
         assert (
             body["session_url"] == got.json()["session_url"] == build_session_url(sid)
         )
+        if base is not None:
+            assert got.json()["session_url"] == f"/root?session={sid}"
         listed = test_app.get("/api/sessions").json()["sessions"]
         assert next(item for item in listed if item["id"] == sid)[
             "session_url"
@@ -86,6 +88,16 @@ class TestSessionCrud:
             ]
             is None
         )
+
+        def deny_listing(hook, **kwargs):
+            if kwargs.get("target") == "list_visualization_sessions":
+                return {"message": "listing denied"}
+            return authorize(hook, **kwargs)
+
+        monkeypatch.setattr(access, "authorize_graph_access", deny_listing)
+        response = test_app.get("/api/sessions")
+        assert response.status_code == 403
+        assert response.json()["detail"] == "listing denied"
 
     def test_rename(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
