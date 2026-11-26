@@ -238,11 +238,18 @@ def validate_template(document: Any) -> dict[str, Any]:
         if _has_non_string_key(document):
             raise TemplateError("invalid_document")
         TemplateDocument.model_validate(document)
+        return copy.deepcopy(document)
     except TemplateError:
         raise
-    except (ValidationError, ValueError, TypeError, OverflowError) as exc:
+    # RecursionError: free-form payloads nested past the interpreter limit.
+    except (
+        ValidationError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+    ) as exc:
         raise TemplateError("invalid_document") from exc
-    return copy.deepcopy(document)
 
 
 class TemplateStore:

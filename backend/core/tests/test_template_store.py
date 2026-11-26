@@ -1,5 +1,6 @@
 # covers: backend/core/template_store.py
 import copy
+import sys
 
 import pytest
 
@@ -102,6 +103,13 @@ def test_document_round_trips_without_normalization():
     assert validate_template(value) is not value
 
 
+def _nested(depth):
+    value = {}
+    for _ in range(depth):
+        value = {"x": value}
+    return value
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -194,6 +202,9 @@ def test_document_round_trips_without_normalization():
         ),
         lambda d: d["nodes"][0]["shape"].update(inline=None),
         lambda d: d.update(type_shapes={}),
+        lambda d: d["annotation_document"]["annotations"][0].update(
+            style=_nested(sys.getrecursionlimit() + 100)
+        ),
     ],
 )
 def test_invalid_document_is_rejected(mutation):
