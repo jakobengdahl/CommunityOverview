@@ -294,15 +294,22 @@ describe('ChatPanel conversation state', () => {
     const action = { token: 'save-token', tool: 'save_view', arguments: {} };
     global.fetch
       .mockResolvedValueOnce(streamed({ content: 'confirm', pending_actions: [action] }))
-      .mockResolvedValueOnce(json({ outcome: 'ok', message: 'Saved', result: { action: 'save_view', name: 'View' } }));
-    render(<ChatPanel flushBeforeCapture={() => Promise.reject(new Error('Canvas capture timed out'))} />);
+      .mockResolvedValueOnce(
+        json({ outcome: 'ok', message: 'Saved', result: { action: 'save_view', name: 'View' } })
+      );
+    render(
+      <ChatPanel flushBeforeCapture={() => Promise.reject(new Error('Canvas capture timed out'))} />
+    );
     await send('save');
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
-    await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
-      en.chat.pending_action_failed.replace('{message}', 'Canvas capture timed out')
-    ));
-    expect(useGraphStore.getState().chatMessages.at(-1).pendingActions[0].settled.key).toBe('chat.pending_action_failed');
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        en.chat.pending_action_failed.replace('{message}', 'Canvas capture timed out')
+      )
+    );
+    expect(useGraphStore.getState().chatMessages.at(-1).pendingActions[0].settled.key).toBe(
+      'chat.pending_action_failed'
+    );
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
-
 });
