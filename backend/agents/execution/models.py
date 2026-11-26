@@ -288,6 +288,7 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
       (the entity's before/after/patch data and the event's actor attribution
       go); every other payload key except ``agent_name`` is dropped. Kept
       values survive only as short strings or integers.
+    * Function jobs retain an opaque binding digest for safe idempotency replay.
     * ``result.summary`` is nulled and only boolean/numeric result values are
       kept, so free text under any other key goes too.
     * ``last_error`` and the attribution fields ``session_id`` and ``origin``
@@ -299,6 +300,8 @@ def redact_job(job: ExecutionJob, now: datetime) -> None:
     redacted: Dict[str, Any] = {}
     if "agent_name" in payload:
         redacted["agent_name"] = _kept_scalar(payload["agent_name"])
+    if job.kind == ExecutionKind.FUNCTION and "function_binding_digest" in payload:
+        redacted["function_binding_digest"] = payload["function_binding_digest"]
     event = payload.get("event")
     if isinstance(event, dict):
         entity = event.get("entity") if isinstance(event.get("entity"), dict) else {}

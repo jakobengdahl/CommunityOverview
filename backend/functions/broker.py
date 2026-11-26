@@ -190,6 +190,7 @@ class BrokerContext:
     # backend.functions.run_files.RunFiles of a webhook call with files.
     run_files: Any = None
     contract_version: str = "1"
+    session_id: str | None = None
 
 
 @dataclass
@@ -318,7 +319,9 @@ class FunctionBroker:
         spec = TOOLS.get(name)
         if spec is None:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
-        if name == "graph.attach_run_file" and ctx.contract_version != "3":
+        if name == "graph.attach_run_file" and ctx.session_id:
+            raise BrokerError(ERR_ACCESS_DENIED, "Attachments cannot be staged.")
+        if name == "graph.attach_run_file" and ctx.contract_version not in {"3", "4"}:
             raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
         if spec.grant is not None and (
@@ -358,12 +361,30 @@ class FunctionBroker:
             if ctx.authorization_inputs.get("actor_type") == "function_webhook"
             else nullcontext()
         )
+        from backend.runtime.session_context import bind_function_origin, bind_session
+
         with (
+            bind_session(ctx.session_id),
+            bind_function_origin(
+                {
+                    "function_id": ctx.function_id,
+                    "function_version": ctx.function_version,
+                    "run_id": ctx.run_id,
+                    "correlation_id": ctx.correlation_id,
+                }
+                if ctx.session_id
+                else None
+            ),
             use_request_authorization(
                 **_authorization_kwargs(ctx.authorization_inputs)
             ),
             scope,
         ):
+            if (
+                ctx.session_id
+                and self._service.session_gate.named_mode(ctx.session_id) != "staged"
+            ):
+                raise BrokerError(ERR_ACCESS_DENIED, "Staged session required.")
             decision = access.evaluate_graph_access(
                 self._service.authorization_hook,
                 action=spec.action,

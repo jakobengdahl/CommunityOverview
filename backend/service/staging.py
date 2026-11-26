@@ -404,6 +404,11 @@ class StagedWrite:
             stamped = [
                 {**entry, "session_seq": seq, "stage_token": token} for entry in upserts
             ]
+            origin = session_context.current_function_origin()
+            if origin is not None:
+                stamped = [
+                    {**entry, "function_origin": dict(origin)} for entry in stamped
+                ]
             staged_entries.extend(stamped)
             store.stage(
                 self.session_id,

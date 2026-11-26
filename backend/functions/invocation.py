@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import fcntl
 import logging
 import os
@@ -35,6 +36,7 @@ from backend.functions.runner import (
     safe_relative_path,
 )
 from backend.runtime.authorization import use_request_authorization
+from backend.runtime.session_context import current_session_id, not_supported
 from backend.service.access import evaluate_graph_access
 
 # The local host uses one process with threads. Share admission across service
@@ -111,6 +113,10 @@ def _schema(schema):
 
 # ``precheck`` validates everything but the input, which is not read yet.
 _UNCHECKED = object()
+
+
+def _binding_digest(write_target, session_id):
+    return hashlib.sha256(json.dumps([write_target, session_id]).encode()).hexdigest()
 
 
 def _bind(actor_binding):
@@ -202,12 +208,15 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2", "3"}
+        manifest["contract_version"] not in {"1", "2", "3", "4"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
         or not _valid_triggers(manifest)
-        or manifest.get("write_target", "graph") != "graph"
+        or manifest.get("write_target", "graph")
+        not in (
+            ("graph", "session") if manifest["contract_version"] == "4" else ("graph",)
+        )
         or any(key in manifest for key in ("retry", "secrets", "egress"))
         or ("description" in manifest and not isinstance(manifest["description"], str))
     ):
@@ -355,7 +364,15 @@ class FunctionInvocationService:
                 "configure run_history_db"
             )
 
-    def _replay(self, existing, binding):
+    def _replay(self, existing, binding, write_target="graph", session_id=None):
+        digest = existing.payload.get("function_binding_digest")
+        if digest is not None and digest != _binding_digest(write_target, session_id):
+            raise PermissionError("Conflicting invocation binding")
+        if digest is None and (
+            existing.payload.get("write_target", "graph") != write_target
+            or existing.payload.get("session_id") != session_id
+        ):
+            raise PermissionError("Conflicting invocation binding")
         # Authentication transport is not identity. Redacted records have no
         # attribution or content left; current graph access gates their replay.
         if not binding.get("actor_id"):
@@ -388,6 +405,12 @@ class FunctionInvocationService:
 
     def replay_webhook(self, function_id, idempotency_key, actor_binding):
         binding = _bind(actor_binding)
+        try:
+            manifest, _ = load_manifest(self.root, function_id)
+        except (OSError, ValueError):
+            manifest = None
+        if manifest and manifest.get("write_target", "graph") == "session":
+            raise PermissionError("A staged session is required")
         with _admission(self.root):
             previous = self.store.list_jobs(
                 agent_id=function_id, kind=ExecutionKind.FUNCTION
@@ -559,6 +582,33 @@ class FunctionInvocationService:
         # Only the trusted binding supplies identity and scope. In particular,
         # never carry its headers through the authorization helper.
         binding = _bind(actor_binding)
+        session_id = current_session_id()
+        try:
+            current_manifest, _ = load_manifest(self.root, function_id)
+        except (OSError, ValueError):
+            current_manifest = None
+        write_target = (current_manifest or {}).get("write_target", "graph")
+        if write_target == "graph" and session_id is not None:
+            raise not_supported("Function invocation")
+        if write_target == "session":
+            if session_id is None:
+                raise ValueError("A staged session is required")
+            try:
+                if self.graph_service.session_gate.named_mode(session_id) != "staged":
+                    raise ValueError("A staged session is required")
+                with use_request_authorization(**binding):
+                    decision = evaluate_graph_access(
+                        self.graph_service.authorization_hook,
+                        action="mutate",
+                        target="invoke_function",
+                        session_id=session_id,
+                    )
+                if not binding.get("actor_id") or not decision.allowed:
+                    raise PermissionError("Access denied")
+            except PermissionError:
+                raise
+            except Exception as exc:
+                raise ValueError("Invalid staged session") from exc
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
@@ -568,6 +618,9 @@ class FunctionInvocationService:
             correlation_id=correlation_id or str(uuid.uuid4()),
             payload={
                 "function_id": function_id,
+                "write_target": write_target,
+                "session_id": session_id,
+                "function_binding_digest": _binding_digest(write_target, session_id),
                 "trigger": trigger,
                 "attribution": {
                     "actor": {
@@ -590,7 +643,7 @@ class FunctionInvocationService:
             )
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
-                    return self._replay(existing, binding)
+                    return self._replay(existing, binding, write_target, session_id)
             if self._in_progress(function_id, idempotency_key, reservation):
                 job.state, job.started_at = ExecutionState.CANCELLED, None
                 job.result = {
@@ -602,6 +655,11 @@ class FunctionInvocationService:
             code, manifest, package = self._refusal(
                 function_id, binding, trigger, input
             )
+            if (
+                manifest is not None
+                and manifest.get("write_target", "graph") != write_target
+            ):
+                raise PermissionError("Invocation binding changed")
             if manifest is not None:
                 job.payload["function_version"] = manifest["version"]
                 job.origin = f"function:{function_id}@{manifest['version']}"
@@ -629,7 +687,7 @@ class FunctionInvocationService:
                     or stored.idempotency_key != job.idempotency_key
                 ):
                     raise PermissionError("Conflicting run identity")
-                return self._replay(stored, binding)
+                return self._replay(stored, binding, write_target, session_id)
             if code:
                 return self.reject(Admission(job, started), code)
         return Admission(
@@ -701,6 +759,7 @@ class FunctionInvocationService:
                 max_tool_calls=limits.get("max_tool_calls", 200),
                 run_files=run_files,
                 contract_version=manifest["contract_version"],
+                session_id=job.payload.get("session_id"),
             )
             envelope = {
                 "schema_version": "1.0",
