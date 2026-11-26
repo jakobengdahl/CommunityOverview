@@ -1566,6 +1566,7 @@ def _register_session_endpoints(
                 body.get("y"),
                 body.get("expected_revision"),
                 body.get("template_revision"),
+                body.get("expected_session_seq"),
             )
         return template_response(result)
 

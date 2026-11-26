@@ -1396,8 +1396,7 @@ def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
 
 
 @pytest.mark.parametrize("mode", [None, "copy"])
-def test_copy_refuses_staged_target_without_writes(capture, tmp_path, mode):
-    import copy
+def test_copy_inserts_into_staged_target(capture, tmp_path, mode):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from backend.core.storage_backends import FileGraphPersistenceBackend
@@ -1424,31 +1423,143 @@ def test_copy_refuses_staged_target_without_writes(capture, tmp_path, mode):
     doc = manager.template_store.save(doc, 0)
     service = GraphService(storage)
     target = manager.create_session("target", "staged")
-    before = copy.deepcopy(target.state)
     subscriber = manager.bus.subscribe(target.id)
     app = FastAPI()
     app.include_router(
         create_rest_router(service, session_manager=manager), prefix="/api"
     )
-    with (
-        patch.object(service, "add_nodes") as add_nodes,
-        patch.object(manager, "_apply_op_sync") as apply,
-    ):
-        body = {"template_id": doc["template_id"], "x": 0, "y": 0}
-        if mode is not None:
-            body["mode"] = mode
-        response = TestClient(app).post(
-            f"/api/sessions/{target.id}/insert-template",
-            json=body,
+    body = {"template_id": doc["template_id"], "x": 0, "y": 0}
+    if mode is not None:
+        body["mode"] = mode
+    client = TestClient(app)
+    url = f"/api/sessions/{target.id}/insert-template"
+    for field in ("expected_revision", "template_revision", "expected_session_seq"):
+        refused = client.post(url, json={**body, field: 999})
+        assert refused.status_code == 409
+        assert refused.json()["error"] == (
+            "session_seq_conflict"
+            if field == "expected_session_seq"
+            else "revision_conflict"
         )
-    assert response.status_code == 409
-    assert response.json()["error"] == "staged_target_not_supported"
-    add_nodes.assert_not_called()
-    apply.assert_not_called()
-    assert target.state == before and target.seq == 0
+    from backend.core.layer_store import LayerFull, entry_version
+
+    with patch.object(
+        storage.layer_store, "stage", side_effect=LayerFull(target.id, 0, 1)
+    ):
+        refused = client.post(url, json=body)
+    assert refused.status_code == 422 and refused.json()["error"] == "layer_full"
+    assert not storage.layer_store.load_layer(target.id) and subscriber.queue.empty()
+    stage_results = []
+    stage_change = manager.stage_graph_change
+
+    def record_stage(*args, **kwargs):
+        result = stage_change(*args, **kwargs)
+        stage_results.append(result)
+        return result
+
+    with patch.object(manager, "stage_graph_change", side_effect=record_stage):
+        response = client.post(url, json=body)
+    assert response.status_code == 200
+    result = response.json()
+    assert set(result["node_id_map"].values()) == set(target.state["node_refs"])
     assert not storage.nodes and not storage.edges
-    assert storage.layer_store.load_layer(target.id) == []
+    layer = storage.layer_store.load_layer(target.id)
+    assert {
+        (e["kind"], e["entity_id"], e["version"])
+        for e in stage_results[0]["entry_versions"]
+    } == {(e["kind"], e["entity_id"], entry_version(e)) for e in layer}
+    assert {e["entity_id"] for e in layer if e["kind"] == "node"} == set(
+        result["node_id_map"].values()
+    )
+    assert all(
+        e["staged"]["metadata"]["template"]["id"] == doc["template_id"]
+        for e in layer
+        if e["kind"] == "node"
+    )
+    events = [subscriber.queue.get_nowait(), subscriber.queue.get_nowait()]
+    assert [event["seq"] for event in events] == sorted(
+        event["seq"] for event in events
+    )
+    service.attach_sessions(manager)
+    assert service.merge_staged_changes(target.id, "merge-1")["success"]
+    assert set(storage.nodes) == set(result["node_id_map"].values())
+
+
+def test_staged_copy_rolls_back_only_its_versions(capture, tmp_path):
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+    from backend.core.session_store import AnnotationLimitReached
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    backend = FileGraphPersistenceBackend(tmp_path / "stage.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "stage.json"), persistence_backend=backend)
+    modes = WriteModes(storage.layer_store)
+    manager = SessionManager(
+        SessionStore(
+            InMemorySessionPersistenceBackend(), staged_status=modes.staged_status
+        ),
+        write_modes=modes,
+    )
+    doc["revision"] = 0
+    doc = manager.template_store.save(doc, 0)
+    service = GraphService(storage)
+    target = manager.create_session("target", "staged")
+    subscriber = manager.bus.subscribe(target.id)
+    changed = []
+
+    def fail_after_restage(*args, **kwargs):
+        entries = storage.layer_store.load_layer(target.id)
+        entry = entries[0]
+        entry["stage_token"] = "newer"
+        storage.layer_store.stage(target.id, [entry])
+        changed.append((entry["kind"], entry["entity_id"]))
+        raise AnnotationLimitReached()
+
+    with patch.object(manager, "_apply_op_sync", side_effect=fail_after_restage):
+        result = templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=0, y=0
+        )
+    assert result["error"] == "annotations_limit"
+    assert [
+        (e["kind"], e["entity_id"]) for e in storage.layer_store.load_layer(target.id)
+    ] == changed
     assert subscriber.queue.empty()
+    assert target.seq == 0
+
+
+def test_staged_copy_rolls_back_when_stage_session_persist_fails(capture, tmp_path):
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    backend = FileGraphPersistenceBackend(tmp_path / "stage.json", staged_sessions=True)
+    storage = GraphStorage(str(tmp_path / "stage.json"), persistence_backend=backend)
+    modes = WriteModes(storage.layer_store)
+    manager = SessionManager(
+        SessionStore(
+            InMemorySessionPersistenceBackend(), staged_status=modes.staged_status
+        ),
+        write_modes=modes,
+    )
+    doc["revision"] = 0
+    doc = manager.template_store.save(doc, 0)
+    target = manager.create_session("target", "staged")
+    subscriber = manager.bus.subscribe(target.id)
+    with patch.object(manager.store, "persist", side_effect=OSError):
+        result = templates.insert_template(
+            GraphService(storage), manager, target.id, doc["template_id"], x=0, y=0
+        )
+    assert result["error"] == "storage_error"
+    assert storage.layer_store.load_layer(target.id) == []
+    assert target.seq == 0 and subscriber.queue.empty()
 
 
 def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):
