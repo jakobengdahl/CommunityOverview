@@ -26,7 +26,13 @@ from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_READ
 
 from . import access
-from .session_capture import _annotation_links, _LEGACY_GROUP_PREFIX, _link_id
+from .session_capture import (
+    _annotation_links,
+    _hook_call,
+    _LEGACY_GROUP_PREFIX,
+    _link_id,
+)
+from .staging import HookFailed
 
 
 def _shape(node, state, config, saved):
@@ -192,7 +198,7 @@ def capture_template(
             session_manager.store._lock,
             session_manager.store._backend.transaction(),
         ):
-            if access.authorize_graph_access(
+            if _hook_call(access.authorize_graph_access)(
                 service.authorization_hook,
                 action=GRAPH_ACTION_READ,
                 target="get_visualization_session",
@@ -225,7 +231,7 @@ def capture_template(
             if len(annotations) > _DEFAULT_MAX_ANNOTATIONS:
                 return {"success": False, "error": "annotations_limit"}
             storage = service._storage
-            decision = access.evaluate_graph_access(
+            decision = _hook_call(access.evaluate_graph_access)(
                 service.authorization_hook,
                 action=GRAPH_ACTION_READ,
                 target="save_session_view",
@@ -347,6 +353,9 @@ def capture_template(
         return {"success": False, "error": exc.code}
     except CaptureRefused as exc:
         return {"success": False, "error": exc.code}
+    except HookFailed:
+        # As on the save path: a hook that could not answer has not authorized.
+        return {"success": False, "error": "access_denied"}
     except RevisionConflict:
         return {"success": False, "error": "revision_conflict"}
     except (LayoutBusy, SessionNotFound) as exc:

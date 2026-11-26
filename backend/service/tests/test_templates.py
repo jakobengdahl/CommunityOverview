@@ -68,6 +68,9 @@ def test_denials_and_missing_references(capture, denied_id):
         "backend.service.templates.access.authorize_graph_access", return_value=True
     ):
         assert run() == {"success": False, "error": "session_not_found"}
+    for hook in ("authorize_graph_access", "evaluate_graph_access"):
+        with patch(f"backend.service.templates.access.{hook}", side_effect=ValueError):
+            assert run() == {"success": False, "error": "access_denied"}
     with patch("backend.service.templates.access.is_node_visible", return_value=False):
         assert run() == {"success": False, "error": "access_denied"}
     session.state["annotations"][0]["attachment"]["target_id"] = "missing"
