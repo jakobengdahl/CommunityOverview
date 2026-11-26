@@ -556,6 +556,40 @@ export async function replayCanvasHistory({ sessionId, snapshot, getSync, replay
   await sync.waitForRevision(result.revision);
 }
 
+/** Capture only after the canvas snapshot and its pending edits are confirmed. */
+export async function captureCanvasSession({
+  sessionId,
+  name,
+  snapshot,
+  getSync,
+  capture,
+  isCurrent,
+  read,
+  save,
+}) {
+  await snapshot();
+  if (!isCurrent()) throw new Error('session changed');
+  const sync = getSync();
+  if (!sync || sync.sessionId !== sessionId) throw new Error('sync unavailable');
+  await sync.flushPending();
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  const contents = await capture();
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  let source = await read(sessionId);
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  const ops = Object.entries(contents.positions)
+    .filter(([id]) => !source.state?.positions?.[id])
+    .map(([node_id, position]) => ({ op: 'node_moved', node_id, position }));
+  if (ops.length) {
+    sync.sendOps(ops);
+    await sync.flushPending();
+    if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+    source = await read(sessionId);
+  }
+  if (!isCurrent()) throw new Error('session changed');
+  return save(sessionId, name, source.seq);
+}
+
 /** Serialize complete history replays while preserving each caller's result. */
 export function createHistoryReplayQueue() {
   let tail = Promise.resolve();

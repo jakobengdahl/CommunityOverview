@@ -117,6 +117,14 @@ describe('staged-session binding in api.js', () => {
     expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Copy of Plan' });
   });
 
+  it('captures the specified revision as a session', async () => {
+    const calls = mockFetch(200, { success: true, kind: 'saved_session', session_url: '/session' });
+    const result = await api.saveSessionView('1111-2222', 'Overview', 7);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222\/save-view$/);
+    expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Overview', expected_revision: 7 });
+    expect(result).toEqual({ success: true, kind: 'saved_session', session_url: '/session' });
+  });
+
   it('deletes a staged session with its staged changes only when asked to', async () => {
     const calls = mockFetch(200, { deleted: true });
     await api.deleteServerSession('1111-2222', 'c1');

@@ -260,13 +260,12 @@ The user may refer to "visualization" or "view" in different ways. Always unders
    -> User phrases: "visa bara X", "ta bort Y fran vyn", "lagg till Z i grafen"
 
 2. "Saved view" / "saved visualization" / "sparad vy" / "stored view"
-   -> This refers to SavedView NODES stored IN the graph database
-   -> Permanent snapshots with saved positions/layout
+   -> New saves are independent sessions; older SavedView nodes remain in the graph
    -> User phrases: "spara vyn", "vilka vyer finns", "ladda X-vyn", "saved views"
 
 When user says "visualization", determine from context:
 - "Show me actors" -> modify current visualization (use add_nodes)
-- "Save this visualization" -> create SavedView node (use save_view)
+- "Save this visualization" -> prefer save_session_view when available; otherwise request browser capture with save_view
 - "What visualizations exist?" -> list SavedView nodes (use list_saved_views)
 - "Load the AI view" -> load SavedView (use get_saved_view)
 
@@ -518,8 +517,8 @@ IMPORTANT: Always respect the user's intent from their message. Don't automatica
 
 WORKFLOW FOR SAVING/LOADING SAVED VIEWS:
 1. User can save current visualization state as a named saved view
-2. Use save_view() when user wants to save what they see now
-3. The frontend will capture current node positions, hidden nodes, and groups
+2. Prefer save_session_view with the session ID and current revision when available.
+3. Otherwise save_view only requests browser capture. Never claim a save succeeded until the browser confirms it.
 4. To load a saved view, use get_saved_view() with the view name
 5. To list available saved views, use list_saved_views()
 6. Suggest existing saved views when relevant
@@ -572,13 +571,13 @@ TOOL USAGE GUIDELINES:
   create_saved_view, create_collection_response: Use these dedicated tools for system
   objects after user approval. Pass the type-specific fields inside config. create_agent
   creates an enabled agent and its subscription together. create_saved_view persists
-  explicit node_ids and positions without a browser; save_view captures the current canvas.
+  explicit node_ids and positions without a browser; save_view only requests browser capture.
 - update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - delete_edges: CAREFUL - max 50 edges, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
-- save_view: For saving current visualization state as a saved view
+- save_view: Request browser capture only; do not claim success without browser confirmation. Prefer save_session_view when available.
 - get_saved_view: For loading a saved view into the visualization
 - list_saved_views: For listing all available saved views in the database
 - get_schema: For getting the complete schema configuration
@@ -1310,7 +1309,7 @@ class ChatProcessor:
             },
             {
                 "name": "save_view",
-                "description": "Save the current visualization state as a saved view. Use this when the user wants to save what they see now.",
+                "description": "Request browser capture of the current view. This does not save it; do not claim success without browser confirmation. Prefer save_session_view when available.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -2180,6 +2179,11 @@ class ChatProcessor:
                 retry_allowed=rounds_remaining > 2,
             )
 
+        if any(action.get("action") == "save_view" for action in pending_extra_actions):
+            final_text = (
+                "The browser has been asked to save the view; confirm the save there."
+            )
+
         # Prepare final tool result with accumulated data
         final_tool_result = {}
 
@@ -2200,6 +2204,16 @@ class ChatProcessor:
         # If no accumulated data but we have tool results, use the last one
         if not final_tool_result and tool_results:
             final_tool_result = tool_results[-1]["result"]
+
+        # Preserve a browser capture request even when another tool returned data.
+        capture_requests = [
+            action
+            for action in pending_extra_actions
+            if action.get("action") == "save_view"
+        ]
+        if capture_requests and isinstance(final_tool_result, dict):
+            if final_tool_result.get("action") != "save_view" and not pending_form:
+                final_tool_result["extra_actions"] = capture_requests
 
         # A present_form action must always reach the client (it renders the input
         # widgets). Overlay it last so its action/form survive alongside any nodes/edges.

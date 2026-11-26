@@ -82,6 +82,7 @@ vi.mock('../src/services/api', () => {
     getDisplayName: vi.fn(() => null),
     listServerSessions: vi.fn(async () => ({ sessions: [] })),
     renameServerSession: vi.fn(async () => ({})),
+    saveSessionView: vi.fn(),
     deleteServerSession: vi.fn(async () => ({ deleted: true })),
     createSession: vi.fn(async () => ({ id: '9999-0001', write_mode: 'staged' })),
     setSessionWriteMode: vi.fn(async (id) => ({ id, write_mode: 'staged' })),
@@ -297,29 +298,63 @@ describe('Server-backed session lifecycle', () => {
     ).toBeInTheDocument();
   });
 
-  it('toolbar Save View still opens the naming dialog and emits ops to the server', async () => {
-    const { container } = renderApp();
+  it.each([['https://public.example/app/?session=9876-5432'], [null]])(
+    'toolbar Save View captures the canvas and shows the session link (%s)',
+    async (sessionUrl) => {
+      vi.spyOn(SessionSyncClient.prototype, 'hasCaptureBaseline').mockReturnValue(true);
+      api.saveSessionView.mockResolvedValue({
+        success: true,
+        session_id: '9876-5432',
+        session_url: sessionUrl,
+      });
+      const getSession = api.getSession.getMockImplementation();
+      api.getSession.mockImplementation(async (...args) => ({
+        ...(await getSession(...args)),
+        seq: 7,
+      }));
+      // This fake does not broadcast position ops; don't advance beyond its snapshot.
+      const fetchOps = global.fetch.getMockImplementation();
+      global.fetch.mockImplementation(async (...args) => {
+        const response = await fetchOps(...args);
+        return { ...response, json: async () => ({ applied: [], seq: 0 }) };
+      });
+      const { container } = renderApp();
 
-    act(() => {
-      useGraphStore.getState().updateVisualization([NODE_A], []);
-    });
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
 
-    // The SavedView button is the last toolbar item
-    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
-    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      // The SavedView button is the last toolbar item
+      const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
 
-    await waitFor(() => {
-      expect(screen.getByText('Save View')).toBeInTheDocument();
-    });
-    // The shared round-trip persisted the canvas as incremental ops (step 6),
-    // materialising the session on its op stream rather than a full-state PUT.
-    await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalled();
-    });
-    // Layout only: membership is never part of a snapshot save.
-    const ops = opsFrom(global.fetch);
-    expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
-  });
+      await waitFor(() => {
+        expect(screen.getByText('Save view')).toBeInTheDocument();
+      });
+      // The shared round-trip persisted the canvas as incremental ops (step 6),
+      // materialising the session on its op stream rather than a full-state PUT.
+      await waitFor(() => {
+        expect(global.fetch).toHaveBeenCalled();
+      });
+      // Layout only: membership is never part of a snapshot save.
+      const ops = opsFrom(global.fetch);
+      expect(ops).toEqual([{ op: 'node_moved', node_id: 'node-a', position: { x: 11, y: 22 } }]);
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Overview' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(api.saveSessionView).toHaveBeenCalled());
+      if (sessionUrl) {
+        expect(await screen.findByRole('link', { name: 'Open session' })).toHaveAttribute(
+          'href',
+          sessionUrl
+        );
+      } else {
+        await waitFor(() => expect(screen.getByText('View saved.')).toBeInTheDocument());
+        expect(screen.queryByRole('link', { name: 'Open session' })).toBeNull();
+      }
+      expect(api.saveSessionView).toHaveBeenCalledWith(expect.any(String), 'Overview', 7);
+    }
+  );
 
   it("a user's add sends the node's position with the add, not after it", async () => {
     renderApp();
@@ -399,7 +434,7 @@ describe('Server-backed session lifecycle', () => {
       expect(connectSpy).toHaveBeenCalledTimes(1);
     });
     await waitFor(() => {
-      expect(screen.getByText('Save View')).toBeInTheDocument();
+      expect(screen.getByText('Save view')).toBeInTheDocument();
     });
 
     // Second save: a fresh client connects, so the pending ops finally reach the
@@ -986,7 +1021,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1051,7 +1086,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1117,7 +1152,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
     expect(capturedClient).toBeTruthy();
 
     const sessionSource = await waitFor(() => {
@@ -1192,7 +1227,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1257,7 +1292,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1342,7 +1377,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1397,7 +1432,7 @@ describe('Server-backed session lifecycle', () => {
     act(() => useGraphStore.getState().updateVisualization([NODE_A], []));
     const buttons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(buttons[buttons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
     const source = await waitFor(() => {
       const found = FakeEventSource.instances.find(
         (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
@@ -1452,7 +1487,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1496,7 +1531,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1581,7 +1616,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
 
     const sessionSource = await waitFor(() => {
       const found = FakeEventSource.instances.find(
@@ -1676,7 +1711,7 @@ describe('Server-backed session lifecycle', () => {
       });
       const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
       fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-      await waitFor(() => screen.getByText('Save View'));
+      await waitFor(() => screen.getByText('Save view'));
 
       const oldSource = await waitFor(() => {
         const found = FakeEventSource.instances.find(
@@ -1870,7 +1905,7 @@ describe('Server-backed session lifecycle', () => {
     });
     const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
     fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-    await waitFor(() => screen.getByText('Save View'));
+    await waitFor(() => screen.getByText('Save view'));
     return waitFor(() => {
       const found = FakeEventSource.instances.find(
         (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
@@ -2614,7 +2649,7 @@ describe('Server-backed session lifecycle', () => {
       });
       const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
       fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
-      await waitFor(() => screen.getByText('Save View'));
+      await waitFor(() => screen.getByText('Save view'));
       const source = await waitFor(() => {
         const found = FakeEventSource.instances.find(
           (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')

@@ -25,7 +25,6 @@ import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
   annotationsToOverlays,
-  annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
@@ -65,9 +64,13 @@ import {
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
-import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
+import {
+  captureCanvasSession,
+  createHistoryReplayQueue,
+  replayCanvasHistory,
+} from './utils/sessionActivity';
 import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
-import { readyBaseline } from './utils/captureContents';
+import { buildCaptureContents, readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -126,6 +129,14 @@ function reflectSessionUrl(id) {
   } catch {
     // ignore — URL reflection is best-effort
   }
+}
+
+function browserSessionUrl(id) {
+  const url = new URL(window.location.href);
+  url.hash = '';
+  url.search = '';
+  url.searchParams.set('session', id);
+  return url.toString();
 }
 
 function App() {
@@ -265,6 +276,15 @@ function App() {
   const [editingAKCData, setEditingAKCData] = useState(null);
   const [akcIntroShown, setAkcIntroShown] = useState(false);
   const [akcConfig, setAkcConfig] = useState(null);
+
+  useEffect(() => {
+    const request = (event) => {
+      viewDialogRequestedRef.current = event.detail?.name || true;
+      setSaveViewSignal((prev) => prev + 1);
+    };
+    window.addEventListener('request-save-view', request);
+    return () => window.removeEventListener('request-save-view', request);
+  }, []);
 
   // ── Session navigation state ────────────────────────────────────────────
   // The visualization session ID doubles as the working-session identity.
@@ -2291,8 +2311,9 @@ function App() {
       const callbacks = snapshotCallbacksRef.current.splice(0);
       callbacks.forEach((cb) => cb?.());
       if (viewDialogRequestedRef.current) {
+        const name = viewDialogRequestedRef.current;
         viewDialogRequestedRef.current = false;
-        setSaveViewDialog({ viewData });
+        setSaveViewDialog({ name: typeof name === 'string' ? name : '' });
       }
     },
     [persistSessionSnapshot]
@@ -2485,47 +2506,57 @@ function App() {
 
       setIsSavingView(true);
       try {
-        const parentIds = Object.fromEntries(
-          saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
-        );
-        const annotationDocument = legacyMetadataToAnnotationDocument({
-          groups: saveViewDialog.viewData.groups || [],
-          parentIds,
-          annotations: saveViewDialog.viewData.annotations || [],
-        });
-        const legacyAnnotationMetadata = annotationDocumentToLegacyMetadata(annotationDocument);
-        const viewNode = {
+        annotationSchedulerRef.current.clearPending();
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        const result = await captureCanvasSession({
+          sessionId,
           name,
-          type: 'SavedView',
-          description: `Saved view: ${name}`,
-          summary: `Contains ${saveViewDialog.viewData.nodes.length} nodes`,
-          metadata: {
-            node_ids: saveViewDialog.viewData.nodes.map((n) => n.id),
-            positions: Object.fromEntries(
-              saveViewDialog.viewData.nodes.map((n) => [n.id, n.position])
-            ),
-            parentIds,
-            edge_ids: (saveViewDialog.viewData.edges || []).map((e) => e.id),
-            edges: saveViewDialog.viewData.edges || [],
-            annotation_schema_version: annotationDocument.schema_version,
-            annotation_document: annotationDocument,
-            groups: legacyAnnotationMetadata.groups,
-            annotations: legacyAnnotationMetadata.annotations,
-          },
-          communities: [],
-        };
-
-        await api.addNodes([viewNode], []);
-        showNotification('success', `View "${name}" saved`);
+          snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
+          getSync: () => ensureSyncConnected(sessionId),
+          capture: () => flushBeforeCapture(() => buildCaptureContents(getCaptureState())),
+          isCurrent: () => sessionIdRef.current === sessionId,
+          read: api.getSession,
+          save: api.saveSessionView,
+        });
+        if (!result.success) throw Object.assign(new Error(), { code: result.error });
+        clearTimeout(notificationTimeoutRef.current);
+        setNotification({
+          type: 'success',
+          message: t('save_view.saved'),
+          url: result.session_url,
+        });
       } catch (error) {
-        console.error('Error saving view:', error);
-        showNotification('error', 'Could not save view');
+        const codes = [
+          'invalid_request',
+          'access_denied',
+          'session_not_found',
+          'revision_conflict',
+          'session_busy',
+          'staged_changes',
+          'invalid_presentation',
+          'session_too_large',
+          'too_many_sessions',
+          'storage_error',
+        ];
+        showNotification(
+          'error',
+          t(`save_view.${codes.includes(error.code) ? error.code : 'failed'}`)
+        );
       } finally {
         setIsSavingView(false);
         setSaveViewDialog(null);
       }
     },
-    [saveViewDialog, showNotification]
+    [
+      saveViewDialog,
+      sessionId,
+      requestSessionSnapshot,
+      ensureSyncConnected,
+      flushBeforeCapture,
+      getCaptureState,
+      showNotification,
+      t,
+    ]
   );
 
   // Callback: Create subscription
@@ -2841,6 +2872,15 @@ function App() {
   const handleToolbarSaveView = useCallback(() => {
     viewDialogRequestedRef.current = true;
     setSaveViewSignal((prev) => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    const request = (event) => {
+      viewDialogRequestedRef.current = event.detail?.name || true;
+      setSaveViewSignal((prev) => prev + 1);
+    };
+    window.addEventListener('request-save-view', request);
+    return () => window.removeEventListener('request-save-view', request);
   }, []);
 
   // ── Session navigation ──────────────────────────────────────────────────
@@ -3393,11 +3433,7 @@ function App() {
   // correct across deployments without needing the server base URL client-side.
   const handleCopySessionLink = useCallback(
     async (targetId) => {
-      const url = new URL(window.location.href);
-      url.hash = '';
-      url.search = '';
-      url.searchParams.set('session', targetId);
-      const link = url.toString();
+      const link = browserSessionUrl(targetId);
       try {
         await navigator.clipboard.writeText(link);
       } catch {
@@ -4467,7 +4503,10 @@ function App() {
           role={notification.type === 'error' ? 'alert' : 'status'}
           aria-live={notification.type === 'error' ? 'assertive' : 'polite'}
         >
-          <span>{notification.message}</span>
+          <span>
+            {notification.message}{' '}
+            {notification.url && <a href={notification.url}>{t('save_view.open_link')}</a>}
+          </span>
           <button
             onClick={() => setNotification(null)}
             aria-label={t('common.close')}

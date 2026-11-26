@@ -154,11 +154,12 @@ function AppDialogs({
 
       {saveViewDialog && (
         <InputDialog
-          title="Save View"
-          label="View name"
-          placeholder="Enter a name for this view..."
-          confirmText="Save"
-          cancelText="Cancel"
+          title={t('save_view.title')}
+          label={t('save_view.name')}
+          placeholder={t('save_view.placeholder')}
+          defaultValue={saveViewDialog.name || ''}
+          confirmText={t('common.save')}
+          cancelText={t('common.cancel')}
           loadingText={t('common.saving')}
           isLoading={isSavingView}
           onConfirm={onConfirmSaveView}

@@ -584,13 +584,14 @@ controls.
 
 ### 2.6 Saved views
 
-Click **Save view** in the toolbar or ask the AI assistant to save the current layout.
+Click **Save view** in the toolbar or ask the AI assistant to save the current layout,
+then confirm the name in the browser. The view is saved as an independently editable
+session. Open the returned session link to return to it. If the session has staged
+changes, merge or discard them first. A failed or interrupted request may require
+checking the session list before trying again.
 
-Saved views are stored as **SavedView nodes** in the graph, making them visible,
-shareable, and editable like any other node.
-
-To restore a view: double-click its SavedView node in the graph, or search for it and
-click "Restore view" in its detail panel.
+Older SavedView nodes remain available: double-click one in the graph, or search for
+it and click "Restore view" in its detail panel.
 
 ### 2.7 Agents
 
@@ -1407,7 +1408,8 @@ interface.
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
 | `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
-| `save_view` | Ask a connected frontend to capture and save its canvas |
+| `save_view` | Request browser capture; confirmation in the browser is required |
+| `save_session_view` | Save a session at a specified revision and return its link |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
 | `summon_session_viewport` | Move everyone connected to a session to one region of the canvas — given as bounds or as a set of node ids — the same as **Bring everyone here** |

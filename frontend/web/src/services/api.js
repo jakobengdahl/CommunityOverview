@@ -1142,6 +1142,14 @@ export function setDisplayName(name) {
 
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 
+/** Capture a revision of a session as a new session. */
+export async function saveSessionView(sessionId, name, expectedRevision) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/save-view`, {
+    method: 'POST',
+    body: JSON.stringify({ name, expected_revision: expectedRevision }),
+  });
+}
+
 /** Copy a session (canvas, write mode, staged changes) into a new session named `name`. */
 export async function copySession(sessionId, name) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/copy`, {

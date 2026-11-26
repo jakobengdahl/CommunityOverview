@@ -57,6 +57,24 @@ describe('ChatPanel conversation state', () => {
     global.fetch.mockReset();
   });
 
+  it('asks the browser to confirm a capture without writing a graph node', async () => {
+    resetStore();
+    const listener = vi.fn();
+    window.addEventListener('request-save-view', listener);
+    global.fetch.mockResolvedValueOnce(
+      streamed({
+        content: 'Requested',
+        toolResult: { action: 'save_view', name: 'Overview' },
+      })
+    );
+    render(<ChatPanel />);
+    await send('save');
+    await waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    expect(listener.mock.calls[0][0].detail).toEqual({ name: 'Overview' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    window.removeEventListener('request-save-view', listener);
+  });
+
   it('sends turn 2 exactly as the checked-in fixture after a selection and a cancelled delete', async () => {
     const agency = { id: 'n1', type: 'Actor', name: 'Agency' };
     resetStore({ nodes: [agency], selectedGraphNodes: [agency] });
@@ -289,7 +307,7 @@ describe('ChatPanel conversation state', () => {
     expect(stored.settled.key).toBe('chat.pending_action_done');
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
-  it('reports a confirmed saved view as failed when capture times out', async () => {
+  it('reports a browser capture request without claiming a save', async () => {
     resetStore();
     const action = { token: 'save-token', tool: 'save_view', arguments: {} };
     global.fetch
@@ -297,18 +315,14 @@ describe('ChatPanel conversation state', () => {
       .mockResolvedValueOnce(
         json({ outcome: 'ok', message: 'Saved', result: { action: 'save_view', name: 'View' } })
       );
-    render(
-      <ChatPanel flushBeforeCapture={() => Promise.reject(new Error('Canvas capture timed out'))} />
-    );
+    render(<ChatPanel />);
     await send('save');
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
     await waitFor(() =>
-      expect(screen.getByRole('status').textContent).toBe(
-        en.chat.pending_action_failed.replace('{message}', 'Canvas capture timed out')
-      )
+      expect(screen.getByRole('status').textContent).toBe(en.chat.pending_action_capture_requested)
     );
     expect(useGraphStore.getState().chatMessages.at(-1).pendingActions[0].settled.key).toBe(
-      'chat.pending_action_failed'
+      'chat.pending_action_capture_requested'
     );
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
