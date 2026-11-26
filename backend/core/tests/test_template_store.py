@@ -200,6 +200,10 @@ def _nested(depth):
         lambda d: d["annotation_document"]["annotations"][0].update(
             style={1: "x", "1": "y"}
         ),
+        lambda d: d["annotation_document"]["annotations"][0].update(
+            style=({1: "x", "1": "y"},)
+        ),
+        lambda d: d.update(description="\ud800"),
         lambda d: d["nodes"][0]["shape"].update(inline=None),
         lambda d: d.update(type_shapes={}),
         lambda d: d["annotation_document"]["annotations"][0].update(
