@@ -104,7 +104,7 @@ def _rendered_bounds(positions, annotations, *, legacy=False):
                 "y": start.get("y", 0) + annotation.get("dy", 0),
             }
             points.extend((start, end))
-        if annotation_type_of(annotation) == "freehand" and not points:
+        if not legacy and annotation_type_of(annotation) == "freehand" and not points:
             points = [annotation.get("position") or annotation.get("geometry") or {}]
         if points:
             boxes.extend(

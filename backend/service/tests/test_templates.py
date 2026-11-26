@@ -997,7 +997,37 @@ def test_insert_rejects_overflow_without_writing(capture):
     assert target.state == before and target.seq == 0
 
 
-def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture):
+@pytest.mark.parametrize(
+    "points, geometry, coords, expected_position, expected_geometry, expected_points",
+    [
+        (
+            [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
+            {"x": 30, "y": 40},
+            {"x": 100, "y": 200},
+            {"x": 125, "y": 234},
+            {"x": 125, "y": 234},
+            [{"x": 100, "y": 200}, {"x": 102, "y": 202}],
+        ),
+        (
+            [],
+            {"x": 10, "y": 20},
+            {"x": 100, "y": 200},
+            {"x": 120, "y": 220},
+            {"x": 100, "y": 200},
+            [],
+        ),
+        ([], {"x": 10, "y": 20}, {}, {"x": 0, "y": 0}, {"x": -20, "y": -20}, []),
+    ],
+)
+def test_insert_freehand_translates_absolute_points_and_rendered_origin(
+    capture,
+    points,
+    geometry,
+    coords,
+    expected_position,
+    expected_geometry,
+    expected_points,
+):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -1007,8 +1037,8 @@ def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture)
             "id": "stroke",
             "type": "freehand",
             "position": {"x": 30, "y": 40},
-            "geometry": {"x": 30, "y": 40},
-            "points": [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
+            "geometry": geometry,
+            "points": points,
         }
     ]
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
@@ -1016,13 +1046,13 @@ def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture)
     ]
     target = manager.create_session("target")
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=100, y=200
+        service, manager, target.id, doc["template_id"], **coords
     )
     assert result["success"]
     stroke = target.state["annotations"][0]
-    assert stroke["position"] == {"x": 125, "y": 234}
-    assert stroke["geometry"] == {"x": 125, "y": 234}
-    assert stroke["points"] == [{"x": 100, "y": 200}, {"x": 102, "y": 202}]
+    assert stroke["position"] == expected_position
+    assert stroke["geometry"] == expected_geometry
+    assert stroke["points"] == expected_points
 
 
 @pytest.mark.parametrize("skip", ["missing", "already_present"])
