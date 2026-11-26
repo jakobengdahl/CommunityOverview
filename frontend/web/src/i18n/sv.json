@@ -1182,7 +1182,7 @@
     "name": "Namn (obligatoriskt)",
     "description": "Beskrivning",
     "tags": "Taggar (kommaseparerade)",
-    "summary": "Förhandsvisning: {nodes} noder, {edges} kopplingar, {annotations} anteckningar (kan ändras före sparandet)",
+    "summary": "Förhandsvisning: {nodes} noder, {annotations} anteckningar. Kopplingar mellan inkluderade noder räknas vid sparandet.",
     "loading": "Förbereder sessionen…",
     "saving": "Sparar…",
     "save_button": "Spara",

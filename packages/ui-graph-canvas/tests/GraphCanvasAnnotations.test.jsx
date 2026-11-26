@@ -7,7 +7,7 @@ import { AnnotationContext } from '../src/components/AnnotationContext';
 
 function TemplateActionProbe() {
   const { saveAsTemplate } = useContext(AnnotationContext);
-  return <button onClick={() => saveAsTemplate('note-1', 'note')}>Save probe</button>;
+  return <button onClick={() => saveAsTemplate('group-1', 'group')}>Save probe</button>;
 }
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), selectionOnChange: null }));
@@ -89,7 +89,7 @@ describe('GraphCanvas annotation creation', () => {
     const save = vi.fn();
     render(<GraphCanvas nodes={[]} edges={[]} onSaveSelectionAsTemplate={save} />);
     const selected = [
-      { id: 'note-1', type: 'note' },
+      { id: 'group-1', type: 'group' },
       { id: 'node-1', type: 'Actor' },
     ];
     act(() => hoisted.selectionOnChange({ nodes: selected, edges: [] }));

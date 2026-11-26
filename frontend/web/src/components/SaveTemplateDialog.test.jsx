@@ -38,10 +38,12 @@ describe('saving templates', () => {
     expect(templateSummary(source, [], null)).toBeNull();
     expect(templateSummary(source, selection, schema)).toEqual({
       nodes: 1,
-      edges: 0,
       annotations: 1,
     });
-    expect(templateSummary(source, [], schema)).toEqual({ nodes: 2, edges: 1, annotations: 2 });
+    expect(templateSummary(source, [], schema)).toEqual({ nodes: 2, annotations: 2 });
+    // Graph edges can change without a session revision, so no stale count is previewed.
+    expect(templateSummary({ ...source, resolved: { ...source.resolved, edges: [] } }, [], schema))
+      .toEqual(templateSummary(source, [], schema));
   });
 
   it('waits for schema before displaying counts or enabling save', async () => {

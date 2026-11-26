@@ -1182,7 +1182,7 @@
     "name": "Name (required)",
     "description": "Description",
     "tags": "Tags (comma-separated)",
-    "summary": "Preview: {nodes} nodes, {edges} connections, {annotations} annotations (may change before saving)",
+    "summary": "Preview: {nodes} nodes, {annotations} annotations. Connections between included nodes are counted when saved.",
     "loading": "Preparing session…",
     "saving": "Saving…",
     "save_button": "Save",

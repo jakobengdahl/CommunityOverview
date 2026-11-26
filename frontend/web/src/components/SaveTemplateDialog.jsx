@@ -24,9 +24,6 @@ export function templateSummary(source, selected, schema) {
       (whole || chosenNodes.has(node.id)) && schema?.node_types?.[node.type]?.category !== 'system'
   );
   const ids = new Set(nodes.map((node) => node.id));
-  const edges = (source.resolved?.edges || []).filter(
-    (edge) => ids.has(edge.source) && ids.has(edge.target)
-  );
   const annotations = (source.state?.annotations || []).filter((annotation) => {
     if (!whole && !chosenAnnotations.has(annotation.id)) return false;
     const merged = { ...annotation, ...annotation.content };
@@ -38,7 +35,7 @@ export function templateSummary(source, selected, schema) {
       !ids.has(target)
     );
   });
-  return { nodes: nodes.length, edges: edges.length, annotations: annotations.length };
+  return { nodes: nodes.length, annotations: annotations.length };
 }
 
 export default function SaveTemplateDialog({
