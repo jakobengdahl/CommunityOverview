@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
@@ -305,6 +306,11 @@ function NoteNode({ id, data = {}, selected }) {
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
             onKeyDown={handleMenuKeyDown}
           >
+            <AnnotationSaveTemplateControl
+              id={id}
+              type="note"
+              onClose={() => setContextMenu(null)}
+            />
             {locked ? (
               // The capability baseline's two actions for a locked object:
               // unlock, and duplicate (a duplicate never mutates the locked

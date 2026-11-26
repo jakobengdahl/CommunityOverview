@@ -568,6 +568,7 @@ function GraphCanvasInner({
   savedShapes = null,
   onAppearance = null,
   onContextMenuAction = null,
+  onSaveSelectionAsTemplate = null,
   nodeColorResolver = null,
   onViewportChange = null,
   // A host request to move the camera: a fresh `{ bounds }` (model-space
@@ -1219,6 +1220,14 @@ function GraphCanvasInner({
 
   const annotationContextValue = useMemo(
     () => ({
+      saveAsTemplate: onSaveSelectionAsTemplate
+        ? (id, type) => {
+            const selected = selectedNodesRef.current;
+            onSaveSelectionAsTemplate(
+              selected.some((node) => node.id === id) ? selected : [{ id, type }]
+            );
+          }
+        : null,
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
       notifyRenderFailure: reportAnnotationRenderError,
@@ -1239,6 +1248,7 @@ function GraphCanvasInner({
         requestClose: onCloseAnnotationEditSheet,
       },
       labels: {
+        saveAsTemplate: cml.saveAsTemplate,
         color: cml.annotationColor,
         fill: cml.annotationFill,
         border: cml.annotationBorder,
@@ -1323,6 +1333,8 @@ function GraphCanvasInner({
     }),
     [
       notifyAnnotationChange,
+      onSaveSelectionAsTemplate,
+      cml.saveAsTemplate,
       notifyRemoteLockedAttempt,
       beginEditing,
       endEditing,
@@ -5921,6 +5933,7 @@ function GraphCanvasInner({
         <NodeContextMenu
           menu={nodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           schema={schema}
           onEdit={onEdit}
           onAppearance={onAppearance}
@@ -5949,6 +5962,7 @@ function GraphCanvasInner({
         <MultiNodeContextMenu
           menu={multiNodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           onShowOnly={onShowOnly}
           onHideSelection={onHideMultiple || onHide ? hideSelectedGraphNodes : undefined}
           onDeleteSelection={

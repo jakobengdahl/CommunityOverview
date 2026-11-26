@@ -153,6 +153,9 @@ export function buildAppCommands(
 
   return [
     ...toolbarCommands,
+    command('save-template', 'template.save', 'template.command_description', () =>
+      handlers.onSaveTemplate()
+    ),
     command('settings', 'sessions.settings', 'commands.settings_description', () =>
       handlers.onOpenSettings()
     ),

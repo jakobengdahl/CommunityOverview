@@ -10,6 +10,7 @@ import {
 } from '../src/components/ContextMenus';
 
 const labels = {
+  saveAsTemplate: 'Save as template',
   edit: 'Edit',
   appearance: 'Node appearance',
   hide: 'Hide',
@@ -517,6 +518,23 @@ describe('NodeContextMenu teleport action (task-federated-graph-teleport)', () =
 });
 
 describe('MultiNodeContextMenu', () => {
+  it('passes the complete selection to the template action', () => {
+    const nodes = [{ id: 'a' }, { id: 'note', type: 'note' }];
+    const save = vi.fn();
+    const close = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onSaveAsTemplate={save}
+        onClose={close}
+      />
+    );
+    fireEvent.click(screen.getByText(labels.saveAsTemplate));
+    expect(save).toHaveBeenCalledWith(nodes);
+    expect(close).toHaveBeenCalled();
+  });
+
   const nodes = [
     { id: 'a', data: { nodeType: 'Actor' } },
     { id: 'b', data: { nodeType: 'Theme' } },

@@ -20,6 +20,7 @@ vi.mock('reactflow', () => ({
 
 const LABELS = {
   unlock: 'Unlock',
+  saveAsTemplate: 'Save as template',
   groupLayer: 'Group order',
   groupLayerFront: 'Bring forward',
   groupLayerBack: 'Send backward',
@@ -31,7 +32,7 @@ function renderGroup(
   data = { label: 'G', color: '#646cff' },
   notifyChange = vi.fn(),
   notifyRemoteLockedAttempt = vi.fn(),
-  { canvasNodes } = {}
+  { canvasNodes, saveAsTemplate } = {}
 ) {
   hoisted.nodes = canvasNodes || [{ id: 'group-1', type: 'group', data }];
   return {
@@ -39,7 +40,7 @@ function renderGroup(
     notifyRemoteLockedAttempt,
     ...render(
       <AnnotationContext.Provider
-        value={{ notifyChange, notifyRemoteLockedAttempt, labels: LABELS }}
+        value={{ notifyChange, notifyRemoteLockedAttempt, saveAsTemplate, labels: LABELS }}
       >
         <GroupNode id="group-1" data={data} selected />
       </AnnotationContext.Provider>
@@ -51,6 +52,15 @@ const REMOTE_CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
 describe('GroupNode host notification (design step 6)', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it.each([false, true])('offers template saving for a group (locked: %s)', (locked) => {
+    const saveAsTemplate = vi.fn();
+    renderGroup({ label: 'G', locked }, vi.fn(), vi.fn(), { saveAsTemplate });
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save as template' }));
+    expect(saveAsTemplate).toHaveBeenCalledExactlyOnceWith('group-1', 'group');
+    expect(document.querySelector('.graph-group-context-menu')).toBeNull();
+  });
 
   it('notifies on rename and writes the new label', () => {
     const { notifyChange } = renderGroup();
