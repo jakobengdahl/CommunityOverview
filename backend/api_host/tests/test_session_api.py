@@ -1796,25 +1796,39 @@ def test_implicit_rename_reports_storage_failure(test_app, monkeypatch):
     assert store.get(sid) is None
 
 
-def test_template_routes_crud(test_app):
+@pytest.mark.parametrize("with_session_header", [False, True])
+def test_template_routes_crud(test_app, with_session_header):
     sid = test_app.post("/api/sessions", json={"name": "source"}).json()["id"]
+    headers = {"x-communityoverview-session-id": sid} if with_session_header else {}
     response = test_app.post(
         f"/api/sessions/{sid}/templates",
         json={"name": "Example", "expected_revision": 0},
+        headers=headers,
     )
     assert response.status_code == 200
     doc = response.json()["template"]
     path = f"/api/templates/{doc['template_id']}"
-    assert test_app.get(path).json()["template"] == doc
-    assert test_app.get("/api/templates").json()["templates"] == [doc]
+    assert test_app.get(path, headers=headers).json()["template"] == doc
+    assert test_app.get("/api/templates", headers=headers).json()["templates"] == [doc]
     changed = test_app.patch(
-        path, json={"expected_revision": doc["revision"], "name": "New"}
+        path, json={"expected_revision": doc["revision"], "name": "New"}, headers=headers
     ).json()["template"]
     assert changed["name"] == "New"
     assert test_app.delete(
-        path, params={"expected_revision": changed["revision"]}
+        path, params={"expected_revision": changed["revision"]}, headers=headers
     ).json()["deleted"]
-    assert test_app.get(path).status_code == 404
+    assert test_app.get(path, headers=headers).status_code == 404
+
+
+def test_template_capture_retired_session(test_app):
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    assert test_app.delete(f"/api/sessions/{sid}").status_code == 200
+    response = test_app.post(
+        f"/api/sessions/{sid}/templates",
+        json={"name": "Example", "expected_revision": 0},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"success": False, "error": "session_not_found"}
 
 
 @pytest.mark.parametrize(
