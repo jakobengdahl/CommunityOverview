@@ -71,12 +71,37 @@ def _freehand_points(annotation):
 def _rendered_bounds(positions, annotations):
     """Canvas-space bounds, including fallback geometry and point-based marks."""
     boxes = []
-    for position in positions:
+    # Dimensions mirror ui-graph-canvas's nodeShapeGeometry and include the
+    # label above triangles. A missing definition renders as the built-in card.
+    bases = {
+        "rectangle": (200, 120),
+        "rectangle-flat": (240, 96),
+        "triangle-up": (240, 180),
+        "triangle-down": (240, 180),
+    }
+    for position, definition in positions:
         p = position or {}
         px, py = p.get("x", 0), p.get("y", 0)
-        boxes.append((px, py, px + 200, py + 100))  # canvas NODE_WIDTH/HEIGHT
+        base = (definition or {}).get("base")
+        scale = (definition or {}).get("scale", 1)
+        width, height = bases.get(base, (200, 100))
+        label = 28 * scale if base in ("triangle-up", "triangle-down") else 0
+        boxes.append((px, py - label, px + width * scale, py + height * scale))
     for annotation in annotations:
         points = _line_points(annotation) + _freehand_points(annotation)
+        if annotation_type_of(annotation) == "line":
+            # The canvas derives absent endpoints from position and dx/dy.
+            start = (
+                annotation.get("from")
+                or annotation.get("position")
+                or annotation.get("geometry")
+                or {}
+            )
+            end = annotation.get("to") or {
+                "x": start.get("x", 0) + annotation.get("dx", 160),
+                "y": start.get("y", 0) + annotation.get("dy", 0),
+            }
+            points.extend((start, end))
         if points:
             boxes.extend(
                 (p.get("x", 0), p.get("y", 0), p.get("x", 0), p.get("y", 0))
@@ -895,15 +920,53 @@ def insert_template(
             added, skipped, keys = [], [], {}
             positions, overrides = {}, {}
             hidden = list(session.state.get("hidden_node_ids", []))
+            config_data = ConfigLoader().config
+            shape_config = {
+                "types": {
+                    k: v.model_dump() for k, v in config_data.schema_.node_types.items()
+                },
+                "shapes": {
+                    k: v.model_dump() for k, v in config_data.node_shapes.items()
+                },
+            }
+            library = manager.shape_library
+            entries = library.backend.read()["entries"] if library else {}
+            saved = {
+                k: v["definition"]
+                for k, v in entries.items()
+                if v and not v.get("deleted") and "definition" in v
+            }
+
+            def source_definition(node):
+                shape = node.get("shape") or {}
+                ref = shape.get("ref")
+                if shape.get("builtin"):
+                    return None
+                if ref:
+                    namespace, name = ref.split(":", 1)
+                    if namespace == "saved" and entries.get(name, {}).get("deleted"):
+                        return None
+                    return (
+                        saved if namespace == "saved" else shape_config["shapes"]
+                    ).get(name) or shape.get("inline")
+                return shape.get("inline")
+
             source_bounds = _rendered_bounds(
-                (node["position"] for node in doc["nodes"]),
+                ((node["position"], source_definition(node)) for node in doc["nodes"]),
                 doc["annotation_document"]["annotations"],
             ) or (0, 0, 0, 0)
             if x is None:
                 existing_positions = session.state.get("positions") or {}
                 existing_bounds = _rendered_bounds(
                     (
-                        existing_positions.get(node_id)
+                        (
+                            existing_positions.get(node_id),
+                            _shape(graph_node, session.state, shape_config, saved)[
+                                "inline"
+                            ]
+                            if (graph_node := service._storage.get_node(node_id))
+                            else None,
+                        )
                         for node_id in session.state.get("node_refs", [])
                     ),
                     session.state.get("annotations", []),
@@ -916,9 +979,7 @@ def insert_template(
                 y = 0
             dx = _placement_number(x - source_bounds[0])
             dy = _placement_number(y - source_bounds[1])
-            library = manager.shape_library
-            entries = library.backend.read()["entries"] if library else {}
-            config = ConfigLoader().config.node_shapes
+            config = config_data.node_shapes
             shape_report = []
             for node in doc["nodes"]:
                 node_id = node["source_node_id"]
@@ -1024,7 +1085,7 @@ def insert_template(
                         seen.add(id(p))
                         p["x"] = _placement_number(p.get("x", 0) + dx)
                         p["y"] = _placement_number(p.get("y", 0) + dy)
-            _rendered_bounds(positions.values(), annotations)
+            _rendered_bounds(((p, None) for p in positions.values()), annotations)
             op = {
                 "op": "nodes_replaced",
                 "client_id": "mcp-agent",

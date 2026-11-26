@@ -823,7 +823,27 @@ def test_insert_uses_rendered_bounds_and_moves_implicit_annotations(capture):
     assert target.state["positions"]["b"] == {"x": 870, "y": 30}
 
 
-def test_insert_default_origin_accounts_for_unpositioned_node(capture):
+@pytest.mark.parametrize(
+    "selection, expected_x",
+    [
+        (None, 400),
+        (
+            {
+                "inline": {
+                    "version": 1,
+                    "base": "rectangle-flat",
+                    "scale": 3.0,
+                    "placement": "top-left",
+                    "areas": {"first": None, "second": None, "third": None},
+                }
+            },
+            920,
+        ),
+    ],
+)
+def test_insert_default_origin_accounts_for_unpositioned_node(
+    capture, selection, expected_x
+):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -832,11 +852,48 @@ def test_insert_default_origin_accounts_for_unpositioned_node(capture):
         "template"
     ]
     target = manager.create_session("target")
-    target.state.update(node_refs=["a"], positions={})
+    target.state.update(
+        node_refs=["a"],
+        positions={},
+        shape_overrides={"a": selection} if selection else {},
+    )
     assert templates.insert_template(service, manager, target.id, doc["template_id"])[
         "success"
     ]
-    assert target.state["positions"]["b"] == {"x": 400, "y": 0}
+    assert target.state["positions"]["b"] == {"x": expected_x, "y": 0}
+
+
+@pytest.mark.parametrize(
+    "line, origin, expected",
+    [
+        ({"position": {"x": 500, "y": 20}}, None, {"x": 860, "y": 0}),
+        ({"from": {"x": 500, "y": 20}, "dx": 400}, None, {"x": 1100, "y": 0}),
+        (
+            {"position": {"x": -300, "y": -40}, "dx": -100},
+            (100, 200),
+            {"x": 500, "y": 240},
+        ),
+    ],
+)
+def test_insert_line_implicit_endpoints_affect_bounds(capture, line, origin, expected):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state["annotations"] = []
+    target = manager.create_session("target")
+    annotation = {"id": "line", "type": "line", **line}
+    if origin:
+        source.state["annotations"] = [annotation]
+    else:
+        target.state["annotations"] = [annotation]
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    kwargs = {"x": origin[0], "y": origin[1]} if origin else {}
+    assert templates.insert_template(
+        service, manager, target.id, doc["template_id"], **kwargs
+    )["success"]
+    assert target.state["positions"]["b"] == expected
 
 
 def test_insert_rejects_overflow_without_writing(capture):
