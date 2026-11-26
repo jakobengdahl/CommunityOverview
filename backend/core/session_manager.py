@@ -789,6 +789,10 @@ class SessionManager:
         from backend.core.template_store import TemplateStore
 
         self.template_store = TemplateStore(InMemorySessionPersistenceBackend())
+        # A template id never names a session; creation holds the template
+        # store's transaction (see _creating_session) so the check is atomic
+        # with save_template's, which takes the same locks in the same order.
+        store.id_reserved = self._template_holds
         # Every session is direct without one (docs/SESSION_OVERLAY_CONTRACT.md
         # §5): nothing can be staged, nothing is ever retired.
         self.write_modes = write_modes or WriteModes()
@@ -939,6 +943,12 @@ class SessionManager:
 
     # ---------------- session CRUD ----------------
 
+    def _template_holds(self, session_id: str) -> bool:
+        return self.template_store._backend.load(session_id) is not None
+
+    def _creating_session(self):
+        return self.template_store._backend.transaction()
+
     def create_session(
         self, name: Optional[str] = None, write_mode: Optional[str] = None
     ) -> Session:
@@ -949,15 +959,18 @@ class SessionManager:
         Raises WriteModeRefused for a mode this deployment cannot hold.
         """
         mode, source = self.write_modes.choose(write_mode)
-        return self.store.create_with_capacity(
-            name,
-            max_sessions=self._max_sessions,
-            write_mode=mode,
-            write_mode_source=source,
-            on_allocate=(
-                self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
-            ),
-        )[0]
+        with self._creating_session():
+            return self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                write_mode=mode,
+                write_mode_source=source,
+                on_allocate=(
+                    self.write_modes.record_staged
+                    if mode == WRITE_MODE_STAGED
+                    else None
+                ),
+            )[0]
 
     def copy_session(
         self,
@@ -1084,15 +1097,16 @@ class SessionManager:
                 raise
 
         try:
-            return self.store.create_with_capacity(
-                name,
-                max_sessions=self._max_sessions,
-                description=source.description,
-                state=state,
-                write_mode=mode,
-                write_mode_source="explicit",
-                on_allocate=allocate,
-            )[0]
+            with self._creating_session():
+                return self.store.create_with_capacity(
+                    name,
+                    max_sessions=self._max_sessions,
+                    description=source.description,
+                    state=state,
+                    write_mode=mode,
+                    write_mode_source="explicit",
+                    on_allocate=allocate,
+                )[0]
         except BaseException:
             # The document save failed after allocation: the staged record and
             # copied entries must not outlive the copy that was never published.
@@ -1217,15 +1231,16 @@ class SessionManager:
             staged.append(copy_id)
 
         try:
-            session = self.store.create_with_capacity(
-                name,
-                max_sessions=self._max_sessions,
-                description=source.description,
-                state=state,
-                write_mode=mode,
-                write_mode_source="explicit",
-                on_allocate=allocate if mode == WRITE_MODE_STAGED else None,
-            )[0]
+            with self._creating_session():
+                session = self.store.create_with_capacity(
+                    name,
+                    max_sessions=self._max_sessions,
+                    description=source.description,
+                    state=state,
+                    write_mode=mode,
+                    write_mode_source="explicit",
+                    on_allocate=allocate if mode == WRITE_MODE_STAGED else None,
+                )[0]
         except BaseException:
             for copy_id in staged:
                 self.write_modes.retire(copy_id, require_empty=False)
@@ -1278,17 +1293,18 @@ class SessionManager:
                 )
 
         try:
-            session, created = self.store.get_or_create(
-                session_id,
-                prepare=prepare,
-                on_publish=publish_initial,
-                max_sessions=self._max_sessions,
-                write_mode_source=(
-                    "explicit"
-                    if self.write_modes.default_mode == WRITE_MODE_STAGED
-                    else "inherited"
-                ),
-            )
+            with self._creating_session():
+                session, created = self.store.get_or_create(
+                    session_id,
+                    prepare=prepare,
+                    on_publish=publish_initial,
+                    max_sessions=self._max_sessions,
+                    write_mode_source=(
+                        "explicit"
+                        if self.write_modes.default_mode == WRITE_MODE_STAGED
+                        else "inherited"
+                    ),
+                )
         except SessionRetired:
             raise SessionNotFound() from None
         return session, created

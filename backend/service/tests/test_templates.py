@@ -1,11 +1,15 @@
-# covers: backend/service/templates.py
+# covers: backend/service/templates.py, backend/core/session_manager.py
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from backend.core import Edge, GraphStorage, Node
-from backend.core.session_manager import CaptureRefused, SessionManager
+from backend.core.session_manager import (
+    CaptureRefused,
+    SessionManager,
+    SessionNotFound,
+)
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
 from backend.runtime.authorization import (
     GraphAccessNarrowing,
@@ -458,6 +462,16 @@ def test_save_assigns_creator_access_to_a_fresh_non_session_id(capture, allowed)
     if not allowed:
         assert saved["error"] == "access_denied"
     assert templates.list_templates(service, manager)["count"] == int(allowed)
+    if allowed:
+        # Nor does a session id ever name a template, deleted or not.
+        tid = saved["template"]["template_id"]
+        templates.delete_template(service, manager, tid, 1)
+        with pytest.raises(SessionNotFound):
+            manager.get_or_create(tid)
+        parts = iter([1111, 2222, 3333, 4444, 5555, 6666, 7777, 8888])
+        with patch("secrets.randbelow", side_effect=lambda _: next(parts)):
+            assert manager.create_session("new").id == "5555-6666-7777-8888"
+        assert not manager.store.exists(tid)
 
 
 def test_unreadable_stored_template_is_a_storage_error(capture):

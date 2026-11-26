@@ -31,6 +31,7 @@ from .session_capture import (
     _hook_call,
     _LEGACY_GROUP_PREFIX,
     _link_id,
+    INVALID_SESSION_ID_MESSAGE,
 )
 from .staging import HookFailed
 
@@ -447,6 +448,8 @@ def save_template(
 
     if manager is None:
         return _failure("storage_error")
+    if not isinstance(session_id, str) or not is_valid_session_id(session_id):
+        return _failure("invalid_request", message=INVALID_SESSION_ID_MESSAGE)
     tags = [] if tags is None else tags
     if not _metadata(name, description, tags):
         return _failure("invalid_request")
