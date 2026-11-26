@@ -114,6 +114,8 @@ as well as the annotation map, shape report and session revision.
 The caller needs template read and session write access, and graph creation
 access. In a staged session all creations stay in its staged layer until merged.
 A missing target node type returns `schema_mismatch` with `types`; a refused
-edge, stale revision, or failed write rejects the insertion as a whole. Copy
-uses the same explicit coordinates, annotation remapping and per-node shape
+edge or stale revision rejects the insertion. If a write fails after creations,
+rollback is best-effort: undo failures are logged and may leave residual graph or
+session changes; the original error is returned. Staged creations are broadcast
+only after the presentation write succeeds. Copy uses the same explicit coordinates, annotation remapping and per-node shape
 resolution as reference insertion.

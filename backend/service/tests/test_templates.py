@@ -1101,3 +1101,81 @@ def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
         == "access_denied"
     )
     assert set(service._storage.nodes) == before and target.seq == 0
+
+
+def test_copy_holds_staged_broadcast_until_presentation_write(capture, tmp_path):
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    backend = FileGraphPersistenceBackend(
+        tmp_path / "staged.json", staged_sessions=True
+    )
+    storage = GraphStorage(str(tmp_path / "staged.json"), persistence_backend=backend)
+    modes = WriteModes(storage.layer_store)
+    manager = SessionManager(
+        SessionStore(
+            InMemorySessionPersistenceBackend(), staged_status=modes.staged_status
+        ),
+        write_modes=modes,
+    )
+    doc["revision"] = 0
+    doc = manager.template_store.save(doc, 0)
+    service = GraphService(storage)
+    service.attach_sessions(manager)
+    target = manager.create_session("target", "staged")
+    subscriber = manager.bus.subscribe(target.id)
+    original = manager._apply_op_sync
+
+    def fail(*args, **kwargs):
+        assert subscriber.queue.empty()
+        raise OSError("presentation failed")
+
+    with patch.object(manager, "_apply_op_sync", side_effect=fail):
+        assert (
+            templates.insert_template(
+                service, manager, target.id, doc["template_id"], x=0, y=0
+            )["error"]
+            == "storage_error"
+        )
+    assert subscriber.queue.empty()
+
+    def apply(*args, **kwargs):
+        assert subscriber.queue.empty()
+        return original(*args, **kwargs)
+
+    with patch.object(manager, "_apply_op_sync", side_effect=apply):
+        assert templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=0, y=0
+        )["success"]
+    assert [subscriber.queue.get_nowait()["op"]["op"] for _ in range(2)] == [
+        "graph_change_staged",
+        "nodes_replaced",
+    ]
+
+
+def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):
+    from backend.core.session_store import AnnotationLimitReached
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    with (
+        patch.object(manager, "_apply_op_sync", side_effect=AnnotationLimitReached),
+        patch.object(
+            service._storage, "delete_nodes", side_effect=OSError("undo failed")
+        ),
+    ):
+        result = templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=0, y=0
+        )
+    assert result["error"] == "annotations_limit"
+    assert "Template insertion rollback failed: delete created nodes" in caplog.text
+    assert "undo failed" in caplog.text
