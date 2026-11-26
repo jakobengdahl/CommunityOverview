@@ -792,7 +792,13 @@ class TestExecuteToolEndpoint:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["nonexistent_tool", "save_view", "create_saved_view", "list_saved_views", "get_saved_view"],
+        [
+            "nonexistent_tool",
+            "save_view",
+            "create_saved_view",
+            "list_saved_views",
+            "get_saved_view",
+        ],
     )
     def test_execute_tool_not_found(self, test_app: TestClient, tool_name):
         """Unknown and retired tools return 404 without authentication."""
