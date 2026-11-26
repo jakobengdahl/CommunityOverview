@@ -45,7 +45,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 from pydantic import BaseModel, Field, RootModel, field_validator
@@ -78,6 +78,7 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
+from . import session_capture
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
@@ -1533,6 +1534,28 @@ def _register_session_endpoints(
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
+
+    @router.post("/sessions/{session_id}/save-view")
+    async def save_session_view(session_id: str, http_request: Request) -> Response:
+        """MCP twin: ``save_session_view``; the body is validated raw there."""
+        try:
+            body = await http_request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        with use_request_authorization(headers=http_request.headers):
+            result = session_capture.save_session_view(
+                service,
+                session_manager,
+                session_id,
+                body.get("name"),
+                body.get("expected_revision"),
+            )
+        status = (
+            200 if result["success"] else session_capture.ERROR_STATUS[result["error"]]
+        )
+        return JSONResponse(result, status_code=status)
 
     @router.get("/shape-library")
     def get_shape_library() -> Dict[str, Any]:

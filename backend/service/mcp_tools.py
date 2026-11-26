@@ -102,7 +102,7 @@ from backend.runtime.authorization import (
     GRAPH_OPERATION_STAGE,
     use_request_authorization,
 )
-from . import access, graph_merge_plan
+from . import access, graph_merge_plan, session_capture
 from .service import GraphService
 from .staging import outside_storage, refusal_result, session_storage_error
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
@@ -131,10 +131,7 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 
 # SESSION_ID_RE also accepts the older two-group form, which is what the tools'
 # own docstring examples use, so the message must not name only the long one.
-_INVALID_SESSION_ID_ERROR = (
-    "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
-    "(the older DDDD-DDDD form is also accepted)"
-)
+_INVALID_SESSION_ID_ERROR = session_capture.INVALID_SESSION_ID_MESSAGE
 
 
 class _CopyDenied(Exception):
@@ -206,6 +203,10 @@ _SESSION_REFUSALS = frozenset(
 # The read tools whose `visualization_session_id` was a push target first.
 _PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
 
+# Tools that take a session id as a plain argument and answer every refusal
+# with their own codes: the session is never reconciled with a bound one.
+_RAW_SESSION_TOOLS = frozenset({"save_session_view"})
+
 
 def _message_request(mcp) -> Tuple[bool, Any]:
     """``(in_message, request)`` for the MCP message being handled, if any.
@@ -271,7 +272,9 @@ def _session_aware(
     """
     name = func.__name__
     params = inspect.signature(func).parameters
-    if name in _STAGING_TOOLS or name in _COMPOSING_TOOLS:
+    if name in _RAW_SESSION_TOOLS:
+        kind, key = "raw", None
+    elif name in _STAGING_TOOLS or name in _COMPOSING_TOOLS:
         kind, key = (
             ("stage" if name in _STAGING_TOOLS else "compose"),
             (session_context.SESSION_ARGUMENT),
@@ -284,6 +287,8 @@ def _session_aware(
         kind, key = None, None
 
     def run(bound, args, kwargs):
+        if kind == "raw":
+            return func(*args, **kwargs)
         if kind is None:
             if bound is not None:
                 raise session_context.not_supported(f"tool {name}")
@@ -336,6 +341,9 @@ def _session_aware(
             with authorization, session_context.bind_session(bound):
                 return run(bound, args, kwargs)
         except session_context.SessionRefused as exc:
+            if kind == "raw":
+                # Only the message's own session headers can refuse here.
+                return {"success": False, "error": "invalid_request"}
             from .attachment_tools import audit_attachment_refusal, tool_caller
 
             with tool_caller("mcp"):
@@ -705,6 +713,45 @@ def register_mcp_tools(
                 tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
         else:
             mcp.tool()(wrapped)
+            from mcp.server.fastmcp import FastMCP
+
+            if func.__name__ in _RAW_SESSION_TOOLS and isinstance(mcp, FastMCP):
+                from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+
+                class RawArgumentMetadata(FuncMetadata):
+                    # The tool validates its own arguments, as REST does, so a
+                    # wrong type answers `invalid_request`, not a ToolError.
+                    async def call_fn_with_arg_validation(
+                        self,
+                        fn,
+                        fn_is_async,
+                        arguments_to_validate,
+                        arguments_to_pass_directly,
+                    ):
+                        fields = self.arg_model.model_fields
+                        arguments = {
+                            k: v
+                            for k, v in arguments_to_validate.items()
+                            if k in fields
+                        }
+                        arguments |= arguments_to_pass_directly or {}
+                        if fn_is_async:
+                            return await fn(**arguments)
+                        return fn(**arguments)
+
+                tool = mcp._tool_manager.get_tool(func.__name__)
+                tool.fn_metadata = RawArgumentMetadata(**tool.fn_metadata.__dict__)
+                # The Python defaults only let a missing argument reach the
+                # tool's own validation; the advertised schema requires all.
+                properties = {
+                    k: {f: v for f, v in prop.items() if f != "default"}
+                    for k, prop in tool.parameters["properties"].items()
+                }
+                tool.parameters = {
+                    **tool.parameters,
+                    "properties": properties,
+                    "required": list(properties),
+                }
         tools_map[func.__name__] = wrapped
         return wrapped
 
@@ -3354,6 +3401,38 @@ def register_mcp_tools(
             "success": True,
             "session": _project_session(session, mutate_allowed=True),
         }
+
+    @register_tool
+    def save_session_view(
+        # Schema only, all required: FastMCP passes the raw arguments through
+        # unvalidated (``_RAW_SESSION_TOOLS``) and the tool validates them as
+        # REST does.
+        session_id: str = None,  # type: ignore[assignment]
+        name: str = None,  # type: ignore[assignment]
+        expected_revision: Any = None,
+    ) -> Dict[str, Any]:
+        """Save a session's current view as a new, independently editable session.
+
+        All three arguments are required. ``expected_revision`` is the source's
+        ``revision`` from ``get_visualization_session``; a session changed
+        since answers ``revision_conflict`` with ``current_revision``: inspect
+        it and retry explicitly. ``name`` is 1-200 characters and need not be
+        unique. Node references (hidden ones too), positions, visibility,
+        dimming, appearance and the description are copied; graph content is
+        not. A source with staged changes (``staged_changes``) or annotations
+        (``invalid_presentation``) is refused, and so is the whole save when
+        it references a node the caller may not read (``access_denied``).
+
+        Returns:
+            ``success``, ``kind: "saved_session"``, ``source_session_id``,
+            ``source_revision``, the new ``session_id``, its ``revision``,
+            ``missing_node_ids`` (kept references to nodes that no longer
+            exist) and ``session_url``: give that link to the user as-is, never
+            build one. On failure ``success: false`` and a stable ``error``.
+        """
+        return session_capture.save_session_view(
+            service, session_manager, session_id, name, expected_revision
+        )
 
     @register_tool
     def list_visualization_sessions() -> Dict[str, Any]:

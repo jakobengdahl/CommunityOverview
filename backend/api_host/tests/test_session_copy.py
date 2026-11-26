@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from backend.core import session_manager as manager_module
+from backend.core.layer_store import LayerStoreError
 from backend.core.session_annotations import image_annotation_error
 from backend.core.write_modes import STAGED_UNSUPPORTED
 from backend.service.staging import HookFailed
@@ -465,4 +466,294 @@ def test_update_storage_failure_is_storage_error(test_app, monkeypatch, operatio
             ]
             assert tool(sid, "value") == {"success": False, "error": "storage_error"}
     assert manager.store.get(sid) is not None
+    assert manager.store.session_count() == 1
+
+
+def save_view(test_app, session_id, body, transport):
+    """POST .../save-view, or the MCP tool through FastMCP's argument layer,
+    with the same raw arguments."""
+    import asyncio
+
+    if transport == "rest":
+        response = test_app.post(f"/api/sessions/{session_id}/save-view", json=body)
+        return response.status_code, response.json()
+    _, structured = asyncio.run(
+        test_app.app.state.mcp.call_tool(
+            "save_session_view", {"session_id": session_id, **body}
+        )
+    )
+    result = structured["result"]
+    return 200 if result["success"] else None, result
+
+
+def test_save_view_captures_presentation_as_a_new_session(test_app):
+    """Presentation, hidden refs and description are copied into a new session
+    at its own revision; transient state is not; missing refs are kept and
+    reported; both surfaces give the same result for the same input."""
+    from backend.config.config_loader import build_session_url
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session("Design")
+    source.description = "Working canvas"
+    presentation = dict(
+        node_refs=["node-1", "gone"],
+        positions={"node-1": {"x": 20, "y": 30}},
+        hidden_node_ids=["gone"],
+        hidden_edge_ids=["edge-1"],
+        dimmed_node_ids=["node-1"],
+        dimmed_edge_ids=["edge-2"],
+        edge_intensity=0.4,
+        shape_overrides={"node-1": {"shape": "hexagon"}},
+        type_shapes={"Actor": {"shape": "diamond"}},
+        shape_revisions={"node:node-1": 2},
+    )
+    source.state.update(presentation, shape_operation_ids={'["op-1"]': True})
+    source.seq = 7
+    source.activity_log = [{"id": "history"}]
+    manager.presence.join(source.id, "other", "Participant")
+    before = copy.deepcopy(source.to_dict())
+    body = {"name": "n" * 200, "expected_revision": 7}
+    results = {t: save_view(test_app, source.id, body, t) for t in ("rest", "mcp")}
+    ids = set()
+    for status, result in results.values():
+        assert status == 200
+        saved = manager.get_session(result.pop("session_id"))
+        ids.add(saved.id)
+        assert result.pop("session_url") == build_session_url(saved.id)
+        assert result == {
+            "success": True,
+            "kind": "saved_session",
+            "source_session_id": source.id,
+            "source_revision": 7,
+            "revision": 0,
+            "missing_node_ids": ["gone"],
+        }
+        assert (saved.name, saved.description) == ("n" * 200, "Working canvas")
+        assert saved.seq == 0 and saved.activity_log == []
+        assert manager.roster(saved.id) == []
+        assert saved.write_mode == "direct"
+        assert {k: saved.state[k] for k in presentation} == presentation
+        assert saved.state["shape_operation_ids"] == {}
+    assert len(ids | {source.id}) == 3
+    assert source.to_dict() == before
+
+    empty = manager.create_session()
+    status, result = save_view(
+        test_app, empty.id, {"name": "Empty", "expected_revision": 0}, "mcp"
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+
+
+def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
+    """FastMCP neither decodes nor type-checks the arguments: a JSON-looking
+    name is saved verbatim, as REST saves it, and a non-string session id is
+    `invalid_request`, not a ToolError. The schema still requires all three."""
+    import asyncio
+
+    (tool,) = [
+        t
+        for t in asyncio.run(test_app.app.state.mcp.list_tools())
+        if t.name == "save_session_view"
+    ]
+    assert set(tool.inputSchema["required"]) == {
+        "session_id",
+        "name",
+        "expected_revision",
+    }
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    for name in ("null", "[1]", '{"a": 1}'):
+        body = {"name": name, "expected_revision": 0}
+        results = [save_view(test_app, source.id, body, t) for t in ("rest", "mcp")]
+        saved = [manager.get_session(r["session_id"]) for _, r in results]
+        assert [s.name for s in saved] == [name, name]
+    _, result = save_view(
+        test_app, 123, {"name": "View", "expected_revision": 0}, "mcp"
+    )
+    assert (result["success"], result["error"]) == (False, "invalid_request")
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "n" * 201, "expected_revision": 0},
+        {"name": " ", "expected_revision": 0},
+        {"name": 5, "expected_revision": 0},
+        {"name": None, "expected_revision": 0},
+        {"expected_revision": 0},
+        {"name": "View", "expected_revision": "0"},
+        {"name": "View", "expected_revision": -1},
+        {"name": "View", "expected_revision": True},
+        {"name": "View"},
+    ],
+)
+def test_save_view_rejects_invalid_raw_arguments(test_app, transport, body):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    status, result = save_view(test_app, source.id, body, transport)
+    assert status in (400, None)
+    assert result == {"success": False, "error": "invalid_request"}
+    assert manager.store.session_count() == 1
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_refuses_stale_staged_or_annotated_sources(
+    test_app, monkeypatch, transport
+):
+    """A stale revision, staged changes, annotations, an oversized capture, a
+    full session store or a failing staged-layer store publish nothing; the
+    current revision is withheld when the source read is denied."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.seq = 3
+    status_of = {"rest": lambda s: s, "mcp": lambda s: None}[transport]
+
+    def attempt(revision=3):
+        return save_view(
+            test_app, source.id, {"name": "V", "expected_revision": revision}, transport
+        )
+
+    assert attempt(2) == (
+        status_of(409),
+        {"success": False, "error": "revision_conflict", "current_revision": 3},
+    )
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=ctx.session_id != source.id
+    )
+    test_app.app.state.graph_service._authorization_hook = hook
+    assert attempt(2) == (
+        status_of(404),
+        {"success": False, "error": "session_not_found"},
+    )
+    hook.evaluate.side_effect = None
+    hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
+
+    source.state["annotations"] = [{"id": "a", "type": "text", "x": 0, "y": 0}]
+    assert attempt() == (
+        status_of(422),
+        {"success": False, "error": "invalid_presentation"},
+    )
+    source.state["annotations"] = []
+    writes = manager.write_modes
+    monkeypatch.setattr(writes, "choose", lambda mode: ("staged", "explicit"))
+    monkeypatch.setattr(writes, "_store", Mock(load_layer=lambda sid: [{}]))
+    assert attempt() == (status_of(409), {"success": False, "error": "staged_changes"})
+    driver_error = type("OperationalError", (Exception,), {})
+    for error in (LayerStoreError, driver_error):
+        writes._store.load_layer = Mock(side_effect=error("db at /srv/x"))
+        assert attempt() == (
+            status_of(503),
+            {"success": False, "error": "storage_error"},
+        )
+    monkeypatch.undo()
+    manager._max_sessions = 1
+    assert attempt() == (
+        status_of(503),
+        {"success": False, "error": "too_many_sessions"},
+    )
+    manager._max_sessions = 10
+    source.description = "x" * 2000
+    monkeypatch.setattr(manager_module, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 2048)
+    assert attempt() == (
+        status_of(413),
+        {"success": False, "error": "session_too_large"},
+    )
+    assert manager.store.session_count() == 1
+    assert not hook.assign_copied_session_access.called
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "refusal, refs",
+    [
+        ("create", {"node_refs": ["node-1"]}),
+        ("narrowed", {"node_refs": ["node-1"]}),
+        ("narrowed", {"node_refs": ["gone"]}),
+        ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
+        ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
+        ("removed", {"shape_revisions": {"node:node-1": 1, "type:Actor": 2}}),
+        ("hook_raises", {}),
+    ],
+)
+def test_save_view_denial_publishes_nothing_and_discloses_nothing(
+    test_app, transport, refusal, refs
+):
+    """A denied destination create, a node or edge ref the caller cannot read
+    (or, under narrowing, cannot be shown missing), or a raising hook is one
+    generic access_denied. A node only left in shape_revisions is off the
+    canvas: neither checked, reported missing nor copied."""
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(refs)
+    narrowed = GraphAccessNarrowing(enabled=True, allow_local_graph=False)
+    hook = Mock()
+
+    def evaluate(ctx):
+        if refusal == "hook_raises":
+            raise RuntimeError("hook down at /srv/secret")
+        return GraphAuthorizationDecision(
+            allowed=not (refusal == "create" and ctx.action == "mutate"),
+            reason="node-1 is secret",
+            graph_access=narrowed
+            if refusal in ("narrowed", "removed") and ctx.target == "save_session_view"
+            else GraphAccessNarrowing(),
+        )
+
+    hook.evaluate.side_effect = evaluate
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    if refusal == "removed":
+        assert status == 200 and result["missing_node_ids"] == []
+        saved = manager.get_session(result["session_id"])
+        assert saved.state["shape_revisions"] == {"type:Actor": 2}
+        return
+    assert status in (403, None)
+    assert result == {"success": False, "error": "access_denied"}
+    assert manager.store.session_count() == 1
+    assert not hook.assign_copied_session_access.called
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("failure", [None, ConnectionError, ValueError])
+def test_save_view_grants_after_publishing_and_revokes_on_failure(
+    test_app, transport, failure
+):
+    """Access is assigned to the published copy; a refused or raising
+    assignment revokes the grants made for it (a raising revoke does not
+    replace the denial) and removes the copy before failing."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    hook = Mock()
+    hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
+    published = []
+
+    def assign(context, *, copy_session_id):
+        published.append(manager.store._backend.load(copy_session_id) is not None)
+        if failure:
+            raise failure()
+        return GraphAuthorizationDecision(allowed=False)
+
+    hook.assign_copied_session_access.side_effect = assign
+    if failure is ValueError:
+        hook.revoke_copied_session_access.side_effect = RuntimeError()
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (403, None)
+    assert result == {"success": False, "error": "access_denied"}
+    assert published == [True]
+    copy_id = hook.assign_copied_session_access.call_args.kwargs["copy_session_id"]
+    (context,), kwargs = hook.revoke_copied_session_access.call_args
+    assert (context.session_id, kwargs) == (
+        source.id,
+        {"copy_session_id": copy_id},
+    )
+    assert manager.get_session(copy_id) is None
     assert manager.store.session_count() == 1
