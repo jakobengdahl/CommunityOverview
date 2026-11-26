@@ -137,7 +137,7 @@ describe('ChatComposer', () => {
     await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
     expect(options().map((option) => option.textContent)).toEqual(original);
     expect(input).toHaveAttribute('aria-activedescendant', highlightedId);
-    api.listTemplates.mockImplementationOnce(() => new Promise(() => {}));
+    api.listTemplates.mockResolvedValueOnce({ templates: [{ template_id: 't1', name: 'Goal' }] });
     type(input, '@goal ');
     await settle();
     expect(options().map((option) => option.textContent)).toEqual([

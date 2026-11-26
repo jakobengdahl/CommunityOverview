@@ -119,7 +119,14 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     const query = mentionAtCaret(queried.value, queried.caret)?.query ?? '';
     suggestionInput = query.trimStart().startsWith('/') ? '' : query;
   }
-  const { mode, items, status } = useCommandSuggestions(suggestionInput, context, nodeTypes);
+  const suggestionsActive = focused && !disabled;
+  const { mode, items, status } = useCommandSuggestions(
+    suggestionInput,
+    context,
+    nodeTypes,
+    suggestionsActive,
+    !dismissed
+  );
 
   // A new query (a caret move included), language or graph scope drops the
   // selection before the recomputed results render, so Enter cannot accept an

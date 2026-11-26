@@ -113,18 +113,19 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
  * node types (`nodeTypes`: `{ id, label }`), nodes and readable templates once
  * the debounced searches settle, never commands. A superseded search's result is discarded.
  */
-export function useCommandSuggestions(input, context, nodeTypes) {
+export function useCommandSuggestions(input, context, nodeTypes, active = true, visible = true) {
   const { t } = useI18n();
   const registry = useCommandRegistry();
   const registryVersion = useCommandRegistryVersion(registry);
   const federationDepth = useGraphStore((s) => s.federationDepth);
   const { mode, query } = parseCommandInput(input);
-  const enabled = registry && context.view === 'interactive' && mode !== 'idle';
+  const enabled = registry && context.view === 'interactive' && mode !== 'idle' && active;
   // A fresh identity also prevents a previous visit to the same query from resurfacing.
   const templateCache = useRef(NO_TEMPLATES);
   const request = useMemo(
-    () => (enabled ? { templates: templateCache.current } : null),
-    [enabled, input, mode, query, federationDepth]
+    () =>
+      enabled ? { waitForTemplates: templateCache.current.length > 0, displayed: false } : null,
+    [enabled, visible, input, mode, query, federationDepth]
   );
   const [search, setSearch] = useState({
     request: null,
@@ -136,29 +137,27 @@ export function useCommandSuggestions(input, context, nodeTypes) {
   useEffect(() => {
     if (!request) return undefined;
     let cancelled = false;
-    let displayed = mode === 'command';
     const timer = setTimeout(
       () => {
         api.listTemplates().then(
           (result) => {
             if (cancelled) return;
             templateCache.current = result.templates || [];
-            if (!displayed) setTemplateSearch({ request, templates: templateCache.current });
+            if (!request.displayed)
+              setTemplateSearch({ request, templates: templateCache.current });
           },
           () => {
             if (cancelled) return;
             templateCache.current = NO_TEMPLATES;
-            if (!displayed) setTemplateSearch({ request, templates: NO_TEMPLATES });
+            if (!request.displayed) setTemplateSearch({ request, templates: NO_TEMPLATES });
           }
         );
         if (mode === 'plain') {
           searchVisibleNodes(query, { federationDepth }).then(
             (nodes) => {
-              displayed = true;
               if (!cancelled) setSearch({ request, nodes, failed: false });
             },
             () => {
-              displayed = true;
               if (!cancelled) setSearch({ request, nodes: [], failed: true });
             }
           );
@@ -172,10 +171,7 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     };
   }, [request, mode, query, federationDepth]);
 
-  const templates =
-    templateSearch.request === request
-      ? templateSearch.templates
-      : request?.templates || NO_TEMPLATES;
+  const templates = templateSearch.request === request ? templateSearch.templates : NO_TEMPLATES;
   useEffect(() => {
     if (!registry || mode !== 'command' || !request) return undefined;
     const cleanups = templates.map((template) =>
@@ -212,8 +208,19 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     // registryVersion: a newly registered command must show without an edit.
   }, [registry, registryVersion, mode, query, context, locale, t, templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!registry || mode === 'idle') return { mode, items: [], status: 'idle' };
-  if (mode === 'command') return { mode, items: commandItems, status: 'ready' };
+  if (!request) return { mode, items: [], status: 'idle' };
+  // Cached names must be revalidated before they can be shown on a new query.
+  if (request.waitForTemplates && templateSearch.request !== request) {
+    return { mode, items: [], status: 'loading' };
+  }
+  if (mode === 'command') {
+    // Wait for the registry effect before exposing a partially populated list.
+    if (templates.some((template) => !registry.get(`template:insert:${template.template_id}`))) {
+      return { mode, items: [], status: 'loading' };
+    }
+    if (visible && commandItems.length) request.displayed = true;
+    return { mode, items: commandItems, status: 'ready' };
+  }
 
   // Node types wait for the same debounced search as nodes, so the list
   // appears once and never reorders when the nodes arrive.
@@ -234,6 +241,7 @@ export function useCommandSuggestions(input, context, nodeTypes) {
   }));
   const status = search.failed ? 'error' : 'ready';
   const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
+  if (visible && items.length) request.displayed = true;
   return {
     mode,
     items,
