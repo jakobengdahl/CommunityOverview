@@ -173,9 +173,10 @@ def test_backup_authorizes_all_sessions_before_loading(backend, monkeypatch):
     monkeypatch.setattr(backend, "load", fail_load)
     with pytest.raises(BackupRefused, match="^access denied$") as denied:
         create_backup(Service(denied=unreadable.id), backend, WriteModes())
-    assert all(value not in str(denied.value) for value in (
-        broken.id, broken.name, unreadable.id, unreadable.name
-    ))
+    assert all(
+        value not in str(denied.value)
+        for value in (broken.id, broken.name, unreadable.id, unreadable.name)
+    )
     with pytest.raises(BackupRefused, match="^session_load_failed$"):
         create_backup(Service(), backend, WriteModes())
 
