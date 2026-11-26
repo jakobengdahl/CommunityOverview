@@ -61,6 +61,8 @@ class RuntimeContext:
     correlation_id: str = ""
     request_id: str = ""
     attribution: Mapping[str, Any] = field(default_factory=lambda: immutable({}))
+    # Bytes of files the run received as input, for hosted per-plan quotas.
+    input_bytes: int = 0
 
 
 _execution_context: ContextVar[RuntimeContext | None] = ContextVar(
@@ -260,6 +262,7 @@ class RuntimeExtensions:
         execution_admission=None,
         event_sink=None,
         event_delivery=None,
+        federation_key_provider=None,
     ):
         self.mutation_policy = mutation_policy or DefaultMutationPolicyHook()
         self.execution_admission = (
@@ -271,6 +274,9 @@ class RuntimeExtensions:
             else DefaultRuntimeEventSink()
         )
         self.event_delivery = event_delivery
+        # Serves federation publish access "external"; see
+        # backend/federation/publish.py FederationKeyProvider.
+        self.federation_key_provider = federation_key_provider
 
     def evaluate_mutation(self, context, changes):
         changes = tuple(changes)

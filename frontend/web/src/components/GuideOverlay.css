@@ -19,7 +19,7 @@
   border-radius: 12px;
   box-shadow:
     0 8px 32px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(100, 108, 255, 0.3);
+    0 0 0 1px color-mix(in srgb, var(--co-accent) 30%, transparent);
   z-index: 2200; /* above backdrop (2100) and existing dialogs (2000) */
   display: flex;
   flex-direction: column;
@@ -132,7 +132,7 @@
 }
 
 .guide-progress-dot.active {
-  background: #646cff;
+  background: var(--co-accent);
   transform: scale(1.25);
 }
 
@@ -189,7 +189,7 @@
   width: 16px;
   height: 16px;
   border: 2px solid #3e3e5a;
-  border-top-color: #646cff;
+  border-top-color: var(--co-accent);
   border-radius: 50%;
   animation: guide-spin 0.7s linear infinite;
   flex-shrink: 0;
@@ -235,8 +235,8 @@
 }
 
 .guide-input:focus {
-  border-color: #646cff;
-  box-shadow: 0 0 0 2px rgba(100, 108, 255, 0.2);
+  border-color: var(--co-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--co-accent) 20%, transparent);
 }
 
 .guide-input::placeholder {
@@ -290,10 +290,10 @@
 }
 
 .guide-btn-next {
-  background: #646cff;
-  color: #fff;
+  background: var(--co-accent);
+  color: var(--co-accent-contrast);
 }
 
 .guide-btn-next:hover:not(:disabled) {
-  background: #535bf2;
+  background: var(--co-accent-hover);
 }

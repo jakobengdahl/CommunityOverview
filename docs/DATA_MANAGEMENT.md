@@ -156,7 +156,7 @@ Node types fall into two categories:
 The default profile includes: Actor, Initiative, Capability, Resource, Legislation, Theme, Goal, Event, Data, Risk. Other profiles can define additional types (e.g., the SCB profile adds Dataset, Undersökning, Variabel, etc.).
 
 **System types** (foundational to the application):
-- **SavedView / VisualizationView** (gray) - Saved graph view snapshots
+- **SavedView / VisualizationView** - Legacy graph data types retained for compatibility; use sessions for saved views
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations
 - **Groups** - Visual grouping of nodes in the canvas
@@ -372,11 +372,19 @@ What happens, in order:
    the parameters or a live entity the plan relied on changed, or the graph
    was replaced — is refused with `import_plan_stale`, carrying the current
    plan and its digest to review and commit instead. Nothing has been
-   written either way. A plan that writes nothing — every entry skipped,
-   unchanged or excluded — returns here with `success: true`, zero counts
-   and no `import_id`: no backup, no lock, no record.
-3. **Back up.** The whole current graph is written to `import-backups/`
-   exactly as `POST /api/import` does, and the merge is refused
+   written either way.
+3. **Check commit size and back up.** A commit is refused with 422
+   `import_merge_too_large` before backup and the write lock when its document
+   contains more than `MERGE_COMMIT_MAX_ENTITIES` nodes and edges combined.
+   Set this positive integer environment variable before starting the service;
+   the default is 27,998 entries, the 10,000 nodes plus 17,998 edges in the
+   ADR 0013 section 8 benchmark, whose median lock time was 12.8 seconds.
+   This measurement is a sizing reference, not a time guarantee: hardware,
+   graph contents and event subscribers affect the actual time. Preview has
+   its own limits and can still inspect a larger document. A plan that writes
+   nothing returns `success: true`, zero counts and no `import_id`, backup,
+   lock or record. Otherwise, the whole current graph is written to
+   `import-backups/` exactly as `POST /api/import` does, and the merge is refused
    (`backup_failed`) if it cannot be. Every entity the merge overwrites is
    in it at the version the merge replaces. Restoring it with
    `POST /api/import` is a *replace*: it also undoes every write made after
@@ -409,6 +417,10 @@ What happens, in order:
    node without a vector (`embeddings_status: "queued"`, `job_id` set); a
    merge that changed no embedded text queues nothing (`"not_needed"`). If
    the job cannot be started the merge still stands (`"not_started"`).
+   The job gives a node its vector only if the node still has none and its
+   embedding text is still the text encoded; a node edited meanwhile is
+   encoded again, and the job retries later if nodes keep changing. A later
+   replace does not supersede a merge's job (ADR 0013, "Slice 3a").
 7. **Audit record.** A terminal record under the `import_id` in the same
    job store (`GET /api/import/{import_id}`, and listed by `GET /api/import`
    with `mode: "merge"`) keeps the digest, the parameters, the counts, the
@@ -451,9 +463,13 @@ for the first commit's record before retrying any commit. One commit runs
 at a time (503
 `import_merge_busy`). A store failure is answered as for any direct write —
 502 `write_failed` (nothing changed) or 503 `write_outcome_unknown` — with
-the backup path. Merging is refused in PostgreSQL mode (501
-`import_merge_not_supported`) until its embedding commit exists. There is no
-MCP tool that commits a merge.
+the backup path. In PostgreSQL mode, where other instances keep writing,
+the store also verifies inside the commit's transaction that every live
+entity the plan read is still at the revision read and that the graph was
+not replaced since; a move this instance had not yet seen is answered as
+`import_plan_stale`, and a retry after a moment, once the instance has
+caught up, sees the current plan. The backup and the audit record are this
+instance's. There is no MCP tool that commits a merge.
 
 ## Importing a vector-aware archive
 

@@ -45,7 +45,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 from pydantic import BaseModel, Field, RootModel, field_validator
@@ -78,9 +78,11 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
+from . import session_capture, templates
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
+from .staging import outside_storage, refusal_result, session_storage_error
 
 if TYPE_CHECKING:
     from backend.agents.execution import ExecutionStore
@@ -113,6 +115,31 @@ def _lookup_rate_key(http_request: Request) -> str:
 
 
 # ==================== Request/Response Models ====================
+
+
+class ShapeLibraryCreateRequest(BaseModel):
+    """A new saved shape; an owner or identity field is ignored."""
+
+    key: str
+    name: str
+    definition: Dict[str, Any]
+
+
+class UserPreferencesUpdateRequest(BaseModel):
+    """Preferences to change; omitted keys keep their saved value."""
+
+    hideClassicSurfaces: Optional[bool] = None
+
+
+class ShapeLibraryEditRequest(BaseModel):
+    """An edit of the reviewed revision, whose usage the user was warned of."""
+
+    name: str
+    definition: Dict[str, Any]
+    expected_revision: int
+    expected_usage: int
+    expected_template_usage: int = 0
+    expected_template_usage_token: Optional[str] = None
 
 
 class SearchRequest(BaseModel):
@@ -479,12 +506,6 @@ class AdoptFederatedNodeRequest(BaseModel):
     )
 
 
-class SaveViewRequest(BaseModel):
-    """Request model for saving a view."""
-
-    name: str = Field(..., min_length=1, max_length=200, description="View name")
-
-
 class CreateSessionRequest(BaseModel):
     """Request model for creating a shared session."""
 
@@ -497,6 +518,17 @@ class CreateSessionRequest(BaseModel):
             "direct or staged; omitted, the session takes the graph default "
             "(SESSION_WRITE_MODE_DEFAULT)"
         ),
+    )
+
+
+class CopySessionRequest(BaseModel):
+    """Request model for copying a shared session."""
+
+    name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description='Name for the copy; omitted, "Copy of <source name>"',
     )
 
 
@@ -558,6 +590,7 @@ class SessionOpsRequest(BaseModel):
     base_seq: Optional[int] = Field(
         None, description="Client's last-known seq (informational)"
     )
+    appearance_version: Optional[int] = Field(None, strict=True)
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
@@ -581,6 +614,7 @@ class UndoSessionActionRequest(BaseModel):
     client_id: str = Field(
         ..., min_length=1, max_length=100, description="Requesting actor's client id"
     )
+    appearance_version: Optional[int] = Field(None, strict=True)
     expected_revision: Optional[int] = Field(
         None, description="Client's last-known seq; conflicts if the session moved on"
     )
@@ -618,8 +652,18 @@ class IngestSessionImageRequest(BaseModel):
     expected_revision: Optional[int] = None
 
 
+async def _stream_library_revision(session_manager) -> Optional[int]:
+    """Read the shape library revision off the event loop (catch_up carries it)."""
+    if getattr(session_manager, "shape_library", None) is None:
+        return None
+    return await asyncio.to_thread(session_manager.library_revision)
+
+
 def _resolve_stream_event(
-    event: Dict[str, Any], session_manager, session_id: str
+    event: Dict[str, Any],
+    session_manager,
+    session_id: str,
+    library_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Translate a slow-consumer resync sentinel into a fresh full snapshot.
 
@@ -632,7 +676,7 @@ def _resolve_stream_event(
     needed.
     """
     if event.get("type") == "resync":
-        return session_manager.catch_up(session_id, None)
+        return session_manager.catch_up(session_id, None, library_revision)
     return event
 
 
@@ -691,6 +735,7 @@ _WRITE_ERROR_STATUS = {
     "entity_revision_conflict": 409,
     "write_failed": 502,
     "write_outcome_unknown": 503,
+    "storage_error": 503,
     # A write made in a session (§9, §16.3).
     "session_not_found": 404,
     "session_not_supported": 400,
@@ -1271,31 +1316,6 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         return service.get_request_graph_selection_info(headers=request.headers)
 
 
-def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
-    @router.post("/views/save")
-    async def save_view(request: SaveViewRequest) -> Dict[str, Any]:
-        """Signal intent to save the current view state."""
-        return service.save_view(request.name)
-
-    @router.get("/views/{name}")
-    async def get_saved_view(name: str, request: Request) -> Dict[str, Any]:
-        """Get a saved view by name and load its content."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_saved_view(name)
-        _raise_for_access_denied(result)
-        if not result.get("success", True):
-            raise HTTPException(status_code=404, detail=result.get("error"))
-        return result
-
-    @router.get("/views")
-    async def list_saved_views(request: Request) -> Dict[str, Any]:
-        """List all saved views."""
-        with use_request_authorization(headers=request.headers):
-            result = service.list_saved_views()
-        _raise_for_access_denied(result)
-        return result
-
-
 def _register_session_endpoints(
     router: APIRouter, service: GraphService, session_manager
 ) -> None:
@@ -1318,13 +1338,15 @@ def _register_session_endpoints(
         UndoConflict,
     )
     from backend.core.session_store import (
+        AppearanceVersionRequired,
+        ShapeRevisionConflict,
         AnnotationFieldConflict,
         OpError,
         is_valid_session_id,
     )
-    from backend.core.layer_store import LayerNotEmpty, StagedSessionRetired
+    from backend.core.layer_store import LayerFull, LayerNotEmpty, StagedSessionRetired
     from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
-    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
     from . import access
 
@@ -1349,6 +1371,18 @@ def _register_session_endpoints(
         if denied:
             raise HTTPException(status_code=403, detail=denied.get("message"))
 
+    def _assign_copy_access(
+        http_request: Request, source_id: str, copy_id: str
+    ) -> None:
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=source_id,
+                copy_session_id=copy_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
 
@@ -1360,10 +1394,26 @@ def _register_session_endpoints(
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
+    def _can_read_session(http_request: Request, session_id: str) -> bool:
+        with use_request_authorization(headers=http_request.headers):
+            return not access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
+
     def _session_payload(
         session, *, resolve: bool, manager, http_request: Optional[Request] = None
     ) -> Dict[str, Any]:
+        from backend.config.config_loader import build_session_url
+
         payload = manager.describe(session)
+        payload["session_url"] = (
+            build_session_url(session.id)
+            if _can_read_session(http_request, session.id)
+            else None
+        )
         payload["roster"] = manager.roster(session.id)
         if resolve:
             authorization = (
@@ -1397,15 +1447,374 @@ def _register_session_endpoints(
             )
         try:
             session = session_manager.create_session(request.name, request.write_mode)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
-        return _session_payload(session, resolve=False, manager=session_manager)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
+
+    @router.post("/sessions/{session_id}/copy")
+    async def copy_session(
+        session_id: str,
+        http_request: Request,
+        request: Optional[CopySessionRequest] = None,
+    ) -> Dict[str, Any]:
+        from backend.runtime.authorization import (
+            GRAPH_ACTION_READ,
+            GRAPH_OPERATION_STAGE,
+        )
+
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        _authorize_session_change(http_request, "create_visualization_session", None)
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+        _rate_limit_lookup(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            staged_by = access.build_mutation_actor_id(
+                target="copy_visualization_session"
+            )
+        try:
+            session = await session_manager.copy_session_async(
+                session_id,
+                request.name if request else None,
+                # Copied staged changes are staged by the copier: never more
+                # than the copier may stage.
+                authorize_staging=outside_storage(
+                    lambda: _authorize_session_change(
+                        http_request,
+                        "copy_visualization_session",
+                        session_id,
+                        GRAPH_OPERATION_STAGE,
+                    )
+                ),
+                staged_by=staged_by,
+                assign_access=outside_storage(
+                    lambda copy_id: _assign_copy_access(
+                        http_request, session_id, copy_id
+                    )
+                ),
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except OSError:
+            _staged_answer(session_storage_error())
+        except SessionLimitReached:
+            raise HTTPException(status_code=503, detail="too many sessions")
+        except OpBatchTooLarge:
+            raise HTTPException(status_code=413, detail="session too large")
+        except LayerFull as exc:
+            # The source holds more staged entries than the current cap;
+            # raises the 422 layer_full refusal.
+            _staged_answer(refusal_result(exc))
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except WriteModeRefused as exc:
+            raise _session_refusal(exc.code, exc.message, exc.status)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
+
+    def template_response(result):
+        return JSONResponse(
+            result,
+            status_code=200
+            if result["success"]
+            else templates.ERROR_STATUS.get(result["error"], 400),
+        )
+
+    async def template_body(request):
+        try:
+            body = await request.json()
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    @router.post("/sessions/{session_id}/insert-template")
+    async def insert_template_route(session_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.insert_template(
+                service,
+                session_manager,
+                session_id,
+                body.get("template_id"),
+                body.get("mode", "copy"),
+                body.get("x"),
+                body.get("y"),
+                body.get("expected_revision"),
+                body.get("template_revision"),
+                body.get("expected_session_seq"),
+            )
+        return template_response(result)
+
+    @router.post("/sessions/{session_id}/templates")
+    async def create_template_route(session_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.save_template(
+                service,
+                session_manager,
+                session_id,
+                body.get("name"),
+                body.get("expected_revision"),
+                body.get("node_ids"),
+                body.get("annotation_ids"),
+                body.get("description", ""),
+                body.get("tags"),
+            )
+        return template_response(result)
+
+    def template_integer(value):
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return value  # Service validation supplies the invalid_request envelope.
+
+    @router.get("/templates")
+    async def list_template_route(
+        http_request: Request,
+        query: Optional[str] = None,
+        tags: Optional[List[str]] = Query(None),
+        limit: Optional[str] = None,
+    ):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.list_templates(
+                service, session_manager, query, tags, template_integer(limit)
+            )
+        return template_response(result)
+
+    @router.get("/templates/{template_id}")
+    async def get_template_route(template_id: str, http_request: Request):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.get_template(service, session_manager, template_id)
+        return template_response(result)
+
+    @router.patch("/templates/{template_id}")
+    async def update_template_route(template_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.update_template(
+                service,
+                session_manager,
+                template_id,
+                body.get("expected_revision"),
+                body.get("name"),
+                body.get("description"),
+                body.get("tags"),
+                body.get("replace_from"),
+            )
+        return template_response(result)
+
+    @router.delete("/templates/{template_id}")
+    async def delete_template_route(
+        template_id: str, http_request: Request, expected_revision: Optional[str] = None
+    ):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.delete_template(
+                service,
+                session_manager,
+                template_id,
+                template_integer(expected_revision),
+            )
+        return template_response(result)
+
+    @router.post("/sessions/{session_id}/save-view")
+    async def save_session_view(session_id: str, http_request: Request) -> Response:
+        """MCP twin: ``save_session_view``; the body is validated raw there."""
+        try:
+            body = await http_request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        with use_request_authorization(headers=http_request.headers):
+            result = session_capture.save_session_view(
+                service,
+                session_manager,
+                session_id,
+                body.get("name"),
+                body.get("expected_revision"),
+            )
+        status = (
+            200 if result["success"] else session_capture.ERROR_STATUS[result["error"]]
+        )
+        return JSONResponse(result, status_code=status)
+
+    @router.get("/shape-library")
+    def get_shape_library() -> Dict[str, Any]:
+        """Current saved shapes; tombstoned entries and owners are withheld."""
+        library = session_manager.shape_library
+        if library is None:
+            return {"revision": 0, "entries": {}}
+        snapshot = library.snapshot()
+        return {
+            "revision": snapshot["revision"],
+            "entries": {
+                key: {
+                    "name": entry["name"],
+                    "definition": entry["definition"],
+                    "revision": entry["revision"],
+                }
+                for key, entry in snapshot["entries"].items()
+            },
+        }
+
+    def _library():
+        if session_manager.shape_library is None:
+            raise HTTPException(status_code=404, detail="no shape library")
+        return session_manager.shape_library
+
+    def _library_write(
+        http_request: Request, target: str, key: str, write
+    ) -> Dict[str, Any]:
+        """Run ``write(identity)`` as the request's authenticated identity.
+
+        A saved shape restyles every session referencing it, so the graph
+        authorization hook must allow the mutation as for any session change.
+        The identity is only ever the principal the auth middleware recorded in
+        the request scope; with none, the library refuses the write.
+        """
+        from backend.api_host.middleware import AUTHENTICATED_PRINCIPAL_SCOPE_KEY
+        from backend.core.shape_library import (
+            LibraryConflict,
+            LibraryForbidden,
+            library_identity,
+        )
+
+        library = _library()
+        _authorize_session_change(http_request, target, None)
+        identity = library_identity(
+            http_request.scope.get(AUTHENTICATED_PRINCIPAL_SCOPE_KEY)
+        )
+        try:
+            entry = write(library, identity)
+        except LibraryForbidden:
+            raise _session_refusal(
+                "library_forbidden", "Saving shapes needs a signed-in user.", 403
+            )
+        except LibraryConflict:
+            # The current revision and usage let the client show the review.
+            current = library.snapshot()["entries"].get(key)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "library_conflict",
+                    "message": "The saved shape or its usage has changed.",
+                    "revision": current["revision"] if current else None,
+                    "usage": library.usage(key) if current else None,
+                    "template_usage": library.template_usage(key) if current else None,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "key": entry["key"],
+            "name": entry["name"],
+            "definition": entry["definition"],
+            "revision": entry["revision"],
+            "deleted": entry["deleted"],
+        }
+
+    @router.get("/shape-library/{key}/usage")
+    def get_shape_library_usage(key: str) -> Dict[str, Any]:
+        """Count persisted sessions and live templates, without identifying them."""
+        library = _library()
+        usage = library.usage_snapshot(key)
+        if usage is None:
+            raise HTTPException(status_code=404, detail="saved shape not found")
+        return usage
+
+    @router.post("/shape-library", status_code=201)
+    def create_shape_library_entry(
+        request: ShapeLibraryCreateRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        return _library_write(
+            http_request,
+            "create_shape_library_entry",
+            request.key,
+            lambda library, identity: library.put(
+                request.key, request.name, request.definition, identity=identity
+            ),
+        )
+
+    @router.put("/shape-library/{key}")
+    def update_shape_library_entry(
+        key: str, request: ShapeLibraryEditRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        return _library_write(
+            http_request,
+            "update_shape_library_entry",
+            key,
+            lambda library, identity: library.put(
+                key,
+                request.name,
+                request.definition,
+                identity=identity,
+                expected_revision=request.expected_revision,
+                expected_usage=request.expected_usage,
+                expected_template_usage=request.expected_template_usage,
+                expected_template_usage_token=request.expected_template_usage_token,
+            ),
+        )
+
+    @router.delete("/shape-library/{key}")
+    def delete_shape_library_entry(
+        key: str,
+        http_request: Request,
+        expected_revision: int = Query(...),
+        expected_usage: int = Query(...),
+        expected_template_usage: int = Query(0),
+        expected_template_usage_token: Optional[str] = Query(None),
+    ) -> Dict[str, Any]:
+        """Tombstone the entry; references resolve to the built-in card."""
+        return _library_write(
+            http_request,
+            "delete_shape_library_entry",
+            key,
+            lambda library, identity: library.delete(
+                key,
+                identity=identity,
+                expected_revision=expected_revision,
+                expected_usage=expected_usage,
+                expected_template_usage=expected_template_usage,
+                expected_template_usage_token=expected_template_usage_token,
+            ),
+        )
 
     @router.get("/sessions")
-    async def list_sessions() -> Dict[str, Any]:
-        return {"sessions": session_manager.list_sessions()}
+    async def list_sessions(http_request: Request) -> Dict[str, Any]:
+        from backend.config.config_loader import build_session_url
+
+        with use_request_authorization(headers=http_request.headers):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="list_visualization_sessions",
+            )
+        if denied:
+            raise HTTPException(status_code=403, detail=denied.get("message"))
+
+        return {
+            "sessions": [
+                {**meta, "session_url": build_session_url(meta["id"])}
+                for meta in session_manager.list_sessions()
+                if _can_read_session(http_request, meta["id"])
+            ]
+        }
 
     @router.get("/sessions/{session_id}")
     async def get_session(
@@ -1452,7 +1861,12 @@ def _register_session_endpoints(
                 session = session_manager.get_session(session_id)
                 if session is None:
                     raise HTTPException(status_code=404, detail="session not found")
-                return _session_payload(session, resolve=False, manager=session_manager)
+                return _session_payload(
+                    session,
+                    resolve=False,
+                    manager=session_manager,
+                    http_request=http_request,
+                )
         try:
             # get-or-create (R7): a rename for an id that only exists in the
             # browser's URL/recents (never saved server-side) must materialise
@@ -1461,8 +1875,12 @@ def _register_session_endpoints(
             await session_manager.rename_session(
                 session_id, request.name, request.client_id
             )
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
-            raise HTTPException(status_code=503, detail="too many sessions")
+            raise _session_refusal("too_many_sessions", "too many sessions", 503)
+        except OpBatchTooLarge:
+            raise _session_refusal("session_too_large", "session too large", 413)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
         except RateLimited:
@@ -1473,7 +1891,9 @@ def _register_session_endpoints(
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        return _session_payload(session, resolve=False, manager=session_manager)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
 
     @router.delete("/sessions/{session_id}")
     async def delete_session(
@@ -1586,7 +2006,14 @@ def _register_session_endpoints(
         request = _parse_body_or_422(SessionOpsRequest, body)
         try:
             return await session_manager.apply_ops(
-                session_id, request.client_id, request.base_seq, request.ops
+                session_id,
+                request.client_id,
+                request.base_seq,
+                request.ops,
+                appearance_version=request.appearance_version,
+                authorize_appearance=lambda: _authorize_session_change(
+                    http_request, "apply_session_ops", session_id
+                ),
             )
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="session not found")
@@ -1596,6 +2023,19 @@ def _register_session_endpoints(
             raise HTTPException(status_code=413, detail="op batch too large")
         except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except AppearanceVersionRequired:
+            raise HTTPException(
+                status_code=409, detail={"error": "appearance_version_required"}
+            )
+        except ShapeRevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "shape_revision_conflict",
+                    "target": exc.target,
+                    "revision": exc.revision,
+                },
+            )
         except AnnotationFieldConflict as exc:
             # Same 409 status as LeaseConflict (both mean "this write raced a
             # concurrent edit, don't retry it as-is" — sessionSyncClient.js's
@@ -1864,14 +2304,35 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="session not found")
         return {"session_id": session_id, "activity": records}
 
+    @router.post("/sessions/{session_id}/redo")
     @router.post("/sessions/{session_id}/undo")
     async def undo_session_action(
-        session_id: str, request: UndoSessionActionRequest
+        session_id: str, request: UndoSessionActionRequest, http_request: Request
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+        session = session_manager.get_session(session_id)
+        if session and (
+            session.state.get("shape_overrides")
+            or session.state.get("type_shapes")
+            or session.state.get("shape_operation_ids")
+            or any(
+                r.get("op") in {"node_shape_set", "type_shape_set"}
+                for r in session.activity_log
+            )
+        ):
+            if request.appearance_version != 1:
+                raise HTTPException(
+                    status_code=409, detail={"error": "appearance_version_required"}
+                )
+            _authorize_session_change(http_request, "apply_session_ops", session_id)
         try:
-            return session_manager.undo_last_action(
+            replay = (
+                session_manager.redo_last_action
+                if http_request.url.path.endswith("/redo")
+                else session_manager.undo_last_action
+            )
+            return replay(
                 session_id,
                 request.client_id,
                 expected_revision=request.expected_revision,
@@ -1893,6 +2354,8 @@ def _register_session_endpoints(
             raise HTTPException(status_code=409, detail="session busy, retry")
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except ImageBudgetExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1909,6 +2372,8 @@ def _register_session_endpoints(
         _rate_limit_lookup(request)
         try:
             session_manager.get_or_create(session_id)
+        except OSError:
+            _staged_answer(session_storage_error())
         except SessionLimitReached:
             raise HTTPException(status_code=503, detail="too many sessions")
         except SessionNotFound:
@@ -1946,7 +2411,11 @@ def _register_session_endpoints(
         async def event_generator():
             try:
                 try:
-                    catch_up = session_manager.catch_up(session_id, since_seq)
+                    catch_up = session_manager.catch_up(
+                        session_id,
+                        since_seq,
+                        await _stream_library_revision(session_manager),
+                    )
                 except SessionNotFound:
                     # Deleted between the handshake above and the first body
                     # iteration. Without the notice a direct-mode client's
@@ -1965,9 +2434,14 @@ def _register_session_endpoints(
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"
                         continue
+                    library_revision = (
+                        await _stream_library_revision(session_manager)
+                        if event.get("type") == "resync"
+                        else None
+                    )
                     try:
                         event = _resolve_stream_event(
-                            event, session_manager, session_id
+                            event, session_manager, session_id, library_revision
                         )
                     except SessionNotFound:
                         # The session was deleted in the window between this
@@ -2062,6 +2536,7 @@ _IMPORT_ERROR_STATUS = {
     "import_preview_busy": 503,
     "plan_digest_required": 422,
     "import_merge_blocked": 422,
+    "import_merge_too_large": 422,
     "import_plan_stale": 409,
     "import_merge_busy": 503,
     "import_merge_not_supported": 501,
@@ -2588,12 +3063,57 @@ def _register_attachment_endpoints(router: APIRouter, service: GraphService) -> 
 # ==================== Router Factory ====================
 
 
+def _register_user_preference_endpoints(router: APIRouter, store) -> None:
+    """The signed-in user's remembered interface preferences.
+
+    The identity is only ever the user principal the auth middleware recorded;
+    without one (anonymous, or the shared instance token) the defaults are
+    returned and nothing is saved, so no request reads another user's values.
+    """
+    from backend.api_host.middleware import AUTHENTICATED_PRINCIPAL_SCOPE_KEY
+    from backend.core.shape_library import library_identity
+    from backend.core.user_preferences import PREFERENCE_DEFAULTS
+
+    def _identity(http_request: Request) -> Optional[str]:
+        principal = http_request.scope.get(AUTHENTICATED_PRINCIPAL_SCOPE_KEY)
+        if store is None or not isinstance(principal, dict):
+            return None
+        if principal.get("kind") != "user":
+            return None
+        return library_identity(principal)
+
+    @router.get("/user-preferences")
+    def get_user_preferences(http_request: Request) -> Dict[str, Any]:
+        identity = _identity(http_request)
+        if identity is None:
+            return {"signed_in": False, "preferences": dict(PREFERENCE_DEFAULTS)}
+        return {"signed_in": True, "preferences": store.get(identity)}
+
+    @router.put("/user-preferences")
+    def put_user_preferences(
+        request: UserPreferencesUpdateRequest, http_request: Request
+    ) -> Dict[str, Any]:
+        identity = _identity(http_request)
+        if identity is None:
+            raise HTTPException(
+                status_code=403, detail="Saving preferences needs a signed-in user."
+            )
+        try:
+            preferences = store.update(identity, request.model_dump(exclude_none=True))
+        except OSError:
+            logger.exception("Saving user preferences failed")
+            raise HTTPException(status_code=503, detail="preferences not saved")
+        return {"signed_in": True, "preferences": preferences}
+
+
 def create_rest_router(
     service: GraphService,
     prefix: str = "",
     session_manager=None,
     rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
     import_job_store: Optional["ExecutionStore"] = None,
+    function_invocation_service=None,
+    user_preferences=None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -2612,6 +3132,8 @@ def create_rest_router(
             fine for tests and standalone runs, but import jobs then do NOT
             survive a restart; production wiring (``backend/api_host/server.py``)
             passes a durable ``SqliteExecutionStore``.
+        user_preferences: Optional ``UserPreferencesStore``. Without one,
+            every request reads the defaults and saving is refused.
 
     Returns:
         Configured APIRouter
@@ -2627,18 +3149,31 @@ def create_rest_router(
 
         import_job_store = InMemoryExecutionStore()
 
+    if function_invocation_service is not None:
+        from backend.functions.routes import register_function_routes
+
+        register_function_routes(router, function_invocation_service)
+        if hasattr(function_invocation_service, "webhook_token_store"):
+            from backend.functions.routes import register_token_routes
+
+            register_token_routes(
+                router,
+                function_invocation_service,
+                function_invocation_service.webhook_token_store,
+            )
+
     _register_search_endpoints(router, service)
     _register_similarity_endpoints(router, service)
     _register_node_crud_endpoints(router, service)
     _register_edge_crud_endpoints(router, service)
     _register_history_endpoints(router, service)
     _register_metadata_endpoints(router, service)
-    _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
     _register_attachment_endpoints(router, service)
     _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
+    _register_user_preference_endpoints(router, user_preferences)
 
     @router.get("/collect/{short_name}")
     async def get_collect_config(

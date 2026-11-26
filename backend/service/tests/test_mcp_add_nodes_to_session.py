@@ -1,3 +1,4 @@
+# covers: backend/service/mcp_tools.py
 """
 Tests for the ``add_nodes_to_session`` and ``remove_nodes_from_session`` MCP tools.
 
@@ -1682,9 +1683,12 @@ def test_every_session_tool_names_both_accepted_session_id_forms(tools):
         }
         kwargs["session_id"] = "nope"
         result = tool(**kwargs)
-        assert "Invalid session ID format" in result["error"], name
-        assert "DDDD-DDDD-DDDD-DDDD" in result["error"], name
-        assert "older DDDD-DDDD form" in result["error"], name
+        # save_session_view keeps a stable code in `error`, the hint in `message`.
+        invalid = result["error"] == "invalid_request"
+        hint = result["message"] if invalid else result["error"]
+        assert "Invalid session ID format" in hint, name
+        assert "DDDD-DDDD-DDDD-DDDD" in hint, name
+        assert "older DDDD-DDDD form" in hint, name
         checked.append(name)
     assert "add_nodes_to_session" in checked
     assert "remove_nodes_from_session" in checked
@@ -1726,9 +1730,12 @@ def test_every_visualization_session_id_tool_names_both_accepted_forms(tmp_path)
         }
         kwargs["visualization_session_id"] = "nope"
         result = tool(**kwargs)
-        assert "Invalid session ID format" in result["error"], name
-        assert "DDDD-DDDD-DDDD-DDDD" in result["error"], name
-        assert "older DDDD-DDDD form" in result["error"], name
+        # save_session_view keeps a stable code in `error`, the hint in `message`.
+        invalid = result["error"] == "invalid_request"
+        hint = result["message"] if invalid else result["error"]
+        assert "Invalid session ID format" in hint, name
+        assert "DDDD-DDDD-DDDD-DDDD" in hint, name
+        assert "older DDDD-DDDD form" in hint, name
         checked.append(name)
     assert sorted(checked) == [
         "clear_visualization",

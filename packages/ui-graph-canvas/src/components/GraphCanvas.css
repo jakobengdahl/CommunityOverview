@@ -390,6 +390,16 @@ body.graph-suppress-selection * {
   }
 }
 
+/* An editor preview stage pins one theme (graph-card-theme-*, CustomNode.css)
+   whatever the page scheme, so its background must match that theme too. */
+.graph-canvas-container.graph-card-theme-dark {
+  background: #1a1a1a;
+}
+
+.graph-canvas-container.graph-card-theme-light {
+  background: #f5f5f5;
+}
+
 .federation-depth-control {
   position: absolute;
   right: 224px;

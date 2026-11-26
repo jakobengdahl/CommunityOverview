@@ -177,3 +177,13 @@ def test_transient_error_retries_within_total_deadline(provider_class, hang_on_r
         if hang_on_retry != "backoff":
             assert finished.wait(1)
         provider.client.close()
+
+
+def test_claude_default_model_is_not_deprecated_by_the_sdk():
+    """The model used when none is configured must not be one the SDK marks for retirement."""
+    sdk_messages = pytest.importorskip("anthropic.resources.messages.messages")
+    deprecated = getattr(sdk_messages, "DEPRECATED_MODELS", None)
+    if deprecated is None:
+        pytest.skip("installed anthropic SDK publishes no deprecated-model table")
+
+    assert ClaudeProvider(api_key="test").model not in deprecated

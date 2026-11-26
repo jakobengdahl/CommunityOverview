@@ -1,3 +1,4 @@
+# covers: backend/core/session_store.py, backend/core/session_manager.py
 """
 Tests for the server-side session store (step 1) and op state transforms
 (step 3) in ``backend/core/session_store.py``.
@@ -8,14 +9,19 @@ dropped-update rule, and the ring buffer catch-up continuity check.
 """
 
 import copy
+import errno
 import json
+import os
+import threading
 
 import pytest
 
+from backend.core import session_store, storage_backends
 from backend.core.session_store import (
     AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
+    MAX_SESSION_DESCRIPTION_CHARS,
     OpError,
     Session,
     SessionStore,
@@ -74,8 +80,18 @@ class TestPersistence:
         backend = FileSessionPersistenceBackend(tmp_path)
         session = Session(id="1111-2222", name="x", seq=5)
         session.state["node_refs"] = ["a", "b"]
-        backend.save(session.to_dict())
+        # A pre-appearance session fixture has no shape keys.
+        legacy = session.to_dict()
+        legacy["state"].pop("shape_overrides")
+        legacy["state"].pop("type_shapes")
+        backend.save(legacy)
         restored = Session.from_dict(backend.load("1111-2222"))
+        assert restored.state["shape_overrides"] == {}
+        assert restored.state["type_shapes"] == {}
+        roundtrip = restored.to_dict()
+        for key in ("shape_overrides", "type_shapes"):
+            roundtrip["state"].pop(key)
+        assert roundtrip == legacy
         assert restored.seq == 5
         assert restored.state["node_refs"] == ["a", "b"]
 
@@ -169,6 +185,27 @@ class TestStateOps:
         assert s.state["node_refs"] == ["a", "b", "c"]
         assert s.seq == 2
 
+    def test_nodes_added_drops_view_layout_keys(self, tmp_path):
+        """Only a replace carries a view's layout; an add relays none of it."""
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store,
+            s,
+            {
+                "op": "nodes_added",
+                "node_ids": ["a"],
+                "hidden_node_ids": ["a"],
+                "annotations": [{"id": "x", "kind": "note"}],
+                "removed_annotation_ids": ["y"],
+            },
+        )
+        assert not {"hidden_node_ids", "annotations", "removed_annotation_ids"} & set(
+            applied
+        )
+        assert s.state["hidden_node_ids"] == []
+        assert s.state["annotations"] == []
+
     def test_nodes_removed_cleans_positions_and_membership(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
@@ -188,6 +225,30 @@ class TestStateOps:
         assert s.state["node_refs"] == ["b"]
         assert "a" not in s.state["positions"]
         assert s.state["annotations"][0]["member_node_ids"] == ["b"]
+
+    def test_session_described_persists_and_outlives_clearing_the_canvas(
+        self, tmp_path
+    ):
+        store = _store(tmp_path)
+        s = store.create(name="n")
+        self._apply(store, s, {"op": "nodes_added", "node_ids": ["a"]})
+        self._apply(store, s, {"op": "session_described", "description": "brief"})
+        self._apply(store, s, {"op": "nodes_removed", "node_ids": ["a"]})
+        store.persist(s)
+
+        reloaded = _store(tmp_path).get(s.id)
+        assert reloaded.description == "brief"
+        assert reloaded.name == "n"
+        assert {m["id"]: m for m in store.list_meta()}[s.id]["description"] == "brief"
+
+    def test_session_described_rejects_an_oversized_description(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        too_long = "x" * (MAX_SESSION_DESCRIPTION_CHARS + 1)
+        with pytest.raises(OpError):
+            self._apply(store, s, {"op": "session_described", "description": too_long})
+        assert s.description is None
+        assert s.seq == 0
 
     def test_node_moved_is_lww(self, tmp_path):
         store = _store(tmp_path)
@@ -671,3 +732,492 @@ class TestRestoreRing:
 
         assert store.ring(s.id).maxlen == 2
         assert [op["seq"] for op in store.ring(s.id)] == [4, 5]
+
+
+class TestAppearanceOperations:
+    def test_special_dictionary_keys_survive_persistence_and_removal(self, tmp_path):
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["__proto__"]})
+        for op in (
+            dict(op="node_shape_set", node_id="__proto__"),
+            dict(op="type_shape_set", type="__proto__"),
+        ):
+            store.apply_state_op(
+                session,
+                {
+                    **op,
+                    "version": 1,
+                    "selection": {"builtin": True},
+                    "base_revision": 0,
+                    "operation_id": op["op"],
+                    "client_id": "c",
+                },
+            )
+        store.persist(session)
+        restored = _store(tmp_path).get(session.id)
+        assert restored.state["shape_overrides"]["__proto__"] == {"builtin": True}
+        assert restored.state["type_shapes"]["__proto__"] == {"builtin": True}
+        store.apply_state_op(
+            session, {"op": "nodes_removed", "node_ids": ["__proto__"]}
+        )
+        assert "__proto__" not in session.state["shape_overrides"]
+        assert session.state["shape_revisions"]["node:__proto__"] == 2
+
+    def test_validated_selections_reject_malformed_payloads(self, tmp_path):
+        """Only complete supported selections can enter session state."""
+        store = _store(tmp_path)
+        session = store.create()
+        for selection in [
+            {"builtin": True},
+            {"ref": "config:card"},
+            {"ref": "saved:card"},
+            {
+                "inline": {
+                    "version": 1,
+                    "base": "triangle-up",
+                    "scale": 1,
+                    "placement": "centre",
+                    "areas": {"first": "name", "second": None, "third": None},
+                }
+            },
+            None,
+        ]:
+            op = dict(
+                op="type_shape_set",
+                type="Thing",
+                selection=selection,
+                version=1,
+                base_revision=session.state["shape_revisions"].get("type:Thing", 0),
+                operation_id=str(session.seq),
+            )
+            assert store.apply_state_op(session, op)["seq"] == session.seq
+            assert session.state["type_shapes"].get("Thing") == selection
+        before = copy.deepcopy(session.to_dict())
+        for selection in [
+            {"builtin": False},
+            {"ref": "card"},
+            {"builtin": True, "ref": "saved:card"},
+            {"inline": {"version": 2}},
+        ]:
+            with pytest.raises(OpError):
+                store.apply_state_op(
+                    session, {**op, "selection": selection, "operation_id": "invalid"}
+                )
+        for extra in ({"node_id": "a"}, {"unexpected": True}):
+            with pytest.raises(OpError):
+                store.apply_state_op(session, {**op, **extra})
+        assert session.to_dict() == before
+
+    def test_revision_retry_persistence_and_atomic_undo(self, tmp_path):
+        """Concurrent edits conflict and retries never repeat an atomic type change."""
+        from backend.core.session_store import ShapeRevisionConflict
+
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        for node_id in ["a", "b"]:
+            store.apply_state_op(
+                session,
+                dict(
+                    op="node_shape_set",
+                    node_id=node_id,
+                    selection={"builtin": True},
+                    version=1,
+                    base_revision=0,
+                    operation_id=node_id,
+                    client_id="first",
+                ),
+            )
+        node_record = store.find_latest_undoable(session, "first")
+        store.apply_state_op(
+            session,
+            node_record["inverse_op"],
+            trusted_replay=True,
+            record_activity=False,
+        )
+        assert "b" not in session.state["shape_overrides"]
+        store.apply_state_op(
+            session,
+            {
+                "op": "node_shape_set",
+                "node_id": "b",
+                "selection": {"builtin": True},
+                "version": 1,
+            },
+            trusted_replay=True,
+            record_activity=False,
+        )
+        op = dict(
+            op="type_shape_set",
+            type="Thing",
+            selection={"ref": "config:card"},
+            clear_node_id="a",
+            clear_base_revision=1,
+            version=1,
+            base_revision=0,
+            operation_id="type",
+            client_id="first",
+        )
+        seq = session.seq
+        store.apply_state_op(session, op)
+        assert session.seq == seq + 1
+        assert session.state["shape_overrides"] == {"b": {"builtin": True}}
+        record = store.find_latest_undoable(session, "first")
+        assert store.undo_conflict_reason(session, record) is None
+        store.persist(session)
+        restored_store = _store(tmp_path)
+        restored = restored_store.get(session.id)
+        assert restored.to_dict() == session.to_dict()
+        assert restored_store.apply_state_op(restored, op) is None
+        current_retry = {
+            **op,
+            "client_id": "second",
+            "base_revision": 1,
+            "clear_base_revision": 2,
+            "selection": {"builtin": True},
+        }
+        assert restored_store.apply_state_op(restored, current_retry) is None
+        reconnect_retry = {**op, "client_id": "second"}
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
+        receipt = json.dumps([op["operation_id"]])
+        restored.state["shape_operation_ids"][
+            json.dumps(["first", op["operation_id"]])
+        ] = restored.state["shape_operation_ids"].pop(receipt)
+        assert restored_store.apply_state_op(restored, current_retry) is None
+        before_retry = copy.deepcopy(restored.to_dict())
+        assert restored_store.apply_state_op(restored, reconnect_retry) is None
+        assert restored.to_dict() == before_retry
+        with pytest.raises(ShapeRevisionConflict):
+            restored_store.apply_state_op(restored, {**op, "operation_id": "new"})
+        assert restored.seq == seq + 1
+        assert restored.state["type_shapes"] == {"Thing": {"ref": "config:card"}}
+        restored_store.apply_state_op(
+            restored, record["inverse_op"], trusted_replay=True, record_activity=False
+        )
+        assert restored.state["shape_overrides"] == {
+            "a": {"builtin": True},
+            "b": {"builtin": True},
+        }
+        assert restored.state["type_shapes"] == {}
+        restored_store.apply_state_op(
+            restored, {"op": "nodes_removed", "node_ids": ["a"]}
+        )
+        assert "a" not in restored.state["shape_overrides"]
+
+    def test_node_operation_rejects_clear_fields(self, tmp_path):
+        store = _store(tmp_path)
+        session = store.create()
+        store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        before = copy.deepcopy(session.to_dict())
+        for field, value in [
+            ("clear_node_id", "b"),
+            ("clear_base_revision", 0),
+            ("type", "Thing"),
+        ]:
+            with pytest.raises(OpError):
+                store.apply_state_op(
+                    session,
+                    dict(
+                        op="node_shape_set",
+                        node_id="a",
+                        selection={"builtin": True},
+                        version=1,
+                        base_revision=0,
+                        operation_id="bad",
+                        **{field: value},
+                    ),
+                )
+            assert session.to_dict() == before
+
+
+def _in_thread(fn):
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(value=fn()), daemon=True)
+    thread.start()
+    return thread, result
+
+
+class TestTransactionCoversReads:
+    """A second backend over the same directory stands in for another process:
+    it shares only the ``.sessions.lock`` file, not the in-process lock."""
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda store, sid: store.get(sid).name,
+            lambda store, sid: store._backend.load(sid)["name"],
+        ],
+        ids=["store_get_miss", "backend_load"],
+    )
+    def test_read_waits_for_a_transaction_and_sees_its_end_state(self, tmp_path, read):
+        writer = FileSessionPersistenceBackend(tmp_path)
+        raw = Session(id="1111-2222", name="before").to_dict()
+        writer.save(raw)
+        store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+        with writer.transaction():
+            writer.save({**raw, "name": "partial"})
+            reader, result = _in_thread(lambda: read(store, raw["id"]))
+            reader.join(0.3)
+            assert reader.is_alive()
+            writer.delete(raw["id"])
+            writer.save({**raw, "name": "after"})
+        reader.join(5)
+        assert result["value"] == "after"
+
+    def test_cache_hit_returns_the_cached_session_without_the_lock(self, tmp_path):
+        writer = FileSessionPersistenceBackend(tmp_path)
+        writer.save(Session(id="1111-2222", name="before").to_dict())
+        store = SessionStore(FileSessionPersistenceBackend(tmp_path))
+        cached = store.get("1111-2222")
+        with writer.transaction():
+            writer.save(Session(id="1111-2222", name="after").to_dict())
+            reader, result = _in_thread(lambda: store.get("1111-2222"))
+            reader.join(5)
+        assert result["value"] is cached
+        assert cached.name == "before"
+
+    @pytest.mark.parametrize("case", ["missing", "invalid_id", "corrupt"])
+    def test_failed_read_releases_the_lock_and_caches_nothing(self, tmp_path, case):
+        backend = FileSessionPersistenceBackend(tmp_path)
+        store = SessionStore(backend)
+        if case == "invalid_id":
+            with pytest.raises(OpError):
+                backend.load("../etc")
+        elif case == "corrupt":
+            (tmp_path / "1111-2222.json").write_text("{", encoding="utf-8")
+            with pytest.raises(ValueError):
+                store.get("1111-2222")
+        else:
+            assert store.get("1111-2222") is None
+        other = FileSessionPersistenceBackend(tmp_path)
+        writer, _ = _in_thread(
+            lambda: other.save(Session(id="1111-2222", name="later").to_dict())
+        )
+        writer.join(5)
+        assert not writer.is_alive()
+        assert store.get("1111-2222").name == "later"
+
+
+@pytest.mark.parametrize("module", [session_store, storage_backends])
+def test_windows_file_lock_waits_until_acquired(module, monkeypatch, tmp_path):
+    """On Windows ``_lock_file`` retries a timed-out lock until it is held,
+    for shared and exclusive requests alike, and raises any other error. Lock
+    and unlock always target byte 0, whatever the handle's position, and leave
+    that position as it was. The session backend's transaction lock takes the
+    same waiting path."""
+    calls = []
+    positions = []
+    outcomes = []
+
+    class FakeMsvcrt:
+        LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+        @staticmethod
+        def locking(fileno, mode, nbytes):
+            calls.append(mode)
+            positions.append(os.lseek(fileno, 0, os.SEEK_CUR))
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise OSError(outcome, "locked")
+
+    monkeypatch.setattr(module, "msvcrt", FakeMsvcrt)
+    (tmp_path / "lock").write_text("existing")
+    with open(tmp_path / "lock", "ab") as f:
+        eof = os.lseek(f.fileno(), 0, os.SEEK_END)
+        for exclusive in (True, False):
+            calls.clear()
+            outcomes[:] = [errno.EDEADLOCK, errno.EACCES, None]
+            module._lock_file(f, exclusive=exclusive)
+            assert calls == [FakeMsvcrt.LK_LOCK] * 3
+        outcomes[:] = [errno.EBADF]
+        with pytest.raises(OSError):
+            module._lock_file(f)
+        outcomes[:] = [None]
+        calls.clear()
+        module._unlock_file(f)
+        assert calls == [FakeMsvcrt.LK_UNLCK]
+        assert set(positions) == {0}
+        assert os.lseek(f.fileno(), 0, os.SEEK_CUR) == eof > 0
+    if module is session_store:
+        outcomes[:] = [None, None]
+        backend = FileSessionPersistenceBackend(tmp_path / "s")
+        calls.clear()
+        outcomes[:] = [errno.EDEADLOCK, None, None]
+        with backend.transaction():
+            pass
+        assert calls == [FakeMsvcrt.LK_LOCK] * 2 + [FakeMsvcrt.LK_UNLCK]
+
+
+def test_creation_paths_share_capacity_across_stores(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.core.session_manager import SessionLimitReached, SessionManager
+
+    first = SessionManager(_store(tmp_path), max_sessions=2)
+    source = first.create_session()
+    second = SessionManager(_store(tmp_path), max_sessions=2)
+    barrier = threading.Barrier(2)
+
+    def create(copy):
+        barrier.wait()
+        try:
+            return second.copy_session(source.id) if copy else first.create_session()
+        except SessionLimitReached:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, (False, True)))
+    assert sum(result is not None for result in results) == 1
+    assert len(_store(tmp_path).list_meta()) == 2
+
+    roomy = SessionManager(_store(tmp_path), max_sessions=4)
+    assert roomy.create_session()
+    assert roomy.copy_session(source.id)
+
+
+def test_unpublished_document_is_invisible_and_swept_on_restart(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    published = store.create()
+    directory = tmp_path / "sessions"
+    original_rename = session_store.os.rename
+
+    def crash_before_publish(source, destination):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(session_store.os, "rename", crash_before_publish)
+    with pytest.raises(KeyboardInterrupt):
+        store.create_with_capacity(max_sessions=2)
+    monkeypatch.setattr(session_store.os, "rename", original_rename)
+    assert store.session_count() == 1
+    assert [m["id"] for m in store.list_meta()] == [published.id]
+    orphan = list(directory.glob("session_*.json"))
+    assert len(orphan) == 1
+    partial = directory / "session_partial.json"
+    partial.write_text("{")
+    restarted = _store(tmp_path)
+    assert not orphan[0].exists()
+    assert not partial.exists()
+    assert restarted.get(published.id) is not None
+    assert restarted.create_with_capacity(max_sessions=2)[1]
+
+
+def test_publication_flushes_and_is_visible_to_another_store(tmp_path, monkeypatch):
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    calls = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd):
+        calls.append(os.fstat(fd).st_mode)
+        real_fsync(fd)
+
+    monkeypatch.setattr(session_store.os, "fsync", record_fsync)
+    session = first.create()
+    import stat
+
+    assert any(stat.S_ISREG(mode) for mode in calls)
+    assert any(stat.S_ISDIR(mode) for mode in calls)
+    assert second.get(session.id).id == session.id
+
+
+def test_failed_directory_flush_removes_new_session(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_store,
+            "_fsync_directory",
+            lambda _: (_ for _ in ()).throw(OSError()),
+        )
+        with pytest.raises(OSError):
+            store.create_with_capacity(max_sessions=1)
+    assert store.session_count() == 0
+    assert store.create_with_capacity(max_sessions=1)[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_implicit_creation_publishes_initial_operation(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    observer = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    saved = store._backend.save
+    visible = []
+
+    def observe(document):
+        saved(document)
+        visible.append(json.loads((tmp_path / "sessions" / f"{sid}.json").read_text()))
+
+    monkeypatch.setattr(store._backend, "save", observe)
+    if operation == "rest":
+        await manager.rename_session(sid, "named")
+    elif operation == "rename":
+        manager.rename_session_sync(sid, "named")
+    elif operation == "describe":
+        manager.describe_session_sync(sid, "described")
+    else:
+        assert manager.materialize_command(
+            sid, {"result": {"action": "add_to_visualization", "nodes": [{"id": "n"}]}}
+        )
+    assert len(visible) == 1
+    assert observer.get(sid).to_dict() == visible[0]
+    assert visible[0]["seq"] == 1
+    if operation in ("rest", "rename"):
+        assert visible[0]["name"] == "named"
+    elif operation == "describe":
+        assert visible[0]["description"] == "described"
+    else:
+        assert visible[0]["state"]["node_refs"] == ["n"]
+    before = store.get(sid).to_dict()
+    session, created = manager.get_or_create(
+        sid, initial_op={"op": "session_renamed", "name": "other", "client_id": "test"}
+    )
+    assert not created and session.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rest", "rename", "describe", "push"])
+async def test_failed_implicit_creation_does_not_publish_or_delete(
+    tmp_path, monkeypatch, operation
+):
+    from backend.core.session_manager import SessionManager
+
+    store = _store(tmp_path)
+    manager = SessionManager(store, max_sessions=1)
+    sid = "1234-5678"
+    deleted = []
+    with monkeypatch.context() as patch:
+
+        def fail(_document):
+            raise OSError()
+
+        patch.setattr(store._backend, "save", fail)
+        patch.setattr(store, "delete", lambda session_id: deleted.append(session_id))
+        with pytest.raises(OSError):
+            if operation == "rest":
+                await manager.rename_session(sid, "named")
+            elif operation == "rename":
+                manager.rename_session_sync(sid, "named")
+            elif operation == "describe":
+                manager.describe_session_sync(sid, "described")
+            else:
+                manager.materialize_command(
+                    sid,
+                    {
+                        "result": {
+                            "action": "add_to_visualization",
+                            "nodes": [{"id": "n"}],
+                        }
+                    },
+                )
+    assert not deleted
+    assert _store(tmp_path).get(sid) is None
+    assert store.session_count() == 0
+    assert manager.create_session()

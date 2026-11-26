@@ -24,6 +24,8 @@ Usage:
 """
 
 import contextlib
+import json
+import os
 import logging
 import threading
 from dataclasses import dataclass
@@ -46,6 +48,9 @@ from backend.core.session_auto_add import (
 from backend.core.merge_record_retention import MergeRecordRetention
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.core.shape_library import FileShapeLibraryPersistenceBackend, ShapeLibrary
+from backend.core.user_preferences import UserPreferencesStore
+from backend.ui.conversation_state import FileTaintRegistry
 from backend.core.session_manager import SessionManager
 from backend.core.write_modes import WriteModes
 
@@ -69,6 +74,7 @@ from backend.federation import (
     load_federation_config,
     summarize_federation_config,
 )
+from backend.federation.publish import build_key_provider
 
 from .config import AppConfig
 from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
@@ -92,6 +98,7 @@ from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
 from .agent_routes import register_agent_routes
+from .federation_routes import register_federation_routes
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +366,30 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         config, graph_storage, authorization_hook, runtime_extensions
     )
     graph_storage = runtime.graph_storage
+    from backend.config.config_loader import DEFAULT_CONFIG_PATH
+    from backend.federation.config import resolve_federation_config_path
+    from backend.runtime.config_context import (
+        get_tenant_config_dir,
+        resolve_schema_config_path_info,
+    )
+
+    graph_path = Path(graph_storage.json_path).resolve()
+    locations = {
+        "graph": graph_path.parent,
+        "schema config": Path(
+            resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]
+        ).parent,
+        "federation config": Path(resolve_federation_config_path()).parent,
+    }
+    tenant_dir = get_tenant_config_dir()
+    if tenant_dir:
+        locations = {"tenant config": Path(tenant_dir), **locations}
+    token_path = config.get_webhook_tokens_db_path(graph_path, locations.values())
+    for name, directory in locations.items():
+        if token_path.resolve().is_relative_to(directory.resolve()):
+            raise ValueError(
+                f"Webhook token database must be outside the {name} directory"
+            )
     graph_service = runtime.graph_service
     federation_manager = runtime.federation_manager
     federation_config = runtime.federation_config
@@ -418,11 +449,35 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         )
         merge_record_retention.start()
     sessions_dir = str(config.resolve_sessions_dir())
+    session_backend = FileSessionPersistenceBackend(sessions_dir)
     session_store = SessionStore(
-        FileSessionPersistenceBackend(sessions_dir),
+        session_backend,
         staged_status=write_modes.staged_status,
     )
     session_manager = SessionManager(session_store, write_modes=write_modes)
+    from backend.core.template_store import TemplateStore
+
+    session_manager.template_store = TemplateStore(
+        FileSessionPersistenceBackend(Path(sessions_dir) / "templates"),
+        Path(resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]).parent
+        / "templates",
+    )
+    for template_id in session_manager.template_store.profile_ids():
+        if (
+            session_backend.load(template_id) is not None
+            or write_modes.staged_status(template_id) != "none"
+        ):
+            raise ValueError("profile template ID collides with a session")
+    # Writes need the identity the auth middleware authenticated (the REST
+    # routes refuse without one); a commit invalidates the referencing sessions.
+    session_manager.shape_library = ShapeLibrary(
+        FileShapeLibraryPersistenceBackend(Path(sessions_dir) / "shape-library"),
+        session_backend,
+        templates=session_manager.template_store,
+        writes_enabled=True,
+        writers=session_store,
+        invalidate=session_manager.publish_library_invalidation,
+    )
     app.state.session_store = session_store
     app.state.session_manager = session_manager
 
@@ -446,11 +501,37 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         target=_recover_import_jobs, name="import-startup-recovery", daemon=True
     ).start()
 
+    from backend.functions.invocation import FunctionInvocationService
+
+    function_invocation_service = FunctionInvocationService(
+        graph_service,
+        agent_registry.run_history_store,
+        root=os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_ROOT", "config/functions"),
+        enabled=json.loads(os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_ENABLED", "{}")),
+        isolation_minimum=os.getenv(
+            "COMMUNITYOVERVIEW_FUNCTIONS_ISOLATION_MINIMUM", "degraded"
+        ),
+    )
+    function_invocation_service.webhook_graph_bindings = json.loads(
+        os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_WEBHOOK_GRAPHS", "{}")
+    )
+    if not isinstance(function_invocation_service.webhook_graph_bindings, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in function_invocation_service.webhook_graph_bindings.items()
+    ):
+        raise ValueError("Invalid webhook graph bindings")
+    app.state.function_invocation_service = function_invocation_service
+    from backend.functions.token_store import WebhookTokenStore
+
+    function_invocation_service.webhook_token_store = WebhookTokenStore(token_path)
+
     # Create and mount REST API router
     rest_router = create_rest_router(
         graph_service,
         session_manager=session_manager,
         import_job_store=import_job_store,
+        function_invocation_service=function_invocation_service,
+        user_preferences=UserPreferencesStore(Path(sessions_dir) / "user-preferences"),
     )
     app.include_router(rest_router, prefix=config.api_prefix)
 
@@ -461,7 +542,9 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         config.mcp_attachment_tools,
     )
     chat_service = ChatService(
-        graph_service, assistant_attachment_access=config.assistant_attachment_access
+        graph_service,
+        assistant_attachment_access=config.assistant_attachment_access,
+        conversation_registry=FileTaintRegistry(sessions_dir),
     )
     document_service = DocumentService()
 
@@ -512,12 +595,13 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     auto_add_registry = SessionAutoAddRegistry()
     app.state.auto_add_registry = auto_add_registry
 
-    def _auto_add_push(session_id: str, node_payload: dict) -> None:
+    def _auto_add_push(session_id: str, node_payload: dict, agent_id: str) -> None:
         _push_to_session(
             session_registry,
             session_id,
             "session_auto_add_agent",
-            {"nodes": [node_payload], "edges": []},
+            # agent_id attributes the server-applied addition to this agent.
+            {"nodes": [node_payload], "edges": [], "agent_id": agent_id},
             session_manager,
         )
 
@@ -582,6 +666,18 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
 
     # Federation + agent-system status endpoints
     register_agent_routes(app, agent_registry, graph_service, federation_manager)
+
+    # Federation read route for other instances; absent unless publishing is on.
+    register_federation_routes(
+        app,
+        graph_storage,
+        federation_config.federation,
+        build_key_provider(
+            federation_config.federation,
+            external_provider=runtime_extensions.federation_key_provider,
+            reserved_tokens=(config.auth_bearer_token, config.auth_password),
+        ),
+    )
 
     async def shutdown():
         """Gracefully shutdown agent registry and event system."""
@@ -657,3 +753,16 @@ def get_app() -> FastAPI:
         uvicorn backend.api_host.server:get_app --factory
     """
     return create_app()
+
+
+def main() -> None:
+    """Run the application server with environment configuration."""
+    import uvicorn
+
+    config = AppConfig.from_env()
+    uvicorn.run(
+        "backend.api_host.server:get_app",
+        factory=True,
+        host=config.host,
+        port=config.port,
+    )

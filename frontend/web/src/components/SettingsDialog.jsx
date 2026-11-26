@@ -8,8 +8,10 @@ import {
   BoxArrowRight,
   X,
   Diagram3Fill,
+  Terminal,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
+import useUserPreferencesStore from '../store/userPreferencesStore';
 import { useI18n } from '../i18n';
 import { getDisplayName, setDisplayName } from '../services/api';
 import { resolveColor } from './FloatingToolbar';
@@ -39,7 +41,10 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
     toggleChatPanel,
     resetChatPanelToDefault,
     schema,
+    llmAvailable,
   } = useGraphStore();
+  const { signedIn, preferences, saving, saveFailed, setHideClassicSurfaces } =
+    useUserPreferencesStore();
   const { version, sha } = getBuildInfo();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
   const [metamodelExplorerOpen, setMetamodelExplorerOpen] = useState(false);
@@ -186,6 +191,34 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
           >
             {t('menu.reset_assistant_panel_default')}
           </button>
+          {/* The command box lives in the assistant panel; without it there
+              would be no input left to replace the hidden surfaces. */}
+          {llmAvailable && (
+            <>
+              <button
+                className="settings-dialog-menu-item"
+                aria-pressed={preferences.hideClassicSurfaces}
+                disabled={!signedIn || saving}
+                onClick={() => setHideClassicSurfaces(!preferences.hideClassicSurfaces)}
+              >
+                <Terminal size={14} />
+                <span>{t('settings.hide_classic_surfaces')}</span>
+                <span
+                  className={`settings-dialog-toggle${preferences.hideClassicSurfaces ? ' active' : ''}`}
+                />
+              </button>
+              <p className="settings-dialog-field-hint">
+                {signedIn
+                  ? t('settings.hide_classic_surfaces_hint')
+                  : t('settings.hide_classic_surfaces_signed_out')}
+              </p>
+              {saveFailed && (
+                <p className="settings-dialog-field-hint settings-dialog-field-error" role="alert">
+                  {t('settings.hide_classic_surfaces_error')}
+                </p>
+              )}
+            </>
+          )}
 
           <div className="settings-dialog-section-divider" />
           <div className="settings-dialog-section-title">{t('settings.presence_section')}</div>

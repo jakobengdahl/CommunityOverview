@@ -933,6 +933,13 @@ class MCPLoader:
                         "attachments_unavailable",
                         "too_many_nodes",
                         "attachment_index_corrupt",
+                        "federated_node",
+                        "attachments_not_allowed",
+                        "node_archived",
+                        "attachment_too_large",
+                        "node_attachment_limit",
+                        "unsupported_attachment_type",
+                        "attachment_too_large_for_tool",
                     }
                     else "tool_failed",
                 )
@@ -970,6 +977,8 @@ class MCPLoader:
             "list_node_attachments": "attachment_tool_list",
             "read_node_attachment": "attachment_tool_read",
             "search_node_attachments": "attachment_tool_search",
+            "add_node_attachment": "attachment_tool_add",
+            "delete_node_attachment": "attachment_tool_delete",
         }
         # Dispatch only advertised GRAPH tools, never REST attachment methods.
         if tool_name not in {

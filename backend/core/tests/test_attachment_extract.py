@@ -1684,3 +1684,29 @@ def test_g4_pdf_text_with_a_lone_surrogate_is_ok(monkeypatch):
     assert result.status == ae.STATUS_OK
     assert _texts(result) == ["a?b"]
     result.segments[0].text.encode("utf-8")
+
+
+def test_anydoc_evaluation_records_supply_chain_evidence_and_adoption_gate():
+    from pathlib import Path
+
+    evaluation = (
+        Path(__file__).resolve().parents[3]
+        / "docs/design/ANYDOC_EXTRACTION_EVALUATION.md"
+    ).read_text()
+    assessment = evaluation.split("## Security and supply-chain assessment", 1)[1]
+    assessment = assessment.split("## Verification", 1)[0]
+    for evidence in (
+        "firecrawl-anydoc==0.2.4",
+        "License-Expression: MIT",
+        "tomsideguide",
+        "42bf1c5ecdde9eb0d96d6bd75a9e6698cf93b14c",
+        "0e5aed01bf6d4e5c588d3363888293f2ceeb9feb00449a32e0ba993797cf0bd3",
+        "cp310-abi3",
+        "CPython 3.11",
+        "Linux/amd64",
+        "https://pypi.org/integrity/",
+        "https://github.com/firecrawl/anydoc/blob/v0.2.4/LICENSE",
+        "not independently cryptographically verified",
+        "owner's switch decision remains pending",
+    ):
+        assert evidence in assessment, f"Missing supply-chain evidence: {evidence}"

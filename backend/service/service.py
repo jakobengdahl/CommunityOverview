@@ -39,7 +39,7 @@ from backend.federation import FederationManager
 from backend.runtime import session_context
 
 from . import access, attachments, queries, mutations, views, import_service
-from . import staged_review
+from . import attachment_tools, staged_review
 from .attachment_tools import AttachmentReadTools, ATTACHMENT_READ_DEFAULT_CHARS
 from .attachments import AttachmentSettings
 from .composed import annotate_staged_state
@@ -161,7 +161,11 @@ class GraphService:
             return run(None)
         for attempt in range(self.STAGING_ATTEMPTS):
             try:
-                with self._storage.write_lock:
+                with (
+                    self._session_gate.session_manager.store._lock,
+                    self._session_gate.session_manager.store._backend.transaction(),
+                    self._storage.write_lock,
+                ):
                     return run(staging)
             except layer_store.LayerRaced:
                 # Another op changed an entry this one read: decided again on
@@ -433,6 +437,7 @@ class GraphService:
                     "op": "graph_changes_merged",
                     "merge_id": merge_id,
                     "removals": [list(key) for key in plan.removals],
+                    "dropped_node_ids": self._nodes_gone_from_graph(plan.removals),
                 },
             )
         return access.attach_mutation_attribution(
@@ -447,6 +452,15 @@ class GraphService:
             },
             event_context,
         )
+
+    def _nodes_gone_from_graph(self, removals) -> List[str]:
+        """The node keys among *removals* the graph does not hold: a discarded
+        create, a merged delete, a create merged under a new id."""
+        return [
+            entity_id
+            for kind, entity_id in removals
+            if kind == "node" and self._storage.get_node(entity_id) is None
+        ]
 
     def _replayed_items(self, record: Dict[str, Any], graph_access) -> List[Dict]:
         """A replayed merge's items, as far as the caller's view covers them
@@ -508,6 +522,7 @@ class GraphService:
                 {
                     "op": "graph_changes_discarded",
                     "removals": [list(key) for key in removed],
+                    "dropped_node_ids": self._nodes_gone_from_graph(removed),
                 },
             )
         return {
@@ -621,6 +636,21 @@ class GraphService:
             query=query, node_ids=node_ids, top_k=top_k
         )
 
+    def attachment_tool_add(
+        self,
+        node_id: str,
+        filename: str,
+        content_text: Optional[str] = None,
+        content_base64: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ):
+        return attachment_tools.add_attachment(
+            self, node_id, filename, content_text, content_base64, content_type
+        )
+
+    def attachment_tool_delete(self, node_id: str, attachment_id: str):
+        return attachment_tools.delete_attachment(self, node_id, attachment_id)
+
     def list_node_attachments(self, node_id: str) -> Dict[str, Any]:
         return attachments.list_node_attachments(
             self._storage, self._authorization_hook, self._attachment_settings, node_id
@@ -664,6 +694,17 @@ class GraphService:
             declared_content_type=declared_content_type,
             content=content,
             content_length=content_length,
+        )
+
+    def attachment_upload_refusal(
+        self, node_id: str, content_length: int
+    ) -> Optional[Dict[str, Any]]:
+        return attachments.upload_refusal(
+            self._storage,
+            self._authorization_hook,
+            self._attachment_settings,
+            node_id,
+            content_length,
         )
 
     def delete_node_attachment(
@@ -974,6 +1015,28 @@ class GraphService:
                 metadata_merge=metadata_merge,
                 expected_updated_at=expected_updated_at,
                 expected_revision=expected_revision,
+                staging=staging,
+            ),
+        )
+
+    def batch_update_nodes(
+        self,
+        updates: List[Dict[str, Any]],
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return self._write(
+            "batch_update_nodes",
+            expected_session_seq,
+            lambda staging: mutations.batch_update_nodes(
+                self._storage,
+                self._authorization_hook,
+                updates,
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
                 staging=staging,
             ),
         )
@@ -1342,9 +1405,6 @@ class GraphService:
 
     # ==================== Saved Views ====================
 
-    def save_view(self, name: str) -> Dict[str, Any]:
-        return views.save_view(name)
-
     def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
         return self._read(
             "resolve_session_nodes",
@@ -1353,6 +1413,20 @@ class GraphService:
             ),
             nodes=[],
             edges=[],
+        )
+
+    def authorize_capture_refs(
+        self,
+        node_ids: List[str],
+        edge_ids: List[str],
+        *,
+        target: str = "save_session_view",
+    ) -> Dict[str, Any]:
+        return self._read(
+            target,
+            lambda storage: views.authorize_capture_refs(
+                storage, self._authorization_hook, node_ids, edge_ids, target=target
+            ),
         )
 
     def resolve_session_node_semantics(

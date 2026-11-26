@@ -409,6 +409,10 @@ export function describeActivity(record, opts = {}) {
   const op = record && record.op;
 
   switch (op) {
+    case 'nodes_added':
+    case 'nodes_removed':
+    case 'nodes_replaced':
+      return { key: `history.desc.${op}`, params: { count: record.affected?.count || 0 } };
     case 'annotation_created':
       return {
         key: 'history.desc.annotation_created',
@@ -539,4 +543,54 @@ export function classifyUndoError(err) {
     return 'conflict';
   }
   return 'failed';
+}
+
+/** Publish the current canvas before replaying history; await its stream echo. */
+export async function replayCanvasHistory({ sessionId, snapshot, getSync, replay, clientId }) {
+  await snapshot();
+  const sync = getSync();
+  if (!sync || sync.sessionId !== sessionId) return;
+  await sync.flushPending();
+  if (getSync() !== sync) return;
+  const result = await replay(sessionId, clientId);
+  await sync.waitForRevision(result.revision);
+}
+
+/**
+ * Save the source session at its confirmed revision. The hold-aware capture
+ * flush runs first so a layout hold ending during the later waits is still
+ * published; browser-computed positions are never written to the source.
+ */
+export async function captureCanvasSession({
+  sessionId,
+  name,
+  snapshot,
+  getSync,
+  capture,
+  isCurrent,
+  read,
+  save,
+}) {
+  await capture();
+  if (!isCurrent()) throw new Error('session changed');
+  await snapshot();
+  if (!isCurrent()) throw new Error('session changed');
+  const sync = getSync();
+  if (!sync || sync.sessionId !== sessionId) throw new Error('sync unavailable');
+  await sync.flushPending();
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  const source = await read(sessionId);
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  return save(sessionId, name, source.seq);
+}
+
+/** Serialize complete history replays while preserving each caller's result. */
+export function createHistoryReplayQueue() {
+  let tail = Promise.resolve();
+  return (replay) => {
+    const result = tail.then(replay);
+    // A failed operation must reject its caller without blocking later requests.
+    tail = result.catch(() => {});
+    return result;
+  };
 }

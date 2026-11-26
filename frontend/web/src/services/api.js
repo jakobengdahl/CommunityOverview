@@ -340,10 +340,11 @@ export async function resolveTeleport(nodeId, options = {}) {
 /**
  * Get details for a specific node
  * @param {string} nodeId - Node ID
+ * @param {Object} options - `signal` to abort the read
  * @returns {Promise<{node: Object, edges: Array}>}
  */
-export async function getNodeDetails(nodeId) {
-  return apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`);
+export async function getNodeDetails(nodeId, { signal } = {}) {
+  return apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`, signal ? { signal } : {});
 }
 
 /**
@@ -567,6 +568,73 @@ export async function getSchema() {
   return apiFetch(`${API_BASE}/schema`);
 }
 
+/** The signed-in user's remembered preferences: `{signed_in, preferences}`. */
+export async function getUserPreferences() {
+  return apiFetch(`${API_BASE}/user-preferences`);
+}
+
+/** Save preference changes for the signed-in user; anonymous requests are a 403. */
+export async function saveUserPreferences(changes) {
+  return apiFetch(`${API_BASE}/user-preferences`, {
+    method: 'PUT',
+    body: JSON.stringify(changes),
+  });
+}
+
+/** Saved node shapes: `{revision, entries: {key: {name, definition, revision}}}`. */
+export async function getShapeLibrary() {
+  return apiFetch(`${API_BASE}/shape-library`);
+}
+
+const savedShapeUrl = (key) => `${API_BASE}/shape-library/${encodeURIComponent(key)}`;
+
+/** How many sessions reference a saved shape: `{revision, usage}`. */
+export async function getSavedShapeUsage(key) {
+  return apiFetch(`${savedShapeUrl(key)}/usage`);
+}
+
+/** Create a saved shape; the server records the signed-in user as owner. */
+export async function createSavedShape(key, name, definition) {
+  return apiFetch(`${API_BASE}/shape-library`, {
+    method: 'POST',
+    body: JSON.stringify({ key, name, definition }),
+  });
+}
+
+/** Edit the reviewed revision of a saved shape; a stale review is a 409. */
+export async function updateSavedShape(
+  key,
+  name,
+  definition,
+  revision,
+  usage,
+  templateUsage,
+  templateUsageToken
+) {
+  return apiFetch(savedShapeUrl(key), {
+    method: 'PUT',
+    body: JSON.stringify({
+      name,
+      definition,
+      expected_revision: revision,
+      expected_usage: usage,
+      expected_template_usage: templateUsage,
+      expected_template_usage_token: templateUsageToken,
+    }),
+  });
+}
+
+/** Delete (tombstone) a saved shape; its users fall back to the built-in card. */
+export async function deleteSavedShape(key, revision, usage, templateUsage, templateUsageToken) {
+  const query = new URLSearchParams({
+    expected_revision: revision,
+    expected_usage: usage,
+    expected_template_usage: templateUsage,
+  });
+  if (templateUsageToken != null) query.set('expected_template_usage_token', templateUsageToken);
+  return apiFetch(`${savedShapeUrl(key)}?${query}`, { method: 'DELETE' });
+}
+
 // ============================================================
 // Node attachments (ADR 0008)
 // ============================================================
@@ -646,35 +714,6 @@ export async function exportGraph() {
 }
 
 /**
- * Save a view
- * @param {string} name - View name
- * @returns {Promise<{success: boolean}>}
- */
-export async function saveView(name) {
-  return apiFetch(`${API_BASE}/views/save`, {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  });
-}
-
-/**
- * Get a saved view
- * @param {string} name - View name
- * @returns {Promise<Object>}
- */
-export async function getSavedView(name) {
-  return apiFetch(`${API_BASE}/views/${encodeURIComponent(name)}`);
-}
-
-/**
- * List all saved views
- * @returns {Promise<{views: Array}>}
- */
-export async function listSavedViews() {
-  return apiFetch(`${API_BASE}/views`);
-}
-
-/**
  * Execute a backend tool directly (for MCP tool compatibility)
  * @param {string} toolName - Tool name
  * @param {Object} args - Tool arguments
@@ -696,8 +735,9 @@ export async function executeTool(toolName, args) {
 
 const UI_API_BASE = getPathRoot() + '/ui';
 
-// Latest signed conversation_state per conversation key. The server treats a
-// continued conversation without a valid clean one as tainted (ADR 0010 §5).
+// Latest signed conversation_state and server conversation_id per conversation
+// key. The server treats a continued conversation without a valid clean state
+// as tainted, and serves only ids it minted (ADR 0010 §5).
 const conversationStates = new Map();
 
 /**
@@ -710,24 +750,34 @@ const conversationStates = new Map();
 export async function sendChatMessage(messages, documentContext = null, options = {}) {
   const key = options.conversationId;
   if (!key) throw new Error('sendChatMessage requires options.conversationId');
-  const body = { messages };
-  if (conversationStates.has(key)) {
-    body.conversation_state = conversationStates.get(key);
-  }
+  // The server binds pending actions to its id; confirmChatAction sends it back.
+  const known = conversationStates.get(key);
+  const body = { messages, conversation_id: known?.id ?? key };
+  if (known?.state) body.conversation_state = known.state;
   const response = await postChat(body, documentContext, options);
-  if (response?.conversation_state) conversationStates.set(key, response.conversation_state);
+  if (response?.conversation_state) {
+    conversationStates.set(key, {
+      state: response.conversation_state,
+      id: response.conversation_id ?? body.conversation_id,
+    });
+  }
   return response;
 }
 
 /**
  * Run a pending action the server recorded, by its single-use token.
  * @param {string} token
+ * @param {string} conversationId - The key of the conversation whose turn recorded the action
  * @returns {Promise<Object>} The tool result, or `{ error_code }` when refused
  */
-export async function confirmChatAction(token) {
+export async function confirmChatAction(token, conversationId) {
+  if (!conversationId) throw new Error('confirmChatAction requires a conversationId');
   return apiFetch(`${UI_API_BASE}/chat/confirm`, {
     method: 'POST',
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({
+      token,
+      conversation_id: conversationStates.get(conversationId)?.id ?? conversationId,
+    }),
   });
 }
 
@@ -1078,6 +1128,54 @@ export function setDisplayName(name) {
 
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 
+export async function saveTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/templates`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listTemplates() {
+  return apiFetch(`${API_BASE}/templates`);
+}
+
+export async function updateTemplate(templateId, body) {
+  return apiFetch(`${API_BASE}/templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteTemplate(templateId, revision) {
+  return apiFetch(
+    `${API_BASE}/templates/${encodeURIComponent(templateId)}?expected_revision=${encodeURIComponent(revision)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function insertTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/insert-template`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/** Capture a revision of a session as a new session. */
+export async function saveSessionView(sessionId, name, expectedRevision) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/save-view`, {
+    method: 'POST',
+    body: JSON.stringify({ name, expected_revision: expectedRevision }),
+  });
+}
+
+/** Copy a session (canvas, write mode, staged changes) into a new session named `name`. */
+export async function copySession(sessionId, name) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/copy`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
 /**
  * Create a new server-side shared session (server-assigned id).
  * @param {string|null} name
@@ -1307,7 +1405,15 @@ export async function getSessionActivity(sessionId, { actor, limit } = {}) {
 export async function undoSessionAction(sessionId, clientId) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/undo`, {
     method: 'POST',
-    body: JSON.stringify({ client_id: clientId }),
+    body: JSON.stringify({ client_id: clientId, appearance_version: 1 }),
+  });
+}
+
+/** Reapply the requesting actor's most recently undone session action. */
+export async function redoSessionAction(sessionId, clientId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/redo`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId, appearance_version: 1 }),
   });
 }
 

@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
@@ -150,9 +151,8 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
     expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
-    // No regression from the "Nearby object menu" creation-time attachment
-    // entry point: today's plain one-click toolbox creation (no target
-    // anchor involved) must still produce an unattached annotation.
+    // Plain one-click toolbox creation (no target anchor involved) must still
+    // produce an unattached annotation.
     expect(text.data.attachment).toBeUndefined();
     // Unlike `shape` (see the semantic-default-layer test below), every
     // other kind gets no explicit `zIndex` at creation, which resolves to
@@ -260,19 +260,18 @@ describe('GraphCanvas bottom annotation toolbox', () => {
   it('creates an icon annotation via the toolbox with the default icon and size', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^icon: check$/i }));
 
     placeOnPane();
 
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
-    expect(icon.data.icon).toBe('circle');
+    expect(icon.data.icon).toBe('check');
     // No `style` box (fixed intrinsic size) — geometry lives in `data.size`
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
-    // No regression: plain one-click creation with no nearby target produces
-    // an unattached icon, same as before the "Nearby object menu" entry point.
+    // Plain one-click creation with no target anchor produces an unattached icon.
     expect(icon.data.attachment).toBeUndefined();
   });
 
@@ -437,16 +436,10 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(findCreatedNode('heatmap').zIndex).toBe(-1);
   });
 
-  it('creates a label annotation via the toolbox', () => {
+  it('does not offer label creation via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
-
-    placeOnPane();
-
-    const label = findCreatedNode('label');
-    expect(label).toBeTruthy();
-    expect(label.data.attachment).toBeUndefined();
+    expect(screen.queryByRole('button', { name: /^label$/i })).not.toBeInTheDocument();
   });
 
   it('honours a host-provided label override for i18n', () => {

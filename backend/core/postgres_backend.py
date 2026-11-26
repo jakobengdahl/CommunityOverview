@@ -78,8 +78,10 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 from backend.core import layer_store
+from backend.core.actor_attribution import validate_erasure
 from backend.core.storage_backends import (
     BackendCapabilities,
+    BatchConditions,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
@@ -1098,6 +1100,7 @@ class PostgresGraphPersistenceBackend:
             store_traversal=True,
             revision_enforcement=True,
             staged_sessions=self._staged_sessions,
+            batch_conditions=True,
         )
 
     # -- traversal contract --------------------------------------------------
@@ -1530,6 +1533,7 @@ class PostgresGraphPersistenceBackend:
         self,
         operations: Sequence[EntityOperation],
         write_token: Optional[str] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> List[Optional[int]]:
         """Apply the operations in order, in one transaction.
 
@@ -1580,12 +1584,15 @@ class PostgresGraphPersistenceBackend:
         condition of that same statement; one that does not hold raises
         EntityRevisionConflict and the transaction rolls back, so nothing in
         the batch lands and nothing is announced. `write_token` is stored in
-        every entity written - see `read_write_evidence`.
+        every entity written - see `read_write_evidence`. `conditions` are
+        verified first, in the same transaction - see `_verify_conditions`.
         """
         self._ensure_schema()
         for attempt in range(self.DEADLOCK_RETRIES + 1):
             try:
-                return self._apply_batch_once(operations, write_token)
+                if conditions is None:
+                    return self._apply_batch_once(operations, write_token)
+                return self._apply_batch_once(operations, write_token, conditions)
             except psycopg.errors.DeadlockDetected:
                 if attempt == self.DEADLOCK_RETRIES:
                     raise
@@ -1608,7 +1615,10 @@ class PostgresGraphPersistenceBackend:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _apply_batch_once(
-        self, operations: Sequence[EntityOperation], write_token: Optional[str]
+        self,
+        operations: Sequence[EntityOperation],
+        write_token: Optional[str],
+        conditions: Optional[BatchConditions] = None,
     ) -> List[Optional[int]]:
         with self._pool.connection() as conn:
             with conn.transaction():
@@ -1623,6 +1633,8 @@ class PostgresGraphPersistenceBackend:
                     (SAVE_LOCK_KEY, self.schema),
                 )
                 self._claim_or_check_graph_identity(conn)
+                if conditions is not None:
+                    self._verify_conditions(conn, conditions)
                 checks = [
                     layer_store.MergeCheck.incident_edges(
                         op.entity_id,
@@ -1653,6 +1665,91 @@ class PostgresGraphPersistenceBackend:
                 # and a batch that fails announces nothing at all.
                 self._announce(conn, operations)
                 return revisions
+
+    def _verify_conditions(self, conn, conditions: BatchConditions) -> None:
+        """Refuse the batch unless what its decision read still holds.
+
+        The generation needs no row lock: a replace is a whole-graph save,
+        which takes the save lock this batch already holds in SHARE mode. A
+        row read as present is held FOR SHARE until commit, so another
+        instance's update or delete of it waits for this batch or is seen
+        here; one read as absent can only be checked, and an insert after
+        this point is an ordinary concurrent write (ADR 0013 §4). A listed
+        pair's endpoints are held FOR UPDATE, which the FOR KEY SHARE every
+        edge write takes on its endpoints waits for, so the edges listed
+        between them hold until commit.
+        """
+        if conditions.generation is not None:
+            row = conn.execute(
+                sql.SQL(
+                    "SELECT doc->>'graph_generation', doc->>'graph_replace_token'"
+                    " FROM {} LIMIT 1"
+                ).format(self._table("graph_metadata"))
+            ).fetchone()
+            try:
+                stored = int(row[0]) if row and row[0] is not None else 0
+            except ValueError:
+                # As GraphStorage.load() reads it.
+                stored = 0
+            if stored != conditions.generation:
+                raise EntityRevisionConflict(
+                    "graph", "generation", conditions.generation, stored
+                )
+            stored_token = row[1] if row else None
+            if stored_token != conditions.replace_token:
+                raise EntityRevisionConflict("graph", "replace_token", None, None)
+        scope, scope_params = self._and_scope()
+        endpoints = sorted(
+            {
+                end
+                for source, target, _, _ in conditions.triples
+                for end in (source, target)
+            }
+        )
+        if endpoints:
+            conn.execute(
+                sql.SQL(
+                    "SELECT 1 FROM {} WHERE id = ANY(%s::text[]){} ORDER BY id"
+                    " FOR UPDATE"
+                ).format(self._table("graph_nodes"), scope),
+                (endpoints, *scope_params),
+            )
+        for source, target, type_name, listed in conditions.triples:
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id FROM {} WHERE doc->>'source' = %s"
+                    " AND doc->>'target' = %s AND doc->>'type' = %s{}"
+                ).format(self._table("graph_edges"), scope),
+                (source, target, type_name, *scope_params),
+            ).fetchall()
+            # Compared as sorted in Python, as the server's collation need not
+            # order ids the way the listing did.
+            if sorted(row[0] for row in rows) != sorted(listed):
+                raise EntityRevisionConflict("graph", "triples", None, None)
+        for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
+            read = {
+                entity_id: revision
+                for read_kind, entity_id, revision in conditions.reads
+                if read_kind == kind
+            }
+            if not read:
+                continue
+            rows = conn.execute(
+                sql.SQL(
+                    "SELECT id, COALESCE((doc->>'revision')::bigint, 0) FROM {}"
+                    " WHERE id = ANY(%s::text[]){} ORDER BY id FOR SHARE"
+                ).format(self._table(table), scope),
+                (sorted(read), *scope_params),
+            ).fetchall()
+            stored_revisions = {row[0]: int(row[1]) for row in rows}
+            for entity_id in sorted(read):
+                if stored_revisions.get(entity_id) != read[entity_id]:
+                    raise EntityRevisionConflict(
+                        kind,
+                        entity_id,
+                        read[entity_id],
+                        stored_revisions.get(entity_id),
+                    )
 
     def _refuse_dangling_edges_on_create(
         self, conn, created_nodes, operations: Sequence[EntityOperation]
@@ -3137,8 +3234,92 @@ class PostgresGraphPersistenceBackend:
         self._pool.close()
 
 
+class PostgresMergeRecords:
+    """Actor erasure over a PostgreSQL graph store's staged-merge records.
+
+    Operator maintenance with writers stopped, the counterpart of the file
+    backend's StagedLayersFile merge log: only the merging `actor` of rows in
+    graph_merge_records is rewritten, in place. Nothing is created, so a
+    schema without the table is an absent store. Only rows of this scope
+    (unscoped rows when none is given) are touched.
+    """
+
+    def __init__(
+        self, conninfo: str, *, schema: str = "public", scope: Optional[str] = None
+    ):
+        self._backend = PostgresGraphPersistenceBackend(
+            conninfo, schema=schema, scope=scope, pool_size=1
+        )
+
+    def exists(self) -> bool:
+        backend = self._backend
+        with backend._pool.connection() as conn:
+            return (
+                conn.execute(
+                    "SELECT to_regclass(%s)",
+                    (
+                        sql.Identifier(backend.schema, "graph_merge_records").as_string(
+                            conn
+                        ),
+                    ),
+                ).fetchone()[0]
+                is not None
+            )
+
+    def preflight(self) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        to_regclass needs no privilege on the table, so the erasure's UPDATE
+        is run and rolled back: it fails on a missing privilege, a read-only
+        server or a replica. The values matched are irrelevant to that.
+        """
+        if not self.exists():
+            return False
+        self._update("", "", dry_run=True)
+        return True
+
+    def erase_actor(
+        self, actor_id: str, replacement_token: str, *, dry_run: bool = False
+    ) -> int:
+        """Return the rows changed; a dry run rolls the same UPDATE back."""
+        validate_erasure(actor_id, replacement_token)
+        if not self.exists():
+            return 0
+        return self._update(actor_id, replacement_token, dry_run=dry_run)
+
+    def _update(self, actor_id: str, replacement_token: str, *, dry_run: bool) -> int:
+        backend = self._backend
+        with backend._pool.connection() as conn:
+            with conn.transaction():
+                backend._layer_transaction(conn)
+                # The predicate as well as the policy: a role that bypasses
+                # row-level security would otherwise reach every scope.
+                scope, params = backend._layer_scope()
+                # A JSON string comparison, as the file log's `==`: an actor
+                # stored as another JSON type is not this actor.
+                cursor = conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET doc = jsonb_set(doc, '{{actor}}', %s)"
+                        " WHERE doc->'actor' = %s{}"
+                    ).format(backend._table("graph_merge_records"), scope),
+                    (
+                        psycopg.types.json.Jsonb(replacement_token),
+                        psycopg.types.json.Jsonb(actor_id),
+                        *params,
+                    ),
+                )
+                count = cursor.rowcount
+                if dry_run:
+                    raise psycopg.Rollback()
+        return count
+
+    def close(self) -> None:
+        self._backend.close()
+
+
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    "PostgresMergeRecords",
     # The two a host must be able to catch, so they belong in a curated list
     # as much as the tuning constants do.
     "CrossScopeWriteRefused",

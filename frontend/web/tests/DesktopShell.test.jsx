@@ -1,3 +1,4 @@
+// covers: frontend/web/src/components/DesktopShell.jsx
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 
@@ -106,5 +107,17 @@ describe('DesktopShell', () => {
 
     fireEvent.click(screen.getByText('create-actor'));
     expect(onCreateNodeForType).toHaveBeenCalledWith('Actor');
+  });
+
+  it('hides only search and toolbar in the command-box-only layout, restored on turning it off', () => {
+    const { rerender } = render(<DesktopShell {...baseProps({ hideClassicSurfaces: true })} />);
+    expect(screen.queryByTestId('floating-search')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('floating-toolbar')).not.toBeInTheDocument();
+    expect(screen.getByTestId('floating-header')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-panel')).toBeInTheDocument();
+
+    rerender(<DesktopShell {...baseProps({ hideClassicSurfaces: false })} />);
+    expect(screen.getByTestId('floating-search')).toBeInTheDocument();
+    expect(screen.getByTestId('floating-toolbar')).toBeInTheDocument();
   });
 });

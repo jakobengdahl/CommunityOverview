@@ -362,6 +362,8 @@ function withTypePayload(annotation, type, geometry) {
       label: annotation.label || '',
       description: annotation.description || '',
       color: annotation.color ?? annotation.style?.color,
+      // '' means "automatic" (contrast-derived in GroupNode), not a colour.
+      textColor: typeof annotation.textColor === 'string' ? annotation.textColor : '',
       size: normalizeSize(annotation.size || geometry),
       member_node_ids: Array.isArray(annotation.member_node_ids)
         ? [...annotation.member_node_ids]

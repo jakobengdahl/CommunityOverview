@@ -1,5 +1,11 @@
 import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
-import { savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
+import { savedViewLayout, savedViewMetadataToCanvasMetadata } from './sessionAnnotations';
+
+// The user's own membership change, sent to the session as an explicit op.
+// Added nodes are drawn by the server's broadcast of it, from `nodes`/`edges`;
+// `draw` draws them at once only when there is no session to send to.
+const publishMembership = (op, nodeIds, payload) =>
+  useGraphStore.getState().publishMembership?.(op, nodeIds, payload);
 
 /**
  * App's awaiting graph handlers, guarded against stale post-await canvas writes.
@@ -116,7 +122,6 @@ export async function applyEdgeUpdate({
  * @param {Object} params
  * @param {Object} params.deleteDialog  The pending confirmation ({ nodeId | nodeIds, isMultiple }).
  * @param {Function} params.deleteNodes  API call: delete nodes from the graph.
- * @param {Function} params.removeNode  Store action: drop a node from the canvas.
  * @param {Function} params.setDeleteDialog  Store action: set/close the confirmation.
  * @param {Function} params.showNotification  Surface success/failure to the user.
  * @returns {Promise<boolean>} Whether the canvas was updated.
@@ -124,7 +129,6 @@ export async function applyEdgeUpdate({
 export async function confirmNodeDelete({
   deleteDialog,
   deleteNodes,
-  removeNode,
   setDeleteDialog,
   showNotification,
 }) {
@@ -133,7 +137,7 @@ export async function confirmNodeDelete({
     const ids = deleteDialog.isMultiple ? deleteDialog.nodeIds : [deleteDialog.nodeId];
     await deleteNodes(ids, true);
     const current = !isStaleSessionEpoch(requestEpoch);
-    if (current) ids.forEach((id) => removeNode(id));
+    if (current) publishMembership('nodes_removed', ids);
     showNotification(
       'success',
       deleteDialog.isMultiple ? `${ids.length} nodes deleted` : 'Node deleted'
@@ -241,7 +245,11 @@ export async function persistNewNodes({
   if (scope.sessionChanged()) return false;
   const drawn = toCanvas(result);
   if (!drawn) return false;
-  addNodesToVisualization(drawn.nodes, drawn.edges || []);
+  publishMembership(
+    'nodes_added',
+    drawn.nodes.map((n) => n.id),
+    { nodes: drawn.nodes, edges: drawn.edges || [], draw: addNodesToVisualization }
+  );
   return true;
 }
 
@@ -274,7 +282,11 @@ export async function expandNode({
     if (result.nodes && result.nodes.length > 0) {
       const existingIds = new Set(nodes.map((n) => n.id));
       const newCount = result.nodes.filter((n) => !existingIds.has(n.id)).length;
-      addNodesToVisualization(result.nodes, result.edges || []);
+      publishMembership(
+        'nodes_added',
+        result.nodes.map((n) => n.id),
+        { nodes: result.nodes, edges: result.edges || [], draw: addNodesToVisualization }
+      );
       if (newCount > 0) {
         showNotification('success', `Added ${newCount} new node${newCount !== 1 ? 's' : ''}`);
       } else {
@@ -438,8 +450,8 @@ export async function setEdgeType({
 /**
  * Load a SavedView node's contents onto the canvas, replacing what is there.
  *
- * The canvas is cleared before the node fetches, so the scope is captured after
- * that clear. A switch or a later wholesale replace — another saved view, a
+ * In a session the view's layout goes with the replace; otherwise the canvas is
+ * cleared and its overlays queued once the nodes are drawn. A switch or a later wholesale replace — another saved view, a
  * session load or resync, the clear action — supersedes this load, and its nodes
  * must not be added on top of whatever replaced them.
  *
@@ -468,7 +480,6 @@ export async function loadSavedViewNode({
     const savedEdges = nodeData.metadata?.edges || [];
     const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
     if (nodeIds.length > 0) {
-      clearVisualization();
       const scope = captureCanvasScope();
       const details = await Promise.all(nodeIds.map((id) => getNodeDetails(id).catch(() => null)));
       if (scope.canvasReplaced()) return false;
@@ -481,32 +492,44 @@ export async function loadSavedViewNode({
           }
           return n;
         });
-      if (loadedNodes.length > 0) {
-        let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
-        if (edgesToLoad.length === 0) {
-          const loadedIds = new Set(loadedNodes.map((n) => n.id));
-          const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
-          for (const d of details) {
-            if (d?.edges) {
-              const relevant = d.edges.filter(
-                (e) =>
-                  loadedIds.has(e.source) &&
-                  loadedIds.has(e.target) &&
-                  (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
-              );
-              edgesToLoad.push(...relevant);
-            }
+      let edgesToLoad = savedEdges.length > 0 ? savedEdges : [];
+      if (edgesToLoad.length === 0) {
+        const loadedIds = new Set(loadedNodes.map((n) => n.id));
+        const savedEdgeIds = new Set(nodeData.metadata?.edge_ids || []);
+        for (const d of details) {
+          if (d?.edges) {
+            const relevant = d.edges.filter(
+              (e) =>
+                loadedIds.has(e.source) &&
+                loadedIds.has(e.target) &&
+                (savedEdgeIds.size === 0 || savedEdgeIds.has(e.id))
+            );
+            edgesToLoad.push(...relevant);
           }
         }
-        const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
-        addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-        if (savedViewAnnotations.groups.length > 0) {
+      }
+      const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
+      // A session stores the view's layout with the replace's one record and
+      // every browser renders it from there, so none is saved back.
+      const sent = publishMembership(
+        'nodes_replaced',
+        loadedNodes.map((n) => n.id),
+        {
+          nodes: loadedNodes,
+          edges: Array.from(edgeMap.values()),
+          draw: addNodesToVisualization,
+          view: savedViewLayout(nodeData.metadata),
+        }
+      );
+      if (!sent) {
+        clearVisualization({ keepNodes: true });
+        if (loadedNodes.length > 0 && savedViewAnnotations.groups.length > 0) {
           setPendingGroups({
             groups: savedViewAnnotations.groups,
             parentIds: savedViewAnnotations.parentIds,
           });
         }
-        if (savedViewAnnotations.annotations.length > 0) {
+        if (loadedNodes.length > 0 && savedViewAnnotations.annotations.length > 0) {
           setPendingAnnotations(savedViewAnnotations.annotations);
         }
       }
@@ -569,6 +592,7 @@ export async function openAgentEditor({ agent, getNodeDetails, openEditor, showN
  * @param {Function} params.addNodesToVisualization  Store action: add to the canvas.
  * @param {Function} params.showNotification  Surface the outcome to the user.
  * @param {Function} [params.onDrawn]  Called with the created node once it is drawn.
+ * @param {{x: number, y: number}} [params.position]  Flow position to draw the node at.
  * @returns {Promise<boolean>} Whether the node was drawn.
  */
 export async function createDialogNode({
@@ -577,16 +601,24 @@ export async function createDialogNode({
   addNodesToVisualization,
   showNotification,
   onDrawn,
+  position,
 }) {
   const scope = captureCanvasScope();
   const result = await addNodes([node], []);
-  const created = createdNodesToCanvas([node], result);
+  const created = createdNodesToCanvas([node], result, position);
   if (!created) return false;
   const [createdNode] = created.nodes;
   showNotification('success', `${createdNode.type} "${createdNode.name}" created`);
   if (scope.sessionChanged()) return false;
-  addNodesToVisualization(created.nodes, []);
-  onDrawn?.(createdNode);
+  publishMembership(
+    'nodes_added',
+    created.nodes.map((n) => n.id),
+    {
+      nodes: created.nodes,
+      draw: addNodesToVisualization,
+      onDrawn: () => onDrawn?.(createdNode),
+    }
+  );
   return true;
 }
 
@@ -596,15 +628,30 @@ export async function createDialogNode({
  * The `toCanvas` of the single-node create branches (subscription, skill,
  * knowledge collection, CreateNodeDialog).
  *
+ * A `position` (a toolbar drop point) pins the first node there as its saved
+ * position, so the canvas draws it where it was dropped instead of auto-placing
+ * it; it is set on the drawn copy only, never sent to the server.
+ *
  * @param {Array} nodes  The nodes as sent.
  * @param {Object} result  The addNodes reply.
+ * @param {{x: number, y: number}} [position]  Flow position for the first node.
  * @returns {{nodes: Array}|null} What to draw, or null when nothing was created.
  */
-export function createdNodesToCanvas(nodes, result) {
+export function createdNodesToCanvas(nodes, result, position) {
   const ids = result?.added_node_ids;
   if (!(ids && ids.length > 0)) return null;
-  return { nodes: nodes.map((node, index) => ({ ...node, id: ids[index] || node.id })) };
+  return {
+    nodes: nodes.map((node, index) => ({
+      ...node,
+      id: ids[index] || node.id,
+      ...(position && index === 0 ? { _savedPosition: position } : {}),
+    })),
+  };
 }
+
+// How far below a dropped Agent its EventSubscription is drawn; the canvas
+// layout's parent-to-child offset.
+const AGENT_SUBSCRIPTION_OFFSET_Y = 240;
 
 /**
  * Map an agent create's addNodes result onto the Agent, its subscription and the
@@ -613,11 +660,22 @@ export function createdNodesToCanvas(nodes, result) {
  * @param {Array} agentNodes  The Agent and EventSubscription nodes as sent.
  * @param {Array} agentEdges  The edges as sent.
  * @param {Object} result  The addNodes reply.
+ * @param {{x: number, y: number}} [position]  Flow position for the Agent node; its
+ *   subscription is drawn below it.
  * @returns {{nodes: Array, edges: Array}|null} What to draw, or null when nothing was created.
  */
-export function agentCreateToCanvas(agentNodes, agentEdges, result) {
+export function agentCreateToCanvas(agentNodes, agentEdges, result, position) {
   const created = createdNodesToCanvas(agentNodes, result);
   if (!created) return null;
+  if (position) {
+    // Pin the subscription too: one saved position makes the canvas skip its
+    // layout, so an unpinned companion would land at the origin.
+    const below = { x: position.x, y: position.y + AGENT_SUBSCRIPTION_OFFSET_Y };
+    created.nodes = created.nodes.map((n) => ({
+      ...n,
+      _savedPosition: n.type === 'Agent' ? position : below,
+    }));
+  }
   const ids = result.added_node_ids;
   const agentId = ids[agentNodes.findIndex((n) => n.type === 'Agent')];
   const subscriptionId = ids[agentNodes.findIndex((n) => n.type === 'EventSubscription')];

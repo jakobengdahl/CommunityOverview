@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 import {
   annotationsToGroups,
@@ -20,6 +21,9 @@ export function serverStateToMirror(state, resolvedNodeIds) {
   return {
     node_refs: resolvedNodeIds || s.node_refs || [],
     positions: s.positions || {},
+    shape_overrides: s.shape_overrides || {},
+    type_shapes: s.type_shapes || {},
+    shape_revisions: s.shape_revisions || {},
     hidden_node_ids: s.hidden_node_ids || [],
     hidden_edge_ids: s.hidden_edge_ids || [],
     dimmed_node_ids: s.dimmed_node_ids || [],
@@ -85,6 +89,11 @@ export function useSharedSession({
       const loadedNodes = assertArrayField(resolved.nodes, 'nodes');
       const resolvedEdges = assertArrayField(resolved.edges, 'edges');
       clearVisualization();
+      useGraphStore.setState({
+        shapeOverrides: state.shape_overrides || {},
+        typeShapes: state.type_shapes || {},
+        shapeRevisions: state.shape_revisions || {},
+      });
       if (loadedNodes.length) {
         const positioned = loadedNodes.map((n) =>
           state.positions?.[n.id] ? { ...n, _savedPosition: state.positions[n.id] } : n

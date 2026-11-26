@@ -1,3 +1,4 @@
+# covers: backend/core/postgres_backend.py
 """The PostgreSQL backend against the layer-store contract, and what is its
 own: the tables are opt-in and idempotent, a scope keeps layers apart the
 way it keeps graph rows apart, and a merge is announced like any write.
@@ -8,6 +9,7 @@ see test_persistence_contract_postgres.py.
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import threading
@@ -31,6 +33,7 @@ from backend.core.postgres_backend import (  # noqa: E402
     SCOPE_POLICY_SUFFIX,
     CrossScopeWriteRefused,
     PostgresGraphPersistenceBackend,
+    PostgresMergeRecords,
 )
 from backend.core.storage_backends import EntityOperation, NodeTypeChanged  # noqa: E402
 from backend.core.tests.layer_store_contract import (  # noqa: E402
@@ -46,6 +49,7 @@ from backend.core.tests.persistence_contract import (  # noqa: E402
     node_payload,
     snapshot,
 )
+from backend.service.actor_erasure import main as erase_actor_cli  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not _server_reachable(), reason="no PostgreSQL server configured"
@@ -264,7 +268,9 @@ class TestScopesKeepLayersApart:
         first.stage(A, [entry("node", "a")])
         with pytest.raises(CrossScopeWriteRefused):
             second.record_staged(A)
-        with pytest.raises(CrossScopeWriteRefused):
+        with pytest.raises(
+            (CrossScopeWriteRefused, psycopg.errors.InsufficientPrivilege)
+        ):
             second.retire(A)
         second.drop_layer(A)
         assert first.staged_status(A) == ls.STATUS_ACTIVE
@@ -304,7 +310,9 @@ class TestScopesKeepLayersApart:
             other.merge(A, "m", [], [], [("node", "q")], {})
         with pytest.raises(CrossScopeWriteRefused):
             other.record_staged(A)
-        with pytest.raises(CrossScopeWriteRefused):
+        with pytest.raises(
+            (CrossScopeWriteRefused, psycopg.errors.InsufficientPrivilege)
+        ):
             other.retire(A)
         other.drop_layer(A)
         assert [e["entity_id"] for e in owner.load_layer(A)] == ["q"]
@@ -930,3 +938,120 @@ class TestMergeRecordRetention:
                 ).format(psycopg.sql.Identifier(schema))
             ).fetchall()
         assert [row[0] for row in stamped] == sorted(sessions)[:2]
+
+
+@pytest.fixture
+def erasure_env(monkeypatch):
+    for name in (
+        "AGENTS_RUN_HISTORY_DB",
+        "AGENTS_GOVERNANCE_DB",
+        "GRAPH_POSTGRES_SCOPE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GRAPH_POSTGRES_DSN", DSN)
+    return monkeypatch
+
+
+ERASE = ["--actor-id", "member-1", "--replacement-token", "erased"]
+
+
+def test_actor_erasure_rewrites_merging_actor_in_merge_records_only(
+    erasure_env, make, schema, capsys, tmp_path
+):
+    """Merge-record erasure rewrites `actor` in place; a dry run or a server
+    that refuses the write changes no store."""
+    monkeypatch = erasure_env
+    backend = make()
+    backend.record_staged(A)
+    backend.stage(A, [entry("node", "a"), entry("node", "b")])
+    backend.merge(A, "m-mine", [], [], [("node", "a")], {"actor": "member-1"})
+    backend.merge(A, "m-other", [], [], [("node", "b")], {"actor": "member-2"})
+    mine, other = backend.load_merge("m-mine"), backend.load_merge("m-other")
+    records = PostgresMergeRecords(DSN, schema=schema)
+    try:
+        assert records.erase_actor("member-1", "erased", dry_run=True) == 1
+    finally:
+        records.close()
+    assert backend.load_merge("m-mine") == mine
+    history = tmp_path / "history.ndjson"
+    history.write_text(json.dumps({"actor": "member-1"}) + "\n")
+    args = ["--actor-id", "member-1", "--replacement-token", "erased"]
+    args += ["--postgres-schema", schema]
+    # to_regclass succeeds on a read-only server; the UPDATE does not.
+    read_only = psycopg.conninfo.conninfo_to_dict(DSN)
+    read_only["options"] = "-c default_transaction_read_only=on"
+    monkeypatch.setenv(
+        "GRAPH_POSTGRES_DSN", psycopg.conninfo.make_conninfo(**read_only)
+    )
+    assert erase_actor_cli([*args, "--history-path", str(history)]) == 2
+    assert capsys.readouterr().out == ""
+    assert json.loads(history.read_text()) == {"actor": "member-1"}
+    assert backend.load_merge("m-mine") == mine
+    monkeypatch.setenv("GRAPH_POSTGRES_DSN", DSN)
+    assert erase_actor_cli(args) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["merge_records"] == 1
+    assert backend.load_merge("m-mine") == {**mine, "actor": "erased"}
+    assert backend.load_merge("m-other") == other
+    assert erase_actor_cli(args) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["merge_records"] == 0
+
+
+def test_actor_erasure_treats_a_schema_without_merge_records_as_absent(
+    erasure_env, schema, capsys
+):
+    """No graph_merge_records table: count 0, exit 0, and nothing created."""
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema))
+        )
+    assert erase_actor_cli([*ERASE, "--postgres-schema", schema]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["merge_records"] == 0
+    assert tables_in(schema) == set()
+
+
+def test_actor_erasure_rewrites_only_the_configured_scopes_merge_records(
+    erasure_env, make, schema, capsys
+):
+    """With GRAPH_POSTGRES_SCOPE set, even a role that bypasses row-level
+    security changes only that scope's merge records."""
+    merged = {}
+    for scope, session in (("scope-a", A), ("scope-b", B)):
+        backend = make(scope=scope)
+        backend.record_staged(session)
+        backend.stage(session, [entry("node", scope, session_id=session)])
+        merge_id = f"m-{scope}"
+        backend.merge(
+            session, merge_id, [], [], [("node", scope)], {"actor": "member-1"}
+        )
+        merged[scope] = backend, merge_id, backend.load_merge(merge_id)
+    records = PostgresMergeRecords(DSN, schema=schema, scope="scope-a")
+    try:
+        assert records.erase_actor("member-1", "erased", dry_run=True) == 1
+    finally:
+        records.close()
+    erasure_env.setenv("GRAPH_POSTGRES_SCOPE", "scope-a")
+    assert erase_actor_cli([*ERASE, "--postgres-schema", schema]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["merge_records"] == 1
+    backend, merge_id, before = merged["scope-a"]
+    assert backend.load_merge(merge_id) == {**before, "actor": "erased"}
+    backend, merge_id, before = merged["scope-b"]
+    assert backend.load_merge(merge_id) == before
+
+
+def test_actor_erasure_without_a_dsn_exits_2_touching_no_store(
+    erasure_env, make, schema, capsys, tmp_path
+):
+    """--postgres-schema with no GRAPH_POSTGRES_DSN is an invocation error."""
+    backend = make()
+    backend.record_staged(A)
+    backend.stage(A, [entry("node", "a")])
+    backend.merge(A, "m", [], [], [("node", "a")], {"actor": "member-1"})
+    before = backend.load_merge("m")
+    history = tmp_path / "history.ndjson"
+    history.write_text(json.dumps({"actor": "member-1"}) + "\n")
+    erasure_env.delenv("GRAPH_POSTGRES_DSN")
+    args = [*ERASE, "--postgres-schema", schema, "--history-path", str(history)]
+    assert erase_actor_cli(args) == 2
+    assert capsys.readouterr().out == ""
+    assert json.loads(history.read_text()) == {"actor": "member-1"}
+    assert backend.load_merge("m") == before

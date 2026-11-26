@@ -1,0 +1,124 @@
+# Session backup for operators
+
+Session data is separate from graph data. Back up the graph separately and
+retain both artifacts and their association, including deployment and backup
+time. Coordinate the graph backup with the session snapshot so they correspond.
+
+For the file graph backend, use the supplied offline snapshot integration.
+Stop all application instances and all other writers, then take one coordinated,
+immutable filesystem snapshot containing the session and template directories and graph file
+with its journal, layers and merge sidecars. Keep this snapshot private and
+unchanged throughout the command. The command reads only this snapshot, never a
+live store. Retain the corresponding graph snapshot as the graph backup. A
+snapshot taken while any writer is active is not supported.
+
+Provide a trusted Python module with `authorization_hook()` returning the
+same operator policy used by the deployment. Run in the operator's authorization
+context, with that module on `PYTHONPATH`:
+
+```sh
+export SESSION_BACKUP_AUTH_MODULE=my_deployment.backup_auth
+export SESSION_BACKUP_GRAPH=/snapshot/graph.json
+export SESSION_BACKUP_SESSIONS=/snapshot/sessions
+export SESSION_BACKUP_TEMPLATES=/snapshot/sessions/templates
+python3 scripts/backup_sessions.py --integration scripts.session_backup_file_snapshot \
+  --output /secure/session-backup.json
+```
+
+If the graph backend uses a custom `journal_path`, include that journal in the
+same coordinated snapshot and set `SESSION_BACKUP_GRAPH_JOURNAL` to its snapshot
+path. The integration requires that file when the variable is set; otherwise it
+uses the default journal beside the graph. The operator must match this setting
+to the backend configuration, because the graph file does not record the path.
+An incomplete or malformed journal is refused; repair it through the normal
+recovery workflow and take a fresh snapshot before retrying.
+
+The command checks `backup_sessions` admin authorization before opening stores,
+and checks every session, mutable template and reference before producing a document. The default
+hook denies admin access. The integration makes private working copies, and
+refuses a pending merge; resolve such a merge through the normal application
+workflow before taking a fresh offline snapshot. Restrict artifact access: the
+command creates a new owner-only file and refuses to overwrite one.
+
+For PostgreSQL or another deployment, a trusted integration may supply
+`authorization_hook()` and `open_backup(hook)`, yielding `(service, sessions,
+modes)`. It must provide a read-only `modes.backup_snapshot()` coordinated with
+all staged writes, mode changes, template writes and merges across instances, and use the same
+hook in the service. The service must expose the dedicated mutable template persistence
+backend as `backup_template_backend`. No PostgreSQL integration is supplied. The session backend
+transaction is held during collection; authorization runs after it is released.
+
+The command backs up all sessions in the directory or fails without producing an
+artifact. It refuses inaccessible references, unreadable staged-session records,
+invalid embedded assets, and any unmerged staged changes. Merge or discard those
+changes through the normal workflow before taking a fresh snapshot and retrying. It does
+not include transient presence, leases or activity. The backup is held in memory,
+so available memory and disk space must accommodate the full session data and
+embedded assets and mutable templates. Profile templates are configuration and are not
+included; retain the corresponding profile configuration separately. Graph data is not included.
+
+Format version 2 adds a validated `templates` array to the integrity-protected document.
+Version 1 remains supported on restore and contains no templates. Both versions store embedded image data URLs in the presentation state and
+in a deduplicated asset table. Each asset's SHA-256 is over its decoded bytes.
+Each session's `write_mode` and `write_mode_source` describe its effective mode;
+`write_mode_mirror` preserves the original fields present in the session record,
+which can differ from the authoritative staged-session record.
+The document `integrity.sha256` is over UTF-8 JSON of the entire document with
+`integrity` omitted, sorted keys, no whitespace, unescaped Unicode, and no
+non-finite numbers. These hashes detect accidental corruption; they do not
+provide authentication. Retain both artifacts securely; a graph-only backup cannot recover sessions.
+
+
+## Restore
+
+Stop all application instances and writers. Work with a private offline copy of
+the paired graph backup, never a live store. Use the same trusted authorization
+module and graph snapshot settings as backup. The operator policy must allow the
+`restore_sessions` admin action, session reads, and reads of every referenced
+node, edge and session. The default policy denies admin access.
+
+```sh
+export SESSION_BACKUP_AUTH_MODULE=my_deployment.backup_auth
+export SESSION_BACKUP_GRAPH=/snapshot/graph.json
+python3 scripts/restore_sessions.py --integration scripts.session_restore_file_snapshot \
+  --input /secure/session-backup.json --output /secure/restored-workspace
+```
+
+The output must not exist, and its parent must be on a filesystem supporting
+Linux atomic no-replace rename. The new directory contains the copied graph,
+sidecars, `snapshot.journal.ndjson`, and a `sessions` directory containing the
+mutable `templates` directory (`sessions/templates`). Configure the
+graph journal path to the copied journal if present. Verify the graph and
+sessions in a separate offline instance before switching any application to
+them. The command prints a JSON report of missing node and edge references,
+subject to the operator's graph visibility. Protect the report as session data.
+
+Restore checks document and asset hashes, template documents and profile ID collisions,
+IDs, revisions, annotation safety and
+the normal session and image limits before publication. Version 1 supports up
+to 10,000 sessions and 2,000 annotations per session, subject also to the
+normal document and image size limits. The whole backup must fit in memory and
+the copied graph and restored data must fit on disk. Nonempty import mapping or
+report tables are refused: version 1 backup currently writes empty tables.
+The file integration reads profile templates from the `templates` directory beside the
+active schema configuration; set `SCHEMA_FILE` to the profile schema when necessary.
+Invalid or duplicate profile documents and template ID collisions with profiles,
+restored sessions, or staged session records refuse the restore.
+Existing session IDs, retired staged records, and active staged records for
+direct sessions are collisions. Active records for staged sessions in the
+paired graph are retained. Resolve collisions in a separate clean graph
+workspace before retrying. No data is overwritten.
+
+All writes occur in a private temporary workspace. A failed validation or
+write leaves the output unpublished; discard any leftover temporary directory
+after an interruption and retry from the original artifacts. Keep both original
+backups until the restored graph and sessions have been verified. The supplied
+integration is for file storage; another backend needs a trusted offline
+integration whose `open_restore(hook, output)` yields the service, empty session
+backend, write modes and an atomic publish callback, exposes the empty mutable template
+backend as `service.backup_template_backend` and profile IDs (or a callable returning
+them) as `service.backup_profile_template_ids`, and discards its workspace on failure.
+
+Before rolling back, take a fresh coordinated session and graph backup. When
+returning, restore that session backup with its paired graph backup using the
+procedure above, then verify the restored workspace before switching to it.

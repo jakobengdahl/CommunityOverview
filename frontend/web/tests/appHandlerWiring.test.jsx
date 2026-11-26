@@ -1,5 +1,9 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, waitFor, act, screen, fireEvent } from '@testing-library/react';
+import { echoingOpsFetch } from './fakeSessionServer';
+import { render, waitFor, act, screen, fireEvent, cleanup } from '@testing-library/react';
+import { useContext } from 'react';
+import { CommandRegistryContext } from '../src/commands/commandRegistry';
 
 // The session-scoped helpers App delegates to are tested on their own in
 // appAwaitingHandlerEpochGuards.test.js. What those tests cannot see is App's
@@ -12,7 +16,32 @@ const captured = vi.hoisted(() => ({
   dialogs: null,
   desktop: null,
   syncHandlersRef: null,
+  template: null,
+  captureBarrier: null,
+  captureCalls: 0,
+  registry: null,
 }));
+
+vi.mock('../src/components/SaveTemplateDialog', () => ({
+  default: function SaveTemplateDialogStub(props) {
+    captured.template = props;
+    return <div role="dialog" />;
+  },
+}));
+
+vi.mock('../src/utils/captureFlush', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    createCaptureFlushQueue: () => {
+      const queue = actual.createCaptureFlushQueue();
+      return (options) => {
+        captured.captureCalls += 1;
+        return captured.captureBarrier || queue(options);
+      };
+    },
+  };
+});
 
 vi.mock('../src/hooks/useSyncConnection', async (importOriginal) => {
   const actual = await importOriginal();
@@ -31,6 +60,7 @@ vi.mock('../src/components/DesktopShell', async (importOriginal) => {
   return {
     default: function DesktopShellStub(props) {
       captured.desktop = props;
+      captured.registry = useContext(CommandRegistryContext);
       return <DesktopShell {...props} />;
     },
   };
@@ -99,6 +129,7 @@ vi.mock('../src/services/api', () => {
     updateEdge: vi.fn(async () => ({ success: true })),
     deleteEdge: vi.fn(async () => ({ success: true })),
     exportGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
+    insertTemplate: vi.fn(async () => ({})),
   };
 });
 
@@ -107,6 +138,7 @@ class FakeEventSource {
     this.url = url;
     this.onmessage = null;
     this.onerror = null;
+    FakeEventSource.instances.push(this);
     setTimeout(
       () =>
         this.onmessage?.({
@@ -117,14 +149,12 @@ class FakeEventSource {
   }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
+import { SessionSyncClient } from '../src/services/sessionSyncClient';
 import * as api from '../src/services/api';
 import useGraphStore from '../src/store/graphStore';
 import { I18nProvider } from '../src/i18n';
@@ -187,6 +217,9 @@ describe('App handler wiring', () => {
     captured.dialogs = null;
     captured.desktop = null;
     captured.syncHandlersRef = null;
+    captured.template = null;
+    captured.captureBarrier = null;
+    captured.captureCalls = 0;
     startupStats = null;
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -208,6 +241,295 @@ describe('App handler wiring', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each(
+    ['node', 'type'].flatMap((scope) => [
+      [scope, 'none'],
+      [scope, 'edited'],
+      [scope, 'reconnect'],
+    ])
+  )(
+    'sends one appearance operation for %s at the dialog revision (after apply: %s)',
+    async (scope, after) => {
+      const edited = after !== 'none';
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(
+        true
+      );
+      if (scope === 'type') {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.apply }));
+        fireEvent.click(screen.getByLabelText(en.node_appearance.scope_type));
+      }
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][0]).toEqual([
+        expect.objectContaining({
+          op: scope === 'node' ? 'node_shape_set' : 'type_shape_set',
+          selection: { builtin: true },
+          base_revision: 0,
+          ...(scope === 'node'
+            ? { node_id: 'a' }
+            : { type: 'Actor', clear_node_id: 'a', clear_base_revision: 0 }),
+        }),
+      ]);
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+      expect(send).toHaveBeenCalledTimes(1);
+      if (edited) {
+        fireEvent.click(screen.getByRole('tab', { name: en.node_appearance.shape }));
+        fireEvent.change(screen.getByLabelText(en.node_appearance.scale), {
+          target: { value: '2' },
+        });
+      }
+      const op = send.mock.calls[0][0][0];
+      const acknowledged = {
+        ...op,
+        revisions: scope === 'node' ? { 'node:a': 1 } : { 'type:Actor': 1, 'node:a': 1 },
+      };
+      // A reconnect settles the write before its reload reaches the store.
+      const meta = { ownAppearance: true, sessionId: canvas().sessionKey };
+      meta.applyBaseline = () => {
+        if (after !== 'reconnect') meta.currentAppearance = acknowledged;
+        return false;
+      };
+      await act(async () => captured.syncHandlersRef.current.onRemoteOps([acknowledged], meta));
+      const revision = after === 'reconnect' ? 0 : 1;
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')?.querySelector('[role="alert"]') ?? null).toBeNull()
+      );
+      expect(store().shapeRevisions[scope === 'node' ? 'node:a' : 'type:Actor'] || 0).toBe(
+        revision
+      );
+      if (edited) {
+        expect(screen.getByLabelText(en.node_appearance.scale)).toHaveValue(2);
+        if (after === 'reconnect') {
+          // The dialog builds on its own write, so it waits for the reload.
+          fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+          expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+          act(() => useGraphStore.setState({ shapeRevisions: acknowledged.revisions }));
+        }
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0]).toEqual(
+          expect.objectContaining({
+            base_revision: 1,
+            selection: { inline: expect.objectContaining({ scale: 2 }) },
+          })
+        );
+      } else {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      }
+    }
+  );
+
+  it.each([false, true])(
+    'scopes a refused appearance write to its dialog (reopened: %s)',
+    async (reopened) => {
+      const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps').mockImplementation(() => {});
+      await renderApp();
+      act(() => canvas().onSaveView({ nodes: [] }));
+      act(() => canvas().onAppearance('a'));
+      fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+      const op = send.mock.calls[0][0][0];
+      api.getSession.mockResolvedValueOnce({
+        state: {},
+        resolved: { nodes: [NODE_A, NODE_B], edges: [EDGE_1] },
+        roster: [],
+      });
+      if (reopened) {
+        fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+        act(() => canvas().onAppearance('b'));
+      }
+      await act(async () =>
+        captured.syncHandlersRef.current.onDropped([op], 409, {
+          detail: { error: 'shape_revision_conflict' },
+        })
+      );
+      if (reopened) {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].node_id).toBe('b');
+      } else {
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+        // A reload (or a collaborator's write) moving the revision past the
+        // open dialog keeps Apply refused; reopening builds on the new state.
+        act(() => useGraphStore.setState({ shapeRevisions: { 'node:a': 1 } }));
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+        expect(send).toHaveBeenCalledTimes(1);
+        fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+        act(() => canvas().onAppearance('a'));
+        fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0][0].base_revision).toBe(1);
+      }
+    }
+  );
+
+  it('refuses a node gone from the store inside the dialog and guards double Escape', async () => {
+    const send = vi.spyOn(SessionSyncClient.prototype, 'sendOps');
+    await renderApp();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    act(() => canvas().onAppearance('a'));
+    const nodes = store().nodes;
+    act(() => useGraphStore.setState({ nodes: nodes.filter((node) => node.id !== 'a') }));
+    fireEvent.click(screen.getByRole('button', { name: en.node_appearance.apply }));
+    expect(screen.getByRole('dialog').querySelector('[role="alert"]')).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
+    act(() => useGraphStore.setState({ nodes }));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual(['a', 'b']);
+    expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(false);
+  });
+
+  it('guards double Escape while the template dialog is open and releases it on close', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual(['a', 'b']);
+    act(() => captured.template.onClose());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual([]);
+  });
+
+  it('aborts a template insertion before capture when the session changes during readiness', async () => {
+    await renderApp();
+    act(() => canvas().onSaveView({ nodes: [] }));
+    let releaseReady;
+    vi.spyOn(SessionSyncClient.prototype, 'whenReady').mockImplementationOnce(
+      () => new Promise((resolve) => (releaseReady = resolve))
+    );
+    const insert = captured.registry.get('template:insert').execute({}, { template_id: 't1' });
+    const rejected = expect(insert).rejects.toThrow('Session is no longer available');
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => canvas().onSaveView({ nodes: [], edges: [] }));
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    const signal = canvas().saveViewSignal;
+    const captureCalls = captured.captureCalls;
+    captured.captureBarrier = Promise.resolve();
+    await act(async () => {
+      releaseReady();
+      await rejected;
+    });
+    expect(canvas().saveViewSignal).toBe(signal);
+    expect(captured.captureCalls).toBe(captureCalls);
+    expect(api.insertTemplate).not.toHaveBeenCalled();
+  });
+
+  it('does not reconnect the old session when template preparation finishes after a switch', async () => {
+    await renderApp();
+    act(() => canvas().onSaveView({ nodes: [] }));
+    await waitFor(() =>
+      expect(
+        FakeEventSource.instances.some((stream) => stream.url.includes('/api/sessions/'))
+      ).toBe(true)
+    );
+    let releaseCapture;
+    captured.captureBarrier = new Promise((resolve) => {
+      releaseCapture = resolve;
+    });
+    const oldSession = canvas().sessionKey;
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    const preparation = captured.template.prepare();
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    const targetStream = FakeEventSource.instances
+      .filter((stream) => stream.url.includes(target))
+      .at(-1);
+    const close = vi.spyOn(targetStream, 'close');
+    await act(async () => {
+      releaseCapture();
+      await Promise.resolve();
+    });
+    const rejected = expect(preparation).rejects.toThrow();
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+      await rejected;
+    });
+    expect(close).not.toHaveBeenCalled();
+    expect(
+      FakeEventSource.instances.filter((stream) => stream.url.includes('/api/sessions/')).at(-1)
+    ).toBe(targetStream);
+    expect(api.getSession).not.toHaveBeenCalledWith(oldSession, { resolve: true });
+  });
+
+  it.each([false, true])(
+    'prepares a newly edited session for templates (edited: %s)',
+    async (edited) => {
+      await renderApp();
+      if (!edited) act(() => store().clearVisualization());
+      const connect = vi.spyOn(SessionSyncClient.prototype, 'connect');
+      act(() => canvas().onSaveSelectionAsTemplate([]));
+      const preparation = captured.template.prepare();
+      await act(async () => {
+        await Promise.resolve();
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+      const source = await preparation;
+      if (edited) {
+        expect(source).toMatchObject({ id: canvas().sessionKey });
+        expect(connect).toHaveBeenCalled();
+        expect(api.getSession).toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+      } else {
+        expect(source).toBeNull();
+        expect(connect).not.toHaveBeenCalled();
+        expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+      }
+      act(() => captured.template.onClose());
+      expect(screen.queryByRole('dialog')).toBeNull();
+    }
+  );
+
+  it('closes the template dialog when the active session changes', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([NODE_A]));
+    expect(captured.template.selected).toEqual([{ id: 'a', annotation: false }]);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    act(() => captured.desktop.onSelectSession('8244-1742-3391-0057'));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe('8244-1742-3391-0057'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('keeps a newly opened template dialog when an earlier save completes', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    const firstSave = captured.template.onSaved;
+    act(() => captured.template.onClose());
+    act(() => canvas().onSaveSelectionAsTemplate([NODE_A]));
+    act(() => firstSave({ nodes: 1, edges: 0, annotations: 0 }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(captured.template.selected).toEqual([{ id: 'a', annotation: false }]);
+
+    const secondSave = captured.template.onSaved;
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    act(() => secondSave({ nodes: 1, edges: 0, annotations: 0 }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(captured.template.sessionId).toBe(target);
+    act(() => captured.template.onSaved({ nodes: 0, edges: 0, annotations: 0 }));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
@@ -331,7 +653,57 @@ describe('App handler wiring', () => {
     });
 
     expect(api.addNodes).toHaveBeenCalledWith([data], []);
-    expect(findNode('created-1')).toMatchObject({ type: data.type, name: data.name });
+    // Drawn from the session's broadcast of the add.
+    await waitFor(() =>
+      expect(findNode('created-1')).toMatchObject({ type: data.type, name: data.name })
+    );
+  });
+
+  it.each([
+    ['Actor', 'onNodeCreated'],
+    ['EventSubscription', 'onSaveSubscription'],
+    ['ActiveKnowledgeCollection', 'onSaveAKC'],
+  ])(
+    'a %s dropped from the toolbar is drawn at the drop point, also on a retry',
+    async (type, handler) => {
+      await renderApp();
+      const data = { type, name: 'Dropped' };
+      api.addNodes
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue({ success: true, added_node_ids: ['dropped-1'] });
+
+      act(() => canvas().onDropCreateNode(type, { x: 120, y: -40 }));
+      // The first save fails and the dialog stays open; the retry succeeds.
+      await act(async () => {
+        await dialogs()
+          [handler](data)
+          .catch(() => {});
+      });
+      await act(async () => {
+        await dialogs()[handler](data);
+      });
+
+      // The position is the canvas's alone; the server is sent the node as entered.
+      expect(api.addNodes).toHaveBeenCalledWith([data], []);
+      await waitFor(() =>
+        expect(findNode('dropped-1')?._savedPosition).toEqual({ x: 120, y: -40 })
+      );
+    }
+  );
+
+  it('does not place a toolbar-created node at an earlier abandoned drop point', async () => {
+    await renderApp();
+    api.addNodes.mockResolvedValue({ success: true, added_node_ids: ['clicked-1'] });
+
+    act(() => canvas().onDropCreateNode('Actor', { x: 120, y: -40 }));
+    act(() => captured.desktop.onCreateNodeForType('Actor'));
+    expect(dialogs().dialogs.createNodeType).toBe('Actor');
+    await act(async () => {
+      await dialogs().onNodeCreated({ type: 'Actor', name: 'Clicked' });
+    });
+
+    await waitFor(() => expect(findNode('clicked-1')).toBeTruthy());
+    expect(findNode('clicked-1')._savedPosition).toBeUndefined();
   });
 
   it('handleEdgeUpdate persists the edge edit and applies it to the canvas edge', async () => {
@@ -363,7 +735,7 @@ describe('App handler wiring', () => {
     });
 
     expect(api.getRelatedNodes).toHaveBeenCalledWith('b', { depth: 1 });
-    expect(nodeIds()).toContain('n1');
+    await waitFor(() => expect(nodeIds()).toContain('n1'));
     expect(findEdge('en')).toBeTruthy();
   });
 
@@ -404,26 +776,6 @@ describe('App handler wiring', () => {
     expect(findEdge('e1').type).toBe('OWNS');
   });
 
-  it('double-clicking a saved view loads its nodes from the API into the canvas', async () => {
-    await renderApp();
-    // Once-only, so the stub cannot outlive this test whatever the runner's
-    // mock-restore semantics or test order.
-    const savedViewNode = async (id) => ({
-      success: true,
-      node: { id, type: 'Actor', name: id.toUpperCase() },
-      edges: [],
-    });
-    api.getNodeDetails.mockImplementationOnce(savedViewNode).mockImplementationOnce(savedViewNode);
-    const view = { type: 'SavedView', name: 'View', metadata: { node_ids: ['v1', 'v2'] } };
-
-    await act(async () => {
-      await canvas().onNodeDoubleClick('view-1', view);
-    });
-
-    expect(api.getNodeDetails).toHaveBeenCalledWith('v1');
-    expect(api.getNodeDetails).toHaveBeenCalledWith('v2');
-    expect(nodeIds()).toEqual(['v1', 'v2']);
-  });
   it.each(['drawer', 'connect dialog', 'new session'])(
     '%s still opens an empty session on 404 without a missing-link notice',
     async (path) => {
@@ -534,6 +886,11 @@ describe('App handler wiring', () => {
       '//evil.example/x',
       '/admin',
       'http:///path',
+      // C0 controls outside the trim's whitespace class stay refused at an end.
+      '\u0001https://example.org/x',
+      'https://example.org/x\u0008',
+      'https://example.org/x\u000e',
+      '\u001fhttps://example.org/x',
     ])('never opens the unsafe target %j', async (target) => {
       await renderApp();
       await act(async () => {
@@ -553,8 +910,8 @@ describe('App handler wiring', () => {
         await canvas().onReferenceOpen({ targetKind: 'resource', target: 'res-1' });
       });
       expect(api.getNodeDetails).toHaveBeenCalledWith('res-1');
+      await waitFor(() => expect(store().focusNodeId).toBe('res-1'));
       expect(nodeIds()).toContain('res-1');
-      expect(store().focusNodeId).toBe('res-1');
     });
 
     it('does not add anything when a resource target cannot be fetched', async () => {
@@ -668,6 +1025,31 @@ describe('App handler wiring', () => {
   // user's silence unless the toast is a live region. The urgency has to
   // follow the kind: a failure interrupts, a notice waits.
   describe('notification toast', () => {
+    it('gives a replacement toast its full lifetime and cancels the timeout on unmount', async () => {
+      await renderApp();
+      vi.useFakeTimers();
+      const notify = () =>
+        act(async () => {
+          await canvas().onReferenceOpen({ targetKind: 'url', target: 'javascript:alert(1)' });
+        });
+      try {
+        await notify();
+        act(() => vi.advanceTimersByTime(2000));
+        await notify();
+        act(() => vi.advanceTimersByTime(1000));
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        act(() => vi.advanceTimersByTime(2000));
+        expect(screen.queryByRole('alert')).toBeNull();
+
+        await notify();
+        expect(vi.getTimerCount()).toBe(1);
+        cleanup();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('announces a notice politely and names its dismiss button', async () => {
       await renderApp();
       api.getSession.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }));
@@ -699,7 +1081,7 @@ describe('App handler wiring', () => {
         await act(async () => {
           await canvas().onReferenceOpen({
             targetKind: 'url',
-            // eslint-disable-next-line no-script-url
+
             target: 'javascript:alert(1)',
           });
         });

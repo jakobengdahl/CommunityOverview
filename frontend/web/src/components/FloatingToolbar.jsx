@@ -81,6 +81,7 @@ import {
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { useViewportMode } from '../hooks/useViewportMode';
+import { getToolbarOrder, runToolbarItem } from '../commands/appCommands';
 import './FloatingToolbar.css';
 
 // Registry of available icons, keyed by Bootstrap Icon name.
@@ -220,24 +221,6 @@ const COLOR_MAP = Object.assign(Object.create(null), {
 
 const DEFAULT_COLOR = '#9CA3AF';
 
-// System types always shown at the bottom (not from schema)
-const SYSTEM_TYPES = ['Agent', 'Skill', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
-const VIEW_TYPES = ['SavedView'];
-
-// Fallback order when schema hasn't loaded yet
-const FALLBACK_DOMAIN_ORDER = [
-  'Actor',
-  'Initiative',
-  'Capability',
-  'Resource',
-  'Legislation',
-  'Theme',
-  'Goal',
-  'Event',
-  'Data',
-  'Risk',
-];
-
 // Neutral glyph for node types with no registered icon. A question mark here
 // would read as a rendering error rather than as an unconfigured icon.
 const DEFAULT_ICON = CircleFill;
@@ -295,46 +278,17 @@ function FloatingToolbar({
   const buttonRefs = useRef({});
   const schema = useGraphStore((s) => s.schema);
 
-  // Build toolbar order from schema node types
-  const toolbarOrder = useMemo(() => {
-    let domainTypes;
-    if (schema?.node_types) {
-      domainTypes = Object.entries(schema.node_types)
-        .filter(([, config]) => config.category !== 'system')
-        .map(([name]) => name);
-    } else {
-      domainTypes = FALLBACK_DOMAIN_ORDER;
-    }
+  const toolbarOrder = useMemo(() => getToolbarOrder(schema), [schema]);
 
-    // System types: show from schema if present, always include Group
-    const systemTypes = SYSTEM_TYPES.filter(
-      (st) => st === 'Group' || !schema?.node_types || schema.node_types[st]
-    );
-
-    return [
-      ...domainTypes,
-      null, // separator
-      ...systemTypes,
-      null, // separator
-      ...VIEW_TYPES,
-    ];
-  }, [schema]);
-
-  const handleClick = (nodeType) => {
-    if (nodeType === 'Agent') {
-      onCreateAgent?.();
-    } else if (nodeType === 'EventSubscription') {
-      onCreateSubscription?.();
-    } else if (nodeType === 'SavedView') {
-      onSaveView?.();
-    } else if (nodeType === 'Group') {
-      onCreateGroup?.();
-    } else if (nodeType === 'ActiveKnowledgeCollection') {
-      onCreateActiveKnowledgeCollection?.();
-    } else {
-      onCreateNode?.(nodeType);
-    }
-  };
+  const handleClick = (nodeType) =>
+    runToolbarItem(nodeType, {
+      onCreateNode,
+      onCreateAgent,
+      onCreateSubscription,
+      onSaveView,
+      onCreateGroup,
+      onCreateActiveKnowledgeCollection,
+    });
 
   const handleDragStart = (event, nodeType) => {
     if (nodeType === 'SavedView') {

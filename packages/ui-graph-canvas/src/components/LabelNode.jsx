@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
@@ -12,7 +13,7 @@ import {
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
-import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -25,14 +26,14 @@ import './LabelNode.css';
  * the session's annotation list (kind: "label").
  */
 const LABEL_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
-const DEFAULT_LABEL_COLOR = '#64748b';
+const DEFAULT_LABEL_COLOR = '#111827';
 const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, enterAttachMode } =
+  const { notifyChange, notifyRemoteLockedAttempt, labels, enterAttachMode } =
     useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live edit lease
   // (task-annotation-exclusive-edit-leases) refuses every mutation below.
@@ -246,6 +247,11 @@ function LabelNode({ id, data, selected }) {
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
             onKeyDown={handleMenuKeyDown}
           >
+            <AnnotationSaveTemplateControl
+              id={id}
+              type="label"
+              onClose={() => setContextMenu(null)}
+            />
             {locked ? (
               // The capability baseline's two actions for a locked object:
               // unlock, and duplicate (a duplicate never mutates the locked
@@ -321,15 +327,9 @@ function LabelNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
-                <NearbyObjectMenuSection
-                  labels={labels}
-                  onAttach={(kind) => attachNearby(id, kind)}
-                />
                 {/* Non-drag "Attach to…" target-tap mode
                     (task-annotation-accessible-shared-controls): `label` is
-                    one of ATTACHABLE_OVERLAY_KINDS, so — unlike the "Add
-                    nearby" section above, which creates a NEW pre-attached
-                    annotation — this attaches THIS existing one. */}
+                    one of ATTACHABLE_OVERLAY_KINDS. */}
                 <button
                   type="button"
                   className="context-menu-attach"

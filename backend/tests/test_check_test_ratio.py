@@ -427,3 +427,20 @@ def test_base_symlinks_count_target_content(
     output = capsys.readouterr().out
     assert test + ":" in output
     assert ("already over the limit on base" in output) == (expected == 0)
+
+
+def test_uncommitted_restore_to_base_is_not_reported(repo):
+    test = "tests/test_unresolved.py"
+    _commit_on_base(repo, {test: _lines(2)})
+    assert _commit(repo, {test: _lines(3)}) == 1
+    (repo / test).write_text(_lines(2))
+    assert main(["--base", "base"]) == 0
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_new_uncommitted_tests_are_checked(repo, staged):
+    test = "tests/test_mod.py"
+    (repo / test).write_text(_lines(16))
+    if staged:
+        _git("add", test)
+    assert main(["--base", "base"]) == 1

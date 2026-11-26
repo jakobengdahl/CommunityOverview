@@ -30,3 +30,5 @@ ADRs carry only the technical decision.
 | [0011](0011-sandboxed-user-functions.md) | Sandboxed user-defined functions: first contract | Proposed |
 | [0012](0012-user-function-isolation.md) | User-function isolation: a hardened-subprocess default runner | Proposed |
 | [0013](0013-graph-import-merge-mode.md) | Graph import: MERGE mode beside REPLACE | Accepted |
+| [0014](0014-webhook-token-storage.md) | Webhook token storage | Accepted |
+| [0016](0016-mcp-2026-07-28-and-skills.md) | MCP 2026-07-28 and skills in three layers | Accepted |

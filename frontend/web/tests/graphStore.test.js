@@ -1,3 +1,4 @@
+// covers: frontend/web/src/store/graphStore.js
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 
@@ -24,6 +25,36 @@ describe('graphStore', () => {
       configLoaded: false,
       error: null,
     });
+  });
+
+  it('stores special node and type identifiers as own properties', () => {
+    useGraphStore.setState({ shapeOverrides: {}, typeShapes: {}, typeShapeClearNodes: {} });
+    const selection = { builtin: true };
+    useGraphStore.getState().setNodeShape('__proto__', selection);
+    let state = useGraphStore.getState();
+    expect(Object.hasOwn(state.shapeOverrides, '__proto__')).toBe(true);
+    expect(JSON.parse(JSON.stringify(state.shapeOverrides))).toEqual({ ['__proto__']: selection });
+    useGraphStore.getState().setTypeShape('__proto__', selection, '__proto__');
+    state = useGraphStore.getState();
+    expect(Object.hasOwn(state.typeShapes, '__proto__')).toBe(true);
+    expect(state.typeShapes.__proto__).toEqual(selection);
+    expect(Object.hasOwn(state.shapeOverrides, '__proto__')).toBe(false);
+    expect(state.typeShapeClearNodes.__proto__).toEqual(['__proto__']);
+    useGraphStore.getState().setTypeShape('__proto__', null);
+    expect(Object.hasOwn(useGraphStore.getState().typeShapes, '__proto__')).toBe(false);
+  });
+
+  it('consumes only the clear intent captured by a completed sync', () => {
+    useGraphStore.setState({ shapeOverrides: {}, typeShapes: {}, typeShapeClearNodes: {} });
+    useGraphStore.getState().setTypeShape('Thing', null, 'a');
+    const snapshot = useGraphStore.getState().typeShapeClearNodes;
+    useGraphStore.getState().setTypeShape('Thing', null, 'b');
+    useGraphStore.getState().consumeTypeShapeClearNodes(snapshot);
+    expect(useGraphStore.getState().typeShapeClearNodes.Thing).toEqual(['a', 'b']);
+    useGraphStore
+      .getState()
+      .consumeTypeShapeClearNodes(useGraphStore.getState().typeShapeClearNodes);
+    expect(useGraphStore.getState().typeShapeClearNodes).toEqual({});
   });
 
   describe('AI assistant collapsed preference', () => {

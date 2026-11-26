@@ -43,6 +43,7 @@ from .models import (
 )
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
+    BatchConditions,
     EntityOperation,
     EntityRevisionConflict,
     ExternalChange,
@@ -372,15 +373,17 @@ class _Undo:
     None where the write created it; `vectors` holds the prior vector of each
     touched node. Captured before memory changes, consumed only when a
     write is refused or did not land (§4.4), and applied without events:
-    none has fired for the write yet.
+    none has fired for the write yet. `regenerate` False leaves a restored
+    node that had no vector without one, rather than embedding it in memory.
     """
 
-    __slots__ = ("nodes", "edges", "vectors")
+    __slots__ = ("nodes", "edges", "vectors", "regenerate")
 
     def __init__(self) -> None:
         self.nodes: Dict[str, Optional[Dict[str, Any]]] = {}
         self.edges: Dict[str, Optional[Dict[str, Any]]] = {}
         self.vectors: Dict[str, Optional[List[float]]] = {}
+        self.regenerate = True
 
 
 class GraphStorage:
@@ -1341,7 +1344,7 @@ class GraphStorage:
             self.edges[edge_id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge_id, data=edge)
         try:
-            self._settle_vector_index(touched)
+            self._settle_vector_index(touched, generate_missing=undo.regenerate)
         except Exception as exc:
             logger.warning(f"could not restore vectors after an undone write: {exc}")
 
@@ -1352,6 +1355,7 @@ class GraphStorage:
         expectations: Optional[Dict[Tuple[str, str], Any]] = None,
         *,
         event_context: Optional[EventContext] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> None:
         """Stamp revisions on a write already applied to memory, and persist it.
 
@@ -1366,7 +1370,9 @@ class GraphStorage:
         expectation waits for the store. A store that enforces revisions is
         always waited for: it assigns the revisions, may refuse the
         expectation (memory is undone, EntityRevisionConflict raised), and a
-        failure is resolved on the write's own evidence (§4.4).
+        failure is resolved on the write's own evidence (§4.4). `conditions`
+        go with that write, to a store declaring `batch_conditions`; a refused
+        one is answered as a refused expectation.
         """
         try:
             self.runtime_extensions.evaluate_mutation(
@@ -1409,10 +1415,14 @@ class GraphStorage:
 
         if not changes:
             return
-        operations = self._operations(changes, expectations, undo=undo)
+        try:
+            operations = self._operations(changes, expectations, undo=undo)
+        except Exception:
+            self._undo(undo)
+            raise
         token = uuid.uuid4().hex
         future = self._io_executor.submit(
-            self._do_apply, tuple(operations), token=token
+            self._do_apply, tuple(operations), token=token, conditions=conditions
         )
         self._last_write = future
         try:
@@ -1483,6 +1493,8 @@ class GraphStorage:
                             sorted(
                                 (e.id, e.revision)
                                 for e in self.get_edges_for_node(entity_id)
+                                # One this same write creates is not stored yet.
+                                if not (e.id in undo.edges and undo.edges[e.id] is None)
                             )
                         )
                         if undo is not None
@@ -2199,6 +2211,7 @@ class GraphStorage:
         vectors: Optional[Dict[str, Any]] = None,
         vector_revision: Optional[int] = None,
         token: Optional[str] = None,
+        conditions: Optional[BatchConditions] = None,
     ) -> Optional[List[Optional[int]]]:
         """Hand entity operations to the backend, on the executor thread.
 
@@ -2219,6 +2232,10 @@ class GraphStorage:
 
         backend = self._persistence_backend
         if self._store_assigns_revisions:
+            if conditions is not None:
+                return backend.apply_batch(  # type: ignore[call-arg]
+                    operations, write_token=token, conditions=conditions
+                )
             return backend.apply_batch(operations, write_token=token)  # type: ignore[call-arg]
         try:
             if len(operations) > 1:
@@ -2424,13 +2441,17 @@ class GraphStorage:
                 self._reload_from_store()
 
     def _settle_vector_index(
-        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+        self,
+        touched: "Dict[str, Tuple[Optional[Node], Any]]",
+        *,
+        generate_missing: bool = True,
     ) -> None:
         """Bring the vector index in step with one batch, in one pass.
 
         `touched` maps an entity id to the node the batch left there and the
         vector the store carried for it - (None, None) where the batch left
-        nothing. Doing this per entity instead would rebuild the index matrix
+        nothing; a node with neither a vector nor `generate_missing` is left
+        without one. Doing this per entity instead would rebuild the index matrix
         once per operation, and the rebuild is linear in the index, so a batch
         would cost the square of it.
 
@@ -2496,7 +2517,7 @@ class GraphStorage:
         missing = [
             node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
         ]
-        if not missing or not generate(missing):
+        if not generate_missing or not missing or not generate(missing):
             return
 
         # Generating at a width the batch did not adopt reads as a model
@@ -3610,6 +3631,11 @@ class GraphStorage:
                 **previous_metadata,
                 "graph_generation": previous_generation + 1,
             }
+            if self._store_assigns_revisions:
+                # Two instances replacing from one generation store the same
+                # number; this tells them apart, so a merge planned on the
+                # replace that lost is refused (ADR 0013 §3).
+                new_metadata["graph_replace_token"] = uuid.uuid4().hex
 
             # From here on every assignment is a single atomic pointer swap —
             # see the docstring above and `_restore` for why that matters.
@@ -3686,11 +3712,92 @@ class GraphStorage:
                     self.save().result()
             return True
 
+    def nodes_without_embedding(self) -> List[Tuple[Node, str]]:
+        """Deep copies of the nodes with no vector, each with its
+        ``embedding_fingerprint``, for ``commit_merge_embeddings``. Copies, so
+        what is encoded is what was fingerprinted however the live node moves."""
+        with self._lock:
+            copies = [
+                node.model_copy(deep=True)
+                for node in self.nodes.values()
+                if not self.vector_store.has_embedding(node.id)
+            ]
+            return [
+                (node, self.vector_store.embedding_fingerprint(node)) for node in copies
+            ]
+
+    def commit_merge_embeddings(
+        self, vectors: Dict[str, Any], fingerprints: Dict[str, str]
+    ) -> Tuple[int, List[str]]:
+        """Commit a merge job's vectors, each only if it still describes its
+        node (ADR 0013, slice 3a): the node exists, has no vector, and its
+        embedding text has the fingerprint recorded before encoding.
+
+        Returns how many vectors landed and the ids to encode again: those
+        whose text changed, and those an entity store refused because another
+        instance moved them. A store that applies entity batches receives only
+        the committed nodes, each expecting the revision held here. A failed
+        commit raises with none of its vectors in memory, also when its
+        outcome is unknown and the graph was re-read from the store.
+        """
+        with self._lock:
+            requeue: List[str] = []
+            pending: Dict[str, Any] = {}
+            for node_id, vector in vectors.items():
+                node = self.nodes.get(node_id)
+                if node is None or self.vector_store.has_embedding(node_id):
+                    continue
+                if self.vector_store.embedding_fingerprint(node) == fingerprints.get(
+                    node_id
+                ):
+                    pending[node_id] = vector
+                else:
+                    requeue.append(node_id)
+            if not self._backend_capabilities.incremental_writes:
+                if pending:
+                    self.vector_store.absorb_embeddings(pending)
+                    try:
+                        self.save().result()
+                    except Exception:
+                        self.vector_store.remove_nodes_embeddings(list(pending))
+                        raise
+                return len(pending), requeue
+            while pending:
+                nodes = [self.nodes[node_id] for node_id in pending]
+                undo = self._capture(node_ids=list(pending))
+                undo.regenerate = False
+                self.vector_store.absorb_embeddings(pending)
+                try:
+                    self._commit(
+                        [("node", "upsert", node) for node in nodes],
+                        undo,
+                        {("node", node.id): node.revision for node in nodes},
+                    )
+                    return len(pending), requeue
+                except EntityRevisionConflict as exc:
+                    # Memory is undone; the rest is re-issued without this one.
+                    if pending.pop(exc.entity_id, None) is None:
+                        raise
+                    requeue.append(exc.entity_id)
+                except Exception:
+                    # A single-writer store keeps a failed write in memory, and
+                    # the re-read after an unknown outcome may itself have
+                    # failed: dropping the vectors costs at most a re-encode,
+                    # keeping them could hide from every later pass a vector
+                    # the store never got.
+                    self.vector_store.remove_nodes_embeddings(list(pending))
+                    raise
+            return 0, requeue
+
     @property
     def supports_import_merge(self) -> bool:
         """Whether ``apply_import_merge`` can run on this backend (ADR 0013
-        §6): not on a store that assigns revisions, until slice 3."""
-        return not self._store_assigns_revisions
+        §3): a store that assigns revisions may be written by other instances,
+        so it must verify the plan's reads itself (``batch_conditions``)."""
+        return (
+            not self._store_assigns_revisions
+            or self._backend_capabilities.batch_conditions
+        )
 
     def apply_import_merge(
         self,
@@ -3712,6 +3819,11 @@ class GraphStorage:
         written before the journal record, as for every write that moves a
         vector.
 
+        On a store that assigns revisions, other instances keep writing
+        behind this lock: the batch also carries every entity the plan read
+        and does not write, at the revision read, and ``generation``, and the
+        store refuses it unless they still hold (``BatchConditions``).
+
         A refused expectation, or any failure before the batch is handed to
         the store, puts memory back and fires nothing. A batch that failed
         after hand-over and could not be re-saved keeps the merge in memory
@@ -3719,16 +3831,17 @@ class GraphStorage:
         ordinary create or update event fires per written entity.
 
         Raises:
-            ImportMergeUnsupported: the store assigns revisions.
+            ImportMergeUnsupported: the store assigns revisions and cannot
+                verify the plan's reads.
             EntityRevisionConflict, GraphWriteFailed, GraphWriteOutcomeUnknown:
                 as for every direct write (§4.4).
             Whatever ``prepare`` raises, with nothing changed.
         """
         with self._lock:
-            if self._store_assigns_revisions:
+            if not self.supports_import_merge:
                 raise ImportMergeUnsupported(
                     "merge import is not supported on a store that assigns "
-                    "revisions yet"
+                    "revisions and cannot verify a plan's reads"
                 )
             writes = prepare()
 
@@ -3829,8 +3942,33 @@ class GraphStorage:
                 undone()
                 raise
 
+            conditions = None
+            if self._store_assigns_revisions:
+                conditions = BatchConditions(
+                    reads=tuple(
+                        (kind, entity_id, revision)
+                        for (kind, entity_id), revision in sorted(
+                            writes.reads.items(), key=lambda item: item[0]
+                        )
+                        if (kind, entity_id) not in expectations
+                    ),
+                    generation=self._generation,
+                    replace_token=self.graph_metadata.get("graph_replace_token"),
+                    triples=tuple(
+                        (source, target, type_name, ids)
+                        for (source, target, type_name), ids in sorted(
+                            writes.triples.items()
+                        )
+                    ),
+                )
             try:
-                self._commit(changes, undo, expectations, event_context=event_context)
+                self._commit(
+                    changes,
+                    undo,
+                    expectations,
+                    event_context=event_context,
+                    conditions=conditions,
+                )
             except (EntityRevisionConflict, GraphWriteFailed):
                 # _commit has undone memory.
                 undone()
@@ -3838,6 +3976,13 @@ class GraphStorage:
             except GraphWriteOutcomeUnknown:
                 raise
             except Exception as exc:
+                if self._store_assigns_revisions:
+                    # _commit resolved every store failure itself, memory
+                    # undone; a re-save of this instance's graph would
+                    # overwrite other writers.
+                    if not isinstance(exc, ExternalChangeRefused):
+                        undone()
+                    raise
                 # The batch reached the store and neither it nor the
                 # whole-graph re-save landed: memory keeps the merge, and the
                 # next write carries the whole graph again.

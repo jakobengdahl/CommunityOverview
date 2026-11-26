@@ -12,6 +12,10 @@ import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
+import { buildExpertCommands } from '../commands/appCommands';
+import { useRegisterCommands } from '../commands/commandRegistry';
+import ChatComposer from './ChatComposer';
+import CommandBoxHint from './CommandBoxHint';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
@@ -52,7 +56,12 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel({ collectionShortName, variant = 'floating' }) {
+function ChatPanel({
+  collectionShortName,
+  variant = 'floating',
+  flushBeforeCapture,
+  getCaptureState,
+}) {
   const isSheet = variant === 'sheet';
   const {
     chatMessages,
@@ -63,8 +72,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     updateChatMessage,
     nodes,
     edges,
-    addNodesToVisualization,
-    updateVisualization,
+    publishMembership,
     clearVisualization,
     chatPanelOpen,
     toggleChatPanel,
@@ -74,8 +82,8 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     clearSelectedGraphNodes,
     activeExperts,
     availableExperts,
+    toggleExpertAgent,
     showMinimap,
-    presentation,
     startGuide,
     guideChatInput,
     clearGuideChatInput,
@@ -92,6 +100,17 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  // Same availability as ExpertAgentSelector: nothing joins mid-request.
+  const expertCommands = useMemo(
+    () =>
+      buildExpertCommands(
+        availableExperts || [],
+        { activeExperts: activeExperts || [], language, disabled: isProcessing },
+        toggleExpertAgent
+      ),
+    [availableExperts, activeExperts, language, isProcessing, toggleExpertAgent]
+  );
+  useRegisterCommands(expertCommands);
   const [progressSteps, setProgressSteps] = useState([]);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -104,6 +123,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const handleSendRef = useRef(null);
+  const composerRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -149,6 +169,18 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     return nodeList.filter((n) => n.type !== 'Community' && n.data?.type !== 'Community');
   };
 
+  // Keep a pending action's outcome in the stored message: the sheet variant
+  // unmounts with the panel, and a remounted card must not offer Confirm again.
+  const settlePendingAction = (messageId, token, settled) => {
+    const message = useGraphStore.getState().chatMessages.find((m) => m.id === messageId);
+    if (!message) return;
+    updateChatMessage(messageId, {
+      pendingActions: message.pendingActions.map((a) =>
+        a.token === token ? { ...a, settled } : a
+      ),
+    });
+  };
+
   // Apply the visualization side-effects a chat response's toolResult implies
   // (save view, clear, add/replace/update nodes, marks, guides). Shared by the
   // typed-message path (handleSend) and the form-submit path (handleSubmitForm)
@@ -164,24 +196,16 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       const currentNodes = useGraphStore.getState().nodes;
       const allEdges = [...edges, ...(result.edges || [])];
       const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-      addNodesToVisualization(positionedNodes, result.edges || []);
+      publishMembership(
+        'nodes_added',
+        positionedNodes.map((n) => n.id),
+        { nodes: positionedNodes, edges: result.edges || [] }
+      );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
-      const viewName = toolResult.name;
-      const currentNodes = useGraphStore.getState().nodes;
-      const viewNode = {
-        name: viewName,
-        type: 'SavedView',
-        description: t('notifications.saved_view_description', { name: viewName }),
-        summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
-        metadata: { node_ids: currentNodes.map((n) => n.id) },
-        communities: [],
-      };
-      try {
-        await api.addNodes([viewNode], []);
-      } catch (err) {
-        console.error('[ChatPanel] Failed to save view:', err);
-      }
+      window.dispatchEvent(
+        new CustomEvent('request-save-view', { detail: { name: toolResult.name } })
+      );
     } else if (
       toolResult.action === 'clear_visualization' ||
       toolResult.action === 'load_visualization' ||
@@ -191,11 +215,13 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       // first so a clear-and-add turn (clear_visualization carrying nodes) shows
       // the new nodes, and an empty replace ends up empty. Kept identical to the
       // useToolResultCommands path so both delivery channels behave the same.
-      clearVisualization();
-      if (toolResult.nodes && toolResult.nodes.length > 0) {
-        const filteredNodes = filterCommunityNodes(toolResult.nodes);
-        updateVisualization(filteredNodes, toolResult.edges || []);
-      }
+      clearVisualization({ keepNodes: true });
+      const filteredNodes = filterCommunityNodes(toolResult.nodes || []);
+      publishMembership(
+        'nodes_replaced',
+        filteredNodes.map((n) => n.id),
+        { nodes: filteredNodes, edges: toolResult.edges || [] }
+      );
     } else if (toolResult.action === 'add_to_visualization') {
       addNodesToView(toolResult);
     } else if (toolResult.action === 'update_in_visualization') {
@@ -214,7 +240,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           updatedNodeIds.has(n.id) ? updatedNodes.find((un) => un.id === n.id) : n
         );
         const newNodes = updatedNodes.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
-        update([...mergedNodes, ...newNodes], currentEdges);
+        update(mergedNodes, currentEdges);
+        publishMembership(
+          'nodes_added',
+          newNodes.map((n) => n.id),
+          { nodes: newNodes }
+        );
       }
     } else if (toolResult.action === 'mark_nodes') {
       useGraphStore.getState().setNodeMarks(toolResult.marks || []);
@@ -364,13 +395,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   // completes, picking up the fully-typed inputValue rather than a stale closure.
   handleSendRef.current = handleSend;
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -452,7 +476,11 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
         const currentNodes = useGraphStore.getState().nodes;
         const allEdges = [...edges, ...(response.toolResult.edges || [])];
         const positionedNodes = positionNewNodes(filteredNodes, currentNodes, allEdges);
-        addNodesToVisualization(positionedNodes, response.toolResult.edges || []);
+        publishMembership(
+          'nodes_added',
+          positionedNodes.map((n) => n.id),
+          { nodes: positionedNodes, edges: response.toolResult.edges || [] }
+        );
       }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
@@ -468,7 +496,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
     }
   };
 
-  const handleRejectProposal = async (proposal) => {
+  const handleRejectProposal = async () => {
     const msg = t('chat.reject_node');
     addChatMessage({ role: 'user', content: msg, timestamp: new Date() });
     setIsProcessing(true);
@@ -548,12 +576,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       });
 
       if (deleteConfirmation.node_ids) {
-        const deletedIds = new Set(deleteConfirmation.node_ids);
-        const newNodes = nodes.filter((n) => !deletedIds.has(n.id));
-        const newEdges = edges.filter(
-          (e) => !deletedIds.has(e.source) && !deletedIds.has(e.target)
-        );
-        updateVisualization(newNodes, newEdges);
+        publishMembership('nodes_removed', [...new Set(deleteConfirmation.node_ids)]);
       }
     } catch (err) {
       if (isStaleSessionEpoch(requestEpoch)) return;
@@ -986,8 +1009,10 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                   <PendingActionCard
                     key={action.token}
                     action={action}
+                    conversationId={chatConversationId}
                     disabled={isProcessing}
                     onConfirmed={applyToolResultSideEffects}
+                    onSettled={(settled) => settlePendingAction(msg.id, action.token, settled)}
                   />
                 ))}
 
@@ -1075,11 +1100,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           </div>
         )}
 
-        <textarea
-          className="chat-input"
+        <CommandBoxHint />
+        <ChatComposer
+          ref={composerRef}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onKeyPress={handleKeyPress}
+          onChange={setInputValue}
+          onSend={handleSend}
           onFocus={requestCloseMenus}
           placeholder={
             uploadedFile
@@ -1090,7 +1116,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
                   ? t('chat.placeholder_with_selection')
                   : t('chat.placeholder')
           }
-          rows={3}
           disabled={isProcessing}
         />
 
@@ -1165,7 +1190,9 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
           </button>
           <button
             className="chat-send-button"
-            onClick={handleSend}
+            // Keeps focus (and an open suggestion list) in the composer.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => composerRef.current.submit()}
             disabled={(!inputValue.trim() && !uploadedFile) || isProcessing}
           >
             {isProcessing ? t('chat.processing') : t('chat.send')}

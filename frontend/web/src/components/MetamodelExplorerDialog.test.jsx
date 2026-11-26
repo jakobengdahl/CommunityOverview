@@ -1,9 +1,17 @@
+// covers: frontend/web/src/components/MetamodelExplorerDialog.jsx, frontend/web/src/components/NodeAppearanceDialog.jsx
 /**
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { URL as NodeURL } from 'node:url';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import MetamodelExplorerDialog from './MetamodelExplorerDialog';
+import NodeAppearanceDialog, {
+  appearanceOperation,
+  currentAppearance,
+} from './NodeAppearanceDialog';
+import { nodeShapeGeometry, nodeShapeTextBox } from '@community-graph/ui-graph-canvas';
 
 vi.mock('../i18n', () => ({
   useI18n: () => ({ t: (key) => key, language: 'en' }),
@@ -400,5 +408,529 @@ describe('MetamodelExplorerDialog', () => {
     });
 
     expect(capture).not.toHaveBeenCalled();
+  });
+});
+
+describe('NodeAppearanceDialog', () => {
+  const EXAMPLE_SHAPE = {
+    version: 1,
+    base: 'rectangle-flat',
+    scale: 2,
+    placement: 'middle-centre',
+    areas: { first: 'type', second: 'name', third: null },
+  };
+  const DEFAULT_SHAPE = {
+    ...EXAMPLE_SHAPE,
+    base: 'rectangle',
+    scale: 1,
+    placement: 'top-left',
+    areas: { first: 'type', second: 'name', third: 'summary' },
+  };
+  const CONFIG_SCHEMA = {
+    ...SCHEMA,
+    node_types: { ...SCHEMA.node_types, Actor: { ...SCHEMA.node_types.Actor, shape: 'example' } },
+    node_shapes: { example: EXAMPLE_SHAPE },
+  };
+  const node = { id: 'a', name: 'First', type: 'Actor' };
+  const props = {
+    node,
+    schema: SCHEMA,
+    color: '#FBBF24',
+    shapeOverrides: { b: { builtin: true } },
+    typeShapes: {},
+    nodes: [node, { id: 'b', name: 'Second', type: 'Actor' }],
+    onClose: vi.fn(),
+    onApply: vi.fn(),
+  };
+  it('applies an unchanged built-in appearance and turns edits into an inline shape', () => {
+    const apply = vi.fn();
+    const view = render(<NodeAppearanceDialog {...props} onApply={apply} />);
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+    expect(document.querySelector('.graph-shaped-node')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply.mock.calls[1][1].inline.scale).toBe(2);
+    expect(document.querySelector('.graph-custom-node')).toBeNull();
+    // The canvas renderer draws the band in the type colour, with band text
+    // that stays readable on a light colour.
+    const chip = () => document.querySelector('.graph-shape-label-chip');
+    expect(chip().textContent).toBe('Actor');
+    expect(chip().style.color).toBe('rgb(0, 0, 0)');
+    expect(document.querySelector('.graph-shape-band').style.fill).toBe('#FBBF24');
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    expect(chip().textContent).toBe('Actor');
+    view.unmount();
+    render(
+      <NodeAppearanceDialog {...props} shapeOverrides={{ a: { builtin: true } }} onApply={apply} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { builtin: true });
+  });
+  it('shows retained overrides on every tab when applying to a type', () => {
+    render(<NodeAppearanceDialog {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.click(screen.getByLabelText('node_appearance.scope_type'));
+    for (const tab of ['shape', 'text', 'apply']) {
+      fireEvent.click(screen.getByRole('tab', { name: `node_appearance.${tab}` }));
+      expect(screen.getByText(/Second/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'node_appearance.apply' }).disabled).toBe(false);
+    }
+  });
+  it('keeps a draft isolated and restores focus on Escape', () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const view = render(<NodeAppearanceDialog {...props} />);
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    expect(props.onApply).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalled();
+    view.unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+  it.each(['light', 'dark'])(
+    'draws the %s preview stage on that theme canvas background in either page scheme',
+    (theme) => {
+      // Parse the canvas stylesheet: jsdom does not evaluate media queries.
+      const style = document.createElement('style');
+      style.textContent = readFileSync(
+        new NodeURL(
+          '../../../../packages/ui-graph-canvas/src/components/GraphCanvas.css',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      document.head.appendChild(style);
+      const backgroundFor = (element, pageLight) => {
+        let background;
+        let specificity = -1;
+        const visit = (rules) => {
+          for (const rule of rules) {
+            if (rule.media) {
+              if (pageLight && rule.conditionText === '(prefers-color-scheme: light)') {
+                visit(rule.cssRules);
+              }
+              continue;
+            }
+            const value = rule.style?.getPropertyValue('background');
+            if (!value || !element.matches(rule.selectorText)) continue;
+            const weight = (rule.selectorText.match(/[.:][\w-]+/g) || []).length;
+            if (weight >= specificity) {
+              specificity = weight;
+              background = value;
+            }
+          }
+        };
+        visit(style.sheet.cssRules);
+        return background;
+      };
+      try {
+        render(<NodeAppearanceDialog {...props} />);
+        fireEvent.change(screen.getByLabelText('node_appearance.theme'), {
+          target: { value: theme },
+        });
+        const stage = document.querySelector('.appearance-preview-stage');
+        const canvas = document.createElement('div');
+        canvas.className = 'graph-canvas-container';
+        const expected = backgroundFor(canvas, theme === 'light');
+        expect(backgroundFor(stage, true)).toBe(expected);
+        expect(backgroundFor(stage, false)).toBe(expected);
+      } finally {
+        style.remove();
+      }
+    }
+  );
+  it('validates scale and applies a type draft while preserving bindings', () => {
+    const apply = vi.fn();
+    render(<NodeAppearanceDialog {...props} onApply={apply} />);
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '11' } });
+    expect(screen.getByRole('button', { name: 'node_appearance.apply' }).disabled).toBe(true);
+    const statuses = screen.getAllByRole('status');
+    expect(statuses.every((status) => !status.textContent)).toBe(true);
+    // A placement reset is announced even while the scale is invalid.
+    fireEvent.change(screen.getByLabelText('node_appearance.base'), {
+      target: { value: 'triangle-up' },
+    });
+    expect(statuses.map((status) => status.textContent)).toContain(
+      'node_appearance.placement_reset'
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '2' } });
+    expect(statuses.map((status) => status.textContent)).toContain(
+      'node_appearance.preview_updated'
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.click(screen.getByLabelText('node_appearance.scope_type'));
+    expect(screen.getByText(/Second/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenCalledWith('type', {
+      inline: {
+        version: 1,
+        base: 'triangle-up',
+        scale: 2,
+        placement: 'centre',
+        areas: { first: 'type', second: 'name', third: 'summary' },
+      },
+    });
+  });
+  it('supports keyboard tabs and traps focus inside the modal', () => {
+    const canvas = document.createElement('div');
+    document.body.append(canvas);
+    const shortcut = vi.fn();
+    document.addEventListener('keydown', shortcut, true);
+    const view = render(<NodeAppearanceDialog {...props} />);
+    expect(canvas.hasAttribute('inert')).toBe(true);
+    const first = screen.getByRole('tab', { name: 'node_appearance.shape' });
+    first.focus();
+    fireEvent.keyDown(first, { key: 'End' });
+    expect(
+      screen.getByRole('tab', { name: 'node_appearance.apply' }).getAttribute('aria-selected')
+    ).toBe('true');
+    fireEvent.keyDown(document.activeElement, { key: 'Home' });
+    expect(document.activeElement).toBe(first);
+    const last = screen.getByRole('button', { name: 'node_appearance.apply' });
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(last);
+    fireEvent.keyDown(last, { key: 'Delete' });
+    expect(shortcut).not.toHaveBeenCalled();
+    view.unmount();
+    expect(canvas.hasAttribute('inert')).toBe(false);
+    document.removeEventListener('keydown', shortcut, true);
+    canvas.remove();
+  });
+  it('applies an explicitly selected configuration reference to the node', () => {
+    const apply = vi.fn();
+    const definition = {
+      version: 1,
+      base: 'rectangle',
+      scale: 1,
+      placement: 'top-left',
+      areas: { first: 'type', second: 'name', third: 'missing' },
+    };
+    render(
+      <NodeAppearanceDialog
+        {...props}
+        schema={{ ...SCHEMA, node_shapes: { example: definition } }}
+        onApply={apply}
+      />
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.config_shape'), {
+      target: { value: 'example' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    // An unavailable binding is named and warned about, never shown as None.
+    const binding = screen.getByLabelText('node_appearance.area_third');
+    expect(binding.value).toBe('missing');
+    expect(binding.selectedOptions[0].textContent).toContain('node_appearance.unavailable');
+    expect(document.getElementById(binding.getAttribute('aria-describedby'))).toBeTruthy();
+    expect(
+      [...screen.getByLabelText('node_appearance.area_second').options].find(
+        (option) => option.value === 'name'
+      ).textContent
+    ).toBe('node_appearance.field_name');
+    const textBox = screen.getByText('node_appearance.unavailable').parentElement;
+    const box = nodeShapeTextBox(nodeShapeGeometry('rectangle', 1), 'top-left');
+    expect(textBox.style.left).toBe(`${box.x}px`);
+    expect(textBox.style.top).toBe(`${box.y}px`);
+    expect(textBox.style.width).toBe(`${box.width}px`);
+    expect(textBox.style.height).toBe(`${box.height}px`);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenCalledWith('node', { ref: 'config:example' });
+  });
+  it.each([
+    ['a built-in node override', { shapeOverrides: { a: { builtin: true } } }, 'node'],
+    ['a configuration default', { schema: CONFIG_SCHEMA }, 'config'],
+    ['a type default', { typeShapes: { Actor: { inline: EXAMPLE_SHAPE } } }, 'type'],
+    ['an unresolvable reference', { shapeOverrides: { a: { ref: 'saved:gone' } } }, 'fallback'],
+  ])('applies %s unchanged as the original value and reports its source', (_, extra, source) => {
+    const apply = vi.fn();
+    const merged = { ...props, ...extra };
+    const original = currentAppearance(
+      node,
+      merged.schema,
+      merged.shapeOverrides,
+      merged.typeShapes
+    );
+    expect(original.source).toBe(source);
+    render(<NodeAppearanceDialog {...merged} onApply={apply} />);
+    expect(screen.getByText(new RegExp(`node_appearance.source_${source}`))).toBeTruthy();
+    // A fallback is drawn as the built-in card it reports.
+    expect(Boolean(document.querySelector('.graph-custom-node'))).toBe(
+      source === 'fallback' || source === 'node'
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    // A base edit and its reversal are no edit at all.
+    const base = screen.getByLabelText('node_appearance.base');
+    const start = base.value;
+    fireEvent.change(base, { target: { value: 'triangle-down' } });
+    fireEvent.change(base, { target: { value: start } });
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    const value = source === 'config' ? { ref: 'config:example' } : original.selection;
+    expect(apply.mock.calls[0][1]).toEqual(value);
+    expect(apply.mock.calls[1][1]).toEqual(
+      source === 'node' || source === 'fallback' ? { inline: DEFAULT_SHAPE } : value
+    );
+  });
+  it('constructs one revision-checked operation for each scope', () => {
+    const selection = { builtin: true };
+    const revisions = { 'node:a': 2, 'type:Actor': 3 };
+    expect(appearanceOperation('node', node, selection, revisions, 'id')).toEqual({
+      op: 'node_shape_set',
+      version: 1,
+      operation_id: 'id',
+      node_id: 'a',
+      selection,
+      base_revision: 2,
+    });
+    expect(appearanceOperation('type', node, selection, revisions, 'id')).toEqual({
+      op: 'type_shape_set',
+      version: 1,
+      operation_id: 'id',
+      type: 'Actor',
+      selection,
+      base_revision: 3,
+      clear_node_id: 'a',
+      clear_base_revision: 2,
+    });
+  });
+  const click = (name) => act(async () => fireEvent.click(screen.getByRole('button', { name })));
+  it('saves a named shape and copies apart from Apply, and a failed Apply keeps both for retry', async () => {
+    const apply = vi.fn();
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    const create = vi.fn(async (key, name, definition) => {
+      if (create.mock.calls.length === 1) await held;
+      return { key, name, definition, revision: create.mock.calls.length, deleted: false };
+    });
+    const view = render(
+      <NodeAppearanceDialog {...props} savedShapes={{}} library={{ create }} onApply={apply} />
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    fireEvent.change(screen.getByLabelText('node_appearance.shape_name'), {
+      target: { value: 'My card!' },
+    });
+    await click('node_appearance.save_named');
+    // While the save runs the shape is locked, and an area edit made meanwhile survives it.
+    const area = () => screen.getByLabelText('node_appearance.area_third');
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    expect(screen.getByLabelText('node_appearance.placement').disabled).toBe(true);
+    fireEvent.change(area(), { target: { value: '' } });
+    await act(async () => release());
+    expect(area().value).toBe('');
+    fireEvent.change(area(), { target: { value: 'summary' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    const [key, name, definition] = create.mock.calls[0];
+    expect(key).toMatch(/^my-card-[0-9a-f]{8}$/);
+    expect([name, definition]).toEqual(['My card!', DEFAULT_SHAPE]);
+    expect(apply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    view.rerender(
+      <NodeAppearanceDialog
+        {...props}
+        savedShapes={{}}
+        library={{ create }}
+        onApply={apply}
+        error="failed"
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply.mock.calls).toEqual([
+      ['node', { ref: `saved:${key}` }],
+      ['node', { ref: `saved:${key}` }],
+    ]);
+    await click('node_appearance.save_copy');
+    expect(create.mock.calls[1][0]).not.toBe(key);
+    expect(create.mock.calls[1][2]).toEqual(DEFAULT_SHAPE);
+    expect(screen.getByRole('button', { name: 'node_appearance.delete_saved' })).toBeTruthy();
+    // A fetch read after both writes omits them: they were deleted elsewhere.
+    view.rerender(
+      <NodeAppearanceDialog
+        {...props}
+        savedShapes={{}}
+        savedShapesRevision={2}
+        library={{ create }}
+        onApply={apply}
+      />
+    );
+    expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+    await click('node_appearance.review_latest');
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+  });
+  it('edits and deletes a saved shape only after a usage warning on the reviewed revision', async () => {
+    const apply = vi.fn();
+    const library = {
+      usage: vi.fn(async (key) => ({
+        revision: key === 'other' ? 1 : library.usage.mock.calls.length < 4 ? 3 : 5,
+        usage: 4,
+        template_usage: 2,
+      })),
+      update: vi
+        .fn()
+        .mockRejectedValueOnce(Object.assign(new Error('stale'), { status: 409 }))
+        .mockImplementation(async (key, name, definition) => ({
+          key,
+          name,
+          definition,
+          revision: 5,
+          deleted: false,
+        })),
+      remove: vi.fn(async (key) => ({ key, revision: 6, deleted: true })),
+      refresh: vi.fn(),
+    };
+    render(
+      <NodeAppearanceDialog
+        {...props}
+        shapeOverrides={{ a: { ref: 'saved:card' } }}
+        savedShapes={{
+          card: { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 },
+          other: { name: 'Other', definition: DEFAULT_SHAPE, revision: 1 },
+        }}
+        library={library}
+        onApply={apply}
+      />
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    await click('node_appearance.edit_saved');
+    expect(screen.getByText('node_appearance.edit_warning')).toBeTruthy();
+    expect(library.update).not.toHaveBeenCalled();
+    // Switching shapes ends the review: it can never write Other's content into Card.
+    const pickSaved = (value) => {
+      fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.shape' }));
+      fireEvent.change(screen.getByLabelText('node_appearance.saved_shape'), {
+        target: { value },
+      });
+    };
+    pickSaved('other');
+    pickSaved('card');
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    await click('node_appearance.edit_saved');
+    await click('node_appearance.confirm_edit');
+    // A stale review commits nothing and must be reviewed again.
+    expect(screen.getByText('node_appearance.library_conflict')).toBeTruthy();
+    expect(library.refresh).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+    await click('node_appearance.edit_saved');
+    await click('node_appearance.confirm_edit');
+    const edited = { ...EXAMPLE_SHAPE, scale: 3 };
+    expect(library.update.mock.calls.map((call) => call.slice(0, 6))).toEqual([
+      ['card', 'Card', edited, 3, 4, 2],
+      ['card', 'Card', edited, 3, 4, 2],
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { ref: 'saved:card' });
+    await click('node_appearance.delete_saved');
+    expect(screen.getByText('node_appearance.delete_warning')).toBeTruthy();
+    await click('node_appearance.confirm_delete');
+    expect(library.remove).toHaveBeenCalledWith('card', 5, 4, 2, null);
+    // The deleted reference previews as the built-in card.
+    expect(document.querySelector('.graph-custom-node')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
+    // Deleting a picked entry keeps the draft's own change, over the built-in card.
+    pickSaved('other');
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.text' }));
+    fireEvent.change(screen.getByLabelText('node_appearance.placement'), {
+      target: { value: 'bottom-right' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    await click('node_appearance.delete_saved');
+    await click('node_appearance.confirm_delete');
+    expect(library.remove).toHaveBeenLastCalledWith('other', 1, 4, 2, null);
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', {
+      inline: { ...DEFAULT_SHAPE, placement: 'bottom-right' },
+    });
+  });
+  it.each([
+    ['a known', { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 }, DEFAULT_SHAPE],
+    ['a not yet fetched', null, EXAMPLE_SHAPE],
+  ])(
+    'keeps a draft started from %s entry on its start when the library moves, until the user reviews',
+    async (_, start, latest) => {
+      const apply = vi.fn();
+      const library = {
+        usage: vi.fn(async () => ({ revision: 4, usage: 2 })),
+        update: vi.fn(async (key, name, definition) => ({ key, name, definition, revision: 7 })),
+        refresh: vi.fn(),
+      };
+      const view = (card, revision) => (
+        <NodeAppearanceDialog
+          {...props}
+          shapeOverrides={{ a: { ref: 'saved:card' } }}
+          savedShapes={card && { card }}
+          savedShapesRevision={revision}
+          library={library}
+          onApply={apply}
+        />
+      );
+      const { rerender } = render(view(start, start?.revision ?? null));
+      fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+      fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+      if (start) {
+        // A stale server revision at the warning commits nothing.
+        await click('node_appearance.edit_saved');
+        expect(screen.queryByRole('button', { name: 'node_appearance.confirm_edit' })).toBeNull();
+        expect(library.refresh).toHaveBeenCalled();
+      }
+      // The library now holds revision 4: the draft stays on what it started from.
+      rerender(view({ name: 'Card', definition: latest, revision: 4 }, 4));
+      const edit = () => screen.getByRole('button', { name: 'node_appearance.edit_saved' });
+      expect(edit().disabled).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+      expect(apply).toHaveBeenLastCalledWith('node', {
+        inline: { ...(start?.definition ?? DEFAULT_SHAPE), scale: 3 },
+      });
+      // Only the user's review moves the draft's own change onto revision 4.
+      await click('node_appearance.review_latest');
+      await click('node_appearance.edit_saved');
+      await click('node_appearance.confirm_edit');
+      expect(library.update).toHaveBeenCalledWith(
+        'card',
+        'Card',
+        { ...latest, scale: 3 },
+        4,
+        2,
+        0,
+        null
+      );
+    }
+  );
+  it('reviews a picked entry deleted elsewhere onto the built-in card, not the original entry', async () => {
+    const apply = vi.fn();
+    const card = { name: 'Card', definition: EXAMPLE_SHAPE, revision: 3 };
+    const view = (savedShapes, revision) => (
+      <NodeAppearanceDialog
+        {...props}
+        shapeOverrides={{ a: { ref: 'saved:card' } }}
+        savedShapes={savedShapes}
+        savedShapesRevision={revision}
+        library={{ refresh: vi.fn() }}
+        onApply={apply}
+      />
+    );
+    const { rerender } = render(
+      view({ card, other: { name: 'Other', definition: EXAMPLE_SHAPE, revision: 1 } }, 1)
+    );
+    fireEvent.change(screen.getByLabelText('node_appearance.saved_shape'), {
+      target: { value: 'other' },
+    });
+    fireEvent.change(screen.getByLabelText('node_appearance.scale'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
+    rerender(view({ card }, 2));
+    await click('node_appearance.review_latest');
+    // A later revision of the original entry never moves the reviewed draft.
+    rerender(view({ card: { ...card, revision: 4 } }, 3));
+    fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
+    expect(apply).toHaveBeenLastCalledWith('node', { inline: { ...DEFAULT_SHAPE, scale: 3 } });
   });
 });

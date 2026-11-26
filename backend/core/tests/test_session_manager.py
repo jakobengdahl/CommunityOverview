@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import json
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -20,6 +21,7 @@ from backend.core.session_store import (
     AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
+    MAX_SESSION_DESCRIPTION_CHARS,
     OpError,
     Session,
     SessionStore,
@@ -237,6 +239,15 @@ class TestApplyOps:
         s = mgr.create_session()
         with pytest.raises(OpError):
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "bogus"}])
+
+    async def test_ops_batch_cannot_set_the_session_description(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "session_described", "description": "x"}]
+            )
+        assert mgr.store.get(s.id).description is None
 
     async def test_batch_is_atomic_on_mid_batch_failure(self):
         """A failing op late in a batch must not apply/broadcast earlier ops.
@@ -2548,11 +2559,23 @@ class TestLifecycle:
         assert events[0]["deleted_by"] == "c1"
         assert mgr.get_session(s.id) is None
 
-    async def test_session_limit(self):
+    async def test_session_limit(self, monkeypatch):
         mgr = _manager(max_sessions=1)
-        mgr.create_session()
+        source = mgr.create_session()
         with pytest.raises(SessionLimitReached):
             mgr.create_session()
+        # Capacity wins over copy validation, for both copy entry points.
+        source.state["annotations"] = [{"id": "invalid", "type": "image"}]
+        with pytest.raises(SessionLimitReached):
+            mgr.copy_session(source.id)
+        with pytest.raises(SessionLimitReached):
+            await mgr.copy_session_async(source.id)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "backend.core.session_manager.DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 1
+            )
+            with pytest.raises(SessionLimitReached):
+                mgr.copy_session(source.id)
 
     async def test_push_command_unknown_session(self):
         mgr = _manager()
@@ -2899,6 +2922,65 @@ class TestRenameSession:
         with pytest.raises(SessionLimitReached):
             await mgr.rename_session("9999-9999", "x")
 
+    @pytest.mark.parametrize("exists", [False, True])
+    async def test_rename_uses_batch_admission_limits(self, exists):
+        op = {"op": "session_renamed", "name": "x"}
+        mgr = _manager(max_op_batch_bytes=len(json.dumps(op)))
+        sid = "1234-5678"
+        if exists:
+            mgr.get_or_create(sid)
+        await mgr.rename_session(sid, "x", client_id="long-client-id")
+        assert mgr.get_session(sid).name == "x"
+
+        mgr = _manager(max_ops_per_batch=0)
+        if exists:
+            mgr.get_or_create(sid)
+        with pytest.raises(OpBatchTooLarge):
+            await mgr.rename_session(sid, "x")
+        assert (mgr.get_session(sid) is not None) == exists
+
+    async def test_initial_event_precedes_a_concurrent_store_writer(self):
+        backend = InMemorySessionPersistenceBackend()
+        mgr = SessionManager(SessionStore(backend))
+        other = SessionStore(backend)
+        entered = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        events = []
+
+        def publish(_sid, event):
+            events.append(event["seq"])
+            entered.set()
+            assert release.wait(5)
+
+        mgr.bus.publish = publish
+        sid = "1234-5678"
+        creator = threading.Thread(target=lambda: mgr.rename_session_sync(sid, "first"))
+        creator.start()
+        assert entered.wait(5)
+
+        def write():
+            session = other.get(sid)
+            with other.writing(sid):
+                op = other.apply_state_op(
+                    session,
+                    {"op": "session_renamed", "name": "second", "client_id": "other"},
+                )
+                other.persist(session)
+                events.append(op["seq"])
+            writer_done.set()
+
+        writer = threading.Thread(target=write)
+        writer.start()
+        try:
+            assert not writer_done.wait(0.1)
+        finally:
+            release.set()
+            creator.join(5)
+            writer.join(5)
+        assert writer_done.is_set()
+        assert events == [1, 2]
+
 
 class TestRenameSessionSync:
     """The MCP rename path shares ``_apply_op_sync``'s rollback, name included."""
@@ -3169,6 +3251,20 @@ class TestRenameDeleteSyncCharges:
             mgr.rename_session_sync(s.id, 42, client_id="mcp-agent")
 
         assert bucket.calls == []
+
+    @pytest.mark.parametrize("bad", [42, "x" * (MAX_SESSION_DESCRIPTION_CHARS + 1)])
+    async def test_an_invalid_description_charges_nothing_and_creates_no_session(
+        self, bad
+    ):
+        mgr = _manager()
+        sid = "1234-5678-9012-3456"
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.describe_session_sync(sid, bad, client_id="mcp-agent")
+
+        assert bucket.calls == []
+        assert mgr.get_session(sid) is None
 
     @pytest.mark.parametrize("bad_id", ["nope", "../1234-5678", "", "1234-5678-"])
     async def test_delete_of_an_invalid_id_is_not_found_and_charges_nothing(
@@ -3900,6 +3996,9 @@ _MCP_BUCKET_WRITES = {
     "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
         sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
     ),
+    "describe_session_sync": lambda mgr, sid, i, label: mgr.describe_session_sync(
+        sid, f"brief-{i}", client_id="mcp-agent", rate_limit_label=label
+    ),
     "delete_session_sync": lambda mgr, sid, i, label: _delete_existing_session(
         mgr, sid, label
     ),
@@ -3917,7 +4016,11 @@ def _delete_existing_session(mgr, sid, label):
 _MCP_UNMETERED_CALLS = {
     "claimed_elements",
     "connected_count",
+    # Like create_session, copying allocates a session without spending a bucket.
+    "copy_session",
     "create_session",
+    # A push materialises the browser's session so the server applies it.
+    "materialize_command",
     "get_session",
     "list_activity",
     "list_sessions",
@@ -3994,7 +4097,11 @@ class _RecordingBucket:
 _MCP_UNMETERED_RUNS = {
     "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
     "connected_count": lambda mgr, sid: mgr.connected_count(sid),
+    "copy_session": lambda mgr, sid: mgr.copy_session(sid),
     "create_session": lambda mgr, sid: mgr.create_session(),
+    "materialize_command": lambda mgr, sid: mgr.materialize_command(
+        sid, {"result": {"action": "add_to_visualization", "nodes": [{"id": "n"}]}}
+    ),
     "get_session": lambda mgr, sid: mgr.get_session(sid),
     "list_activity": lambda mgr, sid: mgr.list_activity(sid),
     "list_sessions": lambda mgr, sid: mgr.list_sessions(),
@@ -5640,3 +5747,127 @@ class TestSessionActivityByteCache:
         assert cached == s
         assert "_activity_record_bytes" not in repr(cached)
         assert "record-bytes-marker" not in repr(cached)
+
+
+@pytest.mark.parametrize("async_copy", [False, True])
+@pytest.mark.parametrize("shared_action", ["update", "delete"])
+async def test_copy_session_carries_staged_changes_into_its_own_layer(
+    async_copy, shared_action
+):
+    """Staged entries land, re-keyed and staged by the copier, in the copy's
+    layer with its canvas whole; the source, its layer and the graph are
+    untouched."""
+    from backend.core.tests.layer_store_contract import entry
+    from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+
+    backend = InMemoryGraphPersistenceBackend({}, staged=True)
+    mgr = _manager(write_modes=WriteModes(backend))
+    source = mgr.create_session("Staged canvas", write_mode="staged")
+    entries = [
+        entry(kind, entity_id, action, session_id=source.id, stage_token="source")
+        for kind, entity_id, action in [
+            ("node", "new", "create"),
+            ("node", "shared", shared_action),
+            ("edge", "new-edge", "create"),
+            ("edge", "shared-edge", shared_action),
+        ]
+    ]
+    backend.stage(source.id, entries=entries)
+    source.state.update(
+        {
+            "node_refs": ["new", "shared"],
+            "positions": {"new": {"x": 1, "y": 2}, "shared": {"x": 3, "y": 4}},
+            "hidden_node_ids": ["new", "shared"],
+            "dimmed_node_ids": ["new", "shared"],
+            "hidden_edge_ids": ["new-edge", "shared-edge"],
+            "dimmed_edge_ids": ["new-edge", "shared-edge"],
+            "annotations": [
+                {"id": "group", "type": "group", "member_node_ids": ["new", "shared"]}
+            ],
+        }
+    )
+    mgr.store.persist(source)
+    before = copy.deepcopy(source.to_dict())
+    layer_before = backend.load_layer(source.id)
+    graph_before = copy.deepcopy([backend._store[k] for k in ("nodes", "edges")])
+    authorized = []
+
+    copy_session = mgr.copy_session_async if async_copy else mgr.copy_session
+    copied = copy_session(
+        source.id,
+        authorize_staging=lambda: authorized.append(True),
+        staged_by="copier",
+    )
+    if async_copy:
+        copied = await copied
+
+    assert authorized == [True]
+    expected = copy.deepcopy(before["state"])
+    group = copied.state["annotations"][0]
+    assert group["id"] != "group"
+    assert group["member_node_ids"] == ["new", "shared"]
+    expected["annotations"] = [group]
+    assert copied.state == expected
+    assert mgr.write_mode_of(copied)["write_mode"] == "staged"
+    layer = backend.load_layer(copied.id)
+    assert {e["session_id"] for e in layer} == {copied.id}
+    assert all(e["session_seq"] <= copied.seq for e in layer)
+    assert {e["staged_by"] for e in layer} == {"copier"}
+    assert "source" not in {e["stage_token"] for e in layer}
+    assert all(e["staged_at"] > s["staged_at"] for e in layer for s in layer_before)
+    drop = ("session_id", "session_seq", "stage_token", "staged_by", "staged_at")
+    assert sorted(
+        ({k: v for k, v in e.items() if k not in drop} for e in layer),
+        key=lambda e: (e["kind"], e["entity_id"]),
+    ) == sorted(
+        ({k: v for k, v in e.items() if k not in drop} for e in layer_before),
+        key=lambda e: (e["kind"], e["entity_id"]),
+    )
+    assert mgr.get_session(source.id).to_dict() == before
+    assert backend.load_layer(source.id) == layer_before
+    assert [backend._store[k] for k in ("nodes", "edges")] == graph_before
+
+
+async def test_copy_session_refused_staging_creates_nothing():
+    """A refused staging authorization, or a failed layer write, leaves no
+    session and no active staged record behind; a source with no staged
+    entries never asks it."""
+    from backend.core.tests.layer_store_contract import entry
+    from backend.core.tests.persistence_contract import InMemoryGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+
+    backend = InMemoryGraphPersistenceBackend({}, staged=True)
+    mgr = _manager(write_modes=WriteModes(backend))
+    source = mgr.create_session("Staged", write_mode="staged")
+    backend.stage(source.id, entries=[entry("node", "n", session_id=source.id)])
+
+    def refuse():
+        raise PermissionError
+
+    mgr._max_sessions = 1
+    with pytest.raises(SessionLimitReached):
+        mgr.copy_session(source.id, authorize_staging=refuse)
+    with pytest.raises(SessionLimitReached):
+        await mgr.copy_session_async(source.id, authorize_staging=refuse)
+    mgr._max_sessions = 100
+    with pytest.raises(PermissionError):
+        mgr.copy_session(source.id, authorize_staging=refuse)
+    assert mgr.store.session_count() == 1
+
+    backend.stage = Mock(side_effect=RuntimeError)
+    with pytest.raises(RuntimeError):
+        mgr.copy_session(source.id)
+    assert mgr.store.session_count() == 1
+    active = [
+        sid
+        for sid, held in backend._store["sessions"].items()
+        if held["status"] == "active"
+    ]
+    assert active == [source.id]
+
+    del backend.stage
+    empty = mgr.create_session("Empty", write_mode="staged")
+    copied = mgr.copy_session(empty.id, authorize_staging=refuse)
+    assert mgr.write_mode_of(copied)["write_mode"] == "staged"
+    assert backend.load_layer(copied.id) == []

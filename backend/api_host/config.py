@@ -6,6 +6,8 @@ or by passing a custom AppConfig to create_app().
 """
 
 import os
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
@@ -182,8 +184,7 @@ class AppConfig:
     )
 
     # Server configuration
-    # Container default, matching the Dockerfile; HOST overrides it. The socket
-    # is bound by the uvicorn CLI, not by this field.
+    # Container default; HOST overrides the server bind address.
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))  # nosec B104
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
 
@@ -316,6 +317,67 @@ class AppConfig:
         if self.sessions_dir:
             return Path(self.sessions_dir)
         return self.get_graph_path().parent / "sessions"
+
+    def get_webhook_tokens_db_path(self, graph_path=None, excluded_dirs=()) -> Path:
+        """Dedicated credential database in operator-controlled private state."""
+        graph_path = (
+            Path(graph_path) if graph_path is not None else self.get_graph_path()
+        )
+        configured_state = os.environ.get("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR")
+        if configured_state:
+            state = Path(configured_state)
+        else:
+            # Keep the location stable across restarts, but separate independent
+            # graph stores owned by the same OS user. Hash the whole identity so
+            # PostgreSQL connection strings (which may contain passwords) are
+            # never exposed in a path.
+            identity = (
+                [
+                    "postgres",
+                    self.graph_postgres_dsn,
+                    self.graph_postgres_schema,
+                    self.graph_postgres_scope,
+                ]
+                if self.graph_backend == "postgres"
+                else ["file", str(graph_path.resolve())]
+            )
+            namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            roots = [Path.home() / ".local" / "state"]
+            # HOME can itself be beneath the graph directory (for example in
+            # pytest subprocesses). Use the account home if that happens.
+            try:
+                import pwd
+
+                roots.append(
+                    Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state"
+                )
+            except (ImportError, KeyError, AttributeError):
+                pass
+            excluded = [
+                graph_path.parent.resolve(),
+                *(Path(d).resolve() for d in excluded_dirs),
+            ]
+            state = next(
+                (
+                    root / "communityoverview" / namespace
+                    for root in roots
+                    if not any(
+                        (root / "communityoverview" / namespace / "webhook_tokens.db")
+                        .resolve()
+                        .is_relative_to(directory)
+                        for directory in excluded
+                    )
+                ),
+                None,
+            )
+            if state is None:
+                raise ValueError(
+                    "No private state directory outside graph and config directories"
+                )
+        path = state / "webhook_tokens.db"
+        if path.resolve() == self.get_import_jobs_db_path().resolve():
+            raise ValueError("Webhook token and import job databases must be separate")
+        return path
 
     def get_import_jobs_db_path(self) -> Path:
         """Resolved path to the import-jobs SQLite database.

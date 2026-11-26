@@ -387,6 +387,9 @@ def test_push_reads_refuse_a_staged_document_without_its_record(
     else:
         monkeypatch.setattr(world.write_modes, "_store", None)
         expected = "staged_unsupported"
+    if tool == "get_saved_view":
+        assert tool not in tools
+        return
     result = tools[tool](visualization_session_id=sid, **kwargs)
     assert result["success"] is False and result["error"] == expected
 

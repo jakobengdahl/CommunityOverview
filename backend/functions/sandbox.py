@@ -38,6 +38,7 @@ SECCOMP_MODE_FILTER = 2
 
 MIB = 1024 * 1024
 DISK_POLL_SECONDS = 0.1
+DISK_SCAN_ATTEMPTS = 5
 # Leave time for cleanup and the final report within the host's stop deadline.
 DISK_SCAN_TIMEOUT_SECONDS = 1.0
 
@@ -541,14 +542,29 @@ def _work_dir_exceeds_quota(spec):
     scan outside the work directory; at most a few are open at once, so depth
     cannot exhaust the supervisor's descriptors. Each inode counts once, so an
     entry moved or unlinked during the scan is not counted twice. Disappearing
-    entries are normal during a run; other scan failures must stop it rather
-    than disable enforcement.
+    entries are normal during a run, but a listed directory that was not
+    scanned causes a rescan, and misses still pending after every attempt
+    raise. A missed directory absent from two later walks is taken as deleted
+    or moved out. Best-effort against a racing function: an entry moved ahead
+    of the walk into an already-scanned directory is not counted by that walk.
     """
     limits = spec.get("disk_limits")
     if limits is None:
         return False
+    missed = {}  # directory identity -> walks since it was last listed unscanned
+    for _ in range(DISK_SCAN_ATTEMPTS):
+        exceeded = _scan_work_dir(spec["work_dir"], limits, missed)
+        if exceeded is not None:
+            return exceeded
+    raise OSError("work directory kept changing during every usage scan")
+
+
+def _scan_work_dir(work_dir, limits, missed):
+    """Return None while a missed directory may still hold uncounted entries."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     seen = set()
+    listed = set()
+    scanned = set()
     totals = [0, 0]  # bytes, entries
 
     def exceeds(info):
@@ -566,9 +582,10 @@ def _work_dir_exceeds_quota(spec):
         info = os.fstat(fd)
         return (info.st_dev, info.st_ino)
 
-    def list_subdirectories(fd):
+    def list_subdirectories(fd, identity):
         """Count a directory's entries; return its new subdirectories, or
         None once the quota is exceeded."""
+        scanned.add(identity)
         subdirectories = []
         with os.scandir(fd) as entries:
             for entry in entries:
@@ -576,12 +593,12 @@ def _work_dir_exceeds_quota(spec):
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                if (info.st_dev, info.st_ino) in seen:
-                    continue
+                identity = (info.st_dev, info.st_ino)
                 if exceeds(info):
                     return None
-                if stat.S_ISDIR(info.st_mode):
-                    subdirectories.append((entry.name, (info.st_dev, info.st_ino)))
+                if stat.S_ISDIR(info.st_mode) and identity not in scanned:
+                    listed.add(identity)
+                    subdirectories.append((entry.name, identity))
         return subdirectories
 
     def open_verified(name, identity, parent):
@@ -599,15 +616,16 @@ def _work_dir_exceeds_quota(spec):
             return None
         return fd
 
-    root = os.open(spec["work_dir"], flags)
+    root = os.open(work_dir, flags)
     current = root
     # Descriptors opened by the walk-down fallback that `current` does not own
     # yet; the finally closes them if an exception (including one raised by a
     # signal handler) arrives while they are held.
     walking = []
     try:
-        seen.add(identity_of(root))
-        pending = list_subdirectories(root)
+        root_identity = identity_of(root)
+        seen.add(root_identity)
+        pending = list_subdirectories(root, root_identity)
         if pending is None:
             return True
         # Frames hold names and identities, not descriptors.
@@ -616,6 +634,8 @@ def _work_dir_exceeds_quota(spec):
             pending = stack[-1][2]
             if pending:
                 name, identity = pending.pop()
+                if identity in scanned:
+                    continue
                 child = open_verified(name, identity, current)
                 if child is None:
                     continue  # Moved or replaced since it was listed.
@@ -624,7 +644,7 @@ def _work_dir_exceeds_quota(spec):
                 previous, current = current, child
                 if previous != root:
                     os.close(previous)
-                pending = list_subdirectories(current)
+                pending = list_subdirectories(current, identity)
                 if pending is None:
                     return True
                 stack.append((name, identity, pending))
@@ -658,6 +678,16 @@ def _work_dir_exceeds_quota(spec):
             walking.clear()
             if previous != root:
                 os.close(previous)
+        for identity in list(missed):
+            # A directory moved into an already-scanned one is not listed
+            # again by this walk, so absence once still calls for a rescan.
+            if identity in scanned or missed[identity] >= 1:
+                del missed[identity]
+            else:
+                missed[identity] += 1
+        missed.update(dict.fromkeys(listed - scanned, 0))
+        if missed:
+            return None
         # Unlinked open files have no directory entry. Measure before cleanup
         # closes the run's descriptors and releases their storage.
         pending = _children_of(os.getpid())

@@ -1,9 +1,17 @@
+// covers: frontend/web/src/components/SettingsDialog.jsx
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 import SettingsDialog from '../src/components/SettingsDialog';
 import useGraphStore from '../src/store/graphStore';
+import useUserPreferencesStore from '../src/store/userPreferencesStore';
+import { saveUserPreferences } from '../src/services/api';
 import { I18nProvider } from '../src/i18n';
+
+vi.mock('../src/services/api', async (importOriginal) => ({
+  ...(await importOriginal()),
+  saveUserPreferences: vi.fn(),
+}));
 
 describe('SettingsDialog', () => {
   beforeEach(() => {
@@ -163,5 +171,32 @@ describe('SettingsDialog', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     vi.restoreAllMocks();
+  });
+
+  it('applies the command-box-only setting only once saved, and reports a failed save', async () => {
+    useGraphStore.setState({ llmAvailable: true });
+    useUserPreferencesStore.setState({
+      signedIn: true,
+      preferences: { hideClassicSurfaces: false },
+      saveFailed: false,
+    });
+    render(
+      <I18nProvider>
+        <SettingsDialog stats={null} onClose={() => {}} />
+      </I18nProvider>
+    );
+    const toggle = screen.getByRole('button', { name: /Command box only/i });
+
+    saveUserPreferences.mockRejectedValueOnce(new Error('503'));
+    fireEvent.click(toggle);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(useUserPreferencesStore.getState().preferences.hideClassicSurfaces).toBe(false);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    saveUserPreferences.mockResolvedValueOnce({ preferences: { hideClassicSurfaces: true } });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'));
+    expect(saveUserPreferences).toHaveBeenLastCalledWith({ hideClassicSurfaces: true });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

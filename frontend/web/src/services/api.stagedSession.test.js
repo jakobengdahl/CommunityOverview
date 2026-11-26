@@ -108,6 +108,67 @@ describe('staged-session binding in api.js', () => {
     expect(JSON.parse(calls[0].options.body)).toEqual({ name: null, write_mode: 'staged' });
   });
 
+  it('posts a copy with its name in the JSON body', async () => {
+    const calls = mockFetch(200, { id: '5555-6666-7777-8888' });
+    await api.copySession('1111-2222-3333-4444', 'Copy of Plan');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222-3333-4444\/copy$/);
+    expect(calls[0].options.method).toBe('POST');
+    expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Copy of Plan' });
+  });
+
+  it('sends a template capture to the selected session and preserves structured failures', async () => {
+    const calls = mockFetch(409, { success: false, error: 'staged_changes' });
+    const body = { name: 'Example', expected_revision: 7, node_ids: ['a'], annotation_ids: [] };
+    await expect(api.saveTemplate('1111-2222', body)).rejects.toMatchObject({
+      code: 'staged_changes',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222\/templates$/);
+    expect(calls[0].options.method).toBe('POST');
+    expect(JSON.parse(calls[0].options.body)).toEqual(body);
+  });
+
+  it('routes template management and explicit placement to the template endpoints', async () => {
+    const calls = mockFetch();
+    const update = { expected_revision: 3, name: 'Renamed' };
+    const insertion = {
+      template_id: 'template',
+      template_revision: 3,
+      mode: 'reference',
+      x: 4,
+      y: 5,
+    };
+    await api.listTemplates();
+    await api.updateTemplate('template', update);
+    await api.deleteTemplate('template', 3);
+    await api.insertTemplate('session', insertion);
+    expect(
+      calls.map(({ url, options }) => [
+        new URL(url, 'http://localhost').pathname,
+        options.method || 'GET',
+      ])
+    ).toEqual([
+      ['/api/templates', 'GET'],
+      ['/api/templates/template', 'PATCH'],
+      ['/api/templates/template', 'DELETE'],
+      ['/api/sessions/session/insert-template', 'POST'],
+    ]);
+    expect(new URL(calls[2].url, 'http://localhost').searchParams.get('expected_revision')).toBe(
+      '3'
+    );
+    expect(JSON.parse(calls[1].options.body)).toEqual(update);
+    expect(JSON.parse(calls[3].options.body)).toEqual(insertion);
+  });
+
+  it('captures the specified revision as a session', async () => {
+    const calls = mockFetch(200, { success: true, kind: 'saved_session', session_url: '/session' });
+    const result = await api.saveSessionView('1111-2222', 'Overview', 7);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222\/save-view$/);
+    expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Overview', expected_revision: 7 });
+    expect(result).toEqual({ success: true, kind: 'saved_session', session_url: '/session' });
+  });
+
   it('deletes a staged session with its staged changes only when asked to', async () => {
     const calls = mockFetch(200, { deleted: true });
     await api.deleteServerSession('1111-2222', 'c1');
@@ -152,7 +213,7 @@ describe('a direct session the server holds, where staging exists', () => {
     api.setActiveSessionForRequests('5555-6666-7777-8888');
     api.setSessionOnServer('5555-6666-7777-8888');
     await api.updateNode('n1', { name: 'x' });
-    await api.saveView('v');
+    await api.saveSessionView('5555-6666-7777-8888', 'v');
     expect(headerOf(calls[0])).toBe('5555-6666-7777-8888');
     // A route that neither stages nor composes keeps working in a direct session.
     expect(headerOf(calls[1])).toBeUndefined();

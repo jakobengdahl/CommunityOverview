@@ -1,10 +1,12 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import { StrictMode } from 'react';
 
 // App captures URL session parameters at module load, before the first render.
 vi.hoisted(() => {
-  window.history.replaceState({}, '', '/?session=1111-2222&view=Overview&node=focus-node');
+  window.history.replaceState({}, '', '/?session=1111-2222&node=focus-node');
 });
 const captured = vi.hoisted(() => ({ canvas: null, shell: null, actualApi: null }));
 
@@ -95,11 +97,7 @@ class FakeEventSource {
 }
 FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -113,7 +111,6 @@ const payload = (id) => ({
   state: {},
   resolved: { nodes: [{ id, type: 'Actor', name: id }], edges: [] },
 });
-const view = { success: true, nodes: [{ id: 'view-node', type: 'Actor' }], edges: [] };
 
 function deferred() {
   let resolve;
@@ -123,6 +120,20 @@ function deferred() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+// Open each session stream that has not delivered its snapshot yet, and let
+// the server's membership broadcasts land: added nodes are drawn from them.
+async function settleBroadcasts() {
+  await act(async () => {
+    FakeEventSource.instances
+      .filter((s) => !s.opened)
+      .forEach((s) => {
+        s.opened = true;
+        s.onmessage?.({ data: JSON.stringify({ type: 'snapshot', seq: 0, session: {} }) });
+      });
+    await vi.advanceTimersByTimeAsync(1000);
+  });
 }
 
 async function renderApp({ strict = false } = {}) {
@@ -143,7 +154,7 @@ describe('App URL session bootstrap', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     window.localStorage.clear();
-    window.history.replaceState({}, '', '/?session=1111-2222&view=Overview&node=focus-node');
+    window.history.replaceState({}, '', '/?session=1111-2222&node=focus-node');
     FakeEventSource.instances = [];
     store().clearVisualization();
     store().clearFocusNode();
@@ -151,7 +162,6 @@ describe('App URL session bootstrap', () => {
     api.getSession.mockImplementation((id) =>
       id === '1111-2222' ? bootstrap.promise : Promise.resolve(payload('new-session-node'))
     );
-    api.getSavedView.mockResolvedValue(view);
     api.getNodeDetails.mockResolvedValue({
       success: true,
       node: { id: 'focus-node', type: 'Actor' },
@@ -162,6 +172,17 @@ describe('App URL session bootstrap', () => {
 
   afterEach(() => {
     cleanup();
+    // api.js keeps session modes at module level: release every session this
+    // test named, or a later test linking the same id inherits its mode.
+    const named = [
+      api.setActiveSessionForRequests,
+      api.setSessionStaged,
+      api.setSessionModeUnknown,
+      api.setSessionOnServer,
+    ].flatMap((fn) => fn.mock.calls.map(([id]) => id));
+    new Set(named.filter(Boolean)).forEach((id) => captured.actualApi.setSessionStaged(id, false));
+    captured.actualApi.setActiveSessionForRequests(null);
+    captured.actualApi.setStagingAvailable(false);
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -198,38 +219,61 @@ describe('App URL session bootstrap', () => {
     }
   );
 
-  it('applies the view and node focus after a successful bootstrap', async () => {
+  it('focuses the node after a successful session bootstrap', async () => {
     await renderApp();
     expect(api.getSavedView).not.toHaveBeenCalled();
     await act(async () => {
       bootstrap.resolve(payload('session-node'));
     });
-    expect(api.getSavedView).toHaveBeenCalledWith('Overview');
-    expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+    await settleBroadcasts();
+    expect(store().nodes.map((n) => n.id)).toEqual(['session-node', 'focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
   });
 
   it('releases the original bootstrap waiter during StrictMode cleanup', async () => {
-    // Make the saved-view effect start awaiting the first bootstrap before
-    // StrictMode cleans it up and creates the second bootstrap promise.
+    // Start the focus waiter before StrictMode replaces the bootstrap promise.
     store().setStats({ total_nodes: 0, total_edges: 0 });
     await renderApp({ strict: true });
     expect(api.getSession).toHaveBeenCalledTimes(2);
+    await settleBroadcasts();
+    expect(store().focusNodeId).toBe('focus-node');
     await act(async () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
     });
-    expect(api.getSavedView).toHaveBeenCalledWith('Overview');
-    expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+    await settleBroadcasts();
+    expect(store().nodes.map((n) => n.id)).toEqual(['focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
     await act(async () => {
       bootstrap.resolve(payload('old-session-node'));
     });
-    expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+    expect(store().nodes.map((n) => n.id)).toEqual(['focus-node']);
     expect(store().focusNodeId).toBe('focus-node');
   });
 
+  it('names one starting session to the api layer when StrictMode runs the initializer twice', async () => {
+    // The starting id is generated only without ?session=, which App reads at import.
+    window.history.replaceState({}, '', '/');
+    vi.resetModules();
+    const freshApi = await import('../src/services/api');
+    const { default: FreshApp } = await import('../src/App');
+    const { I18nProvider: FreshI18n } = await import('../src/i18n');
+    await act(async () => {
+      render(
+        <StrictMode>
+          <FreshI18n>
+            <FreshApp />
+          </FreshI18n>
+        </StrictMode>
+      );
+    });
+    const started = captured.canvas.sessionKey;
+    const named = (fn) => [...new Set(fn.mock.calls.map(([id]) => id))];
+    expect(named(freshApi.setActiveSessionForRequests)).toEqual([started]);
+    expect(named(freshApi.setSessionModeUnknown)).toEqual([started]);
+  });
+
   it.each(['success', '404', '500'])(
-    'bounds a hung bootstrap and ignores its late %s after view and focus',
+    'bounds a hung bootstrap and ignores its late %s after node focus',
     async (outcome) => {
       await renderApp();
       await act(async () => {
@@ -240,8 +284,8 @@ describe('App URL session bootstrap', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1);
       });
-      expect(api.getSavedView).toHaveBeenCalledWith('Overview');
-      expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+      await settleBroadcasts();
+      expect(store().nodes.map((n) => n.id)).toEqual(['focus-node']);
       expect(store().focusNodeId).toBe('focus-node');
       const epoch = store().sessionEpoch;
       await act(async () => {
@@ -249,34 +293,11 @@ describe('App URL session bootstrap', () => {
         else
           bootstrap.reject(Object.assign(new Error('late failure'), { status: Number(outcome) }));
       });
-      expect(store().nodes.map((n) => n.id)).toEqual(['view-node', 'focus-node']);
+      expect(store().nodes.map((n) => n.id)).toEqual(['focus-node']);
       expect(store().focusNodeId).toBe('focus-node');
       expect(store().sessionEpoch).toBe(epoch);
       expect(screen.queryByText(en.sessions.link_not_found)).toBeNull();
       expect(console.error).not.toHaveBeenCalled();
-    }
-  );
-
-  it.each(['node move', 'annotation edit'])(
-    'preserves a canvas-local %s made during the view fetch',
-    async (edit) => {
-      const savedView = deferred();
-      api.getSavedView.mockReturnValue(savedView.promise);
-      await renderApp();
-      await act(async () => {
-        bootstrap.resolve(payload('session-node'));
-      });
-      expect(api.getSavedView).toHaveBeenCalledWith('Overview');
-      act(() => {
-        if (edit === 'node move')
-          captured.canvas.onNodePositionChange('session-node', { x: 10, y: 20 });
-        else captured.canvas.onAnnotationChange('style');
-      });
-      await act(async () => {
-        savedView.resolve(view);
-      });
-      expect(store().nodes.map((n) => n.id)).toEqual(['session-node', 'focus-node']);
-      expect(store().focusNodeId).toBe('focus-node');
     }
   );
 
@@ -302,8 +323,7 @@ describe('App URL session bootstrap', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
       });
-      // The view proceeds; the session's mode is still unread.
-      expect(api.getSavedView).toHaveBeenCalledWith('Overview');
+      // Focus proceeds; the session's mode is still unread.
       expect(await tryWrite()).toEqual({ held: true, sent: 0 });
       await act(async () => answer());
       expect(await tryWrite()).toEqual({ held: false, sent: 1 });
@@ -324,6 +344,8 @@ describe('App URL session bootstrap', () => {
   });
 
   it('connects the stream of a link settled direct by a late 404, so a later switch to staged is learnt', async () => {
+    // No view or node to add: either is a membership write that connects first.
+    window.history.replaceState({}, '', '/?session=1111-2222');
     api.getUiCapabilities.mockResolvedValue({ llm_available: false, staged_sessions: true });
     await renderApp();
     await act(async () => {
@@ -358,7 +380,7 @@ describe('App URL session bootstrap', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
     });
-    // The view's content is saved: the edit connects the session's stream.
+    // An edit connects the session's stream.
     await act(async () => {
       captured.canvas.onSaveView({
         nodes: [{ id: 'view-node', position: { x: 1, y: 2 } }],

@@ -1,16 +1,67 @@
+/* Shared appearance values retain the legacy card palette in both themes.
+   The graph-card-theme-* classes pin one theme for a subtree (an editor
+   preview); the light class repeats the media-query block below. */
+:root,
+.graph-card-theme-dark {
+  --graph-card-surface: #1a1a1a;
+  --graph-card-text-primary: #ddd;
+  --graph-card-text-secondary: #999;
+  --graph-card-border: currentColor;
+  --graph-card-band-foreground: white;
+  --graph-card-focus: rgba(100, 108, 255, 0.7);
+  --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --graph-card-shadow-color: rgba(0, 0, 0, 0.3);
+  --graph-card-control-border: #1a1a1a;
+  --graph-card-boundary: #808080;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --graph-card-surface: white;
+    --graph-card-text-primary: #213547;
+    --graph-card-text-secondary: #666;
+    --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+    --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
+    --graph-card-control-border: white;
+    --graph-card-boundary: #767676;
+  }
+}
+
+.graph-card-theme-light {
+  --graph-card-surface: white;
+  --graph-card-text-primary: #213547;
+  --graph-card-text-secondary: #666;
+  --graph-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --graph-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --graph-card-shadow-color: rgba(0, 0, 0, 0.1);
+  --graph-card-control-border: white;
+  --graph-card-boundary: #767676;
+}
+
+/* A preview node sits in normal flow, as wide as the canvas would draw it. */
+.graph-node-preview {
+  display: flex;
+  justify-content: center;
+}
+
 .graph-custom-node {
-  background: #1a1a1a;
-  border: 2px solid;
+  background: var(--graph-card-surface);
+  border: 2px solid var(--graph-card-border);
   border-radius: 8px;
+  /* Pinned here, not inherited from the host app: the MCP layout read
+     advertises min/max-width as the node's outer width (node_width_bounds). */
+  box-sizing: border-box;
   min-width: 150px;
   max-width: 250px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--graph-card-shadow);
   position: relative;
   transition: all 0.2s ease;
 }
 
 .graph-custom-node:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--graph-card-shadow-hover);
   transform: scale(1.02);
 }
 
@@ -63,7 +114,7 @@
 
 .graph-custom-node.selected {
   box-shadow:
-    0 0 0 3px rgba(100, 108, 255, 0.7),
+    0 0 0 3px var(--graph-card-focus),
     0 0 16px rgba(100, 108, 255, 0.3);
 }
 
@@ -112,7 +163,7 @@
 .graph-node-header {
   padding: 0.4rem 0.6rem;
   border-radius: 6px 6px 0 0;
-  color: white;
+  color: var(--graph-card-band-foreground);
   font-size: 0.75rem;
   font-weight: 600;
   text-align: center;
@@ -122,7 +173,7 @@
 
 .graph-node-content {
   padding: 0.75rem;
-  color: #ddd;
+  color: var(--graph-card-text-primary);
 }
 
 .graph-node-label {
@@ -134,7 +185,7 @@
 
 .graph-node-summary {
   font-size: 0.75rem;
-  color: #999;
+  color: var(--graph-card-text-secondary);
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -153,7 +204,7 @@
   border-radius: 50%;
   background-color: #646cff;
   color: white;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
   font-size: 1rem;
   font-weight: bold;
   cursor: pointer;
@@ -178,7 +229,7 @@
   border-radius: 50%;
   background-color: #10b981;
   color: white;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
   font-size: 0.8rem;
   cursor: pointer;
   display: flex;
@@ -267,35 +318,14 @@ body.graph-menu-open .graph-node-tooltip {
   width: 8px;
   height: 8px;
   background-color: #646cff;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--graph-card-control-border);
 }
 
 /* Light mode support */
 @media (prefers-color-scheme: light) {
-  .graph-custom-node {
-    background: white;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-
+  /* Preserve the legacy light-theme hover precedence over state shadows. */
   .graph-custom-node:hover {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  }
-
-  .graph-node-content {
-    color: #213547;
-  }
-
-  .graph-node-summary {
-    color: #666;
-  }
-
-  .graph-expand-button,
-  .graph-edit-button {
-    border-color: white;
-  }
-
-  .graph-custom-node .react-flow__handle {
-    border-color: white;
+    box-shadow: var(--graph-card-shadow-hover);
   }
 
   .graph-node-tooltip {
@@ -432,4 +462,219 @@ body.graph-menu-open .graph-node-tooltip {
   white-space: nowrap;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   z-index: 6;
+}
+
+/* Configured shapes (docs/design/NODE_SHAPES.md). The React Flow wrapper and
+   this root pass the pointer through, so selection, drag, context menu and
+   erase (elementFromPoint) only hit the painted body and the text and
+   controls inside it; transparent corners reach whatever lies beneath. */
+/* !important: React Flow sets pointer-events inline on its wrapper. */
+.react-flow__node.graph-shaped-flow-node {
+  pointer-events: none !important;
+}
+
+.graph-shaped-node,
+.graph-shape-svg {
+  pointer-events: none;
+}
+
+.graph-shaped-node {
+  position: relative;
+  overflow: visible;
+}
+
+.graph-shape-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+}
+
+/* Body text can grow beyond its geometric box at larger root font sizes.
+   Let the painted body receive its events, even where that text overflows. */
+.graph-shape-body,
+.graph-shape-band,
+.graph-shape-label-chip,
+.graph-shaped-node button {
+  pointer-events: auto;
+}
+
+.graph-shape-text,
+.graph-shape-text > * {
+  pointer-events: none;
+}
+
+/* The connection handles sit at the bbox top and bottom centre, on the body
+   edge of every base (a triangle's apex or tip is a body vertex), and are hit
+   exactly as on the card: React Flow's connectionindicator rule turns them on
+   while nodes are connectable. */
+
+/* Above the body and the state badges beside it. */
+.graph-shape-outside-label {
+  z-index: 7;
+}
+
+/* Sized and placed inline inside the text box; a hover transform or
+   overflowing glyph would reach past the body. */
+.graph-shaped-node .graph-expand-button,
+.graph-shaped-node .graph-expand-button:hover,
+.graph-shaped-node .graph-edit-button,
+.graph-shaped-node .graph-edit-button:hover {
+  right: auto;
+  transform: none;
+  box-sizing: border-box;
+  padding: 0;
+  overflow: hidden;
+}
+
+.graph-shape-body {
+  fill: var(--graph-card-surface);
+}
+
+/* Painted under the boundary, which reaches 2px outside the path; the extra
+   2px of offset keeps the shadow visible below it. */
+.graph-shape-shadow {
+  fill: var(--graph-card-shadow-color);
+  transform: translateY(4px);
+}
+
+.graph-shape-outline {
+  fill: none;
+  stroke-width: 2;
+}
+
+/* Type colours are configurable and need not reach 3:1 against the canvas,
+   so a neutral hairline that does in each theme (4.4:1 on dark, 4.2:1 on
+   light) sits just outside the outline; the body covers its inner half. */
+.graph-shape-boundary {
+  fill: none;
+  stroke: var(--graph-card-boundary);
+  stroke-width: 4;
+}
+
+/* State rings sit under the body, so half their stroke shows outside it.
+   Each ring is 6px wider than the next one in, so stacked states each keep
+   a visible 3px band. */
+.graph-shape-ring {
+  fill: none;
+  stroke-linejoin: round;
+}
+
+.graph-shape-ring-mark {
+  stroke-width: 6;
+}
+
+.graph-shape-ring-focus {
+  stroke: rgba(100, 108, 255, 0.4);
+  stroke-width: 12;
+}
+
+/* Selection is a wider ring than highlight, not only another colour. */
+.graph-shaped-node.selected .graph-shape-ring-focus {
+  stroke: var(--graph-card-focus);
+  stroke-width: 18;
+}
+
+.graph-shape-ring-remote {
+  stroke-width: 24;
+  stroke-dasharray: 6 3;
+}
+
+/* React Flow drops the wrapper outline on keyboard focus; this ring, solid
+   #646cff (at least 3:1 on both canvas backgrounds), replaces it. */
+.graph-shape-ring-keyboard {
+  stroke: transparent;
+  stroke-width: 30;
+}
+
+.react-flow__node:focus-visible .graph-shape-ring-keyboard {
+  stroke: #646cff;
+}
+
+.graph-shaped-node.skill-node .graph-shape-outline {
+  stroke-dasharray: 6 3;
+}
+
+.graph-shaped-node.skill-node.selected .graph-shape-ring-focus {
+  stroke: rgba(251, 191, 36, 0.8);
+}
+
+.graph-shaped-node.staged .graph-shape-outline {
+  stroke: #f0b429 !important;
+  stroke-dasharray: 6 4;
+}
+
+.graph-shaped-node.staged-deleted,
+.graph-shaped-node.staged-orphaned {
+  opacity: 0.7;
+}
+
+.graph-shaped-node.staged-deleted .graph-node-label {
+  text-decoration: line-through;
+}
+
+.graph-shaped-node.dimmed {
+  opacity: 0.35;
+}
+
+.graph-shaped-node.dimmed.selected,
+.graph-shaped-node.dimmed:hover,
+.graph-shaped-node.dimmed.remote-selected,
+.react-flow__node:focus-visible .graph-shaped-node.dimmed {
+  opacity: 1;
+}
+
+@media (prefers-contrast: more) {
+  .graph-shaped-node.dimmed {
+    opacity: 0.7;
+  }
+}
+
+.graph-shape-band-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.graph-shape-label-chip {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-radius: 4px;
+}
+
+.graph-shape-label-chip[style*='background'] {
+  padding: 0 0.3em;
+}
+
+.graph-shape-text {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--graph-card-text-primary);
+}
+
+.graph-shape-text > * {
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.graph-shape-text .graph-node-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  margin-bottom: 0.3em;
+  /* A long summary must clip itself, not squeeze the name out of the column. */
+  flex-shrink: 0;
 }

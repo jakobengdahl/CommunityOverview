@@ -9,9 +9,12 @@ export default defineConfig({
     emptyDirOnBuild: true,
     // Build as a library for embedding
     lib: {
-      entry: path.resolve(__dirname, 'src/main.jsx'),
+      entry: path.resolve(import.meta.dirname, 'src/main.jsx'),
       name: 'CommunityGraphWidget',
       fileName: 'widget',
+      // Vite 6+ names the CSS after the package; the backend inlines style.css
+      // (backend/service/mcp_widget.py), so keep the name it reads.
+      cssFileName: 'style',
       formats: ['iife'],
     },
     rollupOptions: {

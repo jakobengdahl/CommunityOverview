@@ -151,6 +151,13 @@ function scheduleClearGroupsReset(set) {
   }, 100);
 }
 
+// Forwards this browser's own membership changes to the active session (set
+// by App), returning whether it sent one. Rendering never sends membership: a
+// change the server broadcast must not be sent back, so only the user-action
+// sites call publishMembership. A sent change reaches the canvas only from the
+// server's broadcast of the op.
+let membershipPublisher = null;
+
 // One auto-clear timer per pulsing node. A repeated pulse on the same node
 // replaces its timer so the visual always lasts the full latest duration, and
 // the timer only clears the entry if it still carries the seq it was armed for
@@ -383,6 +390,48 @@ const useGraphStore = create((set, get) => ({
   // Actions
   setSessionWriteMode: (mode) =>
     set({ sessionWriteMode: mode === 'staged' || mode === 'unknown' ? mode : 'direct' }),
+  setMembershipPublisher: (publish) => {
+    membershipPublisher = publish;
+  },
+  /**
+   * Send a user's own `nodes_added`/`nodes_removed`/`nodes_replaced` to the
+   * session. The caller changes no membership itself: the canvas follows the
+   * op's broadcast, which draws `nodes`/`edges`, and `onDrawn` runs after it
+   * has. With no session to send to, the change is applied here at once,
+   * drawing with `draw` when given. A replace's `view` layout goes with it to
+   * the session; returns whether it was sent, so a caller applies it locally
+   * otherwise.
+   */
+  publishMembership: (
+    op,
+    nodeIds,
+    { nodes = [], edges = [], onDrawn = null, draw = null, view = null } = {}
+  ) => {
+    if (membershipPublisher?.(op, nodeIds, { nodes, edges, onDrawn, view })) return true;
+    const state = get();
+    const dropped =
+      op === 'nodes_removed'
+        ? new Set(nodeIds)
+        : op === 'nodes_replaced'
+          ? new Set(state.nodes.map((n) => n.id))
+          : null;
+    if (dropped?.size) {
+      set({
+        shapeOverrides: Object.fromEntries(
+          Object.entries(state.shapeOverrides).filter(
+            ([id]) => !dropped.has(id) || (op === 'nodes_replaced' && nodeIds.includes(id))
+          )
+        ),
+        nodes: state.nodes.filter((n) => !dropped.has(n.id)),
+        edges: state.edges.filter((e) => !dropped.has(e.source) && !dropped.has(e.target)),
+        navHistory: state.navHistory.filter((e) => !dropped.has(e.id)),
+      });
+    }
+    if (nodes.length) (draw || get().addNodesToVisualization)(nodes, edges);
+    onDrawn?.();
+    return false;
+  },
+
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
 
@@ -471,12 +520,14 @@ const useGraphStore = create((set, get) => ({
   // esc-esc path is gated on a dialog being open, so an agent driving
   // clear_visualization can pull the canvas out from under an open dialog;
   // closing them here covers every caller at once.
-  clearVisualization: () => {
+  //
+  // `keepNodes` leaves the nodes and edges for a membership change sent to the
+  // session to remove (publishMembership): they leave on its broadcast.
+  clearVisualization: ({ keepNodes = false } = {}) => {
     pulseClearTimers.forEach((timer) => clearTimeout(timer));
     pulseClearTimers.clear();
     set((state) => ({
-      nodes: [],
-      edges: [],
+      ...(keepNodes ? {} : { nodes: [], edges: [], navHistory: [] }),
       detailNode: null,
       editingNode: null,
       editingEdge: null,
@@ -494,7 +545,10 @@ const useGraphStore = create((set, get) => ({
       clearGroupsFlag: true,
       selectedGraphNodes: [],
       selectedNodeId: null,
-      navHistory: [],
+      shapeRevisions: {},
+      shapeOverrides: {},
+      typeShapes: {},
+      typeShapeClearNodes: {},
       canvasBaselineEpoch: state.canvasBaselineEpoch + 1,
     }));
     scheduleClearGroupsReset(set);
@@ -682,6 +736,59 @@ const useGraphStore = create((set, get) => ({
       availableExperts: presentation?.expert_agents || [],
     });
   },
+
+  shapeRevisions: {},
+  shapeOverrides: {},
+  typeShapes: {},
+  typeShapeClearNodes: {},
+  consumeTypeShapeClearNodes: (snapshot) =>
+    set((state) =>
+      state.typeShapeClearNodes === snapshot && Object.keys(snapshot).length
+        ? { typeShapeClearNodes: {} }
+        : state
+    ),
+  setNodeShape: (nodeId, selection) =>
+    set((state) => {
+      const shapeOverrides = { ...state.shapeOverrides };
+      if (selection == null) delete shapeOverrides[nodeId];
+      else
+        Object.defineProperty(shapeOverrides, nodeId, {
+          value: selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      return { shapeOverrides };
+    }),
+  setTypeShape: (type, selection, nodeId) =>
+    set((state) => {
+      const typeShapes = { ...state.typeShapes };
+      const shapeOverrides = { ...state.shapeOverrides };
+      if (selection == null) delete typeShapes[type];
+      else
+        Object.defineProperty(typeShapes, type, {
+          value: selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      if (nodeId != null) delete shapeOverrides[nodeId];
+      const typeShapeClearNodes = { ...state.typeShapeClearNodes };
+      Object.defineProperty(typeShapeClearNodes, type, {
+        value: [
+          ...(Object.hasOwn(typeShapeClearNodes, type) ? typeShapeClearNodes[type] : []),
+          ...(nodeId != null ? [nodeId] : []),
+        ],
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      return {
+        typeShapes,
+        shapeOverrides,
+        typeShapeClearNodes,
+      };
+    }),
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
@@ -1028,6 +1135,9 @@ const useGraphStore = create((set, get) => ({
   removeNode: (nodeId) => {
     const { nodes, edges, navHistory } = get();
     set({
+      shapeOverrides: Object.fromEntries(
+        Object.entries(get().shapeOverrides).filter(([id]) => id !== nodeId)
+      ),
       nodes: nodes.filter((n) => n.id !== nodeId),
       edges: edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
       // Drop the removed node from the trail so its row can't become a dead

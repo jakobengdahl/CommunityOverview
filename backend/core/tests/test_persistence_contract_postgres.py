@@ -1,3 +1,4 @@
+# covers: backend/core/postgres_backend.py
 """The PostgreSQL backend against the persistence contract.
 
 Needs a real server: the properties this backend exists for - a transaction
@@ -2442,6 +2443,7 @@ class TestPostgresDeclaresWhatItImplements:
             change_notification=True,
             store_traversal=True,
             revision_enforcement=True,
+            batch_conditions=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
@@ -7786,27 +7788,26 @@ class TestTheOptionalScopeSeam:
         assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
 
     def test_the_two_layers_agree_on_a_cross_scope_upsert(self, owner, backends):
-        """The refusal, asked where the server is enforcing as well.
+        """Both application and server enforcement refuse cross-scope writes.
 
-        The application half is tested through the superuser DSN, where no
-        policy applies - so nothing there pins the claim this change makes in
-        both its code and its document: that where the policy IS in force the
-        server refuses the same write. That is a genuine branch in the server
-        rather than a consequence of this SQL (how PostgreSQL treats an
-        `ON CONFLICT DO UPDATE` whose conflicting row is invisible under
-        `USING`), so if it ever changed, a host would start seeing a different
-        exception from the same misconfiguration and nothing would notice.
+        PostgreSQL may reject the invisible conflict before the application's
+        guarded update can return its own refusal.
         """
         name, schema, password = owner
         a = self._as_owner(owner, backends, scope="scope-a")
         b = self._as_owner(owner, backends, scope="scope-b")
         a.upsert_node(node_payload("n0", name="A's own"))
 
-        with pytest.raises(CrossScopeWriteRefused):
+        with pytest.raises(
+            (CrossScopeWriteRefused, psycopg.errors.InsufficientPrivilege)
+        ):
             b.upsert_node(node_payload("n0", name="B's version"))
 
-        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert b.load_graph_data()["nodes"] == []
         assert by_id(a.load_graph_data(), "nodes")["n0"]["name"] == "A's own"
+        a.upsert_node(node_payload("n0", name="Updated by A"))
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert by_id(a.load_graph_data(), "nodes")["n0"]["name"] == "Updated by A"
 
     def test_the_policy_admits_a_scopeless_row_to_every_session(self, owner, backends):
         """The `IS NULL` arm, asked of a table that actually has the policy.

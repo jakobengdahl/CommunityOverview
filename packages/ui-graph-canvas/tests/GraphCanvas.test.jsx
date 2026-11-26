@@ -1,6 +1,13 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { nodeShapeAreaValues } from '../src/utils/nodeShapes';
+
+vi.mock('../src/utils/nodeShapes', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, nodeShapeAreaValues: vi.fn(actual.nodeShapeAreaValues) };
+});
 
 const hoisted = vi.hoisted(() => ({ onNodesChange: null, selectionOnChange: null }));
 
@@ -12,6 +19,9 @@ vi.mock('reactflow', () => {
           <div
             key={node.id}
             data-testid={`node-${node.id}`}
+            className={node.className}
+            aria-label={node.ariaLabel}
+            data-shape-base={node.geometry?.base}
             onContextMenu={(event) => onNodeContextMenu?.(event, node)}
           >
             {node.data?.label}
@@ -143,6 +153,87 @@ describe('GraphCanvas', () => {
 
       expect(screen.getByRole('button', { name: /oppna i kallgrafen/i })).toBeTruthy();
     });
+  });
+
+  it('resolves a configured type shape onto its nodes and leaves other types on the card', () => {
+    const schema = {
+      node_shapes: {
+        risk: {
+          version: 1,
+          base: 'triangle-down',
+          scale: 1.5,
+          placement: 'bottom',
+          areas: { first: 'name', second: 'risk_level', third: null },
+        },
+      },
+      node_types: { Risk: { shape: 'risk', fields: ['risk_level'] }, Actor: { shape: 'risk' } },
+    };
+    const canvas = (savedShapes) => (
+      <GraphCanvas
+        nodes={[
+          { id: 'r1', name: 'Supply delay', type: 'Risk', risk_level: 'high' },
+          { id: 'r2', name: 'Saved', type: 'Risk' },
+          { id: 'a1', name: 'Agency', type: 'Actor' },
+        ]}
+        edges={[]}
+        schema={schema}
+        savedShapes={savedShapes}
+        shapeOverrides={{ r2: { ref: 'saved:flat' } }}
+        // A session type default outranks the configured one.
+        typeShapes={{ Actor: { builtin: true } }}
+      />
+    );
+    const flat = { ...schema.node_shapes.risk, base: 'rectangle-flat', placement: 'middle-centre' };
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const { rerender } = render(canvas({ flat: { name: 'Flat', definition: flat, revision: 1 } }));
+    const risk = screen.getByTestId('node-r1');
+    expect(risk.dataset.shapeBase).toBe('triangle-down');
+    expect(risk.className).toBe('graph-shaped-flow-node');
+    expect(risk.getAttribute('aria-label')).toBe('Risk, Supply delay, high');
+    const actor = screen.getByTestId('node-a1');
+    expect(actor.dataset.shapeBase).toBeUndefined();
+    expect(actor.getAttribute('aria-label')).toBeNull();
+    expect(screen.getByTestId('node-r2').dataset.shapeBase).toBe('rectangle-flat');
+    // A deleted library entry falls back to the card, not the configured type shape.
+    rerender(canvas({}));
+    expect(screen.getByTestId('node-r2').dataset.shapeBase).toBeUndefined();
+    // Area texts come from the loaded nodes: a shaped node never fetches.
+    vi.unstubAllGlobals();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('resolves a node look once across overlay changes and again when shape selections change', () => {
+    const risk = {
+      version: 1,
+      base: 'triangle-down',
+      scale: 1,
+      placement: 'bottom',
+      areas: { first: 'name', second: 'risk_level', third: null },
+    };
+    const schema = {
+      node_shapes: { risk },
+      node_types: { Risk: { shape: 'risk', fields: ['risk_level'] } },
+    };
+    const nodes = [{ id: 'r1', name: 'Supply delay', type: 'Risk', risk_level: 'high' }];
+    const flat = { ...risk, base: 'rectangle-flat', placement: 'middle-centre' };
+    const savedShapes = { flat: { name: 'Flat', definition: flat, revision: 1 } };
+    const canvas = (props) => (
+      <GraphCanvas nodes={nodes} edges={[]} schema={schema} savedShapes={savedShapes} {...props} />
+    );
+    nodeShapeAreaValues.mockClear();
+    const { rerender } = render(canvas({}));
+    const node = () => screen.getByTestId('node-r1');
+    rerender(
+      canvas({ highlightedNodeIds: ['r1'], nodeMarks: { r1: { color: '#f00', label: 'Watch' } } })
+    );
+    expect(node().getAttribute('aria-label')).toBe('Risk, Supply delay, high, Watch');
+    rerender(canvas({ dimmedNodeIds: ['r1'] }));
+    expect(node().getAttribute('aria-label')).toBe('Risk, Supply delay, high');
+    expect(nodeShapeAreaValues).toHaveBeenCalledTimes(1);
+    rerender(canvas({ typeShapes: { Risk: { ref: 'saved:flat' } } }));
+    expect(node().dataset.shapeBase).toBe('rectangle-flat');
+    expect(nodeShapeAreaValues).toHaveBeenCalledTimes(2);
   });
 
   it('renders graph container and react-flow', () => {
@@ -508,6 +599,52 @@ describe('GraphCanvas', () => {
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');
+  });
+
+  it('reaches Node appearance and the full detail of a shaped node by keyboard', () => {
+    const onAppearance = vi.fn();
+    const onViewNodeHistory = vi.fn();
+    const description = 'd'.repeat(300);
+    render(
+      <GraphCanvas
+        nodes={[{ id: 'node-1', name: 'Node 1', type: 'Actor', description }]}
+        edges={[]}
+        schema={{
+          node_shapes: {
+            s: {
+              version: 1,
+              base: 'rectangle',
+              scale: 1,
+              placement: 'middle-centre',
+              areas: { first: 'name', second: null, third: null },
+            },
+          },
+          node_types: { Actor: { shape: 's' } },
+        }}
+        onAppearance={onAppearance}
+        onViewNodeHistory={onViewNodeHistory}
+      />
+    );
+    const node = screen.getByTestId('node-node-1');
+    expect(node.dataset.shapeBase).toBe('rectangle');
+    const openMenuFor = (name) => {
+      // The canvas leaves Shift+F10 to the browser, which then fires
+      // `contextmenu` at the focused wrapper, where React Flow binds the handler.
+      expect(fireEvent.keyDown(node, { key: 'F10', shiftKey: true })).toBe(true);
+      fireEvent.contextMenu(node, { clientX: 0, clientY: 0 });
+      const item = screen.getByRole('button', { name });
+      for (let i = 0; i < 20 && document.activeElement !== item; i++) {
+        fireEvent.keyDown(document.activeElement, { key: 'ArrowDown' });
+      }
+      expect(document.activeElement).toBe(item);
+      fireEvent.click(item);
+    };
+
+    openMenuFor('Node appearance');
+    expect(onAppearance).toHaveBeenCalledWith('node-1');
+    // The detail dialog gets the original node, not the clipped area text.
+    openMenuFor(/view change history/i);
+    expect(onViewNodeHistory.mock.calls[0][1].description).toBe(description);
   });
 
   it('selects every node of the same type from a single node context menu', () => {

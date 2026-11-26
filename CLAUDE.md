@@ -216,8 +216,8 @@ references even when the image does not exist yet.
   `scripts/strip_profile_runtime_nodes.py` over an instance export before
   committing it (see `docs/PROFILES.md`).
 - Runtime deps in `backend/requirements.txt` with a minimum pin and no upper bound;
-  dev/test deps in `requirements-dev.txt`; ML/heavy deps only in
-  `requirements-ml.txt`. Reuse what exists (`httpx`, `pydantic`) before adding.
+  dev/test deps in `backend/requirements-dev.txt`; ML/heavy deps only in
+  `backend/requirements-ml.txt`. Reuse what exists (`httpx`, `pydantic`) before adding.
 
 ## Key files
 

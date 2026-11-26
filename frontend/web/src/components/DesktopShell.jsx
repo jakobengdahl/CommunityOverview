@@ -29,6 +29,7 @@ function DesktopShell({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopySession,
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
@@ -42,10 +43,14 @@ function DesktopShell({
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
+  flushBeforeCapture,
+  getCaptureState,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
   akcShortName,
+  // The user's "command box only" layout: no separate search or create toolbar.
+  hideClassicSurfaces = false,
 }) {
   return (
     <>
@@ -68,6 +73,7 @@ function DesktopShell({
         onRenameSession={onRenameSession}
         onDeleteSession={onDeleteSession}
         onCopySessionLink={onCopySessionLink}
+        onCopySession={onCopySession}
         onCopyTriggerUrl={onCopyTriggerUrl}
         onOpenSettings={onOpenSettings}
         onOpenActivity={onOpenActivity}
@@ -76,16 +82,26 @@ function DesktopShell({
         onEnterFullscreen={onEnterFullscreen}
         suspendEscape={suspendEscape}
       />
-      <FloatingSearch onTeleport={onTeleportToSourceGraph} />
-      <FloatingToolbar
-        onCreateNode={onCreateNodeForType}
-        onCreateAgent={onCreateAgent}
-        onCreateSubscription={onCreateSubscription}
-        onSaveView={onSaveView}
-        onCreateGroup={onCreateGroup}
-        onCreateActiveKnowledgeCollection={onCreateActiveKnowledgeCollection}
-      />
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
+      {!hideClassicSurfaces && (
+        <>
+          <FloatingSearch onTeleport={onTeleportToSourceGraph} />
+          <FloatingToolbar
+            onCreateNode={onCreateNodeForType}
+            onCreateAgent={onCreateAgent}
+            onCreateSubscription={onCreateSubscription}
+            onSaveView={onSaveView}
+            onCreateGroup={onCreateGroup}
+            onCreateActiveKnowledgeCollection={onCreateActiveKnowledgeCollection}
+          />
+        </>
+      )}
+      {llmAvailable && (
+        <ChatPanel
+          collectionShortName={akcShortName || undefined}
+          flushBeforeCapture={flushBeforeCapture}
+          getCaptureState={getCaptureState}
+        />
+      )}
     </>
   );
 }

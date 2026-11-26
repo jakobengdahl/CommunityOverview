@@ -846,9 +846,19 @@ lxml's parser options, `lxml` gets its own minimum-pinned line in
   (`RLIMIT_AS`) where the platform supports it; exceeding it ends in
   `failed`.
 - **ZIP-based formats are checked before decompression.** The declared
-  uncompressed total, the member count and the compression ratio (whole
-  archive and per member) are checked from the central directory, and an
-  archive over any cap is `too_large` without inflating anything.
+  uncompressed total, the member count, the whole-archive compression ratio
+  and (conditionally) the per-member ratio are checked from the central
+  directory, and an archive over any cap is `too_large` without inflating
+  anything. The constants are `max_zip_ratio` (100.0),
+  `max_zip_uncompressed_bytes` (100 MiB), `max_zip_members` (2 000) and
+  `zip_ratio_floor_bytes` (1 MiB). The whole-archive ratio is always
+  checked (`total_uncompressed / max(len(archive_data), 1) > max_zip_ratio`). The
+  per-member ratio (`member_uncompressed / max(member_compressed, 1) > max_zip_ratio`) is checked
+  only for members whose declared size exceeds `zip_ratio_floor_bytes`. The
+  floor exists because small XML parts inside OOXML/ODF archives often
+  compress far beyond any reasonable bomb threshold, yet they cannot inflate
+  dangerously on their own; the whole-archive ratio and the total uncompressed
+  cap still bound the inflation.
 - **No XXE.** XML parts are parsed with entity resolution, network access
   and DTD loading off. A part that carries a DTD is refused (OOXML and ODF
   never need one), and the file is `failed`.
@@ -972,7 +982,7 @@ that read or only change what the user's own view shows:
 
 - `search_graph`, `get_related_nodes`, `find_similar_nodes`,
   `find_similar_nodes_batch`, `list_node_types`, `get_subtypes`,
-  `get_schema`, `get_presentation`, `list_saved_views`, `get_saved_view`;
+  `get_schema`, `get_presentation`;
 - the read-only tools of the Agents' `GRAPH` integration
   (`MCPLoader._get_graph_mcp_tools`): `get_node_details`,
   `get_graph_stats`, `get_capabilities`, `get_runtime_info`,
@@ -985,7 +995,7 @@ that read or only change what the user's own view shows:
   `clear_visualization`.
 
 Every other tool — every write (`add_nodes`, `update_node`, `delete_nodes`,
-`delete_edges`, `archive_*`, `unarchive_*`, `save_view`,
+`delete_edges`, `archive_*`, `unarchive_*`,
 `save_collection_response`, `add_node_attachment`,
 `delete_node_attachment`) and any tool added later — is refused with error
 `confirmation_required`. The server records a pending action: the exact
@@ -1306,3 +1316,36 @@ binary bodies; the tools avoid it with bounded text or base64 arguments.
     and proposals);
   - `docs/USER_GUIDE.md` (asking the assistant about attached files);
   - `.env.example` (the new settings).
+
+## Implementation status
+
+§5's taint guard has landed in full:
+
+- **Agent runs** (#1138): the per-run taint rule in `AutonomyGate.wrap`.
+- **Assistant and kiosk, server side** (#1162): tainted turns, pending
+  actions, `POST /ui/chat/confirm`, the signed `conversation_state`
+  (`backend/ui/conversation_state.py`) and the client replay in `api.js`,
+  `ChatPanel.jsx` and `CollectKioskView.jsx`.
+- **Rollback and conversation binding:** two additions to the second bullet
+  of "The taint outlives the turn". The token also signs the request's
+  `conversation_id` and verifies only for the same one. And a process that
+  has issued a tainted token for an actor's `conversation_id` treats every
+  later request with that pair as tainted, so replaying a shorter history
+  with an older clean token, or no history at all, does not clear it. That
+  record is stored under `conversation-taint/` in the configured session
+  directory. Workers sharing that directory and
+  `ATTACHMENT_CONVERSATION_STATE_KEY` accept the same conversation ids and
+  consult the same monotonic record, including for truncated histories.
+  Missing, damaged or unavailable records fail closed. Only a new server-minted
+  id creates a clean record; an existing id never recreates one after loss.
+  Records contain no chat text or actor identifiers, only a clean/tainted flag
+  under a hash of the actor and conversation id. They are retained until removed;
+  operators may remove old records after the conversation-state token TTL to
+  reclaim space, with any subsequent continuation treated as tainted.
+  Pending-action confirmations still require sticky routing. Standalone callers
+  without a session registry retain the conservative per-process fallback.
+  A continued conversation without a `conversation_id` never verifies clean.
+- **Confirmation card:** besides **Confirm and run**, a **Dismiss** button
+  sends nothing and the token then expires. The card's outcome (dismissed,
+  done, failed) is kept with the chat message, so a remounted card shows it
+  instead of offering **Confirm and run** again.

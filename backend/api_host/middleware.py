@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from backend.federation.publish import FEDERATION_GRAPH_PATH
 from backend.runtime.extensions import RuntimeExtensions, bind_runtime_extensions
 from backend.runtime.request_context import (
     ACTOR_ID_HEADER,
@@ -44,6 +45,7 @@ _ACTOR_HEADERS = tuple(
 )
 # Scope key the auth middleware fills with the identity it authenticated.
 AUTHENTICATED_ACTOR_SCOPE_KEY = "communityoverview.authenticated_actor"
+AUTHENTICATED_PRINCIPAL_SCOPE_KEY = "communityoverview.authenticated_principal"
 
 
 class ActorHeaderMiddleware:
@@ -303,6 +305,22 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         ]:
             return await call_next(request)
 
+        # The federation read route checks its own federation keys, which are
+        # valid nowhere else; it exists only while publishing is on.
+        if (
+            request.method in {"GET", "HEAD"}
+            and request.url.path == FEDERATION_GRAPH_PATH
+            and getattr(request.app.state, "federation_route_active", False)
+        ):
+            return await call_next(request)
+
+        # This endpoint authenticates its own per-function bearer credential.
+        if request.method == "POST" and re.fullmatch(
+            rf"{re.escape(config.api_prefix)}/functions/[a-z0-9-]+/webhook",
+            request.url.path,
+        ):
+            return await call_next(request)
+
         # Visualization session endpoints are secured by the session ID itself
         # (CSPRNG, 100M-combination address space).  The browser's EventSource
         # cannot send Authorization headers, so these routes must bypass auth.
@@ -355,6 +373,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 # Non-ASCII credentials are invalid; retain session fallback.
                 pass
         if bearer_authenticated:
+            request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                "kind": "bearer",
+                "id": "instance-token",
+            }
             return await call_next(request)
 
         # A valid signed session cookie (issued by POST /auth/login after a
@@ -386,6 +408,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                         "detail": "Session-auth writes require a same-origin request or X-Requested-With"
                     },
                 )
+            request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                "kind": "user",
+                "id": config.auth_username,
+            }
             # The cookie is only minted for the configured Basic user.
             request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
                 "actor_id": config.auth_username,
@@ -418,6 +444,10 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 )
                 if not (ok_user and ok_pass):
                     raise ValueError("invalid basic credentials")
+                request.scope[AUTHENTICATED_PRINCIPAL_SCOPE_KEY] = {
+                    "kind": "user",
+                    "id": username,
+                }
                 request.scope[AUTHENTICATED_ACTOR_SCOPE_KEY] = {
                     "actor_id": username,
                     "auth_source": "basic",

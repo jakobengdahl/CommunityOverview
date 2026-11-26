@@ -25,7 +25,7 @@ import GenericAnnotationNode, {
   regularShapeAspect,
 } from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
-import AnnotationToolbox from './AnnotationToolbox';
+import AnnotationToolbox, { keyboardToolActivation } from './AnnotationToolbox';
 import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { DEFAULT_FREEHAND_OPTIONS } from '../utils/freehandOptions';
 import { isFederatedNode } from '../utils/nodeProvenance';
@@ -50,6 +50,13 @@ import {
   distributeNodes,
 } from '../utils/graphLayout';
 import {
+  createNodeShapeResolver,
+  nodeShapeAccessibleName,
+  nodeShapeAreaValues,
+  nodeShapeGeometry,
+} from '../utils/nodeShapes';
+import { nodeCardData } from '../utils/nodeCardData';
+import {
   getNodeColor,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
@@ -73,11 +80,10 @@ import {
   computeAttachmentToTarget,
   isEligibleAttachTarget,
   computeAnnotationAriaLabel,
-  nodesAtPoint,
+  overlapPickerCandidates,
   resolveAttachedPosition,
   ICON_INTRINSIC_SIZE,
   VOTE_DOT_INTRINSIC_SIZE,
-  NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
 import {
@@ -367,6 +373,63 @@ function referenceHostBroken(node, isReferenceTargetAvailable) {
   return isReferenceTargetAvailable?.(node.data?.target_kind, target) === false;
 }
 
+// Test the convex triangle against both rectangle axes and its edge normals.
+function shapeOverlapsMarquee(geometry, rect) {
+  const { width: w, height: h, vertices, radius } = geometry;
+  const right = rect.x + rect.width,
+    bottom = rect.y + rect.height;
+  if (rect.x > w || right < 0 || rect.y > h || bottom < 0) return false;
+  if (!vertices) {
+    const x = Math.max(rect.x, Math.min(right, w / 2));
+    const y = Math.max(rect.y, Math.min(bottom, h / 2));
+    const dx = Math.max(radius - x, 0, x - (w - radius));
+    const dy = Math.max(radius - y, 0, y - (h - radius));
+    return dx * dx + dy * dy <= radius * radius;
+  }
+  const corners = [
+    { x: rect.x, y: rect.y },
+    { x: right, y: rect.y },
+    { x: right, y: bottom },
+    { x: rect.x, y: bottom },
+  ];
+  return vertices.every((a, i) => {
+    const b = vertices[(i + 1) % vertices.length];
+    const axis = { x: -(b.y - a.y), y: b.x - a.x };
+    const project = (p) => p.x * axis.x + p.y * axis.y;
+    const polygon = vertices.map(project),
+      box = corners.map(project);
+    return Math.max(...polygon) >= Math.min(...box) && Math.max(...box) >= Math.min(...polygon);
+  });
+}
+
+/**
+ * `(node) => {shapeRender, ariaLabel} | null`: the resolved look of each graph
+ * node object under one set of shape selections, kept per object. Load More
+ * and highlight, dim, mark or presence changes rebuild the flow nodes; they
+ * reuse each look instead of resolving it again.
+ */
+function createNodeShapeLook(selections) {
+  const resolve = createNodeShapeResolver(selections);
+  const looks = new WeakMap();
+  return (node) => {
+    if (!looks.has(node)) {
+      const resolved = resolve(node);
+      let look = null;
+      if (resolved) {
+        const { definition, fields } = resolved;
+        const values = nodeShapeAreaValues(definition, node, fields);
+        const geometry = nodeShapeGeometry(definition.base, definition.scale);
+        look = {
+          shapeRender: { definition, values, geometry },
+          ariaLabel: nodeShapeAccessibleName(definition, node, values),
+        };
+      }
+      looks.set(node, look);
+    }
+    return looks.get(node);
+  };
+}
+
 function GraphCanvasInner({
   nodes: inputNodes = [],
   edges: inputEdges = [],
@@ -404,10 +467,9 @@ function GraphCanvasInner({
   onConnect: onConnectCallback,
   onCreateGroup,
   onSaveView,
+  captureNodesRef,
   onNodePositionChange,
   layoutType = null,
-  onCreateSubscription,
-  onCreateAgent,
   onDropCreateNode,
   // Called with (dataUrl, position) when a human pastes an image from the
   // clipboard, drops an image file on the canvas, or uses the annotation
@@ -450,11 +512,18 @@ function GraphCanvasInner({
   createGroupSignal = 0,
   saveViewSignal = 0,
   closeMenusSignal = 0,
+  // `{ kind, options, seq }`: activates an annotation tool from outside the
+  // toolbox (the host's command registry) as the toolbox's Enter/Space does.
+  // A new `seq` is a new request, so asking for the same tool twice repeats it.
+  annotationToolRequest = null,
   groupsToRestore = null,
   onGroupsRestored,
   annotationsToRestore = null,
   onAnnotationsRestored,
   onAnnotationChange,
+  // Shared hosts supply actor-scoped history; standalone canvases keep move history.
+  onUndo,
+  onRedo,
   remotePositions = null,
   onRemotePositionsApplied,
   animatedLayout = null,
@@ -491,7 +560,15 @@ function GraphCanvasInner({
   lazyLoadHiddenConnectionsLabel = '{count} connections to nodes not yet loaded are hidden — Load More to reveal them',
   showMinimap = false,
   schema = null,
+  // Session shape selections (docs/design/NODE_SHAPES.md); configured type
+  // shapes come from `schema`. A node with no resolved shape keeps the card.
+  shapeOverrides = null,
+  typeShapes = null,
+  // Saved library entries by key, as the host last fetched them.
+  savedShapes = null,
+  onAppearance = null,
   onContextMenuAction = null,
+  onSaveSelectionAsTemplate = null,
   nodeColorResolver = null,
   onViewportChange = null,
   // A host request to move the camera: a fresh `{ bounds }` (model-space
@@ -559,6 +636,7 @@ function GraphCanvasInner({
 }) {
   const cml = {
     edit: 'Edit',
+    appearance: 'Node appearance',
     hide: 'Hide',
     expand: 'Find related nodes',
     delete: 'Delete',
@@ -655,10 +733,8 @@ function GraphCanvasInner({
     groupLayer: 'Group order',
     groupLayerFront: 'Bring forward',
     groupLayerBack: 'Send backward',
-    annotationNearbyMenu: 'Add nearby',
-    annotationNearbyLabel: 'Label',
-    annotationNearbyIcon: 'Icon',
-    annotationNearbyText: 'Text',
+    groupTextColor: 'Text colour',
+    groupTextColorAuto: 'Automatic (best contrast)',
     annotationOpacity: 'Opacity',
     editAnnotation: 'Edit',
     // task-annotation-accessible-shared-controls.
@@ -1082,18 +1158,6 @@ function GraphCanvasInner({
   const notifyAnnotationChange = useCallback((kind) => {
     onAnnotationChangeRef.current?.(kind);
   }, []);
-  // `attachNearbyAnnotation` (the "Nearby object menu" creation entry point)
-  // is declared later, next to `createAnnotation` it depends on — but every
-  // annotation-node context menu needs to reach it through
-  // AnnotationContext, which this component builds well before that point.
-  // A ref (same idiom as onAnnotationChangeRef above) lets the context value
-  // below call whatever the current implementation is without forcing it out
-  // of its natural place.
-  const attachNearbyAnnotationRef = useRef(null);
-  const attachNearby = useCallback(
-    (targetId, kind) => attachNearbyAnnotationRef.current?.(targetId, kind),
-    []
-  );
   // Non-drag "Attach to…" target-tap mode (task-annotation-accessible-
   // shared-controls) — entering it is as simple as remembering which
   // annotation is choosing a target; resolving a chosen target happens in
@@ -1156,12 +1220,19 @@ function GraphCanvasInner({
 
   const annotationContextValue = useMemo(
     () => ({
+      saveAsTemplate: onSaveSelectionAsTemplate
+        ? (id, type) => {
+            const selected = selectedNodesRef.current;
+            onSaveSelectionAsTemplate(
+              selected.some((node) => node.id === id) ? selected : [{ id, type }]
+            );
+          }
+        : null,
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
       notifyRenderFailure: reportAnnotationRenderError,
       beginEditing,
       endEditing,
-      attachNearby,
       enterAttachMode,
       openReference: onReferenceOpen,
       isReferenceTargetAvailable,
@@ -1177,6 +1248,7 @@ function GraphCanvasInner({
         requestClose: onCloseAnnotationEditSheet,
       },
       labels: {
+        saveAsTemplate: cml.saveAsTemplate,
         color: cml.annotationColor,
         fill: cml.annotationFill,
         border: cml.annotationBorder,
@@ -1217,11 +1289,9 @@ function GraphCanvasInner({
         groupLayer: cml.groupLayer,
         groupLayerFront: cml.groupLayerFront,
         groupLayerBack: cml.groupLayerBack,
+        groupTextColor: cml.groupTextColor,
+        groupTextColorAuto: cml.groupTextColorAuto,
         brokenAnnotation: cml.annotationBroken,
-        nearbyMenu: cml.annotationNearbyMenu,
-        nearbyLabel: cml.annotationNearbyLabel,
-        nearbyIcon: cml.annotationNearbyIcon,
-        nearbyText: cml.annotationNearbyText,
         opacity: cml.annotationOpacity,
         editAnnotation: cml.editAnnotation,
         ariaKindNote: cml.ariaKindNote,
@@ -1263,10 +1333,11 @@ function GraphCanvasInner({
     }),
     [
       notifyAnnotationChange,
+      onSaveSelectionAsTemplate,
+      cml.saveAsTemplate,
       notifyRemoteLockedAttempt,
       beginEditing,
       endEditing,
-      attachNearby,
       enterAttachMode,
       isCompact,
       onRequestAnnotationEditSheet,
@@ -1316,11 +1387,9 @@ function GraphCanvasInner({
       cml.groupLayer,
       cml.groupLayerFront,
       cml.groupLayerBack,
+      cml.groupTextColor,
+      cml.groupTextColorAuto,
       cml.annotationBroken,
-      cml.annotationNearbyMenu,
-      cml.annotationNearbyLabel,
-      cml.annotationNearbyIcon,
-      cml.annotationNearbyText,
       cml.ariaKindNote,
       cml.ariaKindLabel,
       cml.ariaKindText,
@@ -1520,32 +1589,62 @@ function GraphCanvasInner({
     });
   }, [visibleEdges, dimmedEdgeIds, edgeIntensity, stagedStates, stagedLabels]);
 
+  const nodeShapeLook = useMemo(
+    () =>
+      createNodeShapeLook({
+        nodeTypes: schema?.node_types,
+        nodeShapes: schema?.node_shapes,
+        savedShapes: savedShapes || {},
+        shapeOverrides: shapeOverrides || {},
+        typeShapes: typeShapes || {},
+      }),
+    [schema, savedShapes, shapeOverrides, typeShapes]
+  );
+
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
     const hasSavedPositions = nodesToRender.some((n) => n._savedPosition);
 
     const nodesWithoutPosition = nodesToRender.map((node) => {
       const mark = nodeMarks[node.id];
+      const remote = remoteSelections?.[node.id] ?? null;
+      const stagedLabel = stagedLabels[stagedStates?.nodes?.[node.id]] ?? null;
+      const look = nodeShapeLook(node);
+      let shaped = null;
+      if (look) {
+        const { definition, values, geometry } = look.shapeRender;
+        const extras = [stagedLabel, mark?.label, remote?.displayName];
+        shaped = {
+          node: {
+            geometry,
+            className: 'graph-shaped-flow-node',
+            // React Flow puts this on the focusable wrapper, replacing the
+            // visible (possibly clipped) text as the node's name.
+            ariaLabel: extras.some(Boolean)
+              ? nodeShapeAccessibleName(definition, node, values, extras)
+              : look.ariaLabel,
+          },
+          data: { shapeRender: look.shapeRender },
+        };
+      }
       return {
         id: node.id,
         type: 'custom',
+        ...shaped?.node,
         data: {
-          ...node,
-          label: node.name,
-          summary: node.summary || node.description?.slice(0, 100),
-          nodeType: node.type,
-          color: (nodeColorResolver || getNodeColor)(node.type),
+          ...nodeCardData(node, (nodeColorResolver || getNodeColor)(node.type)),
           isHighlighted: highlightedNodeIds.includes(node.id),
           isDimmed: dimmedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
-          remoteSelection: remoteSelections?.[node.id] ?? null,
+          remoteSelection: remote,
           stagedState: stagedStates?.nodes?.[node.id] ?? null,
-          stagedLabel: stagedLabels[stagedStates?.nodes?.[node.id]] ?? null,
+          stagedLabel,
           previewEnabled: nodePreviewEnabled,
           onExpand: onExpand ? () => onExpand(node.id, node) : null,
           onEdit: onEdit ? () => onEdit(node.id, node) : null,
+          ...shaped?.data,
         },
         position: node._savedPosition || { x: 0, y: 0 },
       };
@@ -1590,9 +1689,83 @@ function GraphCanvasInner({
     stagedStates,
     stagedLabels,
     nodePreviewEnabled,
+    nodeShapeLook,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
+  const marqueeCleanupRef = useRef(null);
+  useEffect(() => () => marqueeCleanupRef.current?.(), []);
+  const onSelectionStart = useCallback(
+    (event) => {
+      marqueeCleanupRef.current?.();
+      const start = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const move = (e) => {
+        const end = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        const rect = {
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          width: Math.abs(end.x - start.x),
+          height: Math.abs(end.y - start.y),
+        };
+        const labelBounds = new Map();
+        reactFlowWrapper.current
+          ?.querySelectorAll('.react-flow__node[data-id]')
+          .forEach((element) => {
+            const label = element.querySelector(
+              '.graph-shape-outside-label .graph-shape-label-chip'
+            );
+            if (label) labelBounds.set(element.dataset.id, label.getBoundingClientRect());
+          });
+        const left = Math.min(event.clientX, e.clientX),
+          right = Math.max(event.clientX, e.clientX);
+        const top = Math.min(event.clientY, e.clientY),
+          bottom = Math.max(event.clientY, e.clientY);
+        setNodes((current) => {
+          const byId = new Map(current.map((node) => [node.id, node]));
+          return current.map((node) => {
+            if (!node.geometry || node.selectable === false) return node;
+            let x = node.position.x,
+              y = node.position.y;
+            let parent = byId.get(node.parentNode || node.parentId);
+            const visited = new Set([node.id]);
+            while (parent && !visited.has(parent.id)) {
+              visited.add(parent.id);
+              x += parent.position.x;
+              y += parent.position.y;
+              parent = byId.get(parent.parentNode || parent.parentId);
+            }
+            const label = labelBounds.get(node.id);
+            const hitsLabel =
+              label &&
+              label.width > 0 &&
+              label.height > 0 &&
+              left <= label.right &&
+              right >= label.left &&
+              top <= label.bottom &&
+              bottom >= label.top;
+            const selected =
+              hitsLabel ||
+              shapeOverlapsMarquee(node.geometry, {
+                ...rect,
+                x: rect.x - x,
+                y: rect.y - y,
+              });
+            return Boolean(node.selected) === selected ? node : { ...node, selected };
+          });
+        });
+      };
+      const cleanup = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', cleanup);
+        marqueeCleanupRef.current = null;
+      };
+      marqueeCleanupRef.current = cleanup;
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', cleanup);
+    },
+    [screenToFlowPosition, setNodes]
+  );
+
   // Kept current here, next to the state it mirrors — the ref is declared far
   // above because the erase gesture's other refs live together, but it cannot
   // be initialised there: `nodes` does not exist yet at that point.
@@ -1677,7 +1850,12 @@ function GraphCanvasInner({
       // the session changed: that flag drops `prevNodes` entirely, and with it
       // the parentId and style that live only on the flow node — silently
       // detaching every grouped node from its group.
-      let positioned = reconciled;
+      const priorSelection = new Map(nds.map((node) => [node.id, node.selected]));
+      let positioned = contentSwapped
+        ? reconciled
+        : reconciled.map((node) =>
+            priorSelection.has(node.id) ? { ...node, selected: priorSelection.get(node.id) } : node
+          );
       if (enteringFocus) {
         // The ego ring is in absolute flow coordinates, so a node still parented
         // to a group would be drawn relative to that group's box. Focus detaches
@@ -1916,18 +2094,20 @@ function GraphCanvasInner({
   );
 
   const handleUndo = useCallback(() => {
+    if (onUndo) return onUndo();
     const moves = undoMove();
     if (!moves) return;
     applyPositionMoves(moves);
     showNotification('info', cml.undoNotification);
-  }, [undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
+  }, [onUndo, undoMove, applyPositionMoves, showNotification, cml.undoNotification]);
 
   const handleRedo = useCallback(() => {
+    if (onRedo) return onRedo();
     const moves = redoMove();
     if (!moves) return;
     applyPositionMoves(moves);
     showNotification('info', cml.redoNotification);
-  }, [redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
+  }, [onRedo, redoMove, applyPositionMoves, showNotification, cml.redoNotification]);
 
   // Discard history whenever a new position baseline is established: the session
   // identity changes, or the canvas contents are replaced wholesale within the
@@ -2497,65 +2677,6 @@ function GraphCanvasInner({
     [setNodes, isCompact, annotationToolboxPortalContainer]
   );
 
-  // The "Nearby object menu" creation entry point
-  // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a new
-  // label/icon/text pre-wired to attach to an existing node or
-  // annotation, from that target's own context menu — rather than the
-  // create-then-drag-near two-step the toolbox's one-click creation still
-  // requires. `targetId` may be a graph node or any existing annotation
-  // except `group`/`arrow` (the same candidates `findSnapTarget` accepts for
-  // a post-creation drop via `computeDroppedAttachment`; `group` is a
-  // "containment/visual construct, not an attachment target" per the
-  // contract's Attachment section, and an arrow has no stable centre in the
-  // attachment-follow effect below, so it can never be resolved as a target)
-  // — callers only ever offer this control from an eligible target's own
-  // menu, but the type check here is a second, structural guarantee
-  // independent of which menus happen to render it.
-  //
-  // `frame` used to be excluded here too, on the same reasoning as `group`.
-  // Now that it is folded into `shape` (task-annotation-merge-frame-into-
-  // shape-rectangle), a `shape` — whatever its fill/border — stays a valid
-  // target, the same decision `computeDroppedAttachment` makes (see its own
-  // doc comment in utils/annotations.js for the full reasoning).
-  //
-  // Positions the new annotation at NEARBY_ATTACH_OFFSET from the target's
-  // current centre and writes `data.attachment` in exactly the shape
-  // `computeDroppedAttachment` would have produced for a drop at that same
-  // offset, so the pre-existing "keep an attached overlay glued to its
-  // target" effect (above) starts following it immediately — this reuses
-  // that mechanism outright rather than adding a second one. The new
-  // annotation is never locked: `createAnnotation` never sets `data.locked`
-  // for any kind, matching today's plain one-click creation.
-  //
-  // No remote-lock check on the target: every annotation kind's own
-  // `openContextMenu`/`onContextMenu` already refuses to open its menu at all
-  // while remote-locked (so this is never reached for an annotation target
-  // in that state), and NodeContextMenu opens for a remote-locked graph node
-  // exactly like any other — edit/hide/delete included — with no lock check
-  // of its own to match. Adding one here alone would make this the one
-  // action on that menu that silently refuses while every sibling action
-  // proceeds, which is a worse inconsistency than having none.
-  const attachNearbyAnnotation = useCallback(
-    (targetId, kind) => {
-      const target = getFlowNodes().find((n) => n.id === targetId);
-      if (!target || target.type === 'group' || target.type === 'arrow') return;
-      const center = nodeCenter(target);
-      if (!center) return;
-      const attachment = {
-        target_id: targetId,
-        target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
-        offset: { ...NEARBY_ATTACH_OFFSET },
-      };
-      const position = {
-        x: center.x + NEARBY_ATTACH_OFFSET.x,
-        y: center.y + NEARBY_ATTACH_OFFSET.y,
-      };
-      createAnnotation(kind, position, { attachment });
-    },
-    [getFlowNodes, createAnnotation]
-  );
-  attachNearbyAnnotationRef.current = attachNearbyAnnotation;
-
   // Model-space position at the current viewport's centre (used by the bottom
   // toolbox and clipboard paste, neither of which has a click position of its
   // own the way the pane context menu or a file drop does). Mirrors
@@ -2995,7 +3116,7 @@ function GraphCanvasInner({
         }
       }
       const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const candidates = nodesAtPoint(nodes, flowPoint);
+      const candidates = overlapPickerCandidates(nodes, clickedNode, flowPoint);
       if (candidates.length > 1) {
         setOverlapPicker({
           x: event.clientX,
@@ -3388,6 +3509,24 @@ function GraphCanvasInner({
   // is a handful of nodes at ego-ring coordinates. Saving that would overwrite
   // the real layout with a temporary lens and drop every node not in the focus
   // set from the snapshot.
+  useEffect(() => {
+    if (!captureNodesRef) return undefined;
+    const read = () => {
+      const live = getFlowNodes() || [];
+      if (!activeFocusRootId || !preFocusRef.current) return live;
+      // Leaving focus restores every snapshot member to its snapshot position,
+      // including one removed and re-added meanwhile, so capture reads the
+      // same coordinates rather than the transient ego-ring ones.
+      const before = preFocusRef.current.nodes;
+      const known = new Set(before.map((node) => node.id));
+      return [...before, ...live.filter((node) => !known.has(node.id))];
+    };
+    captureNodesRef.current = read;
+    return () => {
+      if (captureNodesRef.current === read) captureNodesRef.current = null;
+    };
+  }, [captureNodesRef, activeFocusRootId, getFlowNodes]);
+
   const handleSaveView = useCallback(() => {
     if (!onSaveView) return;
     // While the focus view is active the mounted canvas is a temporary lens: a
@@ -3416,6 +3555,7 @@ function GraphCanvasInner({
           position: g.position,
           style: g.style,
           color: g.data.color,
+          textColor: g.data.textColor || '',
           // Re-emitted so a value that arrived from the server survives the
           // canvas leg. Dropping either here is what made a locked group's
           // flag revert on the next autosave, whatever the translators did.
@@ -4405,7 +4545,9 @@ function GraphCanvasInner({
       const edgeEl = e.target.closest('.react-flow__edge');
       const menuEl =
         e.target.closest('.graph-context-menu') || e.target.closest('.graph-group-context-menu');
-      const controlsEl = e.target.closest('.react-flow__controls');
+      // The compact pill is the touch layout's stand-in for the ReactFlow
+      // controls, and its focus control acts on the current selection.
+      const controlsEl = e.target.closest('.react-flow__controls, .graph-compact-controls');
       const minimapEl = e.target.closest('.react-flow__minimap');
       const selectionEl = e.target.closest('.react-flow__selection');
       if (!nodeEl && !edgeEl && !menuEl && !controlsEl && !minimapEl && !selectionEl) {
@@ -4600,7 +4742,8 @@ function GraphCanvasInner({
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
 
-      // Undo/redo of node-position moves. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z
+      // Session history when hosted, local move history otherwise. Ctrl/Cmd+Z
+      // undoes; Ctrl/Cmd+Shift+Z
       // and Ctrl/Cmd+Y redo (covering both the mac and Windows conventions).
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const key = e.key?.toLowerCase();
@@ -4763,6 +4906,30 @@ function GraphCanvasInner({
     }
   }, [createGroupSignal, handleAddGroup, activeFocusRootId]);
 
+  // Like createGroupSignal, a request made while a focus view hides the
+  // toolbox is honoured once focus exits.
+  const handledAnnotationToolSeqRef = useRef(null);
+  useEffect(() => {
+    if (
+      annotationToolRequest &&
+      annotationToolRequest.seq !== handledAnnotationToolSeqRef.current &&
+      !activeFocusRootId
+    ) {
+      handledAnnotationToolSeqRef.current = annotationToolRequest.seq;
+      // A command is accepted from the keyboard, and an armed placing tool
+      // needs a pointer to place anything.
+      const { kind } = annotationToolRequest;
+      const { arm, options } = keyboardToolActivation(kind, annotationToolRequest.options);
+      if (arm) handleSelectTool(kind, options);
+      else createAnnotationAtViewportCenter(kind, options);
+    }
+  }, [
+    annotationToolRequest,
+    handleSelectTool,
+    createAnnotationAtViewportCenter,
+    activeFocusRootId,
+  ]);
+
   // Save view when signal changes (triggered from toolbar)
   useEffect(() => {
     if (saveViewSignal > 0) {
@@ -4802,6 +4969,7 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            textColor: g.textColor || '',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
             rotation: g.rotation ?? 0,
@@ -5094,6 +5262,7 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            textColor: g.textColor || '',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
             rotation: g.rotation ?? 0,
@@ -5416,6 +5585,8 @@ function GraphCanvasInner({
             nodes={nodesWithAriaLabels}
             edges={edges}
             onNodesChange={onNodesChange}
+            onSelectionStart={onSelectionStart}
+            onSelectionEnd={() => marqueeCleanupRef.current?.()}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onNodeDragStart={onNodeDragStart}
@@ -5731,8 +5902,9 @@ function GraphCanvasInner({
         </div>
 
         {/* The overlap-object picker (task-annotation-accessible-shared-
-            controls) — offered whenever a click's flow position lands
-            inside more than one annotation's box (see `onNodeClick` above).
+            controls) — offered whenever a click on an annotation lands
+            inside more than one box on that annotation's layer (see
+            `onNodeClick` above).
             A plain, keyboard/touch-reachable button list, the same shape as
             every other menu here; picking one selects exactly that node and
             moves focus to it, the same "land on the thing you picked"
@@ -5761,8 +5933,10 @@ function GraphCanvasInner({
         <NodeContextMenu
           menu={nodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           schema={schema}
           onEdit={onEdit}
+          onAppearance={onAppearance}
           onHide={onHide}
           onExpand={onExpand}
           onDelete={onDelete}
@@ -5777,7 +5951,6 @@ function GraphCanvasInner({
           onRestoreNodes={onRestoreNodes}
           onDimEdges={onDimEdges}
           onRestoreEdges={onRestoreEdges}
-          onAttachNearby={attachNearbyAnnotation}
           onTeleport={
             onTeleportToSourceGraph && isFederatedNode(nodeContextMenu?.node?.data)
               ? onTeleportToSourceGraph
@@ -5789,6 +5962,7 @@ function GraphCanvasInner({
         <MultiNodeContextMenu
           menu={multiNodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           onShowOnly={onShowOnly}
           onHideSelection={onHideMultiple || onHide ? hideSelectedGraphNodes : undefined}
           onDeleteSelection={

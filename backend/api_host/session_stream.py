@@ -108,6 +108,8 @@ def register_session_stream(
 
     async def _session_registry_startup():
         session_registry.set_event_loop(asyncio.get_running_loop())
+        if session_manager is not None:
+            session_manager.set_event_loop(asyncio.get_running_loop())
 
         async def _periodic_cleanup():
             while True:

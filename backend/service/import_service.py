@@ -68,6 +68,11 @@ logger = logging.getLogger(__name__)
 
 BACKUP_SUBDIR = "import-backups"
 
+# The ADR 0013 §8 measured document had 10,000 nodes and 17,998 edges.
+MERGE_COMMIT_MAX_ENTITIES = int(os.environ.get("MERGE_COMMIT_MAX_ENTITIES", "27998"))
+if MERGE_COMMIT_MAX_ENTITIES < 1:
+    raise ValueError("MERGE_COMMIT_MAX_ENTITIES must be a positive integer")
+
 _PREVIEW_SLOT = threading.BoundedSemaphore(1)
 _COMMIT_SLOT = threading.BoundedSemaphore(1)
 
@@ -733,7 +738,8 @@ def commit_merge_import(
     live entity, ADR §3); then the whole graph is backed up as v1 does; then
     ``GraphStorage.apply_import_merge`` recomputes the plan once more under
     its lock, refuses the commit if the digest moved, and applies it
-    all-or-nothing. Afterwards, best-effort: an embeddings job for the nodes
+    all-or-nothing; a shared store also verifies the plan's reads and
+    generation in the write itself. Afterwards, best-effort: an embeddings job for the nodes
     left without a vector, and an audit record in the import job store.
     """
     refusal = _authorize_merge(hook)
@@ -744,8 +750,8 @@ def commit_merge_import(
             "success": False,
             "error_code": ImportMergeUnsupported.code,
             "message": (
-                "Merge import is not supported on a shared (PostgreSQL) graph "
-                "store yet; nothing was changed."
+                "Merge import is not supported on this graph store; nothing "
+                "was changed."
             ),
         }
     try:
@@ -855,6 +861,17 @@ def _commit_merge(
     # Without a caller digest the commit binds to the plan just computed.
     bound_digest = plan.digest
 
+    entity_count = len(document["nodes"]) + len(document.get("edges") or [])
+    if entity_count > MERGE_COMMIT_MAX_ENTITIES:
+        return {
+            "success": False,
+            "error_code": "import_merge_too_large",
+            "message": (
+                f"Merge has {entity_count} nodes and edges; the commit limit is "
+                f"{MERGE_COMMIT_MAX_ENTITIES}. Nothing was changed."
+            ),
+        }
+
     if not _plan_writes(plan.report):
         # Every entry is skipped, unchanged or excluded: no backup, lock or
         # record, so a repeated no-op commit costs a plan and nothing else.
@@ -899,8 +916,9 @@ def _commit_merge(
     minted: Dict[str, Any] = {}
 
     def prepare() -> "MergeWrites":
-        # Under the storage lock: nothing can move between this plan and the
-        # writes it yields, so its digest covers every read the writes rely on.
+        # Under the storage lock: nothing on this instance can move between
+        # this plan and the writes it yields, so its digest covers every read
+        # the writes rely on; a shared store re-checks those reads itself.
         try:
             locked = graph_merge_plan.compute_merge_plan(
                 document, parameters, view, for_commit=True

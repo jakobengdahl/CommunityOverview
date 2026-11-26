@@ -385,6 +385,182 @@ def update_node(
         )
 
 
+def batch_update_nodes(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    updates: List[Dict[str, Any]],
+    *,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+    staging: Optional["StagedWrite"] = None,
+) -> Dict[str, Any]:
+    """Update multiple nodes in a single call.
+
+    Each node is processed independently through the same authorization,
+    validation and staging path as ``update_node``.  Partial success is the
+    default: one node failing (not found, conflict, forbidden) does not stop
+    the others from being applied.
+
+    Returns a compact result with per-node status but no full node bodies.
+    """
+    MAX_BATCH = 100
+
+    decision = access.evaluate_graph_access(
+        hook,
+        action=GRAPH_ACTION_MUTATE,
+        target="batch_update_nodes",
+        graph_operation=_operation(staging),
+    )
+    denied = (
+        None
+        if decision.allowed
+        else access.build_access_denied_result(
+            action=GRAPH_ACTION_MUTATE,
+            target="batch_update_nodes",
+            decision=decision,
+        )
+    )
+    if denied:
+        denied.setdefault("results", [])
+        denied.setdefault("counts", {})
+        return denied
+
+    # --- Pre-flight validations (reject everything if violated) ---
+    if len(updates) > MAX_BATCH:
+        return {
+            "success": False,
+            "error": f"Batch size exceeds the limit of {MAX_BATCH} nodes",
+            "results": [],
+            "counts": {},
+        }
+
+    seen_ids: set = set()
+    for entry in updates:
+        if not isinstance(entry.get("node_id"), str):
+            continue
+        node_id = entry.get("node_id")
+        if node_id in seen_ids:
+            return {
+                "success": False,
+                "error": f"Duplicate node_id in batch: {node_id!r}",
+                "results": [],
+                "counts": {},
+            }
+        seen_ids.add(node_id)
+
+    results: list = []
+    counts = {"ok": 0, "conflict": 0, "not_found": 0, "forbidden": 0, "error": 0}
+
+    for entry in updates:
+        node_id = entry.get("node_id")
+        if "node_id" not in entry:
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Missing required field: node_id",
+                }
+            )
+            continue
+        if not isinstance(node_id, str):
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Invalid node_id: expected a string",
+                }
+            )
+            continue
+        if "updates" not in entry:
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": "Missing required field: updates",
+                }
+            )
+            continue
+        node_updates = entry["updates"]
+        metadata_merge = entry.get("metadata_merge", True)
+        expected_updated_at = entry.get("expected_updated_at")
+        expected_revision = entry.get("expected_revision")
+
+        result = update_node(
+            storage,
+            hook,
+            node_id,
+            node_updates,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+            metadata_merge=metadata_merge,
+            expected_updated_at=expected_updated_at,
+            expected_revision=expected_revision,
+            staging=staging,
+        )
+
+        # Classify the per-node result
+        if result.get("success") is True:
+            counts["ok"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "ok",
+                    "revision": result.get("node", {}).get("revision"),
+                    "updated_at": result.get("node", {}).get("updated_at"),
+                }
+            )
+        elif result.get("error") == "entity_revision_conflict":
+            counts["conflict"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "conflict",
+                    "current_revision": result.get("current_revision"),
+                }
+            )
+        elif (
+            result.get("success") is False
+            and "not found" in (result.get("error") or "").lower()
+        ):
+            counts["not_found"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "not_found",
+                    "error": result.get("error"),
+                }
+            )
+        elif result.get("error_code") == "access_denied":
+            counts["forbidden"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "forbidden",
+                    "error": result.get("error"),
+                }
+            )
+        else:
+            counts["error"] += 1
+            results.append(
+                {
+                    "node_id": node_id,
+                    "status": "error",
+                    "error": result.get("error"),
+                }
+            )
+
+    return {
+        "success": True,
+        "results": results,
+        "counts": counts,
+    }
+
+
 def delete_nodes(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",

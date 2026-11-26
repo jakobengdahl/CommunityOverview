@@ -235,6 +235,7 @@ The presentation section controls the UI and AI behavior:
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
 | `default_chat_collapsed` | Whether the assistant panel starts collapsed for a visitor with no stored preference of their own (default `false`, i.e. open). A visitor's own explicit open/collapse choice, once made, is stored in their browser and takes precedence over this on every later visit until they reset it |
+| `theme` | Optional accent colour for the web UI: `accent`, `accent_hover`, `accent_contrast` (see [THEMING.md](THEMING.md)). An unknown key or a value that is not a plain CSS colour is skipped with a warning |
 | `skills_config` | Skills loader settings (see below) |
 
 The optional top-level `ui.ai_assistant.default_collapsed` boolean controls the
@@ -457,9 +458,8 @@ runs (`--enrich`). Keeping enrichment in its own reviewable file means the
 conversion rule stays strict and every node that passes only because of an
 enrichment is visible in one place.
 
-The profile's `graph.json` is example data only. Runtime state — `SavedView`,
-`VisualizationView`, `EventSubscription`, `Agent` and `Skill` nodes — is created by
-people using a running deployment and does not belong in it. A seed captured by
+The profile's `graph.json` is example data only. Runtime state — `EventSubscription`, `Agent` and `Skill` nodes, as well as
+legacy `SavedView` and `VisualizationView` nodes — does not belong in it. A seed captured by
 exporting a live instance carries that state along, so run
 `scripts/strip_profile_runtime_nodes.py` over any such export before committing it:
 it removes those node types and every edge touching them, drops the file's
@@ -493,8 +493,8 @@ identity_status:                confirmed | not_confirmed | potential | unknown
 
 The loader injects these node types from code (`SYSTEM_NODE_TYPES` in `backend/config/config_loader.py`) on every load, regardless of profile:
 
-- **SavedView** — Saved graph view snapshots
-- **VisualizationView** — Legacy saved views
+- **SavedView** — Legacy graph data type, retained for compatibility
+- **VisualizationView** — Legacy graph data type, retained for compatibility
 - **EventSubscription** — Webhook subscription for graph mutation events
 - **Agent** — AI agent configuration
 - **Skill** — Reusable AI skill definition
@@ -511,6 +511,9 @@ The left-side toolbar in the UI is driven by the schema:
 
 - **Domain types** appear first (in schema definition order)
 - **System types** (Agent, EventSubscription, Group) appear after a separator
-- **SavedView** appears last after another separator
 
 The toolbar uses a two-column grid layout to accommodate many node types.
+
+### Profile templates
+
+Place individual v1 template JSON documents in `config/<profile>/templates/` alongside the active schema configuration. Valid documents load at startup and appear as read-only templates; invalid documents are logged and skipped. IDs already used by another profile or stored template or session (including deleted records) prevent startup; resolve the ID collision before restarting. See [Templates contract](TEMPLATES_CONTRACT.md) for the document format.

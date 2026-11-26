@@ -1,4 +1,6 @@
+// covers: frontend/web/src/App.jsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { echoingOpsFetch } from './fakeSessionServer';
 import { render, screen, waitFor, act } from '@testing-library/react';
 
 /**
@@ -84,6 +86,7 @@ class FakeEventSource {
     this.url = url;
     this.onmessage = null;
     this.onerror = null;
+    FakeEventSource.instances.push(this);
     setTimeout(
       () =>
         this.onmessage?.({
@@ -94,12 +97,9 @@ class FakeEventSource {
   }
   close() {}
 }
+FakeEventSource.instances = [];
 global.EventSource = FakeEventSource;
-global.fetch = vi.fn(async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ applied: [], seq: 1 }),
-}));
+global.fetch = echoingOpsFetch(() => FakeEventSource.instances);
 
 import App from '../src/App';
 import * as api from '../src/services/api';
@@ -264,63 +264,6 @@ describe('App teleport wiring', () => {
 
       await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('missing'));
       expect(store().focusNodeId).toBeNull();
-    });
-  });
-
-  describe('the saved-view gate', () => {
-    it('focuses the node only once the saved-view load has settled', async () => {
-      // A gui_url may legitimately carry both parameters, and the saved-view
-      // path clears the canvas after its own await — so focusing first would
-      // have the node wiped out from under the focus.
-      let releaseView;
-      api.getSavedView.mockImplementation(() => new Promise((resolve) => (releaseView = resolve)));
-      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
-      setSearch('?view=Overview&node=remote-1');
-
-      await renderApp();
-
-      expect(api.getNodeDetails).not.toHaveBeenCalled();
-
-      await act(async () => {
-        releaseView({ success: true, nodes: [], edges: [] });
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('remote-1'));
-      await waitFor(() => expect(store().focusNodeId).toBe('remote-1'));
-    });
-
-    it('still focuses the node when the saved-view load fails', async () => {
-      // The gate must not strand the arrival on an error path.
-      api.getSavedView.mockRejectedValue(new Error('view blew up'));
-      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
-      setSearch('?view=Overview&node=remote-1');
-
-      await renderApp();
-
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('remote-1'));
-      await waitFor(() => expect(store().focusNodeId).toBe('remote-1'));
-    });
-
-    it('still focuses the node when the saved view does not exist', async () => {
-      api.getSavedView.mockResolvedValue({ success: false });
-      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
-      setSearch('?view=Missing&node=remote-1');
-
-      await renderApp();
-
-      await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('remote-1'));
-      await waitFor(() => expect(store().focusNodeId).toBe('remote-1'));
-    });
-
-    it('does not wait when there is no saved view to wait for', async () => {
-      api.getNodeDetails.mockResolvedValue({ success: true, node: REMOTE_NODE, edges: [] });
-      setSearch('?node=remote-1');
-
-      await renderApp();
-
-      expect(api.getSavedView).not.toHaveBeenCalled();
-      await waitFor(() => expect(store().focusNodeId).toBe('remote-1'));
     });
   });
 });

@@ -395,67 +395,13 @@ function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
   );
 }
 
-// The three attachable kinds the "Nearby object menu" contract entry point
-// (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces") offers from an
-// existing node/annotation's own context menu. `arrow`/`line` is
-// deliberately not offered here: arrow's own drag-to-attach editing already
-// gives it a creation-adjacent docking preview via its selected endpoints,
-// so this stays scoped to the one-click kinds that had no creation-time
-// affordance at all. `vote_dot` used to be a member of this list — task-
-// annotation-vote-dot-simplify removed it along with the rest of its
-// attachment behaviour (see ATTACHABLE_OVERLAY_KINDS in utils/annotations.js):
-// a vote dot is now a plain coloured dot with nothing to pre-wire an
-// attachment to.
-const NEARBY_ATTACH_KINDS = [
-  { kind: 'label', labelKey: 'nearbyLabel' },
-  { kind: 'icon', labelKey: 'nearbyIcon' },
-  { kind: 'text', labelKey: 'nearbyText' },
-];
-
-/**
- * The "Nearby object menu" section shared by every context menu that offers
- * it (NodeContextMenu below, plus the annotation-kind menus in
- * NoteNode/LabelNode/ArrowNode/GenericAnnotationNode/FreehandAnnotationNode).
- * `onAttach(kind)` is called with one of NEARBY_ATTACH_KINDS' kinds; the
- * caller already knows which target id this menu is anchored to.
- *
- * `labels` uses the short `nearbyMenu`/`nearbyLabel`/`nearbyIcon`/
- * `nearbyText` keys — the same short-key convention
- * AnnotationContext's own `labels` object already uses for every other
- * annotation-menu string (e.g. `color` for `cml.annotationColor`). A caller
- * holding the flat `cml` object instead (NodeContextMenu, which is not an
- * annotation-node component and has no AnnotationContext to read from) maps
- * its `annotationNearby*` keys down to these short ones at the call site,
- * the same remapping GraphCanvas itself does when it builds
- * AnnotationContext's `labels` from `cml`.
- */
-export function NearbyObjectMenuSection({ labels, onAttach }) {
-  if (!onAttach) return null;
-  return (
-    <>
-      <div className="context-menu-title">{labels.nearbyMenu}</div>
-      <div className="context-menu-nearby">
-        {NEARBY_ATTACH_KINDS.map(({ kind, labelKey }) => (
-          <button
-            key={kind}
-            type="button"
-            data-menu-item="root"
-            className="context-menu-nearby-button"
-            onClick={() => onAttach(kind)}
-          >
-            + {labels[labelKey]}
-          </button>
-        ))}
-      </div>
-    </>
-  );
-}
-
 export function NodeContextMenu({
+  onSaveAsTemplate,
   menu,
   labels: cml,
   schema,
   onEdit,
+  onAppearance,
   onHide,
   onExpand,
   onDelete,
@@ -470,7 +416,6 @@ export function NodeContextMenu({
   onRestoreNodes,
   onDimEdges,
   onRestoreEdges,
-  onAttachNearby,
   onTeleport,
   onClose,
 }) {
@@ -494,6 +439,18 @@ export function NodeContextMenu({
       style={{ left: menu.x, top: menu.y }}
       onKeyDown={handleRootKeyDown}
     >
+      {onSaveAsTemplate && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onSaveAsTemplate([menu.node]);
+            onClose();
+          }}
+        >
+          {cml.saveAsTemplate}
+        </button>
+      )}
       {onEdit && (
         <button
           type="button"
@@ -504,6 +461,18 @@ export function NodeContextMenu({
           }}
         >
           ✏️ {cml.edit}
+        </button>
+      )}
+      {onAppearance && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onAppearance(menu.node.id);
+            onClose();
+          }}
+        >
+          {cml.appearance}
         </button>
       )}
       {onHide && (
@@ -651,23 +620,6 @@ export function NodeContextMenu({
           </>
         );
       })()}
-      {onAttachNearby && (
-        <>
-          <div className="context-menu-separator"></div>
-          <NearbyObjectMenuSection
-            labels={{
-              nearbyMenu: cml.annotationNearbyMenu,
-              nearbyLabel: cml.annotationNearbyLabel,
-              nearbyIcon: cml.annotationNearbyIcon,
-              nearbyText: cml.annotationNearbyText,
-            }}
-            onAttach={(kind) => {
-              onAttachNearby(menu.node.id, kind);
-              onClose();
-            }}
-          />
-        </>
-      )}
       {onDelete && (
         <>
           <div className="context-menu-separator"></div>
@@ -689,6 +641,7 @@ export function NodeContextMenu({
 }
 
 export function MultiNodeContextMenu({
+  onSaveAsTemplate,
   menu,
   labels: cml,
   onShowOnly,
@@ -812,6 +765,18 @@ export function MultiNodeContextMenu({
       <div className="context-menu-header">
         {cml.nodesSelected.replace('{count}', menu.nodes.length)}
       </div>
+      {onSaveAsTemplate && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onSaveAsTemplate(menu.nodes);
+            onClose();
+          }}
+        >
+          {cml.saveAsTemplate}
+        </button>
+      )}
       {onShowOnly && nodeIds.length > 0 && (
         <button
           type="button"
@@ -1094,13 +1059,6 @@ export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }
         onClick={() => createAnnotation('note', menu.flowPosition)}
       >
         📝 {cml.addNote}
-      </button>
-      <button
-        type="button"
-        data-menu-item="root"
-        onClick={() => createAnnotation('label', menu.flowPosition)}
-      >
-        🏷️ {cml.addLabel}
       </button>
       <button
         type="button"

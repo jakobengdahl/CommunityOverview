@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
@@ -20,6 +21,8 @@ const hoisted = vi.hoisted(() => ({
   fitView: null,
   zoomIn: null,
   zoomOut: null,
+  nodesState: null,
+  onNodesChange: null,
 }));
 
 vi.mock('reactflow', () => {
@@ -42,7 +45,11 @@ vi.mock('reactflow', () => {
     default: MockReactFlow,
     ReactFlow: MockReactFlow,
     ReactFlowProvider: ({ children }) => <div>{children}</div>,
-    useNodesState: (initialNodes) => [initialNodes || [], hoisted.setNodes, vi.fn()],
+    useNodesState: (initialNodes) => [
+      hoisted.nodesState ?? (initialNodes || []),
+      hoisted.setNodes,
+      hoisted.onNodesChange,
+    ],
     useEdgesState: (initialEdges) => [initialEdges || [], vi.fn(), vi.fn()],
     addEdge: (_params, edges) => edges,
     useReactFlow: () => ({
@@ -114,6 +121,8 @@ beforeEach(() => {
   hoisted.fitView = vi.fn();
   hoisted.zoomIn = vi.fn();
   hoisted.zoomOut = vi.fn();
+  hoisted.nodesState = null;
+  hoisted.onNodesChange = vi.fn();
   // jsdom has no matchMedia; compactMode 'auto' has to degrade to non-compact
   // rather than throw. The 'auto' test installs its own stub.
   delete window.matchMedia;
@@ -375,6 +384,23 @@ describe('mobile focus view', () => {
     click(exitFocusButton());
     await flushFrame();
     expect(hoisted.fitView).toHaveBeenCalledWith(focusRefit);
+  });
+
+  it('keeps the selection when the pill is tapped, so its focus control can act on it', () => {
+    hoisted.nodesState = [
+      { id: 'node-1', type: 'custom', position: { x: 0, y: 0 }, data: {}, selected: true },
+    ];
+    render(<GraphCanvas nodes={nodes} edges={edges} compactMode="on" />);
+    const deselects = () =>
+      hoisted.onNodesChange.mock.calls.filter(([changes]) =>
+        changes.some((c) => c.type === 'select' && c.selected === false)
+      );
+
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })));
+    expect(deselects()).toHaveLength(0);
+
+    act(() => fireEvent.click(screen.getByTestId('react-flow')));
+    expect(deselects()).toHaveLength(1);
   });
 
   it('disables the focus control until exactly one graph node is selected', () => {

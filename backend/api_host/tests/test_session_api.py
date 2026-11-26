@@ -1,3 +1,4 @@
+# covers: backend/service/rest_api.py
 """
 Tests for the shared-session REST endpoints under /api/sessions (steps 1 & 3).
 
@@ -22,7 +23,14 @@ from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
-    def test_create_and_get(self, test_app: TestClient):
+    @pytest.mark.parametrize("base", [None, "/root?view=old&collect=kiosk&node=n"])
+    def test_create_and_get(self, test_app: TestClient, monkeypatch, base):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        if base is None:
+            monkeypatch.delenv(PUBLIC_BASE_URL_ENV, raising=False)
+        else:
+            monkeypatch.setenv(PUBLIC_BASE_URL_ENV, base)
         resp = test_app.post("/api/sessions", json={"name": "My session"})
         assert resp.status_code == 200
         body = resp.json()
@@ -34,13 +42,62 @@ class TestSessionCrud:
         got = test_app.get(f"/api/sessions/{sid}")
         assert got.status_code == 200
         assert got.json()["id"] == sid
+        assert (
+            body["session_url"] == got.json()["session_url"] == build_session_url(sid)
+        )
+        if base is not None:
+            assert got.json()["session_url"] == f"/root?session={sid}"
+        listed = test_app.get("/api/sessions").json()["sessions"]
+        assert next(item for item in listed if item["id"] == sid)[
+            "session_url"
+        ] == build_session_url(sid)
 
-    def test_list_sessions(self, test_app: TestClient):
+    def test_list_sessions(self, test_app: TestClient, monkeypatch):
         a = test_app.post("/api/sessions", json={"name": "a"}).json()["id"]
         b = test_app.post("/api/sessions", json={"name": "b"}).json()["id"]
         listed = test_app.get("/api/sessions").json()["sessions"]
         ids = {s["id"] for s in listed}
         assert {a, b} <= ids
+
+        from backend.service import access
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV
+
+        monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "/app")
+        original = access.authorize_graph_access
+
+        def authorize(hook, **kwargs):
+            if (
+                kwargs.get("target") == "get_visualization_session"
+                and kwargs.get("session_id") == b
+            ):
+                return {"message": "denied"}
+            return original(hook, **kwargs)
+
+        monkeypatch.setattr(access, "authorize_graph_access", authorize)
+        listed = test_app.get("/api/sessions").json()["sessions"]
+        assert a in {item["id"] for item in listed}
+        assert b not in {item["id"] for item in listed}
+        assert (
+            test_app.get(f"/api/sessions/{a}").json()["session_url"]
+            == f"/app?session={a}"
+        )
+        assert test_app.get(f"/api/sessions/{b}").json()["session_url"] is None
+        assert (
+            test_app.patch(f"/api/sessions/{b}", json={"name": "b"}).json()[
+                "session_url"
+            ]
+            is None
+        )
+
+        def deny_listing(hook, **kwargs):
+            if kwargs.get("target") == "list_visualization_sessions":
+                return {"message": "listing denied"}
+            return authorize(hook, **kwargs)
+
+        monkeypatch.setattr(access, "authorize_graph_access", deny_listing)
+        response = test_app.get("/api/sessions")
+        assert response.status_code == 403
+        assert response.json()["detail"] == "listing denied"
 
     def test_rename(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
@@ -487,6 +544,42 @@ class TestSessionActivityAndUndo:
 
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"] == []
+
+        assert (
+            test_app.post(
+                f"/api/sessions/{sid}/redo", json={"client_id": "c2"}
+            ).status_code
+            == 404
+        )
+        redone = test_app.post(f"/api/sessions/{sid}/redo", json={"client_id": "c1"})
+        assert redone.status_code == 200
+        assert redone.json()["redone_activity_id"] == resp.json()["undone_activity_id"]
+        assert redone.json()["redone_op"] == "annotation_created"
+        restored = test_app.get(f"/api/sessions/{sid}").json()["state"]["annotations"]
+        assert restored[0]["id"] == "note-1"
+
+    @pytest.mark.parametrize("endpoint", ["undo", "redo"])
+    def test_history_rejects_document_budget_and_can_retry(
+        self, test_app: TestClient, monkeypatch, endpoint
+    ):
+        from backend.core import session_manager as manager_module
+
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid)
+        url = f"/api/sessions/{sid}/{endpoint}"
+        body = {"client_id": "c1"}
+        if endpoint == "redo":
+            assert (
+                test_app.post(f"/api/sessions/{sid}/undo", json=body).status_code == 200
+            )
+        before = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_module, "_document_bytes", lambda *args: 10**12)
+            response = test_app.post(url, json=body)
+        assert response.status_code == 413
+        assert "document limit" in response.json()["detail"]
+        assert test_app.get(f"/api/sessions/{sid}").json()["state"] == before
+        assert test_app.post(url, json=body).status_code == 200
 
     def test_undo_is_409_while_another_client_holds_the_lease(
         self, test_app: TestClient
@@ -1474,6 +1567,10 @@ class TestSessionsDirIsolation:
 
         app = create_app(config)
 
+        assert (
+            app.state.session_manager.template_store._backend.directory
+            == elsewhere / "templates"
+        )
         assert app.state.session_store._backend.directory == elsewhere, (
             "the server did not use the session directory it was configured "
             "with, so SESSIONS_DIR does not reach the store and a "
@@ -1651,3 +1748,193 @@ class TestSessionsDirIsolation:
         # A session materialised in app A's store must stay invisible to a
         # second, independently configured app using the same id.
         assert app_b.get(f"/api/sessions/{sid}").status_code == 404
+
+
+def test_appearance_writes_require_current_permission_and_capability(
+    test_app, monkeypatch
+):
+    """Appearance sessions reject read-only callers and incompatible writers."""
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    url = f"/api/sessions/{sid}/ops"
+    op = dict(
+        op="type_shape_set",
+        type="Thing",
+        selection={"builtin": True},
+        version=1,
+        base_revision=0,
+        operation_id="appearance",
+    )
+    body = dict(client_id="first", appearance_version=1, ops=[op])
+    inserted = dict(
+        client_id="first",
+        ops=[
+            dict(
+                op="nodes_replaced",
+                node_ids=["a"],
+                inserted_shape_overrides={"a": {"builtin": True}},
+            )
+        ],
+    )
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert (
+        test_app.post(url, json={**inserted, "appearance_version": 1}).status_code
+        == 403
+    )
+    assert test_app.post(url, json=body).status_code == 403
+    assert test_app.get(f"/api/sessions/{sid}").json()["seq"] == 0
+    manager = test_app.app.state.session_manager
+    original_apply = manager.apply_ops
+
+    async def concurrent_appearance(*args, **kwargs):
+        session = manager.get_session(sid)
+        session.state["shape_overrides"]["a"] = {"builtin": True}
+        return await original_apply(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "apply_ops", concurrent_appearance)
+    membership = dict(
+        client_id="first",
+        appearance_version=1,
+        ops=[dict(op="nodes_removed", node_ids=["a"])],
+    )
+    assert test_app.post(url, json=membership).status_code == 403
+    assert manager.get_session(sid).state["shape_overrides"] == {"a": {"builtin": True}}
+    manager.get_session(sid).state["shape_overrides"].clear()
+    monkeypatch.setattr(manager, "apply_ops", original_apply)
+    monkeypatch.delenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE")
+    assert test_app.post(url, json=inserted).status_code == 409
+    assert manager.get_session(sid).seq == 0
+    assert test_app.post(url, json={**body, "appearance_version": 2}).status_code == 409
+    applied = test_app.post(url, json=body)
+    assert applied.status_code == 200
+    assert test_app.post(url, json=body).json()["seq"] == applied.json()["seq"]
+    retry = test_app.post(url, json={**body, "client_id": "second"})
+    assert retry.status_code == 200
+    assert retry.json()["seq"] == applied.json()["seq"]
+    conflict = test_app.post(
+        url,
+        json={**body, "client_id": "second", "ops": [{**op, "operation_id": "new"}]},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error"] == "shape_revision_conflict"
+    legacy = dict(client_id="old", ops=[dict(op="nodes_hidden", node_ids=["a"])])
+    assert test_app.post(url, json=legacy).status_code == 409
+
+    undo_url = f"/api/sessions/{sid}/undo"
+    replay = dict(client_id="first", appearance_version=1)
+    monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert test_app.post(undo_url, json=replay).status_code == 403
+    monkeypatch.delenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE")
+    assert test_app.post(undo_url, json={"client_id": "first"}).status_code == 409
+    assert test_app.post(undo_url, json=replay).status_code == 200
+    assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {}
+    session = manager.get_session(sid)
+    saved_activity = session.activity_log[:]
+    session.activity_log.clear()
+    assert test_app.post(url, json=legacy).status_code == 409
+    assert test_app.post(undo_url, json={"client_id": "first"}).status_code == 409
+    session.activity_log[:] = saved_activity
+    assert test_app.post(f"/api/sessions/{sid}/redo", json=replay).status_code == 200
+    assert test_app.get(f"/api/sessions/{sid}").json()["state"]["type_shapes"] == {
+        "Thing": {"builtin": True}
+    }
+
+
+@pytest.mark.parametrize("endpoint", ["undo", "redo"])
+def test_history_requires_capability_after_appearance_activity_pruned(
+    test_app, endpoint
+):
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    session = test_app.app.state.session_manager.get_session(sid)
+    session.state["type_shapes"] = {"Thing": {"builtin": True}}
+    session.activity_log.clear()
+    response = test_app.post(
+        f"/api/sessions/{sid}/{endpoint}", json={"client_id": "old"}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "appearance_version_required"
+
+
+def test_implicit_rename_reports_storage_failure(test_app, monkeypatch):
+    store = test_app.app.state.session_manager.store
+    sid = "9999-9996"
+
+    def fail(_document):
+        raise OSError()
+
+    monkeypatch.setattr(store._backend, "save", fail)
+    response = test_app.patch(f"/api/sessions/{sid}", json={"name": "named"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "storage_error"
+    assert store.get(sid) is None
+
+
+@pytest.mark.parametrize("with_session_header", [False, True])
+def test_template_routes_crud(test_app, with_session_header):
+    sid = test_app.post("/api/sessions", json={"name": "source"}).json()["id"]
+    headers = {"x-communityoverview-session-id": sid} if with_session_header else {}
+    response = test_app.post(
+        f"/api/sessions/{sid}/templates",
+        json={"name": "Example", "expected_revision": 0},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    doc = response.json()["template"]
+    path = f"/api/templates/{doc['template_id']}"
+    assert test_app.get(path, headers=headers).json()["template"] == doc
+    assert test_app.get("/api/templates", headers=headers).json()["templates"] == [doc]
+    changed = test_app.patch(
+        path,
+        json={"expected_revision": doc["revision"], "name": "New"},
+        headers=headers,
+    ).json()["template"]
+    assert changed["name"] == "New"
+    assert test_app.delete(
+        path, params={"expected_revision": changed["revision"]}, headers=headers
+    ).json()["deleted"]
+    assert test_app.get(path, headers=headers).status_code == 404
+
+
+def test_template_capture_retired_session(test_app):
+    sid = test_app.post("/api/sessions", json={}).json()["id"]
+    assert test_app.delete(f"/api/sessions/{sid}").status_code == 200
+    response = test_app.post(
+        f"/api/sessions/{sid}/templates",
+        json={"name": "Example", "expected_revision": 0},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"success": False, "error": "session_not_found"}
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("access_denied", 403),
+        ("revision_conflict", 409),
+        ("staged_changes", 409),
+        ("nodes_limit", 413),
+        ("edges_limit", 413),
+        ("annotations_limit", 413),
+    ],
+)
+def test_template_route_failure_status(test_app, monkeypatch, code, status):
+    from backend.service import templates
+
+    monkeypatch.setattr(
+        templates, "save_template", lambda *args: {"success": False, "error": code}
+    )
+    response = test_app.post("/api/sessions/1234-5678/templates", json={})
+    assert response.status_code == status
+    assert response.json()["error"] == code
+
+
+@pytest.mark.parametrize(
+    "method,path,params",
+    [
+        ("get", "/api/templates", {"limit": "bad"}),
+        ("delete", "/api/templates/1234-5678", {"expected_revision": "bad"}),
+    ],
+)
+def test_template_invalid_integer_query(test_app, method, path, params):
+    response = getattr(test_app, method)(path, params=params)
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "error": "invalid_request"}

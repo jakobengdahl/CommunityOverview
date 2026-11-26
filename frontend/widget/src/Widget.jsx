@@ -91,7 +91,7 @@ function Widget({ initialQuery = '', onNodeSelect }) {
   }, []);
 
   const handleExpand = useCallback(
-    async (nodeId, nodeData) => {
+    async (nodeId) => {
       setIsLoading(true);
       try {
         const result = await mcp.getRelatedNodes(nodeId);

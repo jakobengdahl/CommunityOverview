@@ -24,6 +24,7 @@ is a historical archive.
 | [USER_GUIDE.md](USER_GUIDE.md) | End-user walkthrough of every user-facing feature |
 | [PROFILES.md](PROFILES.md) | Configuration profiles: node types, presentation, env |
 | [ICONS.md](ICONS.md) | Icon-name reference for node-type definitions |
+| [THEMING.md](THEMING.md) | The web UI's design tokens and per-deployment theme overrides |
 | [I18N.md](I18N.md) | UI translation fallbacks, adding a language, the English-only lock |
 | [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md) | How graph data files are stored and loaded |
 | [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
@@ -48,6 +49,7 @@ is a historical archive.
 
 | Document | Covers |
 |---|---|
+| [COMMAND_BOX_DESIGN.md](COMMAND_BOX_DESIGN.md) | Unified command box placement, suggestions, keyboard and accessibility interaction design (approved; registry, providers and chat composer implemented) |
 | [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) | Public-core enablement plan for standalone/embedded/extensible runtime modes |
 | [CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md](CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md) | Concrete implementation slices for the runtime/extension enablement above |
 | [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](PLUGIN_RUNTIME_CORE_ENABLEMENT.md) | Generic core work to load, discover, and manage plugins at runtime |

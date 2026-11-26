@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 import asyncio
+import logging
+import os
 import httpx2 as httpx
 
 from backend.core import storage_search
@@ -15,6 +17,24 @@ from backend.core.models import Edge, Node
 
 from . import teleport
 from .config import FederationFileConfig, FederationGraphConfig
+
+logger = logging.getLogger(__name__)
+
+MISSING_CREDENTIAL = "missing_credential"
+WRITE_NOT_SUPPORTED = "allow_write is not supported; federation is read-only"
+_AUTH_HEADERS = {
+    "bearer": lambda token: {"Authorization": f"Bearer {token}"},
+    "api_key": lambda token: {"X-API-Key": token},
+}
+
+
+def _outbound_headers(graph: FederationGraphConfig) -> Optional[Dict[str, str]]:
+    """Headers a sync of this peer sends, or None when its key is missing."""
+    build = _AUTH_HEADERS.get(graph.auth.type)
+    if build is None:
+        return {}
+    token = os.getenv(graph.auth.env_token, "") if graph.auth.env_token else ""
+    return build(token) if token else None
 
 
 @dataclass
@@ -49,13 +69,34 @@ class FederationManager:
         self._stop_event = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
         self._next_sync_at: Dict[str, float] = {}
+        # Keys are read once, here, at startup; a change applies on restart.
+        self._headers: Dict[str, Dict[str, str]] = {}
 
         for graph in self._config.federation.graphs:
-            self._cache[graph.graph_id] = FederatedGraphCache(
+            entry = FederatedGraphCache(
                 graph_id=graph.graph_id,
                 display_name=graph.display_name,
                 status="offline" if graph.enabled else "disabled",
             )
+            if graph.capabilities.allow_write:
+                entry.last_error = WRITE_NOT_SUPPORTED
+            headers = _outbound_headers(graph)
+            if headers is None:
+                # Never fetch without the key: an unauthenticated request could
+                # reach an open endpoint the operator did not mean to use.
+                if graph.enabled:
+                    logger.warning(
+                        "Federated graph %s: auth.type %s needs the key in %s, "
+                        "which is unset or empty; graph skipped",
+                        graph.graph_id,
+                        graph.auth.type,
+                        graph.auth.env_token,
+                    )
+                entry.status = "disabled"
+                entry.last_error = MISSING_CREDENTIAL
+            else:
+                self._headers[graph.graph_id] = headers
+            self._cache[graph.graph_id] = entry
 
     @property
     def enabled(self) -> bool:
@@ -124,18 +165,30 @@ class FederationManager:
             asyncio.run(run_sync())
 
     async def _fetch_graph_payload(
-        self, graph_json_url: str, client: Optional[httpx.AsyncClient], timeout_s: float
+        self,
+        graph_json_url: str,
+        client: Optional[httpx.AsyncClient],
+        timeout_s: float,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Fetch the federated graph JSON payload from the remote endpoint."""
+        """Fetch the federated graph JSON payload from the remote endpoint.
+
+        Only GET: federation never sends a mutation to a remote graph. Redirects
+        are not followed, so a key is never sent on to a second host.
+        """
         if client is None:
             async with httpx.AsyncClient() as new_client:
-                response = await new_client.get(graph_json_url, timeout=timeout_s)
-                response.raise_for_status()
-                return response.json()
-        else:
-            response = await client.get(graph_json_url, timeout=timeout_s)
-            response.raise_for_status()
-            return response.json()
+                return await self._fetch_graph_payload(
+                    graph_json_url, new_client, timeout_s, headers
+                )
+        response = await client.get(
+            graph_json_url,
+            timeout=timeout_s,
+            headers=headers or {},
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def _update_cache(
         self, graph: FederationGraphConfig, payload: Dict[str, Any]
@@ -182,8 +235,15 @@ class FederationManager:
         if graph is None:
             return {"success": False, "error": f"Unknown graph_id: {graph_id}"}
 
+        if not self.enabled:
+            return {"success": False, "error": "Federation is disabled"}
+
         if not graph.enabled:
             return {"success": False, "error": f"Graph {graph_id} is disabled"}
+
+        headers = self._headers.get(graph_id)
+        if headers is None:
+            return {"success": False, "graph_id": graph_id, "error": MISSING_CREDENTIAL}
 
         graph_json_url = graph.endpoints.graph_json_url
         if not graph_json_url:
@@ -195,13 +255,17 @@ class FederationManager:
         timeout_s = max(0.1, self._config.federation.default_timeout_ms / 1000.0)
 
         try:
-            payload = await self._fetch_graph_payload(graph_json_url, client, timeout_s)
+            payload = await self._fetch_graph_payload(
+                graph_json_url, client, timeout_s, headers
+            )
             return self._update_cache(graph, payload)
         except Exception as exc:
             self._set_degraded(graph.graph_id, str(exc))
             return {"success": False, "graph_id": graph.graph_id, "error": str(exc)}
 
     async def sync_all(self) -> Dict[str, Any]:
+        if not self.enabled:
+            return {"success": False, "error": "Federation is disabled", "results": []}
         enabled_graphs = [
             graph.graph_id for graph in self._config.federation.graphs if graph.enabled
         ]

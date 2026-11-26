@@ -53,7 +53,10 @@ in real time:
 - The core stays **single-instance by default**. All cross-instance concerns (Redis
   pub/sub, shared DB) are hidden behind seams that the SaaS layer implements.
 
-## 2. Current state (facts)
+## 2. Original state (historical)
+
+This section describes the state when this design was written; saved-view tools
+and readers have since been removed. Use sessions and server-provided links.
 
 Two "session" concepts coexist today, keyed by the same grouped-digit ID
 format. New IDs use four groups (`DDDD-DDDD-DDDD-DDDD`, ~10^16 address space);
@@ -70,7 +73,7 @@ be large enough that enumeration is infeasible even under that rate limit.
 | Auto-save | `frontend/web/src/App.jsx` (`scheduleAutoSave` → `saveViewSignal` → `handleSaveView`) | 1.5 s debounce; round-trips through the canvas because positions/groups live inside ReactFlow, not the Zustand store |
 | Server session registry | `backend/core/session_registry.py` | In-memory, single `asyncio.Queue` per session, **single consumer by design**, 1 h TTL |
 | Server session endpoints | `backend/api_host/server.py` (`PATCH /sessions/{id}/state`, `GET /sessions/{id}/stream`) | SSE is one-directional (server→browser) and exists so MCP tools can push visualization commands; uploaded state is only `{visible_node_ids, selected_node_ids, node_count}` |
-| Persisted named views | `SavedView` graph nodes via `backend/service/service.py:save_view/get_saved_view` | Static snapshots stored *inside* the graph file — the opposite of the separation this feature requires |
+| Persisted named views | `SavedView` graph nodes via `backend/service/service.py:save_view/get_saved_view` | Previously stored static snapshots *inside* the graph file; these readers are removed |
 | Annotations | Group boxes only (`packages/ui-graph-canvas/src/components/GroupNode.jsx`), plus node marks and edge labels | No sticky notes, free labels, or arrows exist; group membership changes are only observable via the full `onSaveView` snapshot, not discrete events |
 | Storage | `backend/core/storage.py` + `backend/core/storage_backends.py` | Single `graph.json` file, process-local `RLock` + file lock; no DB, no broker, no WebSocket |
 
@@ -80,7 +83,7 @@ Key implications:
    fan-out upgrade, not a green-field build.
 2. Session state must stop storing full node copies. The server-side session stores
    **node references + layout + annotations** and rehydrates node content from the
-   graph on load (same pattern `get_saved_view` already uses).
+   graph on load (as the former saved-view reader did).
 3. `packages/ui-graph-canvas` lacks discrete events for several mutations (group
    rename/resize/membership); realtime mirroring needs those callbacks added.
 
@@ -94,6 +97,7 @@ A session is stored **outside the graph** in a new session store:
 Session {
   id: "DDDD-DDDD-DDDD-DDDD",  # crypto-random (legacy DDDD-DDDD still accepted)
   name: string | null,
+  description: string | null,  # purpose / hand-over brief; survives a canvas clear
   created_at, updated_at: iso8601,
   seq: int,                    # monotonic revision, incremented per applied op
   state: {
@@ -127,13 +131,12 @@ uses `parentId` internally.
 Two protocols, mirroring the existing `GraphPersistenceBackend` pattern:
 
 - `SessionPersistenceBackend` — `load(id)`, `save(session)`, `delete(id)`,
-  `list_meta()`, `list_ids()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
+  `list_meta()`, `list_ids()`, `transaction()`. Core ships `FileSessionPersistenceBackend`: one JSON file per
   session under `data/sessions/<id>.json` (atomic temp+rename, same locking style as
   `storage_backends.py`). Per-session files keep write amplification low under
   frequent op-driven saves. **No automatic retention/eviction in v1** (D13): sessions
   persist until explicitly deleted, because long-lived sessions may evolve into
-  de-facto saved visualizations; revisit retention once session/SavedView
-  convergence is decided.
+  de-facto saved visualizations; retention remains unchanged after SavedView retirement.
 - `SessionEventBus` — `publish(session_id, event)`, `subscribe(session_id)`.
   Core ships `InProcessEventBus` (asyncio, per-subscriber queues). This is the seam a
   SaaS deployment replaces with a Redis-backed bus for multi-instance fan-out. The
@@ -161,13 +164,15 @@ Op catalogue (v1):
 
 | Op | Payload | Conflict rule |
 |---|---|---|
-| `nodes_added` / `nodes_removed` | node_ids | set union / set removal, idempotent |
+| `nodes_added` / `nodes_removed` | node_ids; `nodes_added` optional positions | set union / set removal, idempotent. An add carrying a `positions` object (a push, a browser's own add) stores them and has the server place the other added nodes in the same op; the broadcast carries every position it set. The MCP add tool sends none, leaving its nodes for the agent to arrange. Any other layout key on an add is dropped |
+| `nodes_replaced` | node_ids, optional positions / hidden_node_ids / annotations | membership becomes exactly node_ids (replacement or clear) together with the view's layout, as one sequenced op and one activity record, all-or-nothing: any part that cannot apply (an invalid annotation or position, a leased annotation) refuses the whole op. Positions are kept for members only and every member left without one is placed by the server; hidden_node_ids becomes the hidden set; annotations (groups included) become the session's annotation list by stable id, restoring ids an earlier delete tombstoned. The broadcast carries node_ids, every member's position, the hidden set and, with annotations, only the annotations the op created or changed plus `removed_annotation_ids` (a receiver keeps every annotation not named in either). No-op only if nothing changes |
 | `node_moved` | node_id, position | LWW per node (server arrival order) |
 | `edges_added` / `edges_removed` / `edges_updated` | edges (`edges_removed`: edge_ids) | fan-out only — broadcast to all subscribers, no session state mutated (edges live in the graph, R14); a peer whose node set is unchanged never re-hydrates, so a drag-drawn edge, a deletion, or an attribute change between two present nodes needs this to render for everyone |
 | `nodes_hidden` / `nodes_shown`, `edges_hidden` / `edges_shown` | ids | set ops, idempotent |
 | `annotation_created` / `annotation_updated` / `annotation_deleted` | annotation | LWW per annotation id; update on deleted annotation is dropped |
 | `group_membership_changed` | group_id, member_node_ids | LWW per group |
 | `session_renamed` | name | LWW |
+| `session_described` | description | LWW; server-emitted only (MCP `describe_visualization_session`), refused on `POST /ops` |
 | `selection_claimed` / `selection_released` | element_ids | claim map with TTL, see 3.5 |
 | `layout_applied` | positions map | LWW batch (single op so it wins/loses atomically) |
 
@@ -252,8 +257,8 @@ adds real identity and ACLs behind its own boundary.
 - `packages/ui-graph-canvas` gains discrete callbacks (props, English-default
   labels per i18n rules): `onGroupRenamed`, `onGroupResized`, `onGroupMoved`,
   `onGroupMembershipChanged`, `onGroupDeleted`, plus render support for presence
-  markers (`remoteSelections` prop) and new annotation kinds. The `onSaveView`
-  round-trip remains only for explicit SavedView export.
+  markers (`remoteSelections` prop) and new annotation kinds. Saved views are now
+  captured as sessions.
 - Viewport stays personal — pan/zoom is **not** synced (each collaborator frames
   their own view; positions and content are shared). "Follow user" is a possible
   later enhancement, out of v1 scope.
@@ -262,7 +267,7 @@ adds real identity and ACLs behind its own boundary.
 
 ### 3.8 Compatibility with the MCP/SSE push channel
 
-MCP tools (`search_graph`, `get_saved_view`, `connect_to_visualization_session`, …)
+MCP tools (`search_graph`, `connect_to_visualization_session`, …)
 keep pushing visualization commands into sessions. After the fan-out upgrade these
 pushes reach *all* connected clients of the session — which is the desired behavior
 (an AI agent adding nodes is just another collaborator). The
@@ -392,8 +397,7 @@ steps 6–8.
   `PATCH /api/sessions/{id}` (rename), `DELETE /api/sessions/{id}`,
   `GET /api/sessions` (meta list). Size caps and ID validation.
 - Rehydration endpoint behavior: `GET .../{id}?resolve=true` returns state with node
-  refs resolved to node objects (reuse `get_saved_view` fetch logic; keep `group-*`
-  filtering consistent).
+  refs resolved to node objects, with `group-*` filtering consistent.
 - Tests: `backend/core/tests/` (store, retention, atomicity) +
   `backend/api_host/tests/` or service tests (CRUD, caps). Update
   `backend/DEVELOPMENT.md` endpoint table (add the new endpoints **and** the
@@ -515,6 +519,16 @@ steps 6–8.
 >   group edits) through one place instead of wiring an explicit op emitter into
 >   each, and inherently collapses a bulk position change into a single
 >   `layout_applied` op (keeping big layouts under the server's per-batch cap).
+>   Node membership is the exception: the server is its only writer. The diff
+>   never emits a membership op; a user's own add, removal or clear is sent
+>   explicitly (`sendMembership`), the baseline and the canvas take
+>   membership only from the server's broadcasts (an own add is drawn from
+>   its broadcast, with the nodes it was sent with; an own removal or clear
+>   takes nodes off the canvas on its broadcast, so a node read still in
+>   flight cannot bring one back), and a node read that
+>   settles after a newer membership
+>   version (the stream seq of the last membership op, snapshot or catch-up)
+>   keeps only the nodes the server still holds.
 >   Ops batch on a short debounce; transient POST failures requeue with backoff,
 >   `400`/`413` drop to avoid poisoning the queue.
 > - **Echo-safety without a store guard flag.** The baseline mirrors what the
@@ -699,7 +713,8 @@ steps 6–8.
   realtime and presence.
 - **D13** *(2026-07-04)* No automatic session retention/eviction in v1 — sessions
   persist until explicitly deleted, since some sessions may evolve into de-facto
-  saved visualizations. Revisit together with session/SavedView convergence (3.2).
+  saved visualizations. Session/SavedView retirement is recorded in the
+  [compatibility contract](SESSION_SAVEDVIEW_COMPAT_CONTRACT.md).
 - **D14** *(2026-07-06)* The empty-canvas persistence guard (R4, §8.1) applies
   **only** while a session has never materialised server-side (no connected
   sync client): a fresh, never-edited session must not register (D13). Once a
@@ -921,7 +936,7 @@ core needs to change.
 
 | Downstream SaaS slice | Open-core seam it binds to | Core-shipped default | Where it is injected |
 |---|---|---|---|
-| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` / `list_ids` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
+| Postgres-backed session store | `SessionPersistenceBackend` Protocol — `load` / `save` / `delete` / `list_meta` / `list_ids` / `transaction` (`backend/core/session_store.py`) | `FileSessionPersistenceBackend` (one JSON file per session, atomic temp+rename) | `SessionStore(<backend>)` |
 | Durability / retention | same `SessionPersistenceBackend` seam; the core adds **no** auto-eviction (D13), so a durable backend owns its own retention policy | file persistence, kept until explicit delete | `SessionStore(<backend>)` |
 | Redis event bus (multi-instance fan-out) | `SessionEventBus` Protocol — `publish` / `subscribe` / `unsubscribe` (`backend/core/session_hub.py`) | `InProcessEventBus` (per-subscriber asyncio queues, slow-consumer drop→resync) | `SessionManager(store, event_bus=<bus>)` |
 | Identity / named-identity presence | request-actor pass-through (`service.get_request_actor_info(headers=...)`) feeding the per-client `{client_id, display_name, color}` presence registration (§3.4) | anonymous guest identity (`Guest-<n>`, server-assigned colour); session id is the capability (D7) | session CRUD/stream endpoints in `rest_api.py` |
@@ -932,6 +947,20 @@ adapters now provide `list_ids() -> List[str]`, enumerating every persisted
 session without silently skipping unreadable documents. `SessionStore.erase_actor`
 uses it to scrub activity in cold and loaded sessions without modifying session
 state or sequence numbers. Existing CRUD signatures are unchanged.
+
+**Adapter migration — transactions cover reads:** session persistence adapters
+now provide `transaction()`, a context manager holding the adapter's exclusive
+lock and reentrant within one thread; `load`, `save` and `delete` each run
+inside one. `SessionStore.get` loads and decodes a session that is not yet in
+memory inside a transaction, so a reader in another thread or process sees a
+session as it was before or after a concurrent transaction, never part-way.
+The file adapter locks `.sessions.lock` in its session directory. Atomic
+single-document reads and writes are not enough: a caller may group several
+`load`/`save`/`delete` calls in one outer transaction, and a reader elsewhere
+must not observe that group half done. An adapter therefore cannot return a
+no-op context such as `contextlib.nullcontext()`; it must hold a lock (or an
+equivalent database transaction) that excludes concurrent `load`, `save` and
+`delete` from other threads and processes until the outer transaction exits.
 
 Contract obligations the core commits to, so hosted slices can depend on them:
 

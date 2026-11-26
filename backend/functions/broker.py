@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping
 
@@ -80,7 +81,7 @@ _MAX_ERROR_MESSAGE_CHARS = 500
 @dataclass(frozen=True)
 class ToolSpec:
     method: str  # GraphService method, also the authorization target
-    grant: str
+    grant: str | None
     action: str  # GRAPH_ACTION_READ or GRAPH_ACTION_MUTATE
     required: FrozenSet[str]
     optional: FrozenSet[str] = frozenset()
@@ -91,6 +92,14 @@ class ToolSpec:
 
 
 TOOLS: Dict[str, ToolSpec] = {
+    "run_files.list": ToolSpec("list_run_files", None, GRAPH_ACTION_READ, frozenset()),
+    "run_files.read": ToolSpec(
+        "read_run_file",
+        None,
+        GRAPH_ACTION_READ,
+        frozenset({"file_id"}),
+        frozenset({"offset", "max_chars"}),
+    ),
     "graph.search": ToolSpec(
         "search_graph",
         GRANT_GRAPH_READ,
@@ -146,6 +155,12 @@ TOOLS: Dict[str, ToolSpec] = {
             {"metadata_merge", "expected_updated_at", "expected_revision"}
         ),
     ),
+    "graph.attach_run_file": ToolSpec(
+        "add_node_attachment",
+        GRANT_GRAPH_WRITE,
+        GRAPH_ACTION_MUTATE,
+        required=frozenset({"node_id", "file_id"}),
+    ),
 }
 
 
@@ -172,6 +187,9 @@ class BrokerContext:
     grant_enabled: Callable[[str], bool]
     max_tool_calls: int = MAX_TOOL_CALLS
     max_message_bytes: int = MAX_MESSAGE_BYTES
+    # backend.functions.run_files.RunFiles of a webhook call with files.
+    run_files: Any = None
+    contract_version: str = "1"
 
 
 @dataclass
@@ -300,15 +318,19 @@ class FunctionBroker:
         spec = TOOLS.get(name)
         if spec is None:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
+        if name == "graph.attach_run_file" and ctx.contract_version != "3":
+            raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
-        if spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant):
+        if spec.grant is not None and (
+            spec.grant not in ctx.declared_grants or not ctx.grant_enabled(spec.grant)
+        ):
             raise BrokerError(
                 ERR_GRANT_DENIED, f"The function's grants do not cover {name}."
             )
 
         self._validate_arguments(spec, arguments)
         call_args = dict(arguments)
-        if spec.action == GRAPH_ACTION_MUTATE:
+        if spec.action == GRAPH_ACTION_MUTATE and name != "graph.attach_run_file":
             call_args["event_origin"] = function_origin(
                 ctx.function_id, ctx.function_version
             )
@@ -316,9 +338,31 @@ class FunctionBroker:
         if spec.method == "add_nodes":
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
+                graph_id = ctx.authorization_inputs.get("graph_id") or ""
+                call_args["nodes"] = [
+                    {
+                        **node,
+                        "metadata": {
+                            **(node.get("metadata") or {}),
+                            "origin_graph_id": graph_id,
+                        },
+                    }
+                    for node in call_args["nodes"]
+                ]
 
-        with use_request_authorization(
-            **_authorization_kwargs(ctx.authorization_inputs)
+        scope = (
+            access.restrict_function_graph(
+                ctx.authorization_inputs.get("graph_id") or ""
+            )
+            if ctx.authorization_inputs.get("actor_type") == "function_webhook"
+            else nullcontext()
+        )
+        with (
+            use_request_authorization(
+                **_authorization_kwargs(ctx.authorization_inputs)
+            ),
+            scope,
         ):
             decision = access.evaluate_graph_access(
                 self._service.authorization_hook,
@@ -330,12 +374,36 @@ class FunctionBroker:
                     ERR_ACCESS_DENIED,
                     _sanitize(decision.reason or "Graph access denied."),
                 )
-            try:
-                result = getattr(self._service, spec.method)(**call_args)
-            except Exception:
-                # Never forward internal exception text to function code.
-                logger.exception("Function run %s: tool %s raised", ctx.run_id, name)
-                raise BrokerError(ERR_TOOL_FAILED, "The operation failed.")
+            if ctx.authorization_inputs.get(
+                "actor_type"
+            ) == "function_webhook" and not decision.graph_access.matches(
+                graph_id=ctx.authorization_inputs.get("graph_id") or ""
+            ):
+                raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")
+            if spec.grant is None:
+                # Run files need no grant, but the actor's access is still
+                # checked so revoking it stops reads mid-run (§7.2).
+                return self._call_run_file_tool(spec, call_args)
+            if name == "graph.attach_run_file":
+                from backend.runtime.extensions import (
+                    bind_execution_context,
+                    runtime_context,
+                )
+                from backend.service.attachment_tools import attach_run_file
+
+                with bind_execution_context(
+                    runtime_context(spec.method, correlation_id=ctx.correlation_id)
+                ):
+                    result = attach_run_file(self._service, ctx.run_files, **call_args)
+            else:
+                try:
+                    result = getattr(self._service, spec.method)(**call_args)
+                except Exception:
+                    # Never forward internal exception text to function code.
+                    logger.exception(
+                        "Function run %s: tool %s raised", ctx.run_id, name
+                    )
+                    raise BrokerError(ERR_TOOL_FAILED, "The operation failed.")
 
         if spec.method == "find_similar_nodes":
             # The service applies no visibility narrowing to similarity search;
@@ -354,6 +422,21 @@ class FunctionBroker:
         # Round-trip so the function receives plain JSON (dates become strings);
         # handle_request then measures the whole response envelope.
         return json.loads(json.dumps(result, default=str))
+
+    def _call_run_file_tool(
+        self, spec: ToolSpec, call_args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        result = getattr(self._service._attachment_read_tools, spec.method)(
+            self._context.run_files, **call_args
+        )
+        if result.get("success") is False:
+            code = (
+                ERR_INVALID_ARGUMENTS
+                if result.get("error_code") == "invalid_arguments"
+                else ERR_TOOL_FAILED
+            )
+            raise BrokerError(code, "The operation failed.")
+        return result
 
     @staticmethod
     def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
@@ -408,6 +491,12 @@ class FunctionBroker:
                     ERR_INVALID_ARGUMENTS,
                     "Updating metadata requires metadata_merge: true.",
                 )
+        if spec.method == "add_node_attachment":
+            if not all(
+                isinstance(arguments.get(k), str) for k in ("node_id", "file_id")
+            ):
+                raise BrokerError(ERR_INVALID_ARGUMENTS, "Expected string identifiers.")
+            _refuse_reserved_id(arguments["node_id"])
 
     @staticmethod
     def _validate_keys(spec: ToolSpec, arguments: Mapping[str, Any]) -> None:
@@ -475,6 +564,7 @@ def _refuse_graph_scope(payload: Any) -> None:
 
 
 _AUTHORIZATION_KEYS = (
+    "authenticated_principal",
     "headers",
     "actor_id",
     "actor_type",

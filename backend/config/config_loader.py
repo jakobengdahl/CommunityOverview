@@ -36,6 +36,8 @@ from backend.runtime.request_context import (
 )
 from backend.config.model_profiles import ModelProfile, ModelProfilesConfig
 
+from backend.config.node_shapes import ShapeDefinition, ShapeName, sanitize_shapes
+
 logger = logging.getLogger(__name__)
 
 # Default config path relative to project root
@@ -147,6 +149,7 @@ class NodeTypeConfig(BaseModel):
     # available so turning it off never strands files already attached
     # (ADR 0008 section 7).
     allows_attachments: bool = False
+    shape: Optional[ShapeName] = None
 
 
 class RelationshipTypeConfig(BaseModel):
@@ -360,6 +363,26 @@ class RestInterfaceConfig(BaseModel):
         return entity
 
 
+# presentation.theme keys a deployment may set; the web UI maps each onto the
+# design token of the same name (accent -> --co-accent). Values must be plain
+# CSS colours: anything else could smuggle another declaration into the page.
+THEME_KEYS = ("accent", "accent_hover", "accent_contrast")
+# Plain CSS colours only, matched whole: hex, or rgb()/hsl() with numeric
+# channels in comma or space syntax. Whitespace is spaces only.
+_N = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)"
+_ALPHA = rf"{_N}%?"
+_S = r" *"
+_CSS_COLOR = re.compile(
+    r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+    rf"|rgba?\({_S}{_N}{_S},{_S}{_N}{_S},{_S}{_N}{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|rgba?\({_S}{_N}%? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)?{_S},{_S}{_N}%{_S},{_S}{_N}%{_S}(?:,{_S}{_ALPHA}{_S})?\)"
+    rf"|hsla?\({_S}{_N}(?:deg)? +{_N}%? +{_N}%?{_S}(?:/{_S}{_ALPHA}{_S})?\)"
+)
+_CSS_COLOR_MAX_LEN = 64
+
+
 class PresentationConfig(BaseModel):
     """Presentation configuration for UI and prompts."""
 
@@ -379,6 +402,28 @@ class PresentationConfig(BaseModel):
     skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
     capabilities: List[CapabilityConfig] = Field(default_factory=list)
     guides: List[GuideConfig] = Field(default_factory=list)
+    theme: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _keep_valid_theme_entries(cls, v: Any) -> Dict[str, str]:
+        """Drop unknown keys and non-colour values instead of failing the config."""
+        if not isinstance(v, dict):
+            if v is not None:
+                logger.warning("presentation.theme must be an object; ignoring it")
+            return {}
+        kept = {}
+        for key, value in v.items():
+            if (
+                key in THEME_KEYS
+                and isinstance(value, str)
+                and len(value) <= _CSS_COLOR_MAX_LEN
+                and _CSS_COLOR.fullmatch(value)
+            ):
+                kept[key] = value
+            else:
+                logger.warning("Skipping invalid presentation.theme entry %r", key)
+        return kept
 
 
 class AiAssistantUiConfig(BaseModel):
@@ -402,6 +447,7 @@ class SystemConfig(BaseModel):
 class SchemaFileConfig(BaseModel):
     """Root configuration model for the schema file."""
 
+    node_shapes: Dict[ShapeName, ShapeDefinition] = Field(default_factory=dict)
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
     ui: UiConfig = Field(default_factory=UiConfig)
@@ -414,6 +460,13 @@ class SchemaFileConfig(BaseModel):
     # by default — that is the legacy single-provider mode (LLM_PROVIDER /
     # LLM_MODEL / OPENAI_API_KEY / ANTHROPIC_API_KEY environment variables).
     model_profiles: ModelProfilesConfig = Field(default_factory=ModelProfilesConfig)
+
+    @model_validator(mode="after")
+    def known_shape_references(self):
+        for config in self.schema_.node_types.values():
+            if config.shape is not None and config.shape not in self.node_shapes:
+                raise ValueError("node type references an unknown shape")
+        return self
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -453,11 +506,13 @@ class ConfigLoader:
         self._config_path = self._get_config_path()
         self._dropped_capability_ids = set()
         raw_config = None
+        self.shape_diagnostics = []
 
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
+            self.shape_diagnostics = sanitize_shapes(raw_config)
             self._sanitize_node_types(raw_config)
             self._sanitize_relationship_types(raw_config)
             self._sanitize_rest_interfaces(raw_config)
@@ -751,8 +806,14 @@ def get_schema() -> Dict[str, Any]:
     schema = loader.config.schema_
 
     return {
+        "node_shapes": {
+            name: shape.model_dump()
+            for name, shape in loader.config.node_shapes.items()
+        },
+        "shape_diagnostics": loader.shape_diagnostics,
         "node_types": {
             name: {
+                **({"shape": cfg.shape} if cfg.shape is not None else {}),
                 "fields": cfg.fields,
                 "static": cfg.static,
                 "category": cfg.category,
@@ -853,6 +914,7 @@ def get_presentation() -> Dict[str, Any]:
     - default_language: Default language code
     - default_chat_collapsed: Whether the assistant panel starts collapsed
       for a visitor with no stored preference of their own
+    - theme: Design-token overrides for the web UI (keys in THEME_KEYS)
     """
     loader = _get_loader()
     pres = loader.config.presentation
@@ -877,6 +939,7 @@ def get_presentation() -> Dict[str, Any]:
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
         "capabilities": get_capabilities()["capabilities"],
         "guides": [guide.model_dump() for guide in pres.guides],
+        "theme": dict(pres.theme),
         "ui": loader.config.ui.model_dump(),
     }
 
@@ -1015,14 +1078,15 @@ def build_session_url(session_id: str) -> Optional[str]:
     (see ``docs/MCP_SESSION_LIFECYCLE_CONTRACT.md`` §5). Returns ``None`` when no
     public base URL is configured.
     """
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from urllib.parse import urlencode, urlsplit, urlunsplit
 
     base = get_public_base_url()
     if not base or not session_id:
         return None
     parts = urlsplit(base)
-    query = dict(parse_qsl(parts.query))
-    query["session"] = session_id
+    # A configured base is an origin and optional path, not an app route.
+    # Discard query parameters that could change how the session opens.
+    query = {"session": session_id}
     # Preserve any base path; ensure a "/" path when the base is a bare origin so
     # the result is "https://host/?session=<id>" rather than "https://host?...".
     return urlunsplit(

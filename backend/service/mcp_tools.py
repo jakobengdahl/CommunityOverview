@@ -20,6 +20,7 @@ from .attachment_tools import ATTACHMENT_READ_DEFAULT_CHARS
 import functools
 import inspect
 import json
+import logging
 import math
 import secrets
 from typing import List, Optional, Dict, Any, Callable, Tuple
@@ -38,6 +39,7 @@ from backend.service.mcp_widget import (
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.core.session_store import (
     AnnotationFieldConflict,
+    AnnotationLimitReached,
     OpError,
     is_valid_session_id,
 )
@@ -52,6 +54,8 @@ from backend.core.session_manager import (
     RevisionConflict,
     SessionLimitReached,
     SessionNotFound,
+    _ADDITIVE_ACTIONS,
+    _REPLACING_ACTIONS,
 )
 from backend.core.image_ingest import (
     ImageFetchError,
@@ -95,17 +99,30 @@ from backend.runtime import session_context
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GRAPH_ACTION_READ,
+    GRAPH_OPERATION_STAGE,
     use_request_authorization,
 )
-from . import access, graph_merge_plan
+from . import access, graph_merge_plan, session_capture, templates
 from .service import GraphService
+from .staging import outside_storage, refusal_result, session_storage_error
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
 
+logger = logging.getLogger(__name__)
+
 # Server-owned session state records node x/y but not rendered node dimensions
-# (design §3.8: the browser no longer uploads canvas geometry). Agents still need
-# a size to space nodes without overlap, so the layout tools advertise this
-# assumed default — model-space units at zoom 1, matching the canvas node box.
+# (design §3.8: the browser no longer uploads canvas geometry). The layout tools
+# advertise this typical node box (model-space units at zoom 1) as a spacing
+# estimate; it is not a bound — see _NODE_WIDTH_BOUNDS.
 _ASSUMED_NODE_SIZE = {"width": 220, "height": 120}
+
+# The rendered width range of a card node's outer box, which the canvas CSS
+# guarantees (.graph-custom-node in packages/ui-graph-canvas CustomNode.css:
+# min-width/max-width under box-sizing: border-box, border included). Unlike
+# _ASSUMED_NODE_SIZE this is a bound, not a guess: a column pitch of ``max`` plus a
+# gap never overlaps horizontally between card nodes. A node drawn with a configured shape
+# takes its width from the shape and its scale instead, so it is not covered.
+# Height wraps with the label, so it has no bound.
+_NODE_WIDTH_BOUNDS = {"min": 150, "max": 250}
 
 # summon_session_viewport: who summoned, when the caller names no one, and the
 # largest node set one summon may frame (the add_nodes_to_session batch size).
@@ -123,23 +140,30 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 
 # SESSION_ID_RE also accepts the older two-group form, which is what the tools'
 # own docstring examples use, so the message must not name only the long one.
-_INVALID_SESSION_ID_ERROR = (
-    "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
-    "(the older DDDD-DDDD form is also accepted)"
-)
+_INVALID_SESSION_ID_ERROR = session_capture.INVALID_SESSION_ID_MESSAGE
+
+
+class _CopyDenied(Exception):
+    """The hook refused staging the source's changes into a copy, or the
+    copy's access assignments."""
+
+    def __init__(self, result: Dict[str, Any]):
+        super().__init__(result.get("message"))
+        self.result = result
+
 
 # Server-assigned default when an assistant creates a session without a name
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
-# Appended to every undelivered-push warning: a push writes no session state, so
-# an agent that simply retries it gets the same silence. It deliberately names
+# Appended to every undelivered-push warning: an agent that simply retries an
+# undelivered push gets the same silence. It deliberately names
 # this report, not connect_to_visualization_session, as the verdict: that tool
 # is read before the push, and a consumer present then can be gone by the time
 # the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
-    " A push is not stored in the session's state — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than a "
+    " To change what the session holds whether or not a canvas is open, use "
+    "add_nodes_to_session. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
 )
@@ -173,8 +197,6 @@ _COMPOSING_TOOLS = frozenset(
         "get_graph_stats",
         "get_subtypes",
         "audit_relationship_applicability",
-        "get_saved_view",
-        "list_saved_views",
         "show_graph_widget",
     }
 )
@@ -186,7 +208,21 @@ _SESSION_REFUSALS = frozenset(
     }
 )
 # The read tools whose `visualization_session_id` was a push target first.
-_PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
+_PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes"})
+
+# Tools that take a session id as a plain argument and answer every refusal
+# with their own codes: the session is never reconciled with a bound one.
+_RAW_SESSION_TOOLS = frozenset(
+    {
+        "save_session_view",
+        "save_template",
+        "insert_template",
+        "list_templates",
+        "get_template",
+        "update_template",
+        "delete_template",
+    }
+)
 
 
 def _message_request(mcp) -> Tuple[bool, Any]:
@@ -253,7 +289,9 @@ def _session_aware(
     """
     name = func.__name__
     params = inspect.signature(func).parameters
-    if name in _STAGING_TOOLS or name in _COMPOSING_TOOLS:
+    if name in _RAW_SESSION_TOOLS:
+        kind, key = "raw", None
+    elif name in _STAGING_TOOLS or name in _COMPOSING_TOOLS:
         kind, key = (
             ("stage" if name in _STAGING_TOOLS else "compose"),
             (session_context.SESSION_ARGUMENT),
@@ -266,6 +304,8 @@ def _session_aware(
         kind, key = None, None
 
     def run(bound, args, kwargs):
+        if kind == "raw":
+            return func(*args, **kwargs)
         if kind is None:
             if bound is not None:
                 raise session_context.not_supported(f"tool {name}")
@@ -318,6 +358,9 @@ def _session_aware(
             with authorization, session_context.bind_session(bound):
                 return run(bound, args, kwargs)
         except session_context.SessionRefused as exc:
+            if kind == "raw":
+                # Only the message's own session headers can refuse here.
+                return {"success": False, "error": "invalid_request"}
             from .attachment_tools import audit_attachment_refusal, tool_caller
 
             with tool_caller("mcp"):
@@ -325,6 +368,14 @@ def _session_aware(
             return exc.to_result()
 
     return wrapper
+
+
+_MEMBERSHIP_UNAPPLIED_WARNING = (
+    "Nothing received this push: the server could not store the session it "
+    "targets (the session id may be retired, or the server's session limit "
+    "reached), so its nodes were not added and it was sent to no browser."
+    + _UNDELIVERED_PUSH_REMEDY
+)
 
 
 def _undelivered_push_warning(
@@ -338,6 +389,7 @@ def _undelivered_push_warning(
     hub_published: bool,
     hub_clients: int,
     outcome_unknown: bool,
+    legacy_withheld: bool = False,
 ) -> str:
     """Say why nothing received a push, reading the reason off the actual state.
 
@@ -357,6 +409,11 @@ def _undelivered_push_warning(
     """
     if not registry_configured:
         legacy_reason = "no legacy push channel is configured"
+    elif legacy_withheld:
+        legacy_reason = (
+            "it was not sent to the legacy push channel, since the server could "
+            "not confirm its nodes were added to the session"
+        )
     elif legacy_enqueued and legacy_consumers == 0:
         legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
@@ -455,8 +512,8 @@ def register_mcp_tools(
 
         The three read tools return the service payload verbatim, so without
         this an agent cannot tell a push that landed on a canvas from one that
-        went nowhere: a push writes no session state, so there is nothing to
-        read back either.
+        went nowhere: the session's stored state says what it holds, not
+        whether a canvas showed it.
 
         What keeps this report out of what the canvas receives is the copy
         ``_push_to_session`` takes (``command_result = dict(result)``), not the
@@ -464,12 +521,33 @@ def register_mcp_tools(
         — the legacy queue via ``loop.call_soon``, the hub by passing the object
         to subscribers — so a later mutation of a shared ``result`` would still
         be visible to them. Do not remove that copy.
+
+        A read tool's push writes the session (membership, a loaded view's
+        layout and annotations), so it needs the same MUTATE grant as
+        ``add_nodes_to_session``; a caller without it still gets the read.
         """
+        if session_id and tool_name in _PUSHING_TOOLS:
+            denied = _authorize_session(GRAPH_ACTION_MUTATE, tool_name)
+            if denied:
+                delivery = {
+                    "requested": True,
+                    "delivered": False,
+                    "status": "not_delivered",
+                    "live_consumers": 0,
+                    "error_code": denied["error_code"],
+                    "warning": "Not pushed: this caller may not change the "
+                    "session. " + denied["message"],
+                }
+                if isinstance(result, dict):
+                    result["visualization_delivery"] = delivery
+                return delivery
         delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )
         if session_id and isinstance(result, dict):
             result["visualization_delivery"] = delivery
+            if "error_code" in delivery:
+                result.update(success=False, error=delivery["error_code"])
         return delivery
 
     def _claimed_node_ids(session_id, node_refs):
@@ -652,6 +730,60 @@ def register_mcp_tools(
                 tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
         else:
             mcp.tool()(wrapped)
+            from mcp.server.fastmcp import FastMCP
+
+            if func.__name__ in _RAW_SESSION_TOOLS and isinstance(mcp, FastMCP):
+                from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+
+                class RawArgumentMetadata(FuncMetadata):
+                    # The tool validates its own arguments, as REST does, so a
+                    # wrong type answers `invalid_request`, not a ToolError.
+                    async def call_fn_with_arg_validation(
+                        self,
+                        fn,
+                        fn_is_async,
+                        arguments_to_validate,
+                        arguments_to_pass_directly,
+                    ):
+                        fields = self.arg_model.model_fields
+                        arguments = {
+                            k: v
+                            for k, v in arguments_to_validate.items()
+                            if k in fields
+                        }
+                        arguments |= arguments_to_pass_directly or {}
+                        if fn_is_async:
+                            return await fn(**arguments)
+                        return fn(**arguments)
+
+                tool = mcp._tool_manager.get_tool(func.__name__)
+                tool.fn_metadata = RawArgumentMetadata(**tool.fn_metadata.__dict__)
+                # The Python defaults only let a missing argument reach the
+                # tool's own validation; the advertised schema requires all.
+                properties = {
+                    k: {f: v for f, v in prop.items() if f != "default"}
+                    for k, prop in tool.parameters["properties"].items()
+                }
+                tool.parameters = {
+                    **tool.parameters,
+                    "properties": properties,
+                    "required": (
+                        list(properties)
+                        if func.__name__ == "save_session_view"
+                        else {
+                            "save_template": [
+                                "session_id",
+                                "name",
+                                "expected_revision",
+                            ],
+                            "insert_template": ["session_id", "template_id"],
+                            "list_templates": [],
+                            "get_template": ["template_id"],
+                            "update_template": ["template_id", "expected_revision"],
+                            "delete_template": ["template_id", "expected_revision"],
+                        }[func.__name__]
+                    ),
+                }
         tools_map[func.__name__] = wrapped
         return wrapped
 
@@ -676,6 +808,43 @@ def register_mcp_tools(
     ) -> Dict[str, Any]:
         """Search files on up to 20 visible nodes; report unreadable files."""
         return service.attachment_tool_search(query, node_ids, top_k)
+
+    @register_tool
+    def add_node_attachment(
+        node_id: str,
+        filename: str,
+        content_text: Optional[str] = None,
+        content_base64: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Attach one file to a node, as the REST upload does.
+
+        Give exactly one of `content_text` (stored as its UTF-8 bytes) or
+        `content_base64` (standard base64). At most
+        `ATTACHMENT_MCP_MAX_DECODED_BYTES` decoded bytes, 3,000,000 by default
+        and at most that: the MCP transport refuses request bodies over 4 MiB,
+        and 3,000,000 bytes are 4,000,000 base64 characters. Keep `content_text` well under 3 MB, since JSON escaping
+        grows it in transit. A larger file goes through
+        `POST /api/nodes/{node_id}/attachments`, which keeps the full per-file
+        limit.
+
+        The type is sniffed from the bytes; `content_type` is diagnostic only.
+        Sniffing, node-type and archive rules, limits and error codes are the
+        REST upload's.
+
+        Returns:
+            `{"success": true, "attachment": <record>}`, or an error with
+            `error_code`.
+        """
+        return service.attachment_tool_add(
+            node_id, filename, content_text, content_base64, content_type
+        )
+
+    @register_tool
+    def delete_node_attachment(node_id: str, attachment_id: str) -> Dict[str, Any]:
+        """Delete one attachment from a node, as the REST delete does."""
+        return service.attachment_tool_delete(node_id, attachment_id)
 
     # ==================== Search Tools ====================
 
@@ -764,12 +933,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -892,12 +1062,13 @@ def register_mcp_tools(
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
+                state when nothing did). A push that adds or replaces nodes
+                also writes them into the session's stored membership, but
+                whether a canvas showed it is only in this field — check it
+                rather than assuming the canvas changed. Undelivered is not
+                always discarded: a legacy registry entry with nothing draining
+                it keeps the command queued, and a browser that opens the
+                session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -1091,6 +1262,87 @@ def register_mcp_tools(
             metadata_merge=metadata_merge,
             expected_updated_at=expected_updated_at,
             expected_revision=expected_revision,
+            expected_session_seq=expected_session_seq,
+        )
+
+    @register_tool
+    def batch_update_nodes(
+        updates: List[Dict[str, Any]],
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+        visualization_session_id: Optional[str] = None,
+        expected_session_seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update multiple nodes in a single call (max 100)
+
+        Each node in the batch is processed through the same authorization,
+        validation and staging path as ``update_node``.  One node failing
+        (not found, conflict, forbidden, invalid) does **not** stop the others
+        from being applied — partial success is the default.
+
+        The call is rejected (writes nothing) when the batch exceeds 100 nodes
+        or contains duplicate node_ids.
+
+        Args:
+            updates: List of per-node update dicts, each with:
+
+                * ``node_id`` (str, required): the node to update
+                * ``updates`` (dict, required): same dict as ``update_node`` —
+                  fields to update (name, description, summary, tags, aliases,
+                  metadata). ``tags`` **replace** existing tags, not append.
+                * ``metadata_merge`` (bool, default True): see ``update_node``.
+                * ``expected_updated_at`` (str, optional): optimistic concurrency
+                  guard, same semantics as ``update_node``.
+                * ``expected_revision`` (int, optional): the node's ``revision``
+                  must still equal this value; otherwise the per-node result has
+                  status ``conflict``.
+
+            event_session_id: Optional session ID for webhook loop prevention
+            event_correlation_id: Optional correlation ID for chaining events
+            visualization_session_id: Optional. The session to act in. In a
+                staged session the change is held in the session's layer and
+                the graph is not changed; in a direct session it lands in the
+                graph. A session that does not exist is refused with
+                session_not_found.
+            expected_session_seq: Optional, with a session: the session
+                sequence number you last read. If another participant changed
+                the session since, nothing is written and the result has
+                error="session_seq_conflict".
+
+        Returns:
+            Dict with compact result (no full node bodies):
+
+            .. code-block:: json
+
+                {
+                  "success": true,
+                  "results": [
+                    { "node_id": "a", "status": "ok", "revision": 3,
+                      "updated_at": "2025-..." },
+                    { "node_id": "b", "status": "conflict",
+                      "current_revision": 3 },
+                    { "node_id": "c", "status": "not_found",
+                      "error": "Node with ID c not found" },
+                    { "node_id": "d", "status": "forbidden" },
+                    { "node_id": "e", "status": "error",
+                      "error": "..." }
+                  ],
+                  "counts": { "ok": 1, "conflict": 1, "not_found": 1,
+                              "forbidden": 1, "error": 1 }
+                }
+
+            Status values are ``ok``, ``conflict``, ``not_found``, ``forbidden``,
+            or ``error``. A top-level ``success: true`` means the batch
+            *executed* (not that every node was updated — ``counts`` show the
+            breakdown). An over-cap or duplicate-id batch returns
+            ``success: false`` with no writes.
+        """
+        return service.batch_update_nodes(
+            updates,
+            event_origin="mcp",
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
             expected_session_seq=expected_session_seq,
         )
 
@@ -1546,86 +1798,6 @@ def register_mcp_tools(
             workspace_kind=workspace_kind,
             graph_id=graph_id,
         )
-
-    # ==================== Saved Views Tools ====================
-
-    @register_tool
-    def save_view(name: str) -> Dict[str, Any]:
-        """
-        Signal intent to save the current view state.
-
-        This tool does NOT save the view data itself (positions, etc.) because
-        the backend does not know the client state. Instead, it acts as a signal
-        for the frontend to capture the current visualization state and save it
-        as a SavedView.
-
-        Args:
-            name: Name of the view to save
-
-        Returns:
-            A signal object that the frontend will intercept.
-        """
-        return service.save_view(name)
-
-    @register_tool
-    def get_saved_view(
-        name: str,
-        visualization_session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Get a saved view by name and load its content for display.
-
-        This returns the actual nodes and edges that are part of the saved view,
-        NOT the SavedView node itself. The SavedView node is just metadata
-        storage - what the user wants to see is the content it references.
-
-        Note: "Saved view" = a snapshot of nodes/edges/positions saved in the graph.
-              "Current visualization" = what is currently displayed in the GUI.
-
-        Args:
-            name: Name of the saved view
-            visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded in that session's live canvas, if one is open. The
-                result then carries a ``visualization_delivery`` report saying
-                whether anything actually received it (``delivered``,
-                ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state when it
-                is sent, so reading the session back cannot show whether it
-                landed — check this field rather than assuming the canvas
-                changed. Undelivered is not always discarded: a legacy registry
-                entry with nothing draining it keeps the command queued, and a
-                browser that opens the session later may still apply it.
-
-        Returns:
-            The nodes and edges to display in the visualization, with position
-            and hidden node data, and ``visualization_delivery`` when a session
-            id was given
-        """
-        result = service.get_saved_view(name)
-        _push(visualization_session_id, "get_saved_view", result)
-        return result
-
-    @register_tool
-    def list_saved_views(
-        visualization_session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        List all saved views.
-
-        Returns a list of all saved view snapshots stored in the graph.
-        These are NOT the current visualization - they are saved snapshots
-        that can be loaded to restore a specific graph view.
-
-        Args:
-            visualization_session_id: Optional. The session to read in; one
-                that does not exist is refused with session_not_found, and a
-                staged session is read as composed: the graph with the
-                session's staged changes applied.
-
-        Returns:
-            List of all SavedView nodes with their names and summaries
-        """
-        return service.list_saved_views()
 
     # ==================== Visualization Session Tools ====================
 
@@ -2134,7 +2306,12 @@ def register_mcp_tools(
           in pixels at zoom 1. Origin is (0, 0); +x is right, +y is down.
         - ``x``/``y`` is the node's **top-left** corner (React Flow convention).
         - Node width/height are not server-owned, so they are not returned per
-          node. Use ``assumed_node_size`` to leave collision-free spacing.
+          node. A card node's rendered width always lies within
+          ``node_width_bounds``; a column pitch of ``node_width_bounds.max``
+          plus a gap never overlaps two card nodes horizontally. A node drawn
+          with a configured shape is sized by that shape and its scale and is
+          not covered. ``assumed_node_size`` is a typical box, not a bound, and
+          height grows with the label.
         - ``revision`` is a monotonic counter. Pass it back as
           ``expected_revision`` to ``apply_visualization_layout`` for optimistic
           concurrency (the write is rejected if someone else changed the session
@@ -2169,7 +2346,10 @@ def register_mcp_tools(
 
         Returns:
             Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
-            selected_node_ids, assumed_node_size
+            selected_node_ids, assumed_node_size, node_width_bounds (the
+            rendered min/max outer width of a card node; space columns at
+            ``max`` plus a gap to rule out horizontal overlap between card nodes — shaped
+            nodes are not covered and height has no bound)
         """
         if session_manager is None:
             return {"error": "Session manager not available"}
@@ -2235,6 +2415,7 @@ def register_mcp_tools(
             "nodes": nodes,
             "selected_node_ids": _claimed_node_ids(session_id, node_refs),
             "assumed_node_size": _ASSUMED_NODE_SIZE,
+            "node_width_bounds": _NODE_WIDTH_BOUNDS,
             "coordinate_space": "model-space, pixels at zoom 1, x/y = node top-left",
             "connected_clients": session_manager.connected_count(session_id),
         }
@@ -2994,6 +3175,7 @@ def register_mcp_tools(
         return {
             "session_id": session.id,
             "name": session.name,
+            "description": session.description,
             "lifecycle_state": "active",
             "owner": None,  # reserved; bound by the hosted layer, null in open core
             "workspace": None,  # reserved; bound by the hosted layer
@@ -3019,6 +3201,7 @@ def register_mcp_tools(
         return {
             "session_id": meta["id"],
             "name": meta.get("name"),
+            "description": meta.get("description"),
             "lifecycle_state": "active",
             "owner": None,
             "workspace": None,
@@ -3047,10 +3230,10 @@ def register_mcp_tools(
         ``add_nodes_to_session`` writes the session's stored state whether or
         not anyone has it open. Passing the session id as
         ``visualization_session_id`` to the search/related tools is not a
-        substitute: a push writes no session state, so its nodes land only if a
-        canvas receives it and adds them. Check ``visualization_delivery``
-        (``delivered``, ``status``) on such a result before assuming the push
-        reached anything.
+        substitute: such a push stores its nodes only in a session the server
+        already holds or can create, and shows them only on a canvas that
+        receives it. Check ``visualization_delivery`` (``delivered``,
+        ``status``) on such a result before assuming the push reached anything.
 
         Args:
             name: Optional display name. Names are not required to be unique; when
@@ -3082,6 +3265,8 @@ def register_mcp_tools(
             )
         except WriteModeRefused as exc:
             return exc.to_result()
+        except OSError:
+            return session_storage_error()
         except SessionLimitReached:
             return {
                 "success": False,
@@ -3092,6 +3277,212 @@ def register_mcp_tools(
             "success": True,
             "session": _project_session(session, mutate_allowed=True),
         }
+
+    @register_tool
+    def copy_visualization_session(session_id: str) -> Dict[str, Any]:
+        """Copy a session to a new one named "Copy of <source name>".
+
+        Canvas state, appearance choices, write mode and staged graph changes
+        are copied, annotations under fresh IDs; graph entities remain shared.
+        A hook holding per-session roles gives the copy the source's, capped at
+        the copier's rights, with the copier as owner. Participants, history
+        and leases are excluded.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {"success": False, "error": _INVALID_SESSION_ID_ERROR}
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_visualization_session")
+        if denied:
+            return denied
+        denied = access.authorize_graph_access(
+            service.authorization_hook,
+            action=GRAPH_ACTION_READ,
+            target="get_visualization_session",
+            session_id=session_id,
+        )
+        if denied:
+            return denied
+
+        def authorize_staging() -> None:
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_MUTATE,
+                target="copy_visualization_session",
+                graph_operation=GRAPH_OPERATION_STAGE,
+                session_id=session_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
+        def assign_access(copy_id: str) -> None:
+            denied = access.assign_copied_session_access(
+                service.authorization_hook,
+                source_session_id=session_id,
+                copy_session_id=copy_id,
+            )
+            if denied:
+                raise _CopyDenied(denied)
+
+        try:
+            session = session_manager.copy_session(
+                session_id,
+                authorize_staging=outside_storage(authorize_staging),
+                assign_access=outside_storage(assign_access),
+                staged_by=access.build_mutation_actor_id(
+                    target="copy_visualization_session"
+                ),
+            )
+        except OSError:
+            return session_storage_error()
+        except _CopyDenied as exc:
+            return exc.result
+        except layer_store.LayerFull as exc:
+            # The source holds more staged entries than the current cap.
+            return refusal_result(exc)
+        except WriteModeRefused as exc:
+            return exc.to_result()
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        except (
+            SessionNotFound,
+            SessionLimitReached,
+            OpBatchTooLarge,
+            LayoutBusy,
+        ) as exc:
+            codes = {
+                SessionNotFound: "session_not_found",
+                SessionLimitReached: "too_many_sessions",
+                OpBatchTooLarge: "session_too_large",
+                LayoutBusy: "session_busy",
+            }
+            return {"success": False, "error": codes[type(exc)]}
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
+    def save_session_view(
+        # Schema only, all required: FastMCP passes the raw arguments through
+        # unvalidated (``_RAW_SESSION_TOOLS``) and the tool validates them as
+        # REST does.
+        session_id: str = None,  # type: ignore[assignment]
+        name: str = None,  # type: ignore[assignment]
+        expected_revision: Any = None,
+    ) -> Dict[str, Any]:
+        """Save a session's current view as a new, independently editable session.
+
+        All three arguments are required. ``expected_revision`` is the source's
+        ``revision`` from ``get_visualization_session``; a session changed
+        since answers ``revision_conflict`` with ``current_revision``: inspect
+        it and retry explicitly. ``name`` is 1-200 characters and need not be
+        unique. Node references (hidden ones too), positions, visibility,
+        dimming, appearance, annotations and the description are copied; graph content
+        is not. A source with staged changes (``staged_changes``) or invalid
+        annotations (``invalid_presentation``) is refused, and so is the save when
+        it references a node the caller may not read (``access_denied``).
+
+        Returns:
+            ``success``, ``kind: "saved_session"``, ``source_session_id``,
+            ``source_revision``, the new ``session_id``, its ``revision``,
+            ``missing_node_ids`` (kept references to nodes that no longer
+            exist) and ``session_url``: give that link to the user as-is, never
+            build one. On failure ``success: false`` and a stable ``error``.
+        """
+        return session_capture.save_session_view(
+            service, session_manager, session_id, name, expected_revision
+        )
+
+    @register_tool
+    def save_template(
+        session_id: str = None,
+        name: str = None,
+        expected_revision: Any = None,
+        node_ids: Any = None,
+        annotation_ids: Any = None,
+        description: Any = "",
+        tags: Any = None,
+    ) -> Dict[str, Any]:
+        """Capture a session as a reusable template."""
+        return templates.save_template(
+            service,
+            session_manager,
+            session_id,
+            name,
+            expected_revision,
+            node_ids,
+            annotation_ids,
+            description,
+            tags,
+        )
+
+    @register_tool
+    def insert_template(
+        session_id: str,
+        template_id: str,
+        mode: str = "copy",
+        x: Any = None,
+        y: Any = None,
+        expected_revision: Any = None,
+        template_revision: Any = None,
+        expected_session_seq: Any = None,
+    ) -> Dict[str, Any]:
+        """Insert a template into a session."""
+        return templates.insert_template(
+            service,
+            session_manager,
+            session_id,
+            template_id,
+            mode,
+            x,
+            y,
+            expected_revision,
+            template_revision,
+            expected_session_seq,
+        )
+
+    @register_tool
+    def list_templates(
+        query: Any = None, tags: Any = None, limit: Any = None
+    ) -> Dict[str, Any]:
+        """List accessible templates, optionally filtered by text and tags."""
+        return templates.list_templates(service, session_manager, query, tags, limit)
+
+    @register_tool
+    def get_template(template_id: str = None) -> Dict[str, Any]:
+        """Read a template by ID."""
+        return templates.get_template(service, session_manager, template_id)
+
+    @register_tool
+    def update_template(
+        template_id: str = None,
+        expected_revision: Any = None,
+        name: Any = None,
+        description: Any = None,
+        tags: Any = None,
+        replace_from: Any = None,
+    ) -> Dict[str, Any]:
+        """Update template metadata or replace its capture at a source revision."""
+        return templates.update_template(
+            service,
+            session_manager,
+            template_id,
+            expected_revision,
+            name,
+            description,
+            tags,
+            replace_from,
+        )
+
+    @register_tool
+    def delete_template(
+        template_id: str = None, expected_revision: Any = None
+    ) -> Dict[str, Any]:
+        """Delete a template at its current revision."""
+        return templates.delete_template(
+            service, session_manager, template_id, expected_revision
+        )
 
     @register_tool
     def list_visualization_sessions() -> Dict[str, Any]:
@@ -3282,12 +3673,89 @@ def register_mcp_tools(
                 "error": "rate_limited",
                 "message": "Too many session writes; slow down and retry.",
             }
+        except OSError:
+            return session_storage_error()
         except SessionLimitReached:
             return {
                 "success": False,
                 "error": "too_many_sessions",
                 "message": "The session limit has been reached; delete unused sessions and retry.",
             }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
+        except SessionNotFound:
+            return {"success": False, "error": f"Session '{session_id}' not found."}
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session": _project_session(session, mutate_allowed=True),
+        }
+
+    @register_tool
+    def describe_visualization_session(
+        session_id: str, description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Set or clear a visualization session's description: what the session
+        is for, what has been done and what the next participant should pick
+        up. Read it back as ``description`` on the session resource.
+
+        It belongs to the session, not the canvas, so clearing the
+        visualization keeps it. Last write wins. Pass ``description=null`` to
+        clear it.
+
+        Args:
+            session_id: The session ID (e.g. "8244-1742-3391-0057").
+            description: The new description (at most 4000 characters), or
+                null to clear it.
+
+        Returns:
+            Dict with success and the updated session resource. Each call draws
+            one unit from a rate budget shared with no other tool; busy and
+            rate_limited are retryable.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": _INVALID_SESSION_ID_ERROR,
+            }
+        denied = _authorize_session(
+            GRAPH_ACTION_MUTATE, "describe_visualization_session"
+        )
+        if denied:
+            return denied
+        try:
+            session = session_manager.describe_session_sync(
+                session_id,
+                description,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="describe_visualization_session",
+            )
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except OSError:
+            return session_storage_error()
+        except SessionLimitReached:
+            return {
+                "success": False,
+                "error": "too_many_sessions",
+                "message": "The session limit has been reached; delete unused sessions and retry.",
+            }
+        except OpBatchTooLarge:
+            return {"success": False, "error": "session_too_large"}
         except SessionNotFound:
             return {"success": False, "error": f"Session '{session_id}' not found."}
         except OpError as exc:
@@ -5590,6 +6058,7 @@ def register_mcp_tools(
         label: str = "",
         description: str = "",
         color: Optional[str] = None,
+        text_color: Optional[str] = None,
         member_node_ids: Optional[List[str]] = None,
         z: Optional[float] = None,
         locked: bool = False,
@@ -5629,6 +6098,9 @@ def register_mcp_tools(
             label: Optional group label shown on the box.
             description: Optional longer description.
             color: Optional box color (any CSS color the canvas accepts).
+            text_color: Optional label text color (any CSS color). Pass ""
+                for automatic — dark or white, whichever contrasts more with
+                `color`. Omit to keep the current value on an upsert.
             member_node_ids: Optional list of graph node ids to start the
                 group with. Omit to leave current membership alone on an
                 upsert, or create an empty group. Use `update_group_members`
@@ -5652,7 +6124,8 @@ def register_mcp_tools(
         Returns:
             Dict with success, the created/replaced group (same projected
             shape as `list_annotations`, with `label`/`description`/`color`/
-            `member_node_ids` under `content`), and the new revision.
+            `textColor`/`member_node_ids` under `content`; no `textColor`
+            means automatic, same as ""), and the new revision.
             Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for invalid_content, wrong_type, or too_large.
         """
@@ -5691,6 +6164,7 @@ def register_mcp_tools(
                 label=label,
                 description=description,
                 color=color,
+                text_color=text_color,
                 member_node_ids=member_node_ids,
                 z=z,
                 locked=locked,
@@ -6125,6 +6599,18 @@ def _group_origins(annotations: Any) -> Dict[str, Tuple[float, float]]:
     return origins
 
 
+def _carries_membership(result: Dict[str, Any]) -> bool:
+    """Whether applying *result* gives a session that holds nothing nodes.
+
+    A clear or an empty replace changes nothing in a session never stored, so
+    it does not materialise one.
+    """
+    action = result.get("action")
+    return (action in _REPLACING_ACTIONS or action in _ADDITIVE_ACTIONS) and bool(
+        result.get("nodes")
+    )
+
+
 def _push_to_session(
     session_registry,
     session_id: Optional[str],
@@ -6134,9 +6620,9 @@ def _push_to_session(
 ) -> Dict[str, Any]:
     """Push *result* to a browser session if *session_id* is set.
 
-    When the result has nodes but no explicit *action*, defaults to
-    "add_to_visualization" so external AI tools add to the canvas rather
-    than silently replacing it.
+    When the result has nodes but no *action* the canvas knows (none, or a
+    free-form one), it is pushed as "add_to_visualization" so external AI
+    tools add to the canvas rather than silently replacing it.
 
     The command goes to the legacy single-consumer registry (current frontend)
     and, when a *session_manager* is supplied, is also broadcast to the new
@@ -6166,10 +6652,13 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    A push writes nothing to the session's stored state when it is sent (of the
-    MCP tools, only ``add_nodes_to_session`` and ``remove_nodes_from_session``
-    write ``node_refs``), so a caller that ignores this
-    report cannot tell afterwards whether anything received the push. An
+    Every push applies its node membership on the server before broadcasting
+    (``SessionManager._apply_command_membership``), materialising a session
+    a browser holds only client-side (a legacy registry entry), so browsers only render it and never
+    send it back. A push whose membership cannot be applied (the session cannot
+    be stored, or applying it raised) is sent to no browser and reported
+    undelivered; one queued behind an in-flight batch reaches a legacy browser
+    only after that apply succeeds. An
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
@@ -6179,7 +6668,14 @@ def _push_to_session(
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}
     command_result = dict(result)
-    if "action" not in command_result and command_result.get("nodes"):
+    action = command_result.get("action")
+    if (
+        action not in _REPLACING_ACTIONS
+        and action not in _ADDITIVE_ACTIONS
+        and command_result.get("nodes")
+    ):
+        # search_graph passes its action through unchecked, and browsers draw
+        # any other node-carrying push as an add: the server applies it as one.
         command_result["action"] = "add_to_visualization"
     # A unique id lets the browser dedupe the legacy stream and the hub
     # broadcast delivering the same push during the handover between them
@@ -6191,16 +6687,6 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
-    legacy_enqueued = False
-    legacy_consumers = 0
-    if session_registry and session_registry.is_valid_session_id(session_id):
-        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
-        # A registry that cannot report its consumers cannot support a delivery
-        # claim, so the verdict falls back to the hub rather than assuming a
-        # reader that may not be there.
-        counter = getattr(session_registry, "consumer_count", None)
-        if callable(counter):
-            legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
     # The two hub calls fail independently and mean different things, so they are
@@ -6209,18 +6695,114 @@ def _push_to_session(
     # and the second of those must not be reported as a non-delivery.
     hub_publish_failed = False
     hub_presence_read = True
+    membership_unapplied = False
+    materialization_error = None
+    legacy_withheld = False
+    # A push carrying membership reaches a legacy browser only after the hub
+    # applied it: legacy browsers render without writing membership back, so a
+    # render ahead of a failed apply would show nodes the session never gains.
+    legacy_gated = session_manager is not None and _carries_membership(command_result)
+    legacy = {"sent": False, "enqueued": False, "consumers": 0}
+
+    def _send_legacy() -> None:
+        legacy["sent"] = True
+        if not (
+            session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and not membership_unapplied
+            and not legacy_withheld
+        ):
+            return
+        legacy["enqueued"] = bool(
+            session_registry.push_command_sync(session_id, command)
+        )
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+
+    def _send_legacy_after_apply() -> None:
+        try:
+            _send_legacy()
+        except Exception:
+            logger.exception("legacy push failed for session %s", session_id)
+
     if session_manager is not None:
+        membership_applied = False
+        if (
+            legacy_gated
+            and session_registry
+            and session_registry.is_valid_session_id(session_id)
+            and session_registry.session_exists(session_id)
+        ):
+            try:
+                # The server is the only writer of pushed membership, so a
+                # session a browser holds but never stored is materialised here
+                # rather than by whichever browser renders the push first.
+                membership_applied = session_manager.materialize_command(
+                    session_id, command
+                )
+            except (
+                OSError,
+                SessionLimitReached,
+                OpBatchTooLarge,
+                AnnotationLimitReached,
+            ) as exc:
+                materialization_error = (
+                    "storage_error"
+                    if isinstance(exc, OSError)
+                    else "too_many_sessions"
+                    if isinstance(exc, SessionLimitReached)
+                    else "session_too_large"
+                )
+                membership_unapplied = True
+            except Exception:
+                # Retired id, session limit: no browser writes membership back,
+                # so a legacy render alone would show nodes the session never
+                # gains. The push goes nowhere rather than half-applied.
+                membership_unapplied = True
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
             hub_clients = 0
             hub_presence_read = False
-        try:
-            hub_published = bool(session_manager.push_command(session_id, command))
-        except Exception:
-            # Best-effort mirror to the hub; never break the legacy push path.
-            hub_published = False
-            hub_publish_failed = True
+        if not membership_unapplied:
+            try:
+                if legacy_gated:
+                    hub_published = bool(
+                        session_manager.push_command(
+                            session_id,
+                            command,
+                            on_published=_send_legacy_after_apply,
+                            membership_applied=membership_applied,
+                        )
+                    )
+                else:
+                    hub_published = bool(
+                        session_manager.push_command(session_id, command)
+                    )
+            except Exception:
+                # Best-effort mirror to the hub; never break the legacy push path.
+                hub_published = False
+                hub_publish_failed = True
+                # Applying the membership may be what failed (and rolled back),
+                # so a gated push is not sent to a legacy browser either.
+                legacy_withheld = legacy_gated and not legacy["sent"]
+    if hub_published and legacy_gated and not legacy["sent"]:
+        # Queued behind an in-flight batch: the legacy send follows the apply.
+        # Like the queued hub publish, acceptance stands in for delivery.
+        legacy["enqueued"] = bool(
+            session_registry and session_registry.is_valid_session_id(session_id)
+        )
+        counter = getattr(session_registry, "consumer_count", None)
+        if legacy["enqueued"] and callable(counter):
+            legacy["consumers"] = max(0, int(counter(session_id)))
+    elif not legacy["sent"]:
+        _send_legacy()
+    legacy_enqueued = legacy["enqueued"]
+    legacy_consumers = legacy["consumers"]
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (
@@ -6243,15 +6825,22 @@ def _push_to_session(
         "live_consumers": legacy_consumers + hub_clients,
     }
     if not delivered:
-        delivery["warning"] = _undelivered_push_warning(
-            registry_configured=bool(session_registry),
-            legacy_enqueued=legacy_enqueued,
-            legacy_consumers=legacy_consumers,
-            hub_configured=session_manager is not None,
-            hub_publish_failed=hub_publish_failed,
-            hub_presence_read=hub_presence_read,
-            hub_published=hub_published,
-            hub_clients=hub_clients,
-            outcome_unknown=outcome_unknown,
+        delivery["warning"] = (
+            _MEMBERSHIP_UNAPPLIED_WARNING
+            if membership_unapplied
+            else _undelivered_push_warning(
+                registry_configured=bool(session_registry),
+                legacy_enqueued=legacy_enqueued,
+                legacy_consumers=legacy_consumers,
+                hub_configured=session_manager is not None,
+                hub_publish_failed=hub_publish_failed,
+                hub_presence_read=hub_presence_read,
+                hub_published=hub_published,
+                hub_clients=hub_clients,
+                outcome_unknown=outcome_unknown,
+                legacy_withheld=legacy_withheld,
+            )
         )
+    if materialization_error is not None:
+        delivery["error_code"] = materialization_error
     return delivery

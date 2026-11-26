@@ -94,6 +94,7 @@ function MobileShell({
   onRenameSession,
   onDeleteSession,
   onCopySessionLink,
+  onCopySession,
   onCopyTriggerUrl,
   onOpenSettings,
   onOpenActivity,
@@ -107,10 +108,14 @@ function MobileShell({
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
+  flushBeforeCapture,
+  getCaptureState,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
   akcShortName,
+  // The user's "command box only" layout: no Search or Create slot.
+  hideClassicSurfaces = false,
   // A plain callback ref (App.jsx passes its state setter for this
   // directly): called with the annotate sheet's content DOM node while it is
   // mounted, and with null once it unmounts (the sheet closing, or switching
@@ -212,6 +217,7 @@ function MobileShell({
       Icon: Search,
       active: surface.isOpen('search'),
       onClick: () => openSheet('search'),
+      classic: true,
     },
     {
       key: 'create',
@@ -219,6 +225,7 @@ function MobileShell({
       Icon: PlusCircleFill,
       active: surface.isOpen('create'),
       onClick: () => openSheet('create'),
+      classic: true,
     },
     {
       key: 'annotate',
@@ -241,7 +248,7 @@ function MobileShell({
       active: surface.isOpen('menu'),
       onClick: openMenu,
     },
-  ];
+  ].filter((item) => !(hideClassicSurfaces && item.classic));
 
   return (
     <>
@@ -356,6 +363,7 @@ function MobileShell({
         onRenameSession={onRenameSession}
         onDeleteSession={onDeleteSession}
         onCopySessionLink={onCopySessionLink}
+        onCopySession={onCopySession}
         onCopyTriggerUrl={onCopyTriggerUrl}
         onOpenSettings={onOpenSettings}
         onOpenActivity={() => {
@@ -376,7 +384,12 @@ function MobileShell({
           onClose={() => setChatPanelOpen(false)}
           title={t('mobile_nav.chat_panel_title')}
         >
-          <ChatPanel variant="sheet" collectionShortName={akcShortName || undefined} />
+          <ChatPanel
+            variant="sheet"
+            collectionShortName={akcShortName || undefined}
+            flushBeforeCapture={flushBeforeCapture}
+            getCaptureState={getCaptureState}
+          />
         </BottomSheet>
       )}
     </>

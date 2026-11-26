@@ -1,8 +1,5 @@
-"""
-Tests for config_loader module.
-
-Tests loading and validation of schema configuration from JSON files.
-"""
+# covers: backend/config/config_loader.py
+"""Loading and validation of schema configuration from JSON files."""
 
 import os
 import json
@@ -403,6 +400,49 @@ class TestConfigLoader:
         os.environ["SCHEMA_FILE"] = str(config_path)
         config_loader.reset_loader()
         return config_loader
+
+    @pytest.mark.parametrize(
+        "theme, expected",
+        [
+            (
+                {
+                    "accent": "#0a7f5c",
+                    "accent_hover": "rgb(8, 100, 70)",
+                    "surface": "#000",
+                    "accent_contrast": "#fff;}body{display:none",
+                },
+                {"accent": "#0a7f5c", "accent_hover": "rgb(8, 100, 70)"},
+            ),
+            ("#0a7f5c", {}),
+            (
+                {
+                    "accent": "rgb(10, 20)",
+                    "accent_hover": "#fff\n",
+                    "accent_contrast": "rgb(1., 2, 3)",
+                },
+                {},
+            ),
+            (
+                {"accent": "rgb(\u0661,2,3)"},
+                {},
+            ),
+            ({"accent": 5, "accent_hover": "rgb(" + " " * 60 + "1,2,3)"}, {}),
+            ({"accent": "rgb(1 2 3 / 50%)"}, {"accent": "rgb(1 2 3 / 50%)"}),
+        ],
+    )
+    def test_theme_keeps_only_known_colour_tokens(self, tmp_path, theme, expected):
+        """A bad theme entry is dropped on its own; the rest of the config loads."""
+        config_loader = self._load_capability_config(tmp_path, [])
+        config_path = tmp_path / "schema_config.json"
+        raw = json.loads(config_path.read_text())
+        raw["presentation"]["theme"] = theme
+        config_path.write_text(json.dumps(raw))
+        config_loader.reset_loader()
+
+        presentation = config_loader.get_presentation()
+
+        assert presentation["theme"] == expected
+        assert presentation["title"] == "Capability Test Graph"
 
     @pytest.mark.parametrize("name", ["<absent>", "", None])
     def test_capability_without_name_keeps_schema_and_its_disabled_flag(
@@ -1323,7 +1363,9 @@ class TestBuildSessionUrl:
     def test_base_path_is_preserved(self):
         from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
 
-        os.environ[PUBLIC_BASE_URL_ENV] = "https://example.test/app"
+        os.environ[PUBLIC_BASE_URL_ENV] = (
+            "https://example.test/app?view=old&collect=kiosk&akc=x&node=n&guide=g&keep=yes&session=stale#fragment"
+        )
         assert (
             build_session_url("1234-5678")
             == "https://example.test/app?session=1234-5678"
@@ -1439,7 +1481,9 @@ class TestAllowsAttachmentsSchemaField:
         assert "Rich" in schema["node_types"], "fixture must not be vacuous"
         rich = schema["node_types"]["Rich"]
         assert rich == self.RICH
-        assert set(schema["node_types"]["Plain"]) == set(NodeTypeConfig.model_fields)
+        assert set(schema["node_types"]["Plain"]) == set(
+            NodeTypeConfig.model_fields
+        ) - {"shape"}
         assert schema["node_types"]["Plain"]["allows_attachments"] is False
 
     def test_system_node_types_do_not_allow_attachments(self):

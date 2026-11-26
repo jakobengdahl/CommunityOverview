@@ -1,9 +1,17 @@
+# covers: backend/core/storage.py, backend/agents/execution/import_worker.py
 """Import embedding commits must not replace a shared store's graph."""
 
 from dataclasses import replace
 
 import pytest
 
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    InMemoryExecutionStore,
+)
+from backend.agents.execution.import_worker import drain_import_jobs
 from backend.core import (
     BackendCapabilities,
     Edge,
@@ -190,3 +198,137 @@ def test_a_stale_embedded_node_refuses_the_batch_and_restores_vectors(storage, d
     for node_id in ("a", "b"):
         assert storage.vector_store.get_vector_list(node_id) == [0.0, 1.0]
         assert storage.nodes[node_id].revision == before[node_id]
+
+
+def _merge_job(store, storage):
+    return store.enqueue(
+        ExecutionJob(
+            agent_id="system:graph-import",
+            kind=ExecutionKind.IMPORT,
+            idempotency_key="import:merge",
+            payload={"mode": "merge", "graph_generation": storage.generation},
+        )
+    )
+
+
+def _encoder(storage, monkeypatch, during=None, after=None):
+    """Encode pass k's nodes as [k, len(name) - 1]; in the first pass run
+    `during` before encoding and `after` once encoded."""
+    passes = []
+
+    def compute(nodes):
+        passes.append({node.id: node.model_copy(deep=True) for node in nodes})
+        first = len(passes) == 1
+        if during is not None and first:
+            during()
+        vectors = {
+            node.id: [float(len(passes)), float(len(node.name) - 1)] for node in nodes
+        }
+        if after is not None and first:
+            after()
+        return vectors
+
+    monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", compute)
+    return passes
+
+
+def test_a_node_whose_text_changed_while_encoded_gets_its_new_texts_vector(
+    storage, monkeypatch
+):
+    store = InMemoryExecutionStore()
+    job = _merge_job(store, storage)
+    passes = _encoder(
+        storage, monkeypatch, lambda: storage.update_node("a", {"name": "A2"})
+    )
+
+    drain_import_jobs(store, storage)
+
+    assert store.get(job.id).state == ExecutionState.SUCCEEDED
+    assert set(passes[0]) == {"a", "b"}
+    assert set(passes[1]) == {"a"}
+    assert passes[1]["a"].name == "A2"
+    storage.reload()
+    assert storage.vector_store.get_vector_list("a") == [2.0, 1.0]
+    assert storage.vector_store.get_vector_list("b") == [1.0, 0.0]
+
+
+@pytest.mark.parametrize("change", ["metadata", "vector", "text_reverted"])
+def test_a_change_while_encoded_that_keeps_the_text_commits_the_read_texts_vector(
+    storage, monkeypatch, change
+):
+    """Only a vector of the text read before encoding is committed, and never
+    over a vector the node gained meanwhile."""
+    store = InMemoryExecutionStore()
+    job = _merge_job(store, storage)
+    during, after, expected = {
+        "metadata": (
+            lambda: storage.update_node("a", {"metadata": {"k": "v"}}),
+            None,
+            [1.0, 0.0],
+        ),
+        "vector": (
+            lambda: storage.vector_store.absorb_embeddings({"a": [7.0, 7.0]}),
+            None,
+            [7.0, 7.0],
+        ),
+        # A live node would be encoded as "Bee"; the fingerprint, back at "A",
+        # would not notice.
+        "text_reverted": (
+            lambda: storage.update_node("a", {"name": "Bee"}),
+            lambda: storage.update_node("a", {"name": "A"}),
+            [1.0, 0.0],
+        ),
+    }[change]
+    passes = _encoder(storage, monkeypatch, during, after)
+
+    drain_import_jobs(store, storage)
+
+    assert store.get(job.id).state == ExecutionState.SUCCEEDED
+    assert len(passes) == 1
+    assert storage.vector_store.get_vector_list("a") == expected
+    assert storage.vector_store.get_vector_list("b") == [1.0, 0.0]
+    if change == "metadata":
+        storage.reload()
+        assert storage.nodes["a"].metadata == {"k": "v"}
+        assert storage.vector_store.get_vector_list("a") == expected
+
+
+@pytest.mark.parametrize("failure", ["failed", "refused", "unknown"])
+def test_a_failed_or_refused_merge_commit_leaves_no_vector_and_regenerates_none(
+    storage, monkeypatch, failure
+):
+    store = InMemoryExecutionStore()
+    job = _merge_job(store, storage)
+    _encoder(storage, monkeypatch)
+    # A loaded model: an undo that re-embedded would leave this vector.
+    monkeypatch.setattr(
+        storage.vector_store,
+        "update_nodes_embeddings",
+        lambda nodes: storage.vector_store.absorb_embeddings(
+            {node.id: [9.0, 9.0] for node in nodes}
+        ),
+    )
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("refused")
+
+    if failure != "failed" and not storage._store_assigns_revisions:
+        pytest.skip("requires revision enforcement")
+    if failure == "refused":
+        # Another instance moved b; this one has not heard of it.
+        storage._persistence_backend._store["nodes"]["b"]["revision"] = 100
+    # Undone before the teardown's flush, which writes.
+    with monkeypatch.context() as failing:
+        if failure != "refused":
+            backend = storage._persistence_backend
+            failing.setattr(backend, "apply_batch", refuse)
+            failing.setattr(backend, "save_graph_data", refuse)
+        if failure == "unknown":
+            # Outcome unknown, and the re-read that should settle it fails.
+            failing.setattr(backend, "load_graph_data", refuse)
+        drain_import_jobs(store, storage)
+
+    failed = store.get(job.id)
+    assert (failed.state, failed.attempts) == (ExecutionState.PENDING, 1)
+    assert storage.vector_store.has_embedding("a") == (failure == "refused")
+    assert not storage.vector_store.has_embedding("b")

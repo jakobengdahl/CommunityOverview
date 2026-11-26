@@ -21,6 +21,7 @@ AUTHORIZATION_MODE_DENY_ALL = "deny-all"
 
 GRAPH_ACTION_READ = "read"
 GRAPH_ACTION_MUTATE = "mutate"
+GRAPH_ACTION_ADMIN = "admin"
 
 # What a `mutate` asked about a staged session does to the graph
 # (docs/SESSION_OVERLAY_CONTRACT.md §14). A hook that treats them like any
@@ -92,6 +93,26 @@ class GraphAuthorizationHook(Protocol):
     ) -> GraphAuthorizationDecision: ...
 
 
+class SessionCopyAccessHook(Protocol):
+    """Optional method of a GraphAuthorizationHook that holds per-session roles.
+
+    The core keeps none, so a session copy hands them over here, before the
+    copy is saved: ``context`` is the copier's, its ``session_id`` the source.
+    The hook gives the copy the source's assignments, each capped at the
+    copier's own rights, and makes the copier its owner; a refusal creates
+    nothing.
+
+    ``save_session_view`` assigns only after the copy is published (target
+    ``save_session_view``). If assignment fails, it calls the optional
+    ``revoke_copied_session_access`` with the same arguments, which must drop
+    every assignment made for the copy, and then removes the copy.
+    """
+
+    def assign_copied_session_access(
+        self, context: GraphAuthorizationContext, *, copy_session_id: str
+    ) -> GraphAuthorizationDecision: ...
+
+
 class DefaultGraphAuthorizationHook:
     """Standalone-safe default hook, driven only by the authorization mode env var.
 
@@ -107,6 +128,9 @@ class DefaultGraphAuthorizationHook:
             _clean_string(os.getenv(AUTHORIZATION_MODE_ENV)).lower()
             or AUTHORIZATION_MODE_PERMISSIVE
         )
+
+        if context.action == GRAPH_ACTION_ADMIN:
+            return GraphAuthorizationDecision(allowed=False, source="default")
 
         if mode == AUTHORIZATION_MODE_DENY_ALL:
             return GraphAuthorizationDecision(
@@ -153,10 +177,14 @@ def use_request_authorization(
     workspace_id: Optional[str] = None,
     workspace_kind: Optional[str] = None,
     graph_id: Optional[str] = None,
+    authenticated_principal: Optional[Mapping[str, str]] = None,
 ) -> Iterator[None]:
     """Temporarily bind request-level authorization inputs for service calls."""
     token = _request_authorization_inputs.set(
         {
+            "authenticated_principal": dict(authenticated_principal)
+            if authenticated_principal
+            else None,
             "headers": headers,
             "actor_id": actor_id,
             "actor_type": actor_type,
@@ -170,6 +198,12 @@ def use_request_authorization(
         yield
     finally:
         _request_authorization_inputs.reset(token)
+
+
+def request_authenticated_principal():
+    """Return only identity supplied by the authentication boundary, never actor defaults."""
+    principal = _request_authorization_inputs.get().get("authenticated_principal")
+    return dict(principal) if principal else None
 
 
 def build_graph_authorization_context(

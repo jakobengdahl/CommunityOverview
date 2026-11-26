@@ -10,8 +10,13 @@
  *    to handlers that `App.jsx` binds to the Zustand store and canvas signals.
  *  - Derive the minimal op set from a full-state snapshot (`syncState`) by
  *    diffing against the last-synced baseline, batch ops and POST them to
- *    `/ops`. This keeps every mutation path (search, expand, drag, annotations)
- *    converging without wiring an explicit op emitter into each one.
+ *    `/ops`. This keeps every layout and annotation path (drag, hide, dim,
+ *    annotations) converging without wiring an explicit op emitter into each.
+ *  - Node membership is the exception: the server is its only writer. A
+ *    snapshot never carries it; this browser's own adds, removals and
+ *    replacements go out as explicit ops (`sendMembership`), and the baseline
+ *    and the canvas change membership only on the server's broadcasts, this
+ *    client's own included.
  *  - Stay echo-safe: the baseline mirrors what the server already has, so a
  *    remote op the host re-applies (updating the baseline) never bounces back
  *    out as a fresh local op — no store guard flag needed.
@@ -35,6 +40,11 @@ const SERVER_ONLY_OPS = new Set([
   'graph_changes_merged',
   'write_mode_changed',
 ]);
+
+// Ops that change which nodes are in the session. The server is their only
+// writer: they are sent explicitly, never derived from a snapshot, and their
+// broadcasts are applied even when this client sent them.
+export const MEMBERSHIP_OPS = new Set(['nodes_added', 'nodes_removed', 'nodes_replaced']);
 
 // Above this many changed positions in one snapshot, collapse them into a single
 // layout_applied op instead of one node_moved each — keeps bulk layouts and
@@ -102,6 +112,10 @@ const EMPTY_MIRROR = Object.freeze({
   dimmed_edge_ids: [],
   edge_intensity: 1.0,
   annotations: [],
+  // Frozen too: before setBaseline every client shares this one object.
+  shape_overrides: Object.freeze({}),
+  type_shapes: Object.freeze({}),
+  shape_revisions: Object.freeze({}),
 });
 
 function roundPos(p) {
@@ -134,6 +148,9 @@ export function normalizeMirror(state) {
     dimmed_edge_ids: Array.from(new Set(s.dimmed_edge_ids || [])),
     edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: Array.isArray(s.annotations) ? s.annotations : [],
+    shape_overrides: { ...s.shape_overrides },
+    type_shapes: { ...s.type_shapes },
+    shape_revisions: { ...s.shape_revisions },
   };
 }
 
@@ -218,19 +235,16 @@ export function diffAnnotationFields(before, next, { ignoreMembers = false } = {
 
 /**
  * Compute the ordered op batch that turns `prev` (last synced) into `next`.
- * Pure — exported for unit testing. Order: additions and creates before the
- * changes that depend on them, deletions/removals last.
+ * Pure — exported for unit testing. Order: creates before the changes that
+ * depend on them, deletions last. Never a membership op: `next.node_refs`
+ * only scopes which positions are compared.
  */
 export function computeOps(prevState, nextState) {
   const prev = normalizeMirror(prevState);
   const next = normalizeMirror(nextState);
   const ops = [];
 
-  const addedNodes = diffAdded(prev.node_refs, next.node_refs);
-  const removedNodes = diffAdded(next.node_refs, prev.node_refs);
-  if (addedNodes.length) ops.push({ op: 'nodes_added', node_ids: addedNodes });
-
-  // Positions: only for nodes that survive in next. New-with-position and moved
+  // Positions: only for nodes on the canvas. New-with-position and moved
   // both count. Bulk changes collapse into one layout_applied op.
   const movedIds = next.node_refs.filter((id) => {
     const np = next.positions[id];
@@ -309,8 +323,41 @@ export function computeOps(prevState, nextState) {
     if (!nextAnn.has(id)) ops.push({ op: 'annotation_deleted', annotation_id: id });
   }
 
-  if (removedNodes.length) ops.push({ op: 'nodes_removed', node_ids: removedNodes });
   return ops;
+}
+
+/**
+ * Read nodes a membership broadcast added, for the canvas. A node this client
+ * sent with its add (`sent`, from takeSentNodes) is taken from there, not
+ * read. A result read across a newer membership version is stale: it keeps
+ * only the nodes the server still holds, since a later removal or replace
+ * must not be undone by a late read, while a node still held has no other op
+ * left to render it. Edges come only from the kept nodes.
+ */
+export async function hydrateAddedNodes(client, nodeIds, getNodeDetails, sent = null) {
+  const version = client.membershipVersion;
+  const reads = await Promise.all(
+    nodeIds.map((id) => {
+      const node = sent?.nodes.get(id);
+      if (node)
+        return { node, edges: sent.edges.filter((e) => e.source === id || e.target === id) };
+      return getNodeDetails(id).catch(() => null);
+    })
+  );
+  const stale = client.membershipVersion !== version;
+  const kept = reads.filter((r) => r?.node && (!stale || client.isMember(r.node.id)));
+  return { nodes: kept.map((r) => r.node), edges: kept.flatMap((r) => r.edges || []) };
+}
+
+// The server omits a group's unset textColor, but the canvas side
+// (createAnnotation) always carries ''; without this the next local diff would
+// publish a phantom `textColor: ''` patch.
+function withGroupTextColor(ann) {
+  const merged = { ...ann };
+  if ((merged.type ?? merged.kind) === 'group' && typeof merged.textColor !== 'string') {
+    merged.textColor = '';
+  }
+  return merged;
 }
 
 /**
@@ -320,24 +367,141 @@ export function computeOps(prevState, nextState) {
  * the baseline, the next local snapshot no longer looks like it added it.
  * Pure — exported for unit testing. Returns a new mirror.
  */
+// The shape library revision an event needs fetched before it is handled:
+// a number, null for "fetch the current one" (the server could not read it, or
+// an op adds a saved reference whose entry may have changed while this session
+// did not reference it, so no invalidation reached it), else undefined.
+function libraryRevisionOf(event) {
+  if (event.type === 'library_invalidated') {
+    return typeof event.revision === 'number' ? event.revision : null;
+  }
+  if (event.type === 'snapshot' || event.type === 'catch_up') {
+    if (!('library_revision' in event)) return undefined;
+    return typeof event.library_revision === 'number' ? event.library_revision : null;
+  }
+  const op = event.type === 'op' ? event.op : null;
+  const saved = (selection) =>
+    typeof selection?.ref === 'string' && selection.ref.startsWith('saved:');
+  if (op?.op === 'nodes_replaced') {
+    return Object.values(op.inserted_shape_overrides || {}).some(saved) ? null : undefined;
+  }
+  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
+  return saved(op.selection) || saved(op.restore_selection) ? null : undefined;
+}
+
+// A type change and its optional node override change have separate revisions.
+function currentAppearanceOp(baseline, op, requireRevision = false) {
+  const revisions = op.revisions || {};
+  const isCurrent = (key) =>
+    (revisions[key] == null && !requireRevision) ||
+    (Number.isInteger(revisions[key]) && revisions[key] >= (baseline.shape_revisions[key] || 0));
+  const target = op.op === 'node_shape_set' ? `node:${op.node_id}` : `type:${op.type}`;
+  const targetCurrent = isCurrent(target);
+  const nodeKey =
+    op.op === 'type_shape_set' && op.clear_node_id != null ? `node:${op.clear_node_id}` : null;
+  const nodeCurrent = nodeKey && isCurrent(nodeKey);
+  if (!targetCurrent && !nodeCurrent) return null;
+  if (!targetCurrent) {
+    return {
+      op: 'node_shape_set',
+      node_id: op.clear_node_id,
+      selection: op.restore_selection ?? null,
+      revisions: revisions[nodeKey] == null ? {} : { [nodeKey]: revisions[nodeKey] },
+    };
+  }
+  const current = { ...op, revisions: { ...revisions } };
+  if (nodeKey && !nodeCurrent) {
+    delete current.clear_node_id;
+    delete current.restore_selection;
+    delete current.revisions[nodeKey];
+  }
+  return current;
+}
+
 export function applyOpToMirror(mirrorState, op) {
   const m = normalizeMirror(mirrorState);
   const type = op && op.op;
   switch (type) {
     case 'nodes_added':
       m.node_refs = Array.from(new Set([...m.node_refs, ...(op.node_ids || [])]));
+      // The server places every node it adds in the same op.
+      for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
       break;
-    case 'nodes_removed': {
-      const drop = new Set(op.node_ids || []);
-      m.node_refs = m.node_refs.filter((id) => !drop.has(id));
+    case 'nodes_removed':
+    case 'nodes_replaced': {
+      // A replace names the nodes it keeps; everything else leaves.
+      const named = new Set(op.node_ids || []);
+      const replace = type === 'nodes_replaced';
+      const drop = replace ? new Set(m.node_refs.filter((id) => !named.has(id))) : named;
+      for (const id of m.node_refs) {
+        if (drop.has(id)) {
+          const key = `node:${id}`;
+          m.shape_revisions[key] = (m.shape_revisions[key] || 0) + 1;
+        }
+      }
+      m.node_refs = replace ? [...named] : m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
       m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
+      m.shape_overrides = Object.fromEntries(
+        Object.entries(m.shape_overrides).filter(([id]) => !drop.has(id))
+      );
       m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
           : a
       );
+      // A replace carries the layout it leaves: every member's position, the
+      // hidden set and, for a loaded view, the annotations it changed or removed.
+      if (replace) {
+        m.shape_overrides = { ...m.shape_overrides, ...op.inserted_shape_overrides };
+        m.shape_revisions = { ...m.shape_revisions, ...op.inserted_shape_revisions };
+        for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
+        if (Array.isArray(op.hidden_node_ids)) m.hidden_node_ids = [...op.hidden_node_ids];
+        if (Array.isArray(op.annotations)) {
+          const changed = new Map(op.annotations.map((a) => [a.id, withGroupTextColor(a)]));
+          const removed = new Set(op.removed_annotation_ids || []);
+          m.annotations = [
+            ...m.annotations.filter((a) => !removed.has(a.id) && !changed.has(a.id)),
+            ...changed.values(),
+          ];
+        }
+      }
+      break;
+    }
+    case 'graph_changes_discarded':
+    case 'graph_changes_merged':
+      // Nodes the change took out of the graph left the session with it.
+      return op.dropped_node_ids?.length
+        ? applyOpToMirror(m, { op: 'nodes_removed', node_ids: op.dropped_node_ids })
+        : m;
+    case 'node_shape_set':
+    case 'type_shape_set': {
+      const node = type === 'node_shape_set';
+      const target = node ? op.node_id : op.type;
+      const map = node ? m.shape_overrides : m.type_shapes;
+      if (op.selection == null) delete map[target];
+      else
+        Object.defineProperty(map, target, {
+          value: op.selection,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      if (!node && op.clear_node_id != null) {
+        delete m.shape_overrides[op.clear_node_id];
+        if (op.restore_selection != null) {
+          Object.defineProperty(m.shape_overrides, op.clear_node_id, {
+            value: op.restore_selection,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+        }
+      }
+      for (const [key, revision] of Object.entries(op.revisions || {})) {
+        m.shape_revisions[key] = Math.max(m.shape_revisions[key] || 0, revision);
+      }
       break;
     }
     case 'node_moved':
@@ -394,12 +558,11 @@ export function applyOpToMirror(mirrorState, op) {
       const ann = op.annotation;
       if (ann && ann.id) {
         const idx = m.annotations.findIndex((a) => a.id === ann.id);
-        if (idx === -1) m.annotations = [...m.annotations, ann];
-        else {
-          const next = m.annotations.slice();
-          next[idx] = { ...next[idx], ...ann };
-          m.annotations = next;
-        }
+        const next = m.annotations.slice();
+        const merged = withGroupTextColor(idx === -1 ? ann : { ...next[idx], ...ann });
+        if (idx === -1) next.push(merged);
+        else next[idx] = merged;
+        m.annotations = next;
       }
       break;
     }
@@ -661,7 +824,12 @@ export class SessionSyncClient {
    *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand, onViewportSummoned,
    *   onStreamRefused (the stream answered 404 before it ever opened: the
-   *   session id is retired),
+   *   session id is retired), onHeldSaveReleased (a snapshot arrived while a
+   *   broadcast held autosave; the host takes a fresh one now),
+   *   onLibraryRevision (the shape library revision a snapshot, catch-up or
+   *   library invalidation carries; a returned promise holds that event and
+   *   every later one until it settles, so the host fetches the library
+   *   before it resolves session state),
    *   onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -684,6 +852,7 @@ export class SessionSyncClient {
     fetchImpl,
     EventSourceImpl,
     nowFn,
+    deferRemoteOps = false,
   }) {
     this.sessionId = sessionId;
     this.clientId = clientId;
@@ -691,6 +860,7 @@ export class SessionSyncClient {
     this.streamUrl = streamUrl;
     this.opsUrl = opsUrl;
     this.handlers = handlers;
+    this._deferRemoteOps = deferRemoteOps;
     this.flushIntervalMs = flushIntervalMs;
     // Upper bound on how long a single ops POST may stay in flight before it is
     // aborted and retried; <= 0 disables the bound. See DEFAULT_REQUEST_TIMEOUT_MS.
@@ -730,6 +900,10 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    // Whether the baseline holds server state: setBaseline() was given loaded
+    // or seq-less state, or a snapshot confirmed the seq a `{}` placeholder
+    // was seeded at.
+    this._baselineWritten = false;
     this._refusalProbed = false; // asked once why the stream never opened
     this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
@@ -742,6 +916,9 @@ export class SessionSyncClient {
     this._retryTimer = null;
     this._reconnectTimer = null;
     this._closed = false;
+    // Stream events held while the host fetches the shape library.
+    this._eventBacklog = [];
+    this._libraryWait = false;
     this._flushing = false;
     this._forceSingle = false;
 
@@ -750,6 +927,32 @@ export class SessionSyncClient {
     // (by-then possibly stale) creation-time content over it a second time —
     // see foldLocalOp and _handleEvent's 'op' case.
     this._locallyFoldedAnnotationIds = new Set();
+    // Acknowledged appearance writes ({seq, entry}) whose stream position has
+    // not been reached yet; see _releaseAppearanceAcks.
+    this._appearanceAcks = [];
+    // Captured pending operations keep their own server receipt without retaining
+    // settled operations for the lifetime of the session.
+    this._appearanceReceipts = new WeakMap();
+    this._appearanceEchoes = new WeakSet();
+    // The session's membership version: the stream seq of the last
+    // membership op applied, or the seq a loaded baseline, snapshot or
+    // catch-up reflects. A hydration read across a change of it is stale
+    // (hydrateAddedNodes).
+    this._membershipVersion = 0;
+    // What this client's own adds and replaces were sent with, so drawing
+    // their broadcast needs no read: node id -> {node, sent}, where `sent` is
+    // the op's {edges, onDrawn}. Data only: the canvas still takes the node
+    // from the broadcast (takeSentNodes).
+    this._sentNodes = new Map();
+    // Broadcasts still being drawn (holdLayoutSave), and the nodes this
+    // browser's user moved since the last snapshot (noteUserMoved).
+    this._renderHolds = 0;
+    // Bumped by every hold, so a hold that began and ended unseen still shows.
+    this._renderHoldGeneration = 0;
+    this._localEditHolds = 0;
+    this._localEditWaiters = [];
+    this._savePendingRelease = false;
+    this._userMoved = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -811,6 +1014,32 @@ export class SessionSyncClient {
     return this._inFlightOps.concat(this._queue);
   }
 
+  /** Queue captured, acknowledged appearance writes for replay after a reload. */
+  replayAcknowledgedAppearanceOps(capturedOps) {
+    if (this._closed || !this.handlers.onRemoteOps) return 0;
+    let count = 0;
+    for (const captured of capturedOps || []) {
+      const receipt = captured && this._appearanceReceipts.get(captured);
+      if (!receipt) continue;
+      const op = { ...receipt, revisions: { ...receipt.revisions } };
+      const applyBaseline = () => {
+        const current = currentAppearanceOp(this._baseline, op, true);
+        if (!current) return false;
+        for (const key of Object.keys(op)) delete op[key];
+        Object.assign(op, current);
+        this._baseline = applyOpToMirror(this._baseline, op);
+        return true;
+      };
+      this.handlers.onRemoteOps([op], {
+        clientId: this.clientId,
+        sessionId: this.sessionId,
+        applyBaseline,
+      });
+      count += 1;
+    }
+    return count;
+  }
+
   /**
    * The position the baseline currently holds for a node, or null. Lets the host
    * place a node that another client added-then-moved at its authoritative spot,
@@ -819,6 +1048,74 @@ export class SessionSyncClient {
   baselinePosition(nodeId) {
     const p = this._baseline.positions[nodeId];
     return p ? { x: p.x, y: p.y } : null;
+  }
+
+  /** Membership and positions as held by the sync baseline at this instant. */
+  captureBaseline() {
+    return {
+      node_refs: [...this._baseline.node_refs],
+      positions: { ...this._baseline.positions },
+    };
+  }
+
+  /**
+   * Whether the baseline reflects server state rather than a placeholder. A
+   * stream drop since then does not undo that.
+   */
+  hasCaptureBaseline() {
+    return this._baselineWritten;
+  }
+
+  /** The node ids the baseline holds hidden. */
+  baselineHiddenNodeIds() {
+    return [...this._baseline.hidden_node_ids];
+  }
+
+  /** Whether the server's membership, as last broadcast, holds `nodeId`. */
+  isMember(nodeId) {
+    return this._baseline.node_refs.includes(nodeId);
+  }
+
+  /**
+   * Take what this client sent with its own adds of `nodeIds`: the nodes by
+   * id, the edges of their ops, and an `onDrawn` that runs those ops' own
+   * follow-ups (once the host has drawn them). Taken once, by whichever
+   * broadcast names a node first.
+   */
+  takeSentNodes(nodeIds) {
+    const nodes = new Map();
+    const ops = new Set();
+    for (const id of nodeIds || []) {
+      const entry = this._sentNodes.get(id);
+      if (!entry) continue;
+      this._sentNodes.delete(id);
+      nodes.set(id, entry.node);
+      ops.add(entry.sent);
+    }
+    const sent = [...ops];
+    return {
+      nodes,
+      edges: sent.flatMap((s) => s.edges),
+      onDrawn: () => sent.forEach((s) => s.onDrawn?.()),
+    };
+  }
+
+  /**
+   * After a full resync, which replaces the broadcasts of whatever it covers:
+   * take what own adds and replaces no pending op still names were sent with,
+   * for the nodes the reloaded membership holds. The rest are let go.
+   */
+  takeResyncedSentNodes(pendingOps) {
+    const waiting = new Set(
+      (pendingOps || []).filter((op) => MEMBERSHIP_OPS.has(op?.op)).flatMap((op) => op.node_ids)
+    );
+    const settled = [...this._sentNodes.keys()].filter((id) => !waiting.has(id));
+    this.takeSentNodes(settled.filter((id) => !this.isMember(id)));
+    return this.takeSentNodes(settled);
+  }
+
+  get membershipVersion() {
+    return this._membershipVersion;
   }
 
   // ── Presence + selection claims (design 3.4 / 3.5) ─────────────────────────
@@ -1205,7 +1502,7 @@ export class SessionSyncClient {
       } catch {
         return;
       }
-      this._handleEvent(data);
+      this._receive(data);
     };
     source.onerror = () => {
       this._ready = false;
@@ -1288,12 +1585,66 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
-    if (typeof seq === 'number') this._loadedSeq = seq;
+    // Only a `{}` seeded at a seq is a placeholder awaiting its snapshot; an
+    // empty state without one is a load that found no session server-side.
+    this._baselineWritten = Object.keys(state || {}).length > 0 || typeof seq !== 'number';
+    if (typeof seq === 'number') {
+      this._loadedSeq = seq;
+      this._membershipVersion = seq;
+    }
     // A wholesale reset (initial load, or resyncFromServer after a
     // reconnect) makes any pending "skip the next echo-fold" markers moot —
     // the fresh baseline already reflects server truth for every annotation,
     // this one included.
     this._locallyFoldedAnnotationIds.clear();
+  }
+
+  /**
+   * Hold autosave while a broadcast is drawn; returns the release. Until then
+   * the canvas shows part of the server's layout, and a diff would send the
+   * rest back as this user's change. A snapshot skipped meanwhile is asked
+   * for again once the last hold is released.
+   */
+  holdLayoutSave() {
+    this._renderHolds += 1;
+    this._renderHoldGeneration += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._renderHolds -= 1;
+      if (this._renderHolds > 0 || !this._savePendingRelease) return;
+      this._savePendingRelease = false;
+      if (!this._closed) this.handlers.onHeldSaveReleased?.();
+    };
+  }
+
+  /** Hold snapshots and resync while an asynchronous local edit is being applied. */
+  holdLocalEdit() {
+    this._localEditHolds += 1;
+    const releaseSave = this.holdLayoutSave();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._localEditHolds -= 1;
+      releaseSave();
+      if (!this._localEditHolds) this._localEditWaiters.splice(0).forEach((resolve) => resolve());
+    };
+  }
+
+  waitForLocalEdits() {
+    if (!this._localEditHolds) return Promise.resolve();
+    return new Promise((resolve) => this._localEditWaiters.push(resolve));
+  }
+
+  hasLocalEdits() {
+    return this._localEditHolds > 0;
+  }
+
+  /** Nodes this browser's user moved: their positions are saved even unplaced. */
+  noteUserMoved(nodeIds) {
+    for (const id of nodeIds || []) this._userMoved.add(id);
   }
 
   /**
@@ -1333,7 +1684,7 @@ export class SessionSyncClient {
   foldLocalOp(op) {
     const id = op?.annotation?.id;
     if (id) this._locallyFoldedAnnotationIds.add(id);
-    this._baseline = applyOpToMirror(this._baseline, op);
+    this.foldOpIntoBaseline(op);
   }
 
   /**
@@ -1343,8 +1694,10 @@ export class SessionSyncClient {
    * check in `_handleEvent` before it could ever reach — let alone need —
    * `foldLocalOp`'s dedup marker (see that method's docstring for why
    * setting one in that case is actively harmful, not just unnecessary).
+   * A membership op is not folded: membership follows its broadcast.
    */
   foldOpIntoBaseline(op) {
+    if (MEMBERSHIP_OPS.has(op?.op)) return;
     this._baseline = applyOpToMirror(this._baseline, op);
   }
 
@@ -1359,12 +1712,107 @@ export class SessionSyncClient {
    * fields only catches up asynchronously after this op's ack round-trips
    * back (`onLocalAnnotationsApplied`), so a second rapid edit computed
    * before that would otherwise read the same stale, pre-send version.
+   *
+   * The snapshot's `node_refs` is not membership: the baseline keeps the
+   * server's, and the positions of members the canvas has not drawn yet, so
+   * a node still being read is placed where the server has it.
    */
   syncState(state) {
+    // A broadcast still being drawn: the canvas is between two layouts, and
+    // what the user changed meanwhile is diffed by the snapshot taken when
+    // the hold is released.
+    if (this._renderHolds > 0) {
+      this._savePendingRelease = true;
+      return;
+    }
     const next = normalizeMirror(state);
+    // A position the canvas computed for a member the server has none for is
+    // this browser's rendering, not its user's change: it is kept, not sent.
+    const computed = {};
+    const members = new Set(this._baseline.node_refs);
+    for (const id of next.node_refs) {
+      const unplaced = members.has(id) && !this._baseline.positions[id];
+      if (unplaced && next.positions[id] && !this._userMoved.has(id)) {
+        computed[id] = next.positions[id];
+      }
+    }
+    this._userMoved.clear();
+    this._baseline = {
+      ...this._baseline,
+      positions: { ...this._baseline.positions, ...computed },
+    };
     const ops = computeOps(this._baseline, next);
-    this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    const sent = predictAnnotationVersionsForSend(this._baseline, next, ops);
+    sent.shape_overrides = this._baseline.shape_overrides;
+    sent.type_shapes = this._baseline.type_shapes;
+    sent.shape_revisions = this._baseline.shape_revisions;
+    sent.node_refs = this._baseline.node_refs;
+    sent.positions = { ...this._baseline.positions, ...sent.positions };
+    this._baseline = sent;
     if (ops.length) this._enqueue(ops);
+  }
+
+  /**
+   * A replace the server found unchanged is not broadcast; its ack says the
+   * session already holds those nodes, so the host is handed a replace naming
+   * the membership now held, and a dropped op's sent nodes are let go.
+   */
+  _settleSentMembership(batch, applied) {
+    const replaced = (applied || [])
+      .filter((entry) => entry?.op === 'nodes_replaced')
+      .map((entry) => [...new Set(entry.node_ids || [])].sort().join('\n'));
+    for (const op of batch) {
+      if (op.op !== 'nodes_replaced') continue;
+      const at = replaced.indexOf([...op.node_ids].sort().join('\n'));
+      if (at >= 0) {
+        replaced.splice(at, 1);
+      } else if (applied) {
+        // The membership as now broadcast, not as sent: a remote add
+        // sequenced after it may already have arrived.
+        this.takeSentNodes(op.node_ids.filter((id) => !this.isMember(id)));
+        const held = [...this._baseline.node_refs];
+        this.handlers.onRemoteOps?.([{ op: 'nodes_replaced', node_ids: held }], {
+          sessionId: this.sessionId,
+        });
+      }
+    }
+    if (!applied) {
+      for (const op of batch) {
+        if (MEMBERSHIP_OPS.has(op.op)) this.takeSentNodes(op.node_ids);
+      }
+    }
+  }
+
+  /**
+   * Send this browser's own membership change — `nodes_added`,
+   * `nodes_removed` or `nodes_replaced` (the whole view; `[]` clears it) —
+   * as one explicit op. Neither the baseline nor the canvas changes until the
+   * server broadcasts it back; `nodes` (with `edges`) is what that broadcast
+   * then draws instead of reading, and `onDrawn` runs once it has. A replace
+   * may carry the loaded `view` (`positions`, `hidden_node_ids`,
+   * `annotations`), and an add the positions its nodes were drawn at: the
+   * server applies them in the same op, placing every node left without one.
+   */
+  sendMembership(op, nodeIds, { nodes = [], edges = [], onDrawn = null, view = null } = {}) {
+    if (!MEMBERSHIP_OPS.has(op)) return;
+    const ids = [...new Set((nodeIds || []).filter((id) => typeof id === 'string' && id))];
+    if (!ids.length && op !== 'nodes_replaced') return;
+    const sent = { edges, onDrawn };
+    const named = new Set(op === 'nodes_removed' ? [] : ids);
+    const carried = nodes.filter((node) => named.has(node?.id));
+    carried.forEach((node) => this._sentNodes.set(node.id, { node, sent }));
+    let carriedView = {};
+    if (op === 'nodes_replaced' && view) carriedView = view;
+    if (op === 'nodes_added') {
+      const positions = {};
+      for (const node of carried) {
+        const pos = node._savedPosition || node.position;
+        if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') positions[node.id] = pos;
+      }
+      carriedView = { positions }; // the server places the nodes it lacks
+    }
+    this._enqueue([{ op, node_ids: ids, ...carriedView }]);
+    if (!carried.length) onDrawn?.(); // nothing for a broadcast to draw
   }
 
   /**
@@ -1524,7 +1972,12 @@ export class SessionSyncClient {
     const options = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ client_id: this.clientId, base_seq: this._seq, ops: batch }),
+      body: JSON.stringify({
+        client_id: this.clientId,
+        base_seq: this._seq,
+        appearance_version: 1,
+        ops: batch,
+      }),
     };
     if (controller) options.signal = controller.signal;
     const request = this._fetch(this.opsUrl, options);
@@ -1553,7 +2006,39 @@ export class SessionSyncClient {
     });
   }
 
-  async _flush({ bypassReady = false } = {}) {
+  _flush(options = {}) {
+    if (this._activeFlush) return this._activeFlush;
+    if (!this._queue.length) return Promise.resolve(true);
+    const pending = this._flushBatch(options);
+    this._activeFlush = pending;
+    pending.finally(() => {
+      if (this._activeFlush === pending) this._activeFlush = null;
+    });
+    return pending;
+  }
+
+  // History must follow acknowledged writes and stream delivery, otherwise an
+  // immediate undo can target an older action or a stale canvas can resend it.
+  async waitForRevision(revision) {
+    const deadline = Date.now() + 10000;
+    while (!this._ready || this._appliedSeq < revision) {
+      if (this._closed || Date.now() >= deadline) throw new Error('Session sync unavailable');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async flushPending() {
+    await this.waitForRevision(this._seq);
+    if (this._activeFlush && !(await this._activeFlush)) {
+      throw new Error('Session changes are not confirmed');
+    }
+    while (this._queue.length) {
+      if (!(await this._flush())) throw new Error('Session changes are not confirmed');
+    }
+    await this.waitForRevision(this._seq);
+  }
+
+  async _flushBatch({ bypassReady = false } = {}) {
     if (this._flushing || this._closed) return;
     if ((!this._ready && !bypassReady) || !this._queue.length || !this._fetch) return;
     this._flushing = true;
@@ -1598,6 +2083,53 @@ export class SessionSyncClient {
         // already-baked, already-sent prediction — reintroducing the very
         // self-conflict race this mechanism exists to close, the next time
         // that later op's own ack round-trips.
+        for (const entry of body.applied || []) {
+          if (entry?.op !== 'node_shape_set' && entry?.op !== 'type_shape_set') continue;
+          const original = batch.find(
+            (op) => op.op === entry.op && op.operation_id && op.operation_id === entry.operation_id
+          );
+          if (original && entry.revisions) this._appearanceReceipts.set(original, entry);
+          const seq = typeof entry.seq === 'number' ? entry.seq : body.seq;
+          // A reconnect can skip the echo while the POST is still in flight.
+          // Settle the host's pending write without folding an old value over
+          // the newer stream or reconnect state. An already-seen echo makes
+          // this notification harmless: the host matches the operation id.
+          if (typeof seq !== 'number') this._foldOwnAppearance(entry);
+          else if (seq > this._appliedSeq) this._appearanceAcks.push({ seq, entry });
+          else if (
+            (!original || !this._appearanceEchoes.has(original)) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([entry], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
+        }
+        // A resend whose first response was lost is refused as a duplicate
+        // receipt and comes back without an applied entry; if a reconnect also
+        // skipped its echo, nothing else would settle the host's pending write.
+        // The write already landed, and the resync carried its state.
+        for (const op of batch) {
+          if (
+            (op.op === 'node_shape_set' || op.op === 'type_shape_set') &&
+            op.operation_id &&
+            !this._appearanceEchoes.has(op) &&
+            !(body.applied || []).some((entry) => entry?.operation_id === op.operation_id) &&
+            this._deferRemoteOps &&
+            this.handlers.onRemoteOps
+          ) {
+            this.handlers.onRemoteOps([op], {
+              ownAppearance: true,
+              clientId: this.clientId,
+              sessionId: this.sessionId,
+              applyBaseline: () => false,
+            });
+          }
+        }
         const appliedAnnotations = [];
         for (const entry of body.applied || []) {
           if (
@@ -1618,10 +2150,12 @@ export class SessionSyncClient {
         // (App.jsx's applyRemoteOp) — this reuses that exact path rather
         // than adding a second one, the same way handleImageIngest already
         // reuses it for its own direct-apply case.
+        this._settleSentMembership(batch, body.applied || []);
         if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
           this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
         }
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
+        return true;
       } else if (
         resp &&
         (resp.status === 400 ||
@@ -1661,6 +2195,7 @@ export class SessionSyncClient {
           // `finally`'s own filter is then a harmless no-op for a batch
           // already removed.
           this._removeInFlight(batch);
+          this._settleSentMembership(batch, null);
           // Parsed only to let onDropped tell apart the two distinct 409
           // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
           // different-field-edit): a live edit lease (LeaseConflict) vs. a
@@ -1670,6 +2205,9 @@ export class SessionSyncClient {
           // to parse (or isn't JSON) still drops the op exactly as before,
           // just without the extra detail.
           const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
+          // A shape_revision_conflict's revision is not folded here: baseline
+          // changes follow stream seq order, so the resync onDropped starts
+          // incorporates it (docs/design/NODE_SHAPES.md § Remote appearance ordering).
           if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
@@ -1708,6 +2246,46 @@ export class SessionSyncClient {
     this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
   }
 
+  /**
+   * Fold this client's own acknowledged appearance write into the baseline,
+   * through the same deferred canvas queue as remote operations so it keeps
+   * its place among them. Baseline only: the edit is already on the canvas.
+   */
+  _foldOwnAppearance(entry) {
+    const meta = { ownAppearance: true, clientId: this.clientId, sessionId: this.sessionId };
+    const applyBaseline = () => {
+      const current = currentAppearanceOp(this._baseline, entry);
+      if (current) this._baseline = applyOpToMirror(this._baseline, current);
+      meta.currentAppearance = current;
+      return false;
+    };
+    if (this._deferRemoteOps && this.handlers.onRemoteOps) {
+      meta.applyBaseline = applyBaseline;
+      this.handlers.onRemoteOps([entry], meta);
+    } else {
+      applyBaseline();
+    }
+  }
+
+  /**
+   * Appearance baseline changes are folded in server seq order, at the stream
+   * position of the event that made them (docs/design/NODE_SHAPES.md, "Remote
+   * appearance ordering"). The stream is that order; a POST acknowledgment can
+   * arrive before or after neighbouring stream events, so it is held until the
+   * stream reaches its seq and released there, ahead of the event at `seq`.
+   * Returns true when an acknowledgment for exactly `seq` was released, i.e.
+   * the stream event at `seq` is its echo and needs no second fold.
+   */
+  _releaseAppearanceAcks(seq) {
+    if (!this._appearanceAcks.length) return false;
+    const due = this._appearanceAcks.filter((ack) => ack.seq <= seq);
+    if (!due.length) return false;
+    this._appearanceAcks = this._appearanceAcks.filter((ack) => ack.seq > seq);
+    due.sort((a, b) => a.seq - b.seq);
+    for (const ack of due) this._foldOwnAppearance(ack.entry);
+    return due.some((ack) => ack.seq === seq);
+  }
+
   _scheduleRetry() {
     if (this._closed) return;
     // A flush debounced while this request was in flight would otherwise fire
@@ -1737,12 +2315,41 @@ export class SessionSyncClient {
     );
   }
 
+  _receive(data) {
+    if (data) this._eventBacklog.push(data);
+    while (!this._libraryWait && !this._closed && this._eventBacklog.length) {
+      const event = this._eventBacklog.shift();
+      const revision = libraryRevisionOf(event);
+      const pending =
+        revision !== undefined ? this.handlers.onLibraryRevision?.(revision, this.sessionId) : null;
+      if (typeof pending?.then === 'function') {
+        // Stream order is kept: nothing after this event is handled before it.
+        this._libraryWait = true;
+        const resume = () => {
+          this._libraryWait = false;
+          if (this._closed) return;
+          this._handleEvent(event);
+          this._receive(null);
+        };
+        pending.then(resume, resume);
+        return;
+      }
+      this._handleEvent(event);
+    }
+  }
+
   _handleEvent(data) {
     switch (data.type) {
       case 'snapshot':
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
+          this._releaseAppearanceAcks(data.seq);
+          // It may carry membership changes this client never saw as ops; a
+          // read marked stale still keeps every current member.
+          this._membershipVersion = data.seq;
+          // Nothing landed since the load: even a `{}` placeholder is current.
+          if (data.seq === this._loadedSeq) this._baselineWritten = true;
         }
         this._ready = true;
         this._resolveReadyWaiters();
@@ -1772,6 +2379,8 @@ export class SessionSyncClient {
         if (typeof data.seq === 'number') {
           this._seq = data.seq;
           this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
+          this._releaseAppearanceAcks(data.seq);
+          this._membershipVersion = data.seq; // as for a snapshot
         }
         this._ready = true;
         this._resolveReadyWaiters();
@@ -1807,6 +2416,7 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq;
           if (data.seq > this._seq) this._seq = data.seq;
         }
+        const ackedHere = typeof data.seq === 'number' && this._releaseAppearanceAcks(data.seq);
         // Claim ops are ephemeral (advisory soft-locks, never sequenced state).
         // Track other clients' claims for presence markers; our own echoes need
         // no tracking since the local user sees their own selection natively.
@@ -1827,7 +2437,24 @@ export class SessionSyncClient {
         // only the server emits: one carrying this client id (a write-mode
         // switch made from this browser) may come from another tab sharing
         // the id, which must still learn of it.
-        if (data.client_id === this.clientId && !SERVER_ONLY_OPS.has(op.op)) return;
+        // Nor for a membership op: the server is its only writer, so its
+        // broadcast, not the local action, is what the baseline follows.
+        // An appearance echo is the one exception: it is folded here, at its
+        // stream position, unless its acknowledgment was just released for it.
+        if (
+          data.client_id === this.clientId &&
+          !SERVER_ONLY_OPS.has(op.op) &&
+          !MEMBERSHIP_OPS.has(op.op)
+        ) {
+          if (!ackedHere && (op.op === 'node_shape_set' || op.op === 'type_shape_set')) {
+            const original = this._inFlightOps.find(
+              (pending) => pending.operation_id && pending.operation_id === op.operation_id
+            );
+            if (original) this._appearanceEchoes.add(original);
+            this._foldOwnAppearance(op);
+          }
+          return;
+        }
         // Fold the remote change into the baseline before the host applies it,
         // so the resulting local store change does not diff back out as an
         // echo — UNLESS foldLocalOp already folded this exact annotation
@@ -1871,17 +2498,29 @@ export class SessionSyncClient {
         // "stale", it means "already handled via foldLocalOp" (image
         // ingest), and its own delivery must still reach the canvas the same
         // way it always has (see foldLocalOp's docstring).
-        const foldedId = op?.annotation?.id;
-        let staleRemoteAnnotation = false;
-        if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
-          staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
-          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
-        }
-        if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
-          this.handlers.onRemoteOps([op], {
-            clientId: data.client_id,
-            sessionId: this.sessionId,
-          });
+        const applyBaseline = () => {
+          if (op.op === 'node_shape_set' || op.op === 'type_shape_set') {
+            const current = currentAppearanceOp(this._baseline, op);
+            if (!current) return false;
+            // The queued canvas consumer holds this same object.
+            for (const key of Object.keys(op)) delete op[key];
+            Object.assign(op, current);
+          }
+          const foldedId = op?.annotation?.id;
+          let stale = false;
+          if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
+            stale = isAnnotationOpStale(this._baseline, op);
+            this._baseline = foldRemoteAnnotationOp(this._baseline, op);
+          }
+          return !stale;
+        };
+        const changesMembers = MEMBERSHIP_OPS.has(op.op) || op.dropped_node_ids?.length > 0;
+        if (changesMembers && typeof data.seq === 'number') this._membershipVersion = data.seq;
+        const meta = { clientId: data.client_id, sessionId: this.sessionId };
+        if (this._deferRemoteOps && this.handlers.onRemoteOps) {
+          this.handlers.onRemoteOps([op], { ...meta, applyBaseline });
+        } else if (applyBaseline() && this.handlers.onRemoteOps) {
+          this.handlers.onRemoteOps([op], meta);
         }
         break;
       }
@@ -1937,6 +2576,10 @@ export class SessionSyncClient {
           });
         }
         break;
+      case 'library_invalidated':
+        // Only the host's library fetch (onLibraryRevision, in _receive)
+        // follows; nothing is sent back as a session operation.
+        break;
       case 'command':
         // MCP visualization push, broadcast to every subscriber (design §3.8),
         // unlike the legacy single-consumer push stream it superseded (R5).
@@ -1982,6 +2625,8 @@ export class SessionSyncClient {
       this._leasePruneTimer = null;
     }
     this._queue = [];
+    this._appearanceAcks = [];
+    this._eventBacklog = [];
     // A close() before the client ever became ready (e.g. a session switch
     // while whenReady() is still pending) must still resolve any waiter, or
     // its awaiter hangs forever holding this whole client alive. Resolving

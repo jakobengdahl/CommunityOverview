@@ -1,15 +1,15 @@
 # User Function Contract
 
-**Contract version:** 1
+**Contract versions:** 1, 2 and 3
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
 and its protocol session (§6, §7, §9 attribution, the per-message and tool-call
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
-Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Not
-yet implemented: manifests, invocation and run records.
-**Scope:** Open-source core. This version covers manually invoked functions that
-read and write the graph through a broker. Every other trigger, tool and binding
+Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Also implemented: manifest validation, manual REST and CLI invocation through a
+shared admission service, graph-bound inbound webhooks, and function run records in the existing history store.
+**Scope:** Open-source core. These versions cover manual and webhook invocation of functions that
+read and write the graph through a broker. Other triggers, tools and bindings
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
 will need are reserved here so that adding them is not a breaking change.
 
@@ -182,7 +182,7 @@ of a function that is enabled (§4.4).
 
 | Field | Required | Meaning |
 |---|---|---|
-| `contract_version` | yes | The version of this contract the manifest targets. `"1"` for this document. |
+| `contract_version` | yes | The version of this contract the manifest targets: `"1"`, `"2"` or `"3"`. |
 | `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
 | `version` | yes | Semantic version of the function. Recorded on every run. |
 | `name` | yes | Human-readable name. |
@@ -191,7 +191,7 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]` (§13). |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Version 1 accepts only `"graph"`, the default (§13). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
@@ -207,7 +207,7 @@ A manifest is **rejected**, and the function cannot run, when:
 - `contract_version` is not one the host supports;
 - a required field is missing, or a field has the wrong type;
 - a field holds a value this contract version does not allow, such as a trigger
-  kind other than `manual`, a `write_target` other than `graph`, an unknown
+  kind unsupported by the declared version, a `write_target` other than `graph`, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory.
 
@@ -334,6 +334,7 @@ listed in §11.
 | `graph.find_similar` | `graph:read` | `find_similar_nodes` |
 | `graph.add` | `graph:write` | `add_nodes` (nodes and edges) |
 | `graph.update_node` | `graph:write` | `update_node` |
+| `graph.attach_run_file` | `graph:write` | `add_node_attachment` (version 3 only, §12) |
 
 Arguments and results follow the mapped MCP tool, with these restrictions.
 Argument validation failures return `invalid_arguments`; endpoint resolution
@@ -443,12 +444,20 @@ system that started it.
   supervisor polls every 100 ms and checks again after termination; a detected
   quota violation takes precedence over a function's result. Each scan has a
   one-second deadline so it cannot indefinitely delay supervision or the final
-  report. If usage cannot be checked, including a scan timeout, the run is
+  report. A directory listed but not scanned because it moved or was deleted
+  during a scan causes a rescan; the scan remembers such directories by device
+  and inode across up to five attempts, and treats one absent from two later
+  rescans as deleted or moved out. If usage cannot be checked, including a scan
+  timeout or directories still missed after every attempt, the run is
   terminated and fails with `disk_check_failed`.
   Polling is best-effort: usage may overshoot between scans. Transient files
-  closed between scans, memory-mapped files, FIFO or pipe transfers, and
-  directories renamed or moved while a scan runs may escape accounting;
-  unlinked regular files the run still holds open are counted once per inode.
+  closed between scans, memory-mapped files, and FIFO or pipe transfers may
+  escape accounting; unlinked regular files the run still holds open are
+  counted once per inode. The scan cannot be complete against a function that
+  times renames to race it: an entry or directory moved into an
+  already-scanned directory before the scan reaches it is not counted by that
+  scan, and a missed directory whose inode number is reused by a new directory
+  counts as scanned.
   The 16 MiB per-file limit remains in force. Operators should also cap the backing
   container/host storage (see [Deployment Guide](DEPLOYMENT_GUIDE.md#user-function-temporary-storage)).
 - Termination is forced. The runner does not wait for the function to clean up,
@@ -479,7 +488,7 @@ the rules it must follow:
 - **Correlation is forwarded, not regenerated**, so a chain of runs can be
   traced through one id (as in `EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`).
 
-In version 1, with manual triggers only, `chain_depth` is always 0. The rules are
+For manual and webhook triggers, `chain_depth` is always 0. The rules are
 part of this version so that the trigger slice implements them, not designs them.
 
 ## 10. Runtimes
@@ -528,7 +537,7 @@ The run record exposes:
 |---|---|
 | `id` | Run id (`job-…`). |
 | `function_id`, `function_version` | What ran. |
-| `trigger` | `manual` in version 1. |
+| `trigger` | `manual` in version 1; `manual` or `webhook` in version 2. |
 | `status` | `running`, `succeeded`, `failed`, `timed_out`, `cancelled` or `rejected`. |
 | `error` | For `failed` and `rejected`: a code and a sanitized message. |
 | `output` | The validated `result.output`, for `succeeded`. |
@@ -609,6 +618,38 @@ The store's states and methods do not change. In the run-history store:
 - The envelope's `schema_version` follows `EVENT_SUBSCRIPTIONS.md`; the
   `invocation` block follows `contract_version`.
 
+### Version 2: inbound webhooks
+
+Version 2 adds `triggers[].kind = "webhook"` to version 1. Each function has
+one bearer token bound to a graph, shown only when minted or rotated and stored
+as a hash. `POST /functions/{id}/webhook` accepts this token only in the
+Authorization header and a JSON input object up to 64 KiB. It uses the token's
+graph and the `function_webhook` system actor with the function id. The instance
+switch and graph-admin function switch must both be enabled. A separate
+admin-controlled write switch allows graph writes and trusts the external caller;
+otherwise the broker denies `graph:write`. Existing grants and graph authorization
+still apply. A function accepts at most 60 webhook requests per minute. The route
+uses `Idempotency-Key` and the normal single-run and timeout limits. Uploaded
+attachment references in input do not grant access to attachments. Multipart
+upload and HMAC authentication are not supported by this version.
+
+### Version 3: webhook files and attachment writes
+
+Version 3 adds multipart webhook inputs and the `run_files.list` and
+`run_files.read` tools. These expose only the current run's files, as untrusted
+content, without requiring a graph grant; actor authorization still applies.
+Files are temporary and are removed when the run ends. `run_files.read` uses
+the attachment type policy and extraction limits.
+
+`graph.attach_run_file(node_id, file_id)` attaches a current run file to a
+node through the normal attachment upload path, including its authorization,
+type policy and limits, and is refused unless the instance allows attachment
+writes (`ATTACHMENT_CONTENT_ACCESS=read_write`). It requires `graph:write`, including the webhook's
+per-function write switch, and is recorded in the run's tool calls and the
+attachment audit. Attachment content remains untrusted. File ids are scoped
+to the run; filesystem paths and files belonging to another run are not accepted.
+Accepting files into a run does not require the write switch.
+
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
@@ -619,7 +660,6 @@ already reserved for it, so that adding it is an additive contract version
 |---|---|---|
 | Scheduled triggers | `triggers[].kind = "schedule"`, `retry` | Idempotency per fire time, as in `DURABLE_EXECUTION_CONTRACT.md` §5. |
 | Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
-| Inbound webhook triggers | `triggers[].kind = "webhook"` | Authenticated by a bearer token the application generates per function. The token is shown once, stored only as a hash, can be rotated and revoked, and is bound to one function. |
 | Session-staged writes | `write_target = "session"` | Writes land in a session overlay and reach the graph only through that contract's review and merge (`SESSION_OVERLAY_CONTRACT.md`). |
 | Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
 | Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |

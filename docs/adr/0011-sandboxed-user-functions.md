@@ -1,6 +1,6 @@
 # ADR 0011 — Sandboxed user-defined functions: first contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-14
 - **Scope:** Open-source core
 - **Related:** [`USER_FUNCTION_CONTRACT.md`](../USER_FUNCTION_CONTRACT.md) (the

@@ -22,6 +22,7 @@ contract a third-party backend has to meet.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import logging
 import os
@@ -48,33 +49,56 @@ from typing import (
 
 from backend.runtime.errors import GraphWriteFailed as GraphWriteFailed
 
-from .actor_attribution import validate_erasure
+from .actor_attribution import preflight_directory, preflight_file, validate_erasure
 
 logger = logging.getLogger(__name__)
 
 
-# Cross-platform file locking
-if sys.platform == "win32":
+# Cross-platform file locking. msvcrt has no shared mode, so every Windows lock
+# is exclusive, and no mode that waits indefinitely (LK_NBLCK fails at once,
+# LK_LOCK gives up after about ten seconds), so LK_LOCK is retried until it
+# succeeds, as flock would block.
+if sys.platform == "win32":  # pragma: no cover - platform specific
     import msvcrt
-
-    def _lock_file(f, exclusive: bool = True) -> None:
-        """Acquire file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f) -> None:
-        """Release file lock on Windows."""
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-
 else:
     import fcntl
 
-    def _lock_file(f, exclusive: bool = True) -> None:
-        """Acquire file lock on Unix."""
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    msvcrt = None
 
-    def _unlock_file(f) -> None:
-        """Release file lock on Unix."""
+
+def _msvcrt_lock_byte_zero(fd: int, mode: int) -> None:
+    # msvcrt.locking acts on the byte at the current file position. Handles
+    # opened for append sit at EOF while readers sit at 0, so without pinning
+    # the byte two contenders would lock different bytes and never wait for
+    # each other, and an unlock after a write would target an unlocked byte.
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, mode, 1)
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
+
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    """Acquire a file lock, waiting however long another holder keeps it."""
+    if msvcrt is None:
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    while True:
+        try:
+            _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_LOCK)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
+                raise
+
+
+def _unlock_file(f) -> None:
+    """Release a file lock."""
+    if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
 
 
 @dataclass(frozen=True)
@@ -113,6 +137,10 @@ class BackendCapabilities:
         unit. Needs `incremental_writes` and `transactions`, and a backend
         that also declares `change_notification` - a shared store - must
         declare `revision_enforcement` too (§4.4).
+    batch_conditions: `apply_batch` takes `conditions` (BatchConditions) and
+        verifies them inside its unit, so a merge import can be committed
+        against a store other instances write to (ADR 0013 §3). Needs
+        `revision_enforcement`.
     """
 
     incremental_writes: bool = False
@@ -121,6 +149,7 @@ class BackendCapabilities:
     store_traversal: bool = False
     revision_enforcement: bool = False
     staged_sessions: bool = False
+    batch_conditions: bool = False
 
 
 SNAPSHOT_ONLY = BackendCapabilities()
@@ -214,6 +243,27 @@ class EntityOperation:
     @classmethod
     def delete_edge(cls, edge_id: str) -> "EntityOperation":
         return cls("edge", "delete", edge_id)
+
+
+@dataclass(frozen=True)
+class BatchConditions:
+    """What a batch's decision read and does not write (ADR 0013 §3).
+
+    `reads` is `(kind, id, revision)` for each such entity, revision None for
+    one read as absent; `generation` is the `graph_generation` the decision
+    was taken at and `replace_token` the `graph_replace_token` beside it,
+    which tells apart two replaces that raced from one generation.
+    `triples` is `(source, target, type, edge ids)` for each pair and type the
+    decision listed, with every edge it found. A backend declaring
+    `batch_conditions` verifies all of them inside the batch's unit and
+    raises EntityRevisionConflict (kind "graph" for the generation, token
+    and triples) when one does not hold, applying nothing.
+    """
+
+    reads: Tuple[Tuple[str, str, Optional[int]], ...] = ()
+    generation: Optional[int] = None
+    replace_token: Optional[str] = None
+    triples: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -681,6 +731,11 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
                 f"{type(backend).__name__} declares revision_enforcement but "
                 f"does not implement: {', '.join(missing)}"
             )
+    if caps.batch_conditions and not caps.revision_enforcement:
+        raise TypeError(
+            f"{type(backend).__name__} declares batch_conditions without "
+            f"revision_enforcement"
+        )
     if caps.staged_sessions:
         # A merge is graph writes plus a layer removal as one unit, which a
         # backend that cannot apply an atomic batch has no way to offer.
@@ -1972,6 +2027,21 @@ class StagedLayersFile:
             if self.path.name.endswith(suffix)
             else None
         )
+
+    def preflight(self) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        Both files are only read; replacements are renamed in beside them.
+        """
+        if not self.path.exists():
+            return False
+        replaces = [self.path]
+        if self.merge_log_path is not None and self.merge_log_path.exists():
+            replaces.append(self.merge_log_path)
+        for path in replaces:
+            preflight_file(path)
+        preflight_directory(self.path.parent, replaces=replaces)
+        return True
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> int:
         validate_erasure(actor_id, replacement_token)

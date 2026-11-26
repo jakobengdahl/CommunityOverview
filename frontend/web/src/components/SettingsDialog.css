@@ -87,7 +87,7 @@
 .settings-dialog-stat-value {
   font-size: 1.4rem;
   font-weight: 700;
-  color: #646cff;
+  color: var(--co-accent);
 }
 
 .settings-dialog-stat-label {
@@ -238,12 +238,12 @@
 }
 
 .settings-dialog-toggle.active {
-  background: rgba(100, 108, 255, 0.3);
+  background: color-mix(in srgb, var(--co-accent) 30%, transparent);
 }
 
 .settings-dialog-toggle.active::after {
   transform: translateX(12px);
-  background: #646cff;
+  background: var(--co-accent);
 }
 
 .settings-dialog-field {
@@ -271,7 +271,7 @@
 }
 
 .settings-dialog-field-input:focus {
-  border-color: #646cff;
+  border-color: var(--co-accent);
 }
 
 .settings-dialog-field-hint {
@@ -313,4 +313,13 @@
   font-size: 12px;
   opacity: 0.65;
   text-align: center;
+}
+
+.settings-dialog-menu-item:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.settings-dialog-field-error {
+  color: #f08080;
 }

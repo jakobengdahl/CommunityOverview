@@ -10,7 +10,7 @@ import en from '../i18n/en.json';
 import { expectAllKeysResolved, missingKeys } from '../test/strictI18n';
 
 vi.mock('../i18n', async () => (await import('../test/strictI18n')).strictI18nModule);
-vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
+vi.mock('../services/api', () => ({ searchGraph: vi.fn(), getNodeDetails: vi.fn() }));
 
 const g = en.guide;
 const initialState = useGraphStore.getState();
@@ -24,6 +24,7 @@ beforeEach(() => {
   // Shared module mock: without a reset its calls and queued results carry
   // over between tests.
   api.searchGraph.mockReset();
+  api.getNodeDetails.mockReset();
 });
 
 afterEach(() => {

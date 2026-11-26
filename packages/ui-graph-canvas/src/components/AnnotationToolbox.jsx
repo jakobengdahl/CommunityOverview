@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useToolSlotSelection } from '../hooks/useToolSlotSelection';
-import {
-  ANNOTATION_ICONS,
-  DEFAULT_ANNOTATION_ICON,
-  resolveAnnotationIcon,
-} from '../utils/annotationIcons';
+import { readStoredKey, useToolSlotSelection } from '../hooks/useToolSlotSelection';
+import { ANNOTATION_ICONS, resolveAnnotationIcon } from '../utils/annotationIcons';
 import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
 import {
   FREEHAND_COLORS,
@@ -44,7 +40,6 @@ const TOOLBOX_ITEMS_LEADING = [
   },
   { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
   { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
-  { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
 ];
 
 // Every `content.shape` variant the model accepts (SHAPE_STYLES in
@@ -82,6 +77,7 @@ const ICON_VARIANTS = Object.keys(ANNOTATION_ICONS).map((icon) => ({
   label: icon.replace(/_/g, ' '),
 }));
 const ICON_VARIANT_KEYS = ICON_VARIANTS.map((variant) => variant.icon);
+const DEFAULT_ICON = 'check';
 const ICON_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
 const ICON_SLOT_ITEM_KEY = 'icon-slot';
 
@@ -155,6 +151,26 @@ const TOOLBOX_ITEMS_TRAILING = [
 // and never open a picker; GraphCanvas owns what each one then does.
 const MODE_KINDS = new Set(['select', 'eraser', 'freehand']);
 
+/**
+ * Enter/Space on a toolbox entry, for a caller outside the toolbox (the host's
+ * command box): mode tools and `image` arm, every other kind creates at the
+ * viewport centre. Missing options are the slot's remembered variant, as the
+ * slot's own button would pass.
+ */
+export function keyboardToolActivation(kind, options) {
+  let resolved = options;
+  if (!resolved && kind === 'shape') {
+    resolved = { shape: readStoredKey(SHAPE_SLOT_STORAGE_KEY, SHAPE_VARIANT_KEYS, DEFAULT_SHAPE) };
+  } else if (!resolved && kind === 'icon') {
+    resolved = { icon: readStoredKey(ICON_SLOT_STORAGE_KEY, ICON_VARIANT_KEYS, DEFAULT_ICON) };
+  } else if (!resolved && kind === 'vote_dot') {
+    resolved = {
+      color: readStoredKey(VOTE_DOT_SLOT_STORAGE_KEY, VOTE_DOT_VARIANT_KEYS, DEFAULT_GENERIC_COLOR),
+    };
+  }
+  return { arm: MODE_KINDS.has(kind) || kind === 'image', options: resolved };
+}
+
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
 
 function renderGlyph(glyph) {
@@ -217,7 +233,7 @@ function renderGlyph(glyph) {
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label, a shape (via the collapsed shape slot,
+ * It creates note/text, a shape (via the collapsed shape slot,
  * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
  * `renderIconSlot` below), vote_dot (a plain coloured dot — task-annotation-
  * vote-dot-simplify), and image (which opens a file
@@ -301,7 +317,7 @@ function AnnotationToolbox({
   const [currentIcon, setCurrentIcon] = useToolSlotSelection(
     ICON_SLOT_STORAGE_KEY,
     ICON_VARIANT_KEYS,
-    DEFAULT_ANNOTATION_ICON
+    DEFAULT_ICON
   );
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [currentVoteDotColor, setCurrentVoteDotColor] = useToolSlotSelection(
@@ -921,6 +937,7 @@ function AnnotationToolbox({
             anchorRef={iconSlotRef}
             returnFocusRef={iconCornerButtonRef}
             ariaLabel={lbl.iconPicker}
+            hideLabels
             options={pickerOptions}
             currentKey={variant.icon}
             renderGlyph={renderGlyph}
@@ -1123,6 +1140,7 @@ function AnnotationToolbox({
             anchorRef={voteDotSlotRef}
             returnFocusRef={voteDotCornerButtonRef}
             ariaLabel={lbl.voteDotPicker}
+            hideLabels
             options={pickerOptions}
             currentKey={variant.color}
             renderGlyph={renderGlyph}

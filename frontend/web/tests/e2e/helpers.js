@@ -43,3 +43,31 @@ export async function addNodeViaSearch(page, query, name) {
   await input.press('Enter');
   await expect(canvasNode(page, name)).toBeVisible({ timeout: 15000 });
 }
+
+/**
+ * Answers the user preference routes as a signed-in user's server would, from
+ * state kept for this page. The e2e backend runs without sign-in, where every
+ * preference stays at its default and cannot be saved.
+ */
+export async function mockSignedInPreferences(page, preferences = { hideClassicSurfaces: false }) {
+  const state = { ...preferences };
+  await page.route('**/api/user-preferences', async (route) => {
+    if (route.request().method() === 'PUT') Object.assign(state, route.request().postDataJSON());
+    await route.fulfill({ json: { signed_in: true, preferences: state } });
+  });
+}
+
+/**
+ * Flips "Command box only" in Settings and closes the dialog. `openMenu` opens
+ * the session drawer, which stays open after the dialog closes.
+ */
+export async function toggleCommandBoxOnly(page, openMenu, pressed) {
+  const drawer = page.locator('.session-drawer');
+  if (!(await drawer.evaluate((el) => el.classList.contains('open')))) await openMenu();
+  await expect(drawer).toHaveClass(/\bopen\b/);
+  await page.locator('.session-drawer-item', { hasText: 'Settings' }).click();
+  const toggle = page.getByRole('button', { name: 'Command box only' });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', String(pressed));
+  await page.locator('.settings-dialog-close').click();
+}

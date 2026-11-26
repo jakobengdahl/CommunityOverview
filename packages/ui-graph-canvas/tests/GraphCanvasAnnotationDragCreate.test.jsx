@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx, packages/ui-graph-canvas/src/components/AnnotationToolbox.jsx
 // Drag-to-create from the annotation toolbox (task-annotation-toolbox-drag-to-create):
 // dragging a toolbox item creates the annotation at the point where the
 // gesture ends, rather than always at the viewport centre (that click path is
@@ -209,18 +210,18 @@ describe('GraphCanvas annotation toolbox drag-to-create', () => {
   });
 
   describe('coarse pointer: pointer-events drag', () => {
-    it('creates a label at the release position via the toolbox pointer-drag path', () => {
+    it('creates text at the release position via the toolbox pointer-drag path', () => {
       render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} touchMode="on" />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-      const labelButton = screen.getByRole('button', { name: /^label$/i });
-      dispatch(labelButton, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      const textButton = screen.getByRole('button', { name: /^text$/i });
+      dispatch(textButton, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
       dispatch(window, pointerEvent('pointermove', { clientX: 200, clientY: 80 }));
       dispatch(window, pointerEvent('pointerup', { clientX: 200, clientY: 80 }));
 
-      const label = findCreatedNode('label');
-      expect(label).toBeTruthy();
-      expect(label.position).toEqual({ x: 200, y: 80 });
+      const text = findCreatedNode('text');
+      expect(text).toBeTruthy();
+      expect(text.position).toEqual({ x: 200, y: 80 });
     });
 
     it('never drag-creates image or freehand, even past the movement threshold', () => {

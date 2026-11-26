@@ -14,9 +14,10 @@ requests that could not honour a session at all.
 
 A route that names its own session in its path (the session routes) may carry
 the header only for that same session (``session_mismatch`` otherwise). A
-retired session id in such a path is answered 404 here, for every one of them:
+retired session id in such a path is normally answered 404 here:
 a retired id is never recreated (§5.3), and several of those routes would
-otherwise create it.
+otherwise create it. Template capture delegates that refusal to its service
+so it can return the template API's failure envelope.
 
 Over MCP the header binds here too, but a tool call runs in the MCP server's
 own task, which this binding does not reach; the tool wrapper in
@@ -59,6 +60,10 @@ _API_SESSION_AWARE: Sequence[Tuple[str, str]] = (
     ("GET", r"/views"),
     ("GET", r"/views/[^/]+"),
     ("GET", r"/export"),
+    ("GET", r"/templates"),
+    ("GET", r"/templates/[^/]+"),
+    ("PATCH", r"/templates/[^/]+"),
+    ("DELETE", r"/templates/[^/]+"),
 )
 _HOST_SESSION_AWARE: Sequence[Tuple[str, str]] = (
     ("POST", r"/execute_tool"),
@@ -101,6 +106,9 @@ class SessionBindingMiddleware:
             re.compile(re.escape(api_prefix) + r"/sessions/" + _SESSION_ID + r"(/.*)?"),
             re.compile(r"/sessions/" + _SESSION_ID + r"(/.*)?"),
         )
+        self._template_capture = re.compile(
+            re.escape(api_prefix) + r"/sessions/[^/]+/templates"
+        )
 
     def _is_aware(self, method: str, path: str) -> bool:
         if method == "GET" and path in self._typed_paths():
@@ -124,7 +132,11 @@ class SessionBindingMiddleware:
         method = scope.get("method", "GET")
         path = scope.get("path", "")
         path_session = self._path_session(path)
-        if path_session is not None and self._is_retired(path_session):
+        if (
+            path_session is not None
+            and not (method == "POST" and self._template_capture.fullmatch(path))
+            and self._is_retired(path_session)
+        ):
             # Answered as the session routes answer an id they do not hold.
             # A route that would create an unknown id still tells the two
             # apart, by refusing the retired one: that is never recreating it.

@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GraphCanvas.jsx
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
@@ -40,11 +41,18 @@ let renderCount = 0;
 let flowNodes = [];
 let selectionOnChange = null;
 
-vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes, edges }) => {
+vi.mock('reactflow', async (importOriginal) => {
+  const { applyNodeChanges } = await importOriginal();
+  const MockReactFlow = ({ children, nodes, edges, onSelectionStart, onNodesChange }) => {
     flowNodes = nodes || [];
     return (
-      <div data-testid="react-flow">
+      <div
+        data-testid="react-flow"
+        onMouseDown={onSelectionStart}
+        onMouseMove={() => {
+          onNodesChange(nodes.map((node) => ({ id: node.id, type: 'select', selected: true })));
+        }}
+      >
         <div data-testid="nodes">
           {nodes?.map((n) => (
             <div key={n.id} data-testid={`node-${n.id}`}>
@@ -77,7 +85,11 @@ vi.mock('reactflow', () => {
         throw new Error('useNodesState render count exceeded 60 - GraphCanvas is not settling');
       }
       const [nodes, setNodes] = React.useState(initialNodes);
-      return [nodes, setNodes, vi.fn()];
+      return [
+        nodes,
+        setNodes,
+        (changes) => setNodes((current) => applyNodeChanges(changes, current)),
+      ];
     },
     useEdgesState: (initialEdges) => {
       const [edges, setEdges] = React.useState(initialEdges);
@@ -202,7 +214,15 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
   });
 
   it('moves the root to the focus centre and back to its pre-focus position, with an unchanged node count', () => {
-    render(<GraphCanvas nodes={triangleNodes} edges={triangleEdges} compactMode="on" />);
+    const captureNodesRef = { current: null };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
     const before = positionsById();
     expect(before.size).toBe(3);
     expect(before.get('node-1')).not.toEqual({ x: 0, y: 0 });
@@ -218,6 +238,57 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
     for (const id of ['node-2', 'node-3']) {
       expect(focused.get(id)).not.toEqual(before.get(id));
     }
+
+    // Members rendered after focus began are available to capture too, while
+    // existing members retain their pre-focus coordinates.
+    const added = { id: 'node-4', name: 'Node 4', type: 'Actor' };
+    const addedEdge = { id: 'edge-4', source: 'node-1', target: 'node-4', type: 'RELATES_TO' };
+    rerender(
+      <GraphCanvas
+        nodes={[...triangleNodes, added]}
+        edges={[...triangleEdges, addedEdge]}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    const captured = new Map(captureNodesRef.current().map((node) => [node.id, node.position]));
+    expect(captured.get('node-1')).toEqual(before.get('node-1'));
+    expect(captured.get('node-4')).toEqual(positionsById().get('node-4'));
+    expect(captured.get('node-4')).toBeDefined();
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+
+    // A member removed and re-added during focus gets a fresh ego-ring
+    // position, but leaving focus restores its pre-focus one (asserted below),
+    // so capture must report the pre-focus position too.
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes.filter((node) => node.id !== 'node-2')}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    const returnedPosition = positionsById().get('node-2');
+    expect(returnedPosition).toBeDefined();
+    expect(returnedPosition).not.toEqual(before.get('node-2'));
+    expect(
+      new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2')
+    ).toEqual(before.get('node-2'));
 
     // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
     // every node must land back where it was before focus.
@@ -296,3 +367,39 @@ describe.each(MIRRORS)(
     });
   }
 );
+
+it('corrects pane selection after node changes while preserving card selection', () => {
+  renderCount = 0;
+  const schema = {
+    node_shapes: {
+      triangle: {
+        version: 1,
+        base: 'triangle-up',
+        scale: 1,
+        placement: 'centre',
+        areas: { first: 'type', second: 'name', third: null },
+      },
+    },
+    node_types: { Risk: { shape: 'triangle' } },
+  };
+  render(
+    <GraphCanvas
+      nodes={[
+        { id: 'triangle', name: 'Risk', type: 'Risk' },
+        { id: 'card', name: 'Card', type: 'Actor' },
+      ]}
+      edges={[]}
+      schema={schema}
+    />
+  );
+  const pane = screen.getByTestId('react-flow');
+  const triangle = flowNodes.find((node) => node.id === 'triangle');
+  const { x, y } = triangle.position;
+  fireEvent.mouseDown(pane, { button: 0, clientX: x + 2, clientY: y + 2 });
+  fireEvent.mouseMove(pane, { clientX: x + 12, clientY: y + 12 });
+  expect(flowNodes.find((node) => node.id === 'triangle').selected).toBeFalsy();
+  expect(flowNodes.find((node) => node.id === 'card').selected).toBe(true);
+  fireEvent.mouseMove(pane, { clientX: x + 120, clientY: y + 100 });
+  expect(flowNodes.find((node) => node.id === 'triangle').selected).toBe(true);
+  fireEvent.mouseUp(pane);
+});

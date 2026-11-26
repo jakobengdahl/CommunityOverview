@@ -57,6 +57,24 @@ describe('ChatPanel conversation state', () => {
     global.fetch.mockReset();
   });
 
+  it('asks the browser to confirm a capture without writing a graph node', async () => {
+    resetStore();
+    const listener = vi.fn();
+    window.addEventListener('request-save-view', listener);
+    global.fetch.mockResolvedValueOnce(
+      streamed({
+        content: 'Requested',
+        toolResult: { action: 'save_view', name: 'Overview' },
+      })
+    );
+    render(<ChatPanel />);
+    await send('save');
+    await waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    expect(listener.mock.calls[0][0].detail).toEqual({ name: 'Overview' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    window.removeEventListener('request-save-view', listener);
+  });
+
   it('sends turn 2 exactly as the checked-in fixture after a selection and a cancelled delete', async () => {
     const agency = { id: 'n1', type: 'Actor', name: 'Agency' };
     resetStore({ nodes: [agency], selectedGraphNodes: [agency] });
@@ -85,7 +103,12 @@ describe('ChatPanel conversation state', () => {
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
     const body = sentBody(1);
     expect(body.conversation_state).toBe('state-1');
-    expect({ ...body, conversation_state: fixture.conversation_state }).toEqual(fixture);
+    expect(body.conversation_id).toBe(useGraphStore.getState().chatConversationId);
+    expect({
+      ...body,
+      conversation_id: fixture.conversation_id,
+      conversation_state: fixture.conversation_state,
+    }).toEqual(fixture);
   });
 
   it('keeps the signed reply in the replayed history when a tool side effect throws', async () => {
@@ -164,8 +187,9 @@ describe('ChatPanel conversation state', () => {
     expect(sentBody(5).messages).toEqual([{ role: 'user', content: 'fresh' }]);
   });
 
-  it('shows a pending action exactly as recorded, runs it only through the confirmation route and applies its result', async () => {
+  it('shows a pending action exactly as recorded, confirms it only through the confirmation route under the conversation that recorded it, and applies its result', async () => {
     resetStore();
+    const { chatConversationId } = useGraphStore.getState();
     const action = { token: 't-1', tool: 'add_nodes', arguments: { nodes: [{ name: 'X' }] } };
     global.fetch
       .mockResolvedValueOnce(
@@ -202,7 +226,11 @@ describe('ChatPanel conversation state', () => {
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
     const [url, options] = global.fetch.mock.calls[1];
     expect(url).toMatch(/\/ui\/chat\/confirm$/);
-    expect(JSON.parse(options.body)).toEqual({ token: 't-1' });
+    expect(sentBody(0).conversation_id).toBe(chatConversationId);
+    expect(JSON.parse(options.body)).toEqual({
+      token: 't-1',
+      conversation_id: chatConversationId,
+    });
     const status = await screen.findByRole('status');
     expect(within(status).getByText('Added X')).toBeInTheDocument();
     await waitFor(() =>
@@ -232,5 +260,70 @@ describe('ChatPanel conversation state', () => {
     const status = await screen.findByRole('status');
     expect(status.textContent).toBe(en.chat.pending_action_failed.replace('{message}', reason));
     expect(useGraphStore.getState().nodes).toEqual([]);
+  });
+
+  it('a dismissed pending action stays dismissed when the panel remounts and sends nothing', async () => {
+    resetStore();
+    const action = { token: 't-3', tool: 'delete_nodes', arguments: { node_ids: ['n1'] } };
+    global.fetch.mockResolvedValueOnce(
+      streamed({ content: 'needs confirmation', pending_actions: [action] })
+    );
+    const { unmount } = render(<ChatPanel />);
+    await send('read the file');
+    fireEvent.click(await screen.findByRole('button', { name: en.chat.pending_action_dismiss }));
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
+
+    // The mobile sheet unmounts with the panel; the card remounts from the store.
+    unmount();
+    render(<ChatPanel />);
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_dismissed);
+    expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a card remounted while its confirm is in flight offers neither Confirm nor Dismiss and then shows the real outcome', async () => {
+    resetStore();
+    const action = { token: 't-4', tool: 'add_nodes', arguments: { nodes: [{ name: 'Z' }] } };
+    let answer;
+    global.fetch
+      .mockResolvedValueOnce(streamed({ content: 'needs confirmation', pending_actions: [action] }))
+      .mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const { unmount } = render(<ChatPanel />);
+    await send('read the file');
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+
+    unmount();
+    render(<ChatPanel />);
+    expect((await screen.findByRole('status')).textContent).toBe(en.chat.pending_action_running);
+    expect(screen.queryByRole('button', { name: 'Confirm and run' })).toBeNull();
+    expect(screen.queryByRole('button', { name: en.chat.pending_action_dismiss })).toBeNull();
+
+    answer(json({ outcome: 'ok', message: '', result: { success: true, nodes: [], edges: [] } }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(en.chat.pending_action_done)
+    );
+    const [stored] = useGraphStore.getState().chatMessages.at(-1).pendingActions;
+    expect(stored.settled.key).toBe('chat.pending_action_done');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+  it('reports a browser capture request without claiming a save', async () => {
+    resetStore();
+    const action = { token: 'save-token', tool: 'save_view', arguments: {} };
+    global.fetch
+      .mockResolvedValueOnce(streamed({ content: 'confirm', pending_actions: [action] }))
+      .mockResolvedValueOnce(
+        json({ outcome: 'ok', message: 'Saved', result: { action: 'save_view', name: 'View' } })
+      );
+    render(<ChatPanel />);
+    await send('save');
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm and run' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(en.chat.pending_action_capture_requested)
+    );
+    expect(useGraphStore.getState().chatMessages.at(-1).pendingActions[0].settled.key).toBe(
+      'chat.pending_action_capture_requested'
+    );
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 });

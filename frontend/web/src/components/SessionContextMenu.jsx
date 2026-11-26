@@ -1,6 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { ThreeDotsVertical } from 'react-bootstrap-icons';
 import './SessionContextMenu.css';
+
+function positionMenu(anchor, width, height, viewportWidth, viewportHeight) {
+  const margin = 8;
+  const clamp = (value, size, viewport) =>
+    Math.max(margin, Math.min(value, viewport - size - margin));
+  const left = anchor.left + width > viewportWidth - margin ? anchor.right - width : anchor.left;
+  const top =
+    anchor.bottom + height > viewportHeight - margin ? anchor.top - height : anchor.bottom;
+  return { left: clamp(left, width, viewportWidth), top: clamp(top, height, viewportHeight) };
+}
 
 /**
  * SessionContextMenu — a compact kebab menu of actions for a single session
@@ -18,8 +28,24 @@ import './SessionContextMenu.css';
  * @param {Array<{key: string, label: string, icon?: React.ReactNode,
  *   onClick: () => void, danger?: boolean, disabled?: boolean}>} items
  * @param {string} triggerLabel    Accessible label for the kebab button.
+ * @param {{x: number, y: number} | null} pointerPosition
+ *   When set, positions the dropdown at the given coordinates using
+ *   `position: fixed` so a context-menu (right-click / long-press) can
+ *   open the same surface at the pointer rather than below the kebab.
+ * @param {{x: number, y: number, width: number, height: number} | null} kebabAnchor
+ *   When set (kebab-triggered open), positions the dropdown using this rect
+ *   instead of measuring the trigger button.  Takes precedence over pointerPosition when
+ *   present; ignored when the menu is closed.
  */
-function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
+function SessionContextMenu({
+  open,
+  onToggle,
+  onClose,
+  items,
+  triggerLabel,
+  pointerPosition,
+  kebabAnchor,
+}) {
   const rootRef = useRef(null);
 
   // Close on a click anywhere outside the menu. The kebab button lives inside
@@ -30,9 +56,44 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
     const handlePointerDown = (e) => {
       if (rootRef.current && !rootRef.current.contains(e.target)) onClose();
     };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [open, onClose]);
+
+  // Both opening methods use viewport coordinates, measured before paint.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = rootRef.current?.querySelector('.session-context-menu-dropdown');
+    if (!menu) return;
+    const updatePosition = () => {
+      const button = kebabAnchor || rootRef.current.querySelector('button').getBoundingClientRect();
+      const anchor =
+        kebabAnchor || !pointerPosition
+          ? {
+              left: button.x,
+              right: button.x + button.width,
+              top: button.y,
+              bottom: button.y + button.height,
+            }
+          : {
+              left: pointerPosition.x,
+              right: pointerPosition.x,
+              top: pointerPosition.y,
+              bottom: pointerPosition.y,
+            };
+      const { width, height } = menu.getBoundingClientRect();
+      const position = positionMenu(anchor, width, height, window.innerWidth, window.innerHeight);
+      menu.style.left = `${position.left}px`;
+      menu.style.top = `${position.top}px`;
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('orientationchange', updatePosition);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('orientationchange', updatePosition);
+    };
+  }, [open, pointerPosition, kebabAnchor]);
 
   return (
     <div className="session-context-menu" ref={rootRef}>
@@ -48,7 +109,10 @@ function SessionContextMenu({ open, onToggle, onClose, items, triggerLabel }) {
         <ThreeDotsVertical size={15} />
       </button>
       {open && (
-        <div className="session-context-menu-dropdown" role="menu">
+        <div
+          className={`session-context-menu-dropdown${pointerPosition && !kebabAnchor ? ' pointer-triggered' : ''}`}
+          role="menu"
+        >
           {items.map((item) => (
             <button
               key={item.key}

@@ -36,6 +36,7 @@ export function ToolSlotPicker({
   options = [],
   children,
   panelClassName = '',
+  hideLabels = false,
   currentKey,
   onSelect,
   onClose,
@@ -143,6 +144,8 @@ export function ToolSlotPicker({
             key={option.key}
             type="button"
             aria-pressed={option.key === currentKey}
+            aria-label={option.label}
+            title={option.label}
             className={`tool-slot-picker-item${
               option.key === currentKey ? ' tool-slot-picker-item--current' : ''
             }`}
@@ -151,7 +154,7 @@ export function ToolSlotPicker({
             <span className="tool-slot-picker-item-glyph" aria-hidden="true">
               {renderGlyph(option.glyph)}
             </span>
-            <span className="tool-slot-picker-item-label">{option.label}</span>
+            {!hideLabels && <span className="tool-slot-picker-item-label">{option.label}</span>}
           </button>
         ))}
     </div>,

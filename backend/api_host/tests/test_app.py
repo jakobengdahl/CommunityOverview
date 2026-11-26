@@ -1,3 +1,4 @@
+# covers: backend/api_host/server.py, backend/api_host/system_routes.py, backend/api_host/tool_routes.py, backend/service/rest_api.py, backend/ui/rest_api.py
 """
 Unit tests for app_host using FastAPI TestClient.
 
@@ -789,12 +790,23 @@ class TestExecuteToolEndpoint:
         data = response.json()
         assert "nodes" in data
 
-    def test_execute_tool_not_found(self, test_app: TestClient):
-        """Execute non-safe unknown tool is blocked before tool lookup in unauthenticated mode."""
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "nonexistent_tool",
+            "save_view",
+            "create_saved_view",
+            "list_saved_views",
+            "get_saved_view",
+        ],
+    )
+    def test_execute_tool_not_found(self, test_app: TestClient, tool_name):
+        """Unknown and retired tools return 404 without authentication."""
         response = test_app.post(
-            "/execute_tool", json={"tool_name": "nonexistent_tool", "arguments": {}}
+            "/execute_tool", json={"tool_name": tool_name, "arguments": {}}
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
+        assert response.json() == {"error": f"Tool {tool_name} not found"}
 
     def test_execute_tool_get_runtime_info(self, test_app: TestClient):
         """Execute public runtime introspection tool directly."""
@@ -967,3 +979,35 @@ class TestStartupDiagnosticsLlmCheck:
             llm_check = response.json()["checks"]["llm"]
             assert llm_check["status"] == "no_key"
             assert llm_check["available"] is False
+
+
+def test_app_loads_templates_from_selected_profile(app_config, tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    (profile / "templates").mkdir(parents=True)
+    doc = {
+        "schema_version": 1,
+        "template_id": "1234-5678",
+        "name": "Profile",
+        "description": "",
+        "tags": [],
+        "revision": 0,
+        "created_by": "author",
+        "created_at": "2026-01-01",
+        "source_session_id": "source",
+        "source_session_revision": 0,
+        "nodes": [],
+        "edges": [],
+        "annotation_document": {"schema_version": 1, "annotations": []},
+        "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+        "thumbnail": None,
+    }
+    (profile / "templates" / "item.json").write_text(json.dumps(doc))
+    monkeypatch.setenv("SCHEMA_FILE", str(profile / "schema_config.json"))
+    app = create_app(app_config)
+    assert app.state.session_manager.template_store.get(doc["template_id"]) == doc
+    assert app.state.session_manager.template_store.is_profile(doc["template_id"])
+    app.state.session_store._backend.save(
+        {"id": doc["template_id"], "deleted": True, "revision": 1}
+    )
+    with pytest.raises(ValueError):
+        create_app(app_config)

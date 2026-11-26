@@ -15,6 +15,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Right-click context menu](#24-right-click-context-menu)
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
+   - [Saving templates](#saving-templates)
    - [Agents](#27-agents)
    - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
@@ -64,7 +65,7 @@ The application is divided into four main areas:
 Click a node type icon in the left toolbar to open the creation dialog.
 
 ![Toolbar with node type icons](images/toolbar.png)
-*The left toolbar. Each icon represents a node type defined by the active profile. Domain types are listed first; system types (Agent, EventSubscription, Skill, SavedView, etc.) appear below a divider.*
+*The left toolbar. Each icon represents a node type defined by the active profile. Domain types are listed first; system types (Agent, EventSubscription, Skill, etc.) appear below a divider.*
 
 Fill in the node fields and click **Save**. The node appears in the canvas immediately.
 
@@ -80,6 +81,25 @@ subtypes already in the graph, helping maintain consistent terminology across th
 
 You can also drag a node type icon from the toolbar and drop it anywhere on the canvas
 to create a node at that position.
+
+**Node appearance:** Right-click a node and choose **Node appearance** to preview
+its shape, scale, text fields and placement. From the keyboard, Tab to the node and
+press Shift+F10 or the Menu key to open the same menu. Apply the draft to the selected node
+or as the session default for its type; other nodes with their own overrides keep
+them. Cancel discards the draft. If another appearance change is still pending or
+the appearance changes while the editor is open, follow the notice in the dialog
+before applying again. The light and dark preview options do not change the page theme.
+
+**Saved shapes:** signed-in users can keep a look in the shared shape library. On the
+**Apply** tab of **Node appearance**, name the draft and choose **Save as named shape**,
+then **Apply** to use it; saving and applying are separate steps, so a failed Apply keeps
+both the saved shape and your draft for another try. Pick a saved shape on the **Shape**
+tab to use it. Saved shapes are shared and live: after a warning with the number of
+sessions and templates that use it, **Edit saved shape** changes it everywhere, while **Save copy**
+makes an independent one. **Delete saved shape** returns every user of it to the
+built-in card. If someone else changed or deleted the shape since your draft started from
+it, the dialog says so and keeps your draft: choose **Review latest version** to continue
+from the current shape, or **Save copy** to keep your version as a new one.
 
 ### 2.2 Creating edges
 
@@ -218,13 +238,15 @@ menu opened. A submenu trigger (**Change type**, **Organize**, **Align**, **Dist
 also opens with **→** or **Enter**, and closes with **←** or **Escape** without closing
 the menu it belongs to.
 
-Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag, an
-Organize arrangement, or an Align/Distribute), and **Ctrl/Cmd+Shift+Z** (or
-**Ctrl/Cmd+Y**) reapplies it.
-The undo history covers the layout you are looking at, so it is discarded whenever the
-canvas is repopulated — switching session, loading a saved view, or clearing the board.
-Moves made by other people in the session, or by an assistant arranging the view, do not
-discard it: your undo still reverses your own last move.
+**Ctrl/Cmd+Z** undoes your latest eligible session canvas action, including a node
+move (drag, Organize, or Align/Distribute) or an annotation create, edit or delete.
+This includes pen strokes. **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies the
+most recently undone action. A new action of yours clears your redo history.
+The shortcuts use the same actor-scoped history as **Undo my last action** in the
+activity panel: other people's actions are never undone, and changes are synced to
+every viewer. If the affected content has changed since, undo or redo reports a
+conflict instead of overwriting it. While typing in an input or text editor, the
+shortcuts keep their normal text-editing behavior.
 
 ### 2.5 Groups and annotations
 
@@ -232,11 +254,14 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+A group's right-click menu offers a colour, a **Text colour** for its label, a **Group
+order** row, and **Delete Group**. The label's text colour defaults to **Automatic**
+(the "A" swatch), which picks dark or white text, whichever reads better on the group's
+colour.
 Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
 where they appear, and are simply no longer grouped. The deletion is recorded in the
 session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
-from there while it is still your most recent undoable action.
+from there or with **Ctrl/Cmd+Z** while it is still your most recent undoable action.
 
 **Group order** moves a group's background forward or backward *among your other group
 boxes only* — it never changes where a group sits relative to your graph nodes or to any
@@ -260,15 +285,21 @@ you open a shared board.
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
 
+The bottom annotation toolbar uses larger icons on desktop and mobile. The icon
+picker starts with Check and shows names on hover; icon tiles and voting-dot
+colour swatches have accessible names without visible captions. Label creation
+is no longer offered in the toolbar or canvas menu.
+
+Existing **labels** remain editable — a short free-floating text label. Double-click to edit, right-click to
+  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
+  another annotation and it snaps onto it (magnetic), staying attached as that target
+  moves; drag it away again to detach it, keeping wherever you dropped it.
+
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
 
 - **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
   right-click for a colour, to change the text size, to rotate it, or to delete it.
-- **Label** — a short free-floating text label. Double-click to edit, right-click to
-  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
-  another annotation and it snaps onto it (magnetic), staying attached as that target
-  moves; drag it away again to detach it, keeping wherever you dropped it.
 - **Arrow / line** — a connector you can position anywhere on the canvas. Right-click to
   recolour, toggle an arrowhead on either end (so it can be a plain line, a single arrow,
   or a double arrow), or delete. When selected, drag either endpoint; bring an endpoint
@@ -363,7 +394,7 @@ icon is one property — colour, fill, border, text alignment, text size, font, 
 rotation, opacity, size, layer order — and shows what that property is currently set to,
 so a fill button carries the current fill colour. Click one to open just that property's
 controls; click another to switch. **Delete** sits directly in the row, and the remaining
-one-off commands (Duplicate, Add nearby, Attach to…) are behind the **⋯** button. The row
+one-off commands (Duplicate, Attach to…) are behind the **⋯** button. The row
 is deliberately small: the old stacked menu was taller than a phone screen and covered the
 object you were editing.
 
@@ -387,7 +418,9 @@ device with no fine pointer:
   **Detach**.
 - **Multiple objects here** — if you tap or click a point where more than one annotation
   overlaps, a small list appears naming each one so you can pick which you meant, instead of
-  only ever getting whichever one happens to be drawn on top.
+  only ever getting whichever one happens to be drawn on top. Only annotations on the same
+  rendered layer count; node cards are never offered as alternatives. A click on a node card, or on an annotation drawn above shapes sent to the
+  back, simply selects what you clicked.
 - **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
   toggles a mode where tapping adds each node to the selection instead of replacing it — the
   touch equivalent of holding Shift or Ctrl while clicking. Tap empty canvas to clear the
@@ -404,7 +437,7 @@ set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view wo
 **Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
 the tool stays armed until you pick a different one — so placing a row of dots is a row of
 taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
-the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+the way back to ordinary clicking, dragging and marquee-selection (configured shapes are selected when the selection touches their body or outside label); pressing Escape does the
 same. You can still drag a tool straight from the toolbox onto the canvas to place a single
 object without arming anything.
 
@@ -547,27 +580,42 @@ independent annotation you're free to edit right away. A group box does not get 
 Duplicate action — its substance is the graph nodes it groups, not its own content, so
 copying the box alone would not be a real duplicate.
 
-Right-click a node, or any annotation except a group box, and its menu has an
-**Add nearby** section with three buttons: **Label**, **Icon**, **Text**. (**Vote
-dot** is not offered here — it doesn't attach to anything, see above.)
-A transparent-fill shape is included here too — its menu offers "Add nearby" the
-same as any other shape.
-Choosing one creates that annotation already attached to whatever you right-clicked —
-positioned right next to it and following it if it moves — without the create-then-drag-near
-two steps that were previously the only way to attach a new label, icon or piece
-of text. Detach it afterward the same way as any attached annotation: drag it away from its
-target. Arrows are not offered here, since dragging either of a newly placed arrow's
-endpoints already snaps it onto a nearby target the moment you draw it.
+Right-click a node, or any annotation except a group box, and its menu provides the usual
+controls.
 
 ### 2.6 Saved views
 
-Click **Save view** in the toolbar or ask the AI assistant to save the current layout.
+Click **Save view** in the toolbar or ask the AI assistant to save the current layout,
+then confirm the name in the browser. The view is saved as an independently editable
+session. Open the link in the confirmation to return to it. When the server has no
+public address configured, no link is shown; the saved session is listed by its name
+under **Recent sessions** in the session menu. If the session has staged
+changes, merge or discard them first. A failed or interrupted request may require
+checking the session list before trying again.
 
-Saved views are stored as **SavedView nodes** in the graph, making them visible,
-shareable, and editable like any other node.
+The session menu opens recent sessions by ID and copies the server-provided link.
+The assistant and MCP session list also offer server-provided links; names can
+match more than one session, so choose by ID. Collection assistants can use the
+session list when that tool is allowed. API clients can use `session_url` from
+session responses. If the public address is not configured, a link is unavailable.
 
-To restore a view: double-click its SavedView node in the graph, or search for it and
-click "Restore view" in its detail panel.
+SavedView and VisualizationView nodes remain in the graph as data, but cannot be
+opened as views and `?view=` links no longer open them. They are not converted
+to sessions. See the [removal note](SESSION_SAVEDVIEW_COMPAT_CONTRACT.md#release-note-savedview-removal) for backup and recovery.
+
+### Saving templates
+
+Select nodes and annotations, then right-click the selection and choose **Save as
+Template…**. You can also choose **Save as Template…** from the command box; if
+nothing is selected, it saves the whole session. Enter a name, an optional
+description and comma-separated tags. The dialog summarizes the included nodes,
+connections between them and annotations before saving. The counts are a preview;
+graph changes can occur independently, so the confirmation shows the counts
+actually saved. System nodes are excluded, and resource references whose target is
+outside the selection are omitted. Resolve any staged changes before saving. If the session changes while the dialog is open,
+close and reopen it to review the latest contents.
+
+Templates supplied by the active profile are available alongside saved templates. Profile templates are read-only.
 
 ### 2.7 Agents
 
@@ -670,12 +718,20 @@ round is limited to 12,000 characters. Reasoning stays in memory for the open
 chat and is never included in later prompts or saved to graph/session history.
 Models without separate reasoning show only the usual progress and answer.
 
+For questions such as “Is there an AI policy, and what does it say about
+human-in-the-loop?”, the assistant first finds relevant graph nodes using English
+and Swedish search terms, then searches their attached files when access is
+enabled. Answers cite the node, file and page (or a paragraph/table for DOCX).
+Unreadable files are reported explicitly: a file that could not be read does not
+mean the topic is absent. Scanned images have no OCR.
+
 When the assistant reads text from node attachments, that text is treated as
 untrusted data. For the rest of that conversation, it can continue reading and
 adjusting your view, but actions that write data require your confirmation. The
 answer then says that it used text from attached files, and each write the
 assistant asked for appears as a card showing the exact tool and arguments with a
-**Confirm and run** button; only that button runs it, never chat text. If the
+**Confirm and run** button; only that button runs it, never chat text.
+**Dismiss** runs nothing and marks the card as dismissed, also after you close and reopen the chat. If the
 action fails, the card says so with the reason. If the
 card says the confirmation is no longer valid, send the request again. The
 **New conversation** button below the chat input starts a new conversation
@@ -689,6 +745,36 @@ The assistant responds in whatever language you write in — switch mid-conversa
 Responses support **Markdown**: bold text, bullet lists, tables, and inline code are
 rendered properly.
 
+#### Suggestions and commands in the chat input
+
+The chat input also suggests things as you type. Type **@** to insert a reference: after **@** and two more characters it lists
+matching nodes, node types and templates above the input, and the name may contain spaces (`@labour force`). An
+**@** inside a word, as in an e-mail address, does not trigger suggestions.
+Start with **/** to list commands instead, such as creating a node, saving a view or the session actions
+(**/** alone lists them all). Commands are only offered after **/**, so ordinary
+text never runs one.
+
+- **↓** / **↑** choose a suggestion; **Tab** accepts the first one; **Enter**
+  accepts the chosen one; **Esc** closes the list and keeps your text. On a
+  touch screen, tap a row.
+- A node replaces the **@** and what you typed after it with a reference such
+  as `[Labour Force Survey](node:…)`, which the assistant can look up; a node
+  type is inserted as its name. A template inserts a reference containing its ID.
+  These selections do not send the message or create anything.
+- A command opens the same dialog or action as its button elsewhere, including
+  any confirmation. If it cannot run, your text is kept.
+- With no suggestion chosen, **Enter** and **Send** send your text as a chat
+  message exactly as typed, even when it starts with **/**. **Shift+Enter**
+  adds a new line.
+
+Collection kiosks have no suggestions or commands.
+
+With **Settings → Command box only** switched on (see [Settings dialog](#settings-dialog)),
+the chat input is the one place to search and create: a short hint above it
+explains **@** and **/** the first time, until you close it.
+
+![Command suggestions above the chat input](images/chat-command-box.png)
+
 ### 4.2 Adding nodes through chat
 
 Ask the assistant to add content:
@@ -700,7 +786,7 @@ Write operations go through the same validation as the UI — the node type must
 in the current profile's schema.
 
 You can also ask the assistant to create an Agent, EventSubscription, Skill,
-ActiveKnowledgeCollection, SavedView, or CollectionResponse. Dedicated tools
+ActiveKnowledgeCollection, or CollectionResponse. Dedicated tools
 validate their configuration and create the required links. An Agent is enabled
 by default and comes with its own subscription. A collection response names its
 collection by ID. These tools are available in ordinary graph chat; collection
@@ -815,11 +901,40 @@ where they make a question easier to answer.
 
 ## 5. Session menu and settings
 
+Templates can also be inserted through the session API or MCP. By default,
+insertion creates new graph nodes from the saved snapshot; pass `mode=reference`
+to place the original nodes instead. Both require explicit canvas coordinates.
+Copy insertion into a staged session is not yet supported: it returns
+`staged_target_not_supported` (HTTP 409) without making changes. Reference
+insertion remains available in staged sessions.
+
 The session menu includes **Fullscreen canvas**, which hides application chrome
 while preserving the current canvas, selection, assistant, and drawer state.
 Use the subtle return button or Escape to leave it. The shortcut is
 Ctrl+Shift+F on Windows/Linux and Cmd+Shift+F on macOS. If browser fullscreen is
 unavailable or denied, the same action automatically uses an in-app focus mode.
+
+Use **Create a copy** in a session's context menu to open a separate copy of
+the whole session, named “Copy of <name>” (“Kopia av <name>” in Swedish). The
+copy carries the description, positions, groups, all annotation kinds (including
+images), hidden and dimmed objects, node shapes and appearance choices (per node
+and per type) and visual settings. Graph nodes and connections remain shared and
+are never duplicated. The copy keeps the source's write mode: copying a staged
+session copies its unmerged staged changes into the copy as staged changes of its
+own, credited to you as the one who made the copy, so they can be reviewed,
+merged or discarded there independently of the source; making a copy never
+changes the graph. Merging them is checked like any other merge. Participants,
+presence, activity, undo history and edit leases are not copied.
+
+Copying requires permission to create a session and to read the source; copying
+a session with staged changes also requires permission to stage changes. If you
+may copy a session, you copy all of it: its staged changes are not checked one
+by one when copied. You own the copy. Where sessions have their own roles and
+permissions, the copy gets the source's, each limited to what you may do
+yourself, so a copy never gives anyone more access than you have. Sessions
+exceeding the document size limit are refused with a size-limit error message. A
+session holding an older image that links to a web address instead of carrying
+its own picture cannot be copied; re-add that image first.
 
 Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
 a panel that slides out from the left and docks to the screen edge. While it is open,
@@ -838,7 +953,7 @@ AI apps:
 | **Start new session** | Saves the current session automatically and opens a fresh, empty one |
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
-| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
+| **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Create a copy** (opens a separate copy of the session), **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
 | **Recent activity** | Opens the activity panel — this session's annotation/canvas activity with undo, plus a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
@@ -920,6 +1035,31 @@ Agents can read a session’s retained annotation/canvas activity with the MCP
 `get_session_activity` tool. It supports paging (`limit`, `offset`) and filtering
 by action (`action`, for example `annotation_deleted`), including prior annotation
 data and inverse operations when recorded. Reading the log does not undo actions.
+Node additions and removals are recorded, without undo, whenever the server
+applies them: MCP add/remove tools and every visualization push to a stored
+shared session — additive results, clears, and session auto-add agent additions.
+The server
+applies the push's membership change itself and every browser only renders it,
+so each actual change produces one record however many browsers are open; a
+clear is one record. Every open browser shows the resulting state. Repeated
+additions or removals that change nothing produce no record. Nodes you add,
+remove or clear on your own canvas are sent to the server as the same kind of
+change and recorded as yours; your canvas shows the change once the server has
+applied it, at the same moment as everyone else's.
+
+Membership records retain a total count and at most 100 IDs
+(`MAX_ACTIVITY_NODE_IDS`), stored once, with no snapshots or replay operation.
+They have their own 500-record cap (`DEFAULT_MAX_MEMBERSHIP_RECORDS`) and the
+same seven-day age limit, so they never evict undoable activity from its separate
+500-record budget. User actions use the user's presence identity; MCP writes
+display **via MCP** and auto-add agent additions display **via auto-add agent**
+(the record's actor carries the agent id). The shared MCP client ID does not
+identify individual agents or users; records are per change, not per viewer.
+
+A session can also carry a **description** — what it
+is for and what the next participant should pick up — set with the MCP
+`describe_visualization_session` tool and returned with the session; clearing the
+canvas keeps it.
 
 
 Open **Recent activity** from the bottom of the session menu to see the activity
@@ -936,7 +1076,8 @@ with it; graph history is the permanent audit trail.
 `backend/service/actor_erasure.py` replaces matching structured actor identifiers
 in mutation history, nested run-history attribution, proposal `decided_by` and
 the attribution in applied proposal results, session activity (including sessions not currently loaded), the `staged_by` of pending entries in
-staged sessions' layers and the merging `actor` of staged-merge records. Supply the optional
+staged sessions' layers and the merging `actor` of staged-merge records (file
+merge log and PostgreSQL `graph_merge_records`). Supply the optional
 stores to its constructor. An absent store returns zero; PostgreSQL graph storage
 has no mutation-history sidecar, so omit that store. Graph nodes and edges are
 never written. Record IDs, timestamps, decision status and unrelated actors are
@@ -944,8 +1085,18 @@ preserved. This replaces attribution, including actor/delegation objects,
 `staged_by` in event origins and activity records, client IDs and matching
 `agent:<id>` origins; it does not search free text or erase graph content.
 The CLI reaches the layers of the file graph backend (`<graph>.layers.json`
-next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`); layers held in PostgreSQL graph storage are not local
-files, so merge or discard open staged sessions there before maintenance.
+next to `graph.json`) and the merge log beside them (`<graph>.merges.ndjson`).
+With `--postgres-schema` it also replaces the merging `actor` of the staged-merge
+records in that schema of the PostgreSQL graph store (`merge_records`),
+connecting with `GRAPH_POSTGRES_DSN` and `GRAPH_POSTGRES_SCOPE` from the
+environment; a DSN is never taken from the command line. It changes only the
+records of that scope (unscoped records when `GRAPH_POSTGRES_SCOPE` is unset),
+so run it once per scope. Pending entries of staged
+sessions held in PostgreSQL are not reached, so merge or discard open staged
+sessions there before maintenance: a merged session's merge record is then
+scrubbed like any other. In code, `PostgresMergeRecords.erase_actor(...,
+dry_run=True)` returns the number of merge records that would change without
+changing any.
 
 Stop application processes, workers and other writers before maintenance, and
 use a non-personal replacement token that does not contain the original actor
@@ -958,7 +1109,8 @@ python -m backend.service.actor_erasure \
   --run-history-db /path/to/runs.db \
   --governance-db /path/to/proposals.db \
   --sessions-dir /path/to/sessions \
-  --layers-path /path/to/graph.layers.json
+  --layers-path /path/to/graph.layers.json \
+  --postgres-schema public
 ```
 
 The database flags default to `AGENTS_RUN_HISTORY_DB` and
@@ -966,9 +1118,16 @@ The database flags default to `AGENTS_RUN_HISTORY_DB` and
 not created. Output contains only per-store changed-record `counts` and
 `failed_stores`, never actor identifiers, replacement tokens or source data.
 Exit status is 0 on success, 1 for store failures and 2 for invocation errors.
-A path of the wrong kind (a file given as `--sessions-dir`, or a database that
-is not a current-schema store of that flag's kind, or a path that cannot be
-read) is an invocation error: no store is opened or migrated. Start the application once to migrate an older
+Before any store is opened, each selected store checks everything its erasure
+would open: the files it reads or rewrites (including a session directory's
+`.sessions.lock`, every session file and SQLite `-wal`/`-shm` sidecars), write
+access to the directories its replacements are written to, and that a database
+is a current-schema store of that flag's kind. A path of the wrong kind (a file
+given as `--sessions-dir`, a directory or FIFO where a file belongs) or one that
+cannot be read or written is an invocation error, as is a PostgreSQL store that
+cannot be reached or whose merge records this connection may not update (a
+missing privilege, a read-only server or a replica): no store is opened, changed
+or migrated. Start the application once to migrate an older
 database before running maintenance.
 A failed store has a `null` count because partial changes may have happened;
 other stores are still processed. Repair any reported store failure and rerun
@@ -999,7 +1158,7 @@ a layer change, distinct from locking or unlocking it.
   reaching through them: you are told to try again in a moment, and it works
   once they click away. This one is temporary — unlike the conflict above, the
   action stays undoable.
-- Session activity is kept for 7 days or the last 500 actions per session,
+- Session activity is kept for 7 days with separate 500-record budgets for node membership and other actions per session,
   whichever comes first — it is not a permanent record.
 
 #### Graph tab
@@ -1064,6 +1223,7 @@ change the schema — editing the metamodel is not part of the open-source core.
 | **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
 | **Edge intensity** | A slider setting the baseline visibility for every connection in this session. Dimmed connections (see [2.4](#24-right-click-context-menu)) always render below this baseline — lowering it fades the whole graph's connections together, while dimming still singles out specific ones underneath that. |
 | **Assistant panel open** | Toggle the chat panel between expanded and collapsed. Your choice is remembered in the browser and used every time you return, overriding this deployment's configured startup default. Click **Reset to default** underneath to forget your choice and go back to that default. |
+| **Command box only** | Off by default. When on, the separate search bar and the add-node and view buttons are hidden (on a phone, the **Search** and **Create** slots), and you search, create and run actions from the chat input with **@** and **/** (see [4.1](#41-asking-questions)). The session menu, Settings and the annotation tools stay where they are. The choice is saved for your account, so it follows you when you sign in and never applies to another user of the same browser; it needs you to be signed in, and is shown only when the assistant is available. If saving fails, your previous choice stays in effect and the dialog says so. Turning it off brings the hidden controls back at once. |
 
 #### Your presence
 
@@ -1106,8 +1266,7 @@ again, start a new session. Where the installation stages by default, the
 session the app opens with, and the one it moves you to after a session is
 deleted, is a staged session too (unless you are not allowed to stage; then
 it is direct, and says so). Opening a link to a session always joins that
-session as it is; any other link that opens something (a saved view, a node,
-a collection form) opens in a direct session.
+session as it is; any other link that opens something (a node or a collection form) opens in a direct session.
 
 **Seeing what is staged.** A staged session shows a dashed amber **Staged
 session** bar at the bottom of the canvas (at the top on a phone) with the
@@ -1263,13 +1422,12 @@ interface.
 | `create_event_subscription` | Create a subscription for a public HTTP(S) webhook |
 | `create_skill` | Create reusable instructions with content and when-to-use guidance |
 | `create_active_knowledge_collection` | Create a collection with a unique kiosk short name |
-| `create_saved_view` | Save explicit node IDs and positions without needing a browser |
 | `create_collection_response` | Store answers linked to a collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
 | `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
-| `save_view` | Ask a connected frontend to capture and save its canvas |
+| `save_session_view` | Save a session at a specified revision and return its link |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
 | `summon_session_viewport` | Move everyone connected to a session to one region of the canvas — given as bounds or as a set of node ids — the same as **Bring everyone here** |
@@ -1278,9 +1436,7 @@ interface.
 Each dedicated create tool takes a `config` object. For example,
 `create_skill(config={"name": "Review", "content": "Check consistency.",
 "when_to_use": "When reviewing graph changes"})` creates a usable Skill.
-For a headless saved view, pass `config={"name": "Overview", "node_ids": ["node-id"],
-"positions": {"node-id": {"x": 0, "y": 0}}}` to `create_saved_view`; omitted
-positions receive a default layout. These writes use the UI's create authorization
+These writes use the UI's create authorization
 path and respect a bound session's staged write mode. Their schemas describe the
 required fields; invalid configurations are rejected before any nodes are added.
 
@@ -1401,7 +1557,8 @@ desktop chrome — the header, search bar, toolbar, chat panel and session
 menu — for a layout that fits a thumb.
 
 **Navigation.** A compact top bar replaces the desktop header, and a six-slot
-bottom navigation bar replaces the toolbar and the hamburger menu:
+bottom navigation bar replaces the toolbar and the hamburger menu (four slots,
+without **Search** and **Create**, when **Settings → Command box only** is on):
 
 | Slot | Effect |
 |------|--------|
@@ -1481,8 +1638,8 @@ leaving you in it without the controls to get out.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag, Organize, or Align/Distribute) |
-| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
+| **Ctrl+Z** / **Cmd+Z** | Undo your latest eligible canvas action, including pen strokes |
+| **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo your most recently undone canvas action |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
 
@@ -1537,3 +1694,29 @@ before enabling these tools for an assistant or Agent.
 Assistant and kiosk Markdown replies load only inline `data:image/` images.
 Other images show their alt text and URL without loading them. Link targets
 are visible, with links to another origin marked as external.
+
+### Operator-written graph functions
+
+Operators can enable short Python functions that read and update the graph through
+restricted tools. Invoke an enabled function with the manual REST endpoint or
+`python -m backend.functions.cli`; see [the development guide](../backend/DEVELOPMENT.md#manual-user-functions)
+for configuration and request examples. Calls use the authenticated actor's graph
+permissions. Repeating an idempotency key returns the same run record; use a new
+key for a new run. If the function is already running, another invocation is
+rejected as busy. Function records share agent run-history retention. Writes made
+before a failed or timed-out run remain in the graph.
+
+Webhook credentials can be minted, rotated and revoked through the function API.
+The token is shown only on mint or rotation; save it securely. A graph-admin
+authorization hook is required. Webhook invocation is not yet available.
+
+### Inbound user-function webhooks
+
+An administrator of the bound graph can enable an external function call using
+its webhook settings. Set `FUNCTION_WEBHOOKS_ENABLED=true` on the instance,
+mint a function token for the graph, then set `enabled` through the function's
+webhook-settings endpoint. Send a JSON input object with the token as a Bearer
+Authorization header. The token is shown only on mint or rotation; keep it
+secret. The optional `allow_write` switch trusts the external caller to trigger
+writes with the function's enabled grants and the system actor's graph access.
+Leave it off for read-only webhooks. See [the function contract](USER_FUNCTION_CONTRACT.md#version-2-inbound-webhooks) for limits.

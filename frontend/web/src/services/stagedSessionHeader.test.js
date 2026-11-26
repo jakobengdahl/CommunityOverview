@@ -55,6 +55,15 @@ describe('session-aware routes', () => {
     }
   });
 
+  it.each([
+    ['POST', '/api/shape-library'],
+    ['PUT', '/api/shape-library/my%20shape'],
+    ['DELETE', '/api/shape-library/my%20shape'],
+    ['PUT', '/api/user-preferences'],
+  ])('leave the non-graph write %s %s without the header', (verb, path) => {
+    expect(needsSessionHeader(verb, path)).toBe(false);
+  });
+
   it('read the path below a deployment root', () => {
     expect(pathBelowRoot('/app/api/nodes?x=1', '/app')).toBe('/api/nodes');
     expect(needsSessionHeader('POST', pathBelowRoot('/app/api/nodes', '/app'))).toBe(true);

@@ -7,6 +7,7 @@ import {
 } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
+import useUserPreferencesStore from './store/userPreferencesStore';
 import { useI18n } from './i18n';
 import DesktopShell from './components/DesktopShell';
 import MobileShell from './components/MobileShell';
@@ -15,7 +16,9 @@ import GuideOverlay from './components/GuideOverlay';
 import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
+import NodeAppearanceDialog, { appearanceOperation } from './components/NodeAppearanceDialog';
 import ConfirmDialog from './components/ConfirmDialog';
+import SaveTemplateDialog from './components/SaveTemplateDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
 import { teleportToSourceGraph } from './utils/teleport';
@@ -23,11 +26,14 @@ import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
   annotationsToOverlays,
-  annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
-import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS,
+  MEMBERSHIP_OPS,
+  hydrateAddedNodes,
+} from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useStagedSession } from './hooks/useStagedSession';
 import WriteModeBar from './components/WriteModeBar';
@@ -52,18 +58,27 @@ import {
   createdNodesToCanvas,
   deleteEdgeEverywhere,
   expandNode,
-  loadSavedViewNode,
   openAgentEditor,
   persistNewNodes,
   persistNodeUpdates,
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
-import { loadUrlSavedView } from './utils/urlSavedView';
+import {
+  captureCanvasSession,
+  createHistoryReplayQueue,
+  replayCanvasHistory,
+} from './utils/sessionActivity';
+import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
+import { buildCaptureContents, readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
+import { prepareTemplateCapture } from './utils/templateCapture';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import { refusalText } from './utils/stagedReview';
+import { applyTheme } from './utils/theme';
+import { CommandRegistryContext, createCommandRegistry } from './commands/commandRegistry';
+import { buildAppCommands } from './commands/appCommands';
 import './App.css';
 
 // Ceiling on how long one resyncFromServer call may stay in flight before its
@@ -81,6 +96,24 @@ const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 // How many times one resync may fetch the session while the op stream keeps
 // running ahead of each payload (see resyncFromServer).
 const RESYNC_MAX_FETCHES = 3;
+
+// A broadcast op's node read, bounded like the sync requests: ops apply one
+// at a time, so a read that never settles would hold every later op (and a
+// held autosave) with it. A read that times out is aborted and counts as
+// failed; the race still settles it when a fetch ignores the signal.
+function readNodeForRemoteOp(nodeId) {
+  const controller = new AbortController();
+  let timer;
+  return Promise.race([
+    api.getNodeDetails(nodeId, { signal: controller.signal }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('node read timed out'));
+      }, SYNC_REQUEST_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -113,6 +146,8 @@ function App() {
     clearGroupsFlag,
     canvasBaselineEpoch,
     addNodesToVisualization,
+    publishMembership,
+    setMembershipPublisher,
     updateVisualization,
     toggleNodeVisibility,
     toggleEdgeVisibility,
@@ -163,6 +198,8 @@ function App() {
     pulsedNodeIds,
     startGuide,
     getNodeColor,
+    shapeOverrides,
+    typeShapes,
     closeMenusSignal,
     resetSessionScopedState,
     editingEdge,
@@ -174,21 +211,14 @@ function App() {
   const { t, setLanguage, language } = useI18n();
 
   const urlGuideStartedRef = useRef(false);
-  const urlViewLoadedRef = useRef(false);
-  // The in-flight ?session= bootstrap load, so a ?view= in the same URL can wait
-  // for it and be applied on top.
-  const urlSessionBootstrapRef = useRef(null);
-  const canvasEditEpochRef = useRef(0);
   const urlFocusNodeLoadedRef = useRef(false);
-  // The saved-view load clears the canvas after its own await, so focusing a
-  // ?node= before it settles can have the node wiped out from under the focus.
-  // Starts settled when there is no ?view= to wait for, which is also why this
-  // is derived at mount rather than set from inside the view effect.
-  const [urlViewSettled, setUrlViewSettled] = useState(
-    () => !new URLSearchParams(window.location.search).get('view')
-  );
+  const urlSessionBootstrapRef = useRef(null);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const lastEscapeRef = useRef(0);
+  const [appearanceDialog, setAppearanceDialog] = useState(null);
+  const [appearanceError, setAppearanceError] = useState(null);
+  const appearancePendingRef = useRef(null);
   const appRef = useRef(null);
   const canvasContainerRef = useRef(null);
   // Image annotation ids this browser has already rendered optimistically
@@ -200,6 +230,9 @@ function App() {
   const [notification, setNotification] = useState(null);
   const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
+  const [templateDialog, setTemplateDialog] = useState(null);
+  const templateDialogIdRef = useRef(0);
+  const templateSelectionRef = useRef([]);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
@@ -209,6 +242,15 @@ function App() {
   const [showAgentProposalsDialog, setShowAgentProposalsDialog] = useState(false);
   const [agentProposalsAgentId, setAgentProposalsAgentId] = useState(null);
   const [createNodeType, setCreateNodeType] = useState(null);
+  // Flow position of the toolbar drop that opened the current create dialog;
+  // null when it was opened any other way. Cleared only once a create
+  // succeeds: a failed one leaves the dialog open, and its retry still lands there.
+  const dropPositionRef = useRef(null);
+  const createAtDropPosition = useCallback(async (create) => {
+    const result = await create(dropPositionRef.current || undefined);
+    dropPositionRef.current = null;
+    return result;
+  }, []);
   const [createGroupSignal, setCreateGroupSignal] = useState(0);
   const [saveViewSignal, setSaveViewSignal] = useState(0);
   const [isSavingView, setIsSavingView] = useState(false);
@@ -219,11 +261,24 @@ function App() {
   const [akcIntroShown, setAkcIntroShown] = useState(false);
   const [akcConfig, setAkcConfig] = useState(null);
 
+  useEffect(() => {
+    const request = (event) => {
+      viewDialogRequestedRef.current = event.detail?.name || true;
+      setSaveViewSignal((prev) => prev + 1);
+    };
+    window.addEventListener('request-save-view', request);
+    return () => window.removeEventListener('request-save-view', request);
+  }, []);
+
   // ── Session navigation state ────────────────────────────────────────────
   // The visualization session ID doubles as the working-session identity.
   // It is state (not a constant) so the user can switch sessions; the SSE
   // stream and state uploads reconnect automatically when it changes.
+  // StrictMode calls the initializer below twice and React 19 keeps the first
+  // result, so a second call must return the same id its side effects named.
+  const initialSessionIdRef = useRef(null);
   const [sessionId, setSessionIdState] = useState(() => {
+    if (initialSessionIdRef.current) return initialSessionIdRef.current;
     const urlSession = _urlParams.get('session');
     const initial = sessionStore.isValidSessionId(urlSession)
       ? urlSession
@@ -233,21 +288,36 @@ function App() {
     // So may the starting one, until the capabilities say whether the app
     // starts in a server-created session of the installation's default mode.
     api.setSessionModeUnknown(initial);
+    initialSessionIdRef.current = initial;
     return initial;
   });
   // Written together with the state, not from an effect: a switch bumps the
   // session epoch before React re-renders, and the ?view= load must not see the
   // previous id in that gap.
   const sessionIdRef = useRef(sessionId);
+  // Bumped on every session switch. A broadcast op is bound to the generation
+  // it arrived in and stops at its next step once that is no longer current,
+  // so nothing queued in the session left behind lands in the next one.
+  const sessionGenerationRef = useRef(0);
+  // Broadcast ops apply one at a time, in stream order: a replace awaiting its
+  // node reads must not draw its annotations over a later op's. A switch
+  // starts a new chain, so an op left behind cannot hold the new session's.
+  const remoteOpsChainRef = useRef(Promise.resolve());
   const setSessionId = useCallback((id) => {
+    if (id !== sessionIdRef.current) {
+      setTemplateDialog(null);
+      sessionGenerationRef.current += 1;
+      appearancePendingRef.current = null;
+      setAppearanceDialog(null);
+      setAppearanceError(null);
+      remoteOpsChainRef.current = Promise.resolve();
+    }
     sessionIdRef.current = id;
     // Before any request is made from the new session: graph requests carry a
     // session's header only while it is the active one and known staged.
     api.setActiveSessionForRequests(id);
     setSessionIdState(id);
   }, []);
-  // The session the page was opened into, for the ?view= load to compare against.
-  const urlSessionIdRef = useRef(sessionId);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Independent viewport signals (WAVE 0 mobile-shell enabler) — isMobile is a
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
@@ -312,6 +382,9 @@ function App() {
     remoteLeases,
     setRemoteLeases,
     opStreamReady,
+    savedShapes,
+    savedShapesRevision,
+    refreshSavedShapes,
   } = useSyncConnection(sessionId);
   // The active session's write mode and staged changes
   // (docs/SESSION_OVERLAY_CONTRACT.md §17).
@@ -332,6 +405,15 @@ function App() {
   useEffect(() => {
     api.setMessageTranslator(t);
   }, [t]);
+  // The signed-in user's layout choice, read once per page load: signing in as
+  // another user reloads the page and so reads that user's value.
+  const loadUserPreferences = useUserPreferencesStore((state) => state.load);
+  useEffect(() => {
+    loadUserPreferences();
+  }, [loadUserPreferences]);
+  // Without the assistant there is no command box to take over their work.
+  const hideClassicSurfaces =
+    useUserPreferencesStore((state) => state.preferences.hideClassicSurfaces) && llmAvailable;
   const sessionWriteModeRef = useRef(sessionWriteMode);
   sessionWriteModeRef.current = sessionWriteMode;
   const setStoreWriteMode = useGraphStore((state) => state.setSessionWriteMode);
@@ -414,10 +496,22 @@ function App() {
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
   // commands (external pulse-trigger URLs) share the channel and dedup.
+  // A push the server applied membership for materialised the session: join
+  // its op stream, reloading from seq 0 unless a client already holds a
+  // baseline for it.
+  const joinPushedSession = useCallback(() => {
+    if (syncRef.current?.sessionId === sessionId) {
+      ensureSyncConnected(sessionId);
+      return;
+    }
+    ensureSyncConnected(sessionId)?.setBaseline({}, { seq: 0 });
+  }, [sessionId, syncRef, ensureSyncConnected]);
   const { applyToolResultCommand, applyPulseCommand } = useToolResultCommands({
     sessionId,
     opStreamReady,
     latestViewport,
+    syncRef,
+    onServerMembership: joinPushedSession,
   });
 
   // Apply a single remote op incrementally onto the local store + canvas. This
@@ -465,8 +559,31 @@ function App() {
   // it started.
   // inFlight counts the re-reads started at each seq (several can share one).
   const edgeRemovalSeqRef = useRef({ seq: 0, removed: new Map(), inFlight: new Map() });
+  // Autosave holds released once the canvas has drawn what a broadcast
+  // queued: each waits for the commit of the tick it was queued with, and
+  // App's effects run after GraphCanvas's in that commit, so the snapshot a
+  // release may request renders with the drawn nodes.
+  const layoutReleasesRef = useRef({ tick: 0, pending: [] });
+  const [layoutReleaseTick, setLayoutReleaseTick] = useState(0);
+  useEffect(() => {
+    const releases = layoutReleasesRef.current;
+    const due = releases.pending.filter((entry) => entry.tick <= layoutReleaseTick);
+    releases.pending = releases.pending.filter((entry) => entry.tick > layoutReleaseTick);
+    due.forEach((entry) => entry.release());
+  }, [layoutReleaseTick]);
+  const releaseAfterDraw = useCallback((release) => {
+    const releases = layoutReleasesRef.current;
+    releases.tick += 1;
+    releases.pending.push({ tick: releases.tick, release });
+    setLayoutReleaseTick(releases.tick);
+  }, []);
   const applyRemoteOp = useCallback(
-    async (op) => {
+    async (op, heldLayoutRelease = null, generation = sessionGenerationRef.current) => {
+      const isCurrent = () => sessionGenerationRef.current === generation;
+      if (!isCurrent()) {
+        heldLayoutRelease?.();
+        return false; // queued in a session since left
+      }
       const store = useGraphStore.getState();
       if (
         (op?.op === 'edges_added' || op?.op === 'edges_updated') &&
@@ -476,7 +593,6 @@ function App() {
         // the stream reaches anyone holding the session id: read it from the
         // composed view instead, which asks the authorization hook
         // (docs/SESSION_OVERLAY_CONTRACT.md §15).
-        const sessionAtStart = syncRef.current?.sessionId;
         const removalsAtStart = edgeRemovalSeqRef.current.seq;
         const inFlight = edgeRemovalSeqRef.current.inFlight;
         inFlight.set(removalsAtStart, (inFlight.get(removalsAtStart) || 0) + 1);
@@ -487,13 +603,13 @@ function App() {
         const sources = [...new Set(wanted.map((e) => e.source))];
         let reads;
         try {
-          reads = await Promise.all(sources.map((id) => api.getNodeDetails(id).catch(() => null)));
+          reads = await Promise.all(sources.map((id) => readNodeForRemoteOp(id).catch(() => null)));
         } finally {
           const left = inFlight.get(removalsAtStart) - 1;
           if (left > 0) inFlight.set(removalsAtStart, left);
           else inFlight.delete(removalsAtStart);
         }
-        if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+        if (!isCurrent()) return false; // switched away while fetching
         const listed = new Map(reads.flatMap((r) => r?.edges || []).map((e) => [e.id, e]));
         const have = new Set(useGraphStore.getState().edges.map((e) => e.id));
         const fresh = wanted.map((e) => listed.get(e.id)).filter(Boolean);
@@ -512,32 +628,99 @@ function App() {
         return fresh.length > 0;
       }
       switch (op?.op) {
-        case 'nodes_added': {
-          const have = new Set(store.nodes.map((n) => n.id));
-          const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          if (!missing.length) return false;
-          // The only case here with an internal await, so the only one where
-          // the active session can change out from under it (a session
-          // switch mid-fetch, review round 5): capture which session this op
-          // is for and re-check before writing to the store below, which is
-          // not itself session-scoped.
-          const sessionAtStart = syncRef.current?.sessionId;
-          const addNodes = [];
-          const addEdges = [];
-          await Promise.all(
-            missing.map(async (id) => {
-              try {
-                const r = await api.getNodeDetails(id);
-                if (r?.node) {
-                  addNodes.push(r.node);
-                  (r.edges || []).forEach((e) => addEdges.push(e));
-                }
-              } catch {
-                /* node may have been deleted from the graph — skip */
-              }
-            })
+        case 'nodes_added':
+        case 'nodes_replaced': {
+          // A replace (a saved-view load or clear anywhere) keeps only the
+          // nodes it names; both then draw the named nodes this canvas lacks.
+          // This is the only place a node joins the canvas, this browser's
+          // own adds included: they are drawn from what they were sent with,
+          // and a node an own replace carries is redrawn from it, so a view
+          // load places a node already shown where the view has it.
+          const keep = new Set(op.node_ids || []);
+          const client = syncRef.current;
+          const sent = client?.takeSentNodes(op.node_ids);
+          const dropped =
+            op.op === 'nodes_replaced'
+              ? store.nodes.filter((n) => !keep.has(n.id) || sent?.nodes.has(n.id))
+              : [];
+          dropped.forEach((n) => removeNode(n.id));
+          // The op carries the layout it leaves (positions, hidden ids, a
+          // loaded view's annotations); until all of it is drawn, autosave
+          // waits, so no part of it is saved back as this user's change. A
+          // streamed op's hold was taken when it was queued (onRemoteOps).
+          const release = heldLayoutRelease || client?.holdLayoutSave() || (() => {});
+          const releaseSoon = () => releaseAfterDraw(release);
+          const droppedIds = new Set(dropped.map((n) => n.id));
+          const shown = new Set(store.nodes.map((n) => n.id));
+          const moved = Object.fromEntries(
+            Object.entries(op.positions || {}).filter(
+              ([id]) => shown.has(id) && !droppedIds.has(id)
+            )
           );
-          if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
+          if (Object.keys(moved).length)
+            setRemotePositions((prev) => ({ ...(prev || {}), ...moved }));
+          // Only a replace carries a view's hidden ids and annotations, and
+          // only for a replace does the mirror fold them (applyOpToMirror).
+          const isReplace = op.op === 'nodes_replaced';
+          if (isReplace && Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
+          if (isReplace && op.inserted_shape_overrides) {
+            useGraphStore.setState((state) => ({
+              shapeOverrides: { ...state.shapeOverrides, ...op.inserted_shape_overrides },
+              shapeRevisions: Object.fromEntries(
+                Object.entries({ ...state.shapeRevisions, ...op.inserted_shape_revisions }).map(
+                  ([key, revision]) => [key, Math.max(revision, state.shapeRevisions[key] || 0)]
+                )
+              ),
+            }));
+          }
+          const drawAnnotations = () => {
+            if (!isReplace || !Array.isArray(op.annotations)) return;
+            const removed = op.removed_annotation_ids || [];
+            if (removed.length)
+              setRemoteAnnotationOps((prev) => [
+                ...(prev || []),
+                ...removed.map((id) => ({ action: 'delete', id })),
+              ]);
+            op.annotations.forEach(applyAnnotationUpsertToCanvas);
+          };
+          // An own add's result edges between nodes already on the canvas
+          // have no node to hydrate them with: draw those from what was sent.
+          const drawSentEdges = () => {
+            const now = useGraphStore.getState();
+            const onCanvas = new Set(now.nodes.map((n) => n.id));
+            const haveEdges = new Set(now.edges.map((e) => e.id));
+            const edges = (sent?.edges || []).filter(
+              (e) =>
+                e?.id && !haveEdges.has(e.id) && onCanvas.has(e.source) && onCanvas.has(e.target)
+            );
+            if (edges.length) addNodesToVisualization([], edges);
+            return edges.length > 0;
+          };
+          const have = new Set(useGraphStore.getState().nodes.map((n) => n.id));
+          const missing = (op.node_ids || []).filter((id) => !have.has(id));
+          if (!missing.length || !client) {
+            const drew = drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
+            sent?.onDrawn();
+            return dropped.length > 0 || drew;
+          }
+          // The only case here with an internal await, so the only one where
+          // the session or its membership can change out from under it: a
+          // session switch mid-fetch (review round 5), or a membership change
+          // that lands before the reads settle (hydrateAddedNodes).
+          let read;
+          try {
+            read = await hydrateAddedNodes(client, missing, readNodeForRemoteOp, sent);
+          } catch (err) {
+            release();
+            throw err;
+          }
+          if (!isCurrent() || syncRef.current !== client) {
+            release();
+            return false; // switched away while fetching
+          }
+          const { nodes: addNodes, edges: addEdges } = read;
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -545,19 +728,67 @@ function App() {
           // op, which is dropped when the node isn't mounted yet) prevents the node
           // from settling at an auto-layout spot and re-emitting a wrong position.
           if (addNodes.length) {
+            // Where the op placed each node; the server gives every node it
+            // brings in a position.
             const positioned = addNodes.map((n) => {
               const pos = syncRef.current?.baselinePosition(n.id);
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            drawSentEdges();
+            drawAnnotations();
+            releaseSoon();
+            sent.onDrawn();
             return true;
           }
-          return false;
+          const drew = drawSentEdges();
+          drawAnnotations();
+          releaseSoon();
+          return drew || dropped.length > 0;
+        }
+        case 'node_shape_set':
+        case 'type_shape_set': {
+          const node = op.op === 'node_shape_set';
+          useGraphStore.setState((state) => {
+            const shapeOverrides = { ...state.shapeOverrides };
+            const typeShapes = { ...state.typeShapes };
+            const map = node ? shapeOverrides : typeShapes;
+            const key = node ? op.node_id : op.type;
+            if (op.selection == null) delete map[key];
+            else
+              Object.defineProperty(map, key, {
+                value: op.selection,
+                enumerable: true,
+                configurable: true,
+                writable: true,
+              });
+            if (!node && op.clear_node_id != null) {
+              delete shapeOverrides[op.clear_node_id];
+              if (op.restore_selection != null) {
+                Object.defineProperty(shapeOverrides, op.clear_node_id, {
+                  value: op.restore_selection,
+                  enumerable: true,
+                  configurable: true,
+                  writable: true,
+                });
+              }
+            }
+            return {
+              shapeOverrides,
+              typeShapes,
+              shapeRevisions: Object.fromEntries(
+                Object.entries({ ...state.shapeRevisions, ...op.revisions }).map(
+                  ([key, revision]) => [key, Math.max(revision, state.shapeRevisions[key] || 0)]
+                )
+              ),
+            };
+          });
+          return true;
         }
         case 'nodes_removed': {
           const removeIds = op.node_ids || [];
           const existing = new Set(store.nodes.map((n) => n.id));
-          (op.node_ids || []).forEach((id) => removeNode(id));
+          removeIds.forEach((id) => removeNode(id));
           return removeIds.some((id) => existing.has(id));
         }
         case 'nodes_hidden': {
@@ -768,6 +999,7 @@ function App() {
       setRemoteAnnotationOps,
       syncRef,
       applyAnnotationUpsertToCanvas,
+      releaseAfterDraw,
     ]
   );
 
@@ -864,6 +1096,15 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
+        // An edit or another remote operation can arrive while either await
+        // is pending. Recheck synchronously after the queue drains.
+        let drainedChain;
+        do {
+          await client.waitForLocalEdits();
+          drainedChain = remoteOpsChainRef.current;
+          await drainedChain;
+        } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
+        if (syncRef.current !== client || resyncGuardTokenRef.current !== myToken) return 0;
         // Stream ops keep arriving while the GET is in flight, and each one
         // is applied to the canvas and advances the client's appliedSeq (so
         // does this client's own echo, which is not re-applied). A
@@ -879,6 +1120,11 @@ function App() {
             return 0;
           }
           adoptSessionPayload(targetId, payload);
+          do {
+            await client.waitForLocalEdits();
+            drainedChain = remoteOpsChainRef.current;
+            await drainedChain;
+          } while (client.hasLocalEdits() || drainedChain !== remoteOpsChainRef.current);
           // Also bail if the guard timeout already fired and a newer resync
           // now owns it (review round 4): the token check above only stops
           // *this* stale call from clearing a flag it no longer owns — without
@@ -896,12 +1142,7 @@ function App() {
         // `payload` either, and without this second read it would be
         // silently wiped by the reload with nothing to bring it back (review
         // round 6). An op present only in the first read (delivered and
-        // confirmed by the server while we waited) is harmless to keep too —
-        // replaying an already-confirmed op is redundant, never wrong, under
-        // the same idempotent-op contract this whole function already relies
-        // on (see this function's opening comment), so the union below errs
-        // on the side of including rather than trying to guess which read is
-        // more current.
+        // confirmed by the server while we waited) is also retained.
         const pendingOpsAfter = capturePendingOps();
         const seenBefore = new Set(pendingOpsBefore);
         const unionedOps = pendingOpsBefore.concat(
@@ -917,7 +1158,9 @@ function App() {
         recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds), {
+          seq: payload?.seq,
+        });
         // A full reload re-hydrates every annotation from server truth, so any
         // image-ingest race this browser was still waiting to resolve (see
         // createSelfEchoDedup) is moot — drop it rather than let it linger and
@@ -930,6 +1173,9 @@ function App() {
         // the second one, if the annotation was already edited in between,
         // would revert that edit.
         selfIngestedImageAnnotationIdsRef.current.clear();
+        // An own add or replace the reload already holds gets no broadcast
+        // now: run its follow-ups (saved-view groups, focus) here.
+        client.takeResyncedSentNodes(pendingOps).onDrawn();
         // Fold every recovered op into the sync baseline *before* replaying
         // any of them onto the canvas. Two consequences of skipping this
         // (review round 3): the next auto-save's diff would see the baseline
@@ -952,9 +1198,12 @@ function App() {
         // for its original caller (handleImageIngest), whose op is broadcast
         // under a shared, non-personal client id specifically so its own
         // echo is *not* filtered there.
-        for (const op of pendingOps) {
-          client.foldOpIntoBaseline(op);
-        }
+        // TODO(node-shape-phase4c-2): Rebase acknowledged appearance writes
+        // against current revisions inside the canvas queue during resync.
+        const replayOps = pendingOps.filter(
+          (op) => op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set'
+        );
+        for (const op of replayOps) client.foldOpIntoBaseline(op);
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
         // Re-checked every iteration, not just once before the loop (review
@@ -968,10 +1217,12 @@ function App() {
         // over, stop here rather than keep applying this call's now-stale
         // ops on top of what the newer one already established — that newer
         // resync's own return value is the one the caller should act on.
+        // A pending membership op is not drawn here: its broadcast draws it.
         let appliedCount = 0;
-        for (const op of pendingOps) {
+        for (const op of replayOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (syncRef.current !== client) break;
+          if (MEMBERSHIP_OPS.has(op?.op)) continue;
           if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
@@ -1026,7 +1277,13 @@ function App() {
         )
       );
       if (syncRef.current?.sessionId !== sessionAtStart) return; // switched away while fetching
-      if (removeMissing) missing.forEach((id) => removeNode(id));
+      if (removeMissing) {
+        // A discarded staged create is gone from the graph. The server's
+        // discard or merge op takes it out of the session itself, so it only
+        // leaves this canvas: a viewer that sent the removal would be
+        // recorded for a change it did not make.
+        missing.forEach((id) => removeNode(id));
+      }
       const current = useGraphStore.getState();
       const present = new Set(current.nodes.map((n) => n.id));
       const nodeUpdates = new Map();
@@ -1088,13 +1345,17 @@ function App() {
   // the next paint — closing the window where a rapid double-Escape right after a
   // dialog opens could slip past the guard and clear the canvas.
   useLayoutEffect(() => {
+    if (appearanceDialog) lastEscapeRef.current = 0;
     dialogOpenRef.current = !!(
       createNodeType ||
+      appearanceDialog ||
       editingNode ||
       detailNode ||
       editingEdge ||
       deleteDialog ||
       saveViewDialog ||
+      saveViewDialog ||
+      templateDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
       showAgentRunsDialog ||
@@ -1114,11 +1375,13 @@ function App() {
     );
   }, [
     createNodeType,
+    appearanceDialog,
     editingNode,
     detailNode,
     editingEdge,
     deleteDialog,
     saveViewDialog,
+    templateDialog,
     showSubscriptionDialog,
     showAgentDialog,
     showAgentRunsDialog,
@@ -1145,6 +1408,13 @@ function App() {
   //                emphatic confirmation warning everything will be removed.
   //   • named    → confirm before clearing (both esc-esc and the button).
   //   • unnamed  → clear immediately, no confirmation.
+  // A user clear empties the session too, as one explicit replace; its nodes
+  // leave on the replace's broadcast.
+  const clearBoard = useCallback(() => {
+    clearVisualization({ keepNodes: true });
+    publishMembership('nodes_replaced', []);
+  }, [clearVisualization, publishMembership]);
+
   const requestClear = useCallback(
     (source) => {
       const action = decideClearAction({
@@ -1153,7 +1423,7 @@ function App() {
         source,
       });
       if (action === 'clear') {
-        clearVisualization();
+        clearBoard();
       } else if (action === 'confirm') {
         setClearConfirm({ locked: false });
       } else if (action === 'confirm-locked') {
@@ -1161,7 +1431,7 @@ function App() {
       }
       // 'noop' — locked board, esc-esc does nothing.
     },
-    [canvasLocked, currentSessionName, clearVisualization]
+    [canvasLocked, currentSessionName, clearBoard]
   );
 
   // The capture-phase keydown listener is registered once and reads the latest
@@ -1174,17 +1444,16 @@ function App() {
 
   // Double-Escape to clear the canvas (works even from input fields)
   useEffect(() => {
-    let lastEscape = 0;
     const handleKeyDown = (e) => {
       if (e.key !== 'Escape') return;
       if (e.repeat) return;
       if (dialogOpenRef.current) return;
       const now = Date.now();
-      if (now - lastEscape < 400) {
+      if (now - lastEscapeRef.current < 400) {
         requestClearRef.current('keyboard');
-        lastEscape = 0;
+        lastEscapeRef.current = 0;
       } else {
-        lastEscape = now;
+        lastEscapeRef.current = now;
       }
     };
     // Capture phase so it fires even when focus is inside an input/textarea
@@ -1233,7 +1502,7 @@ function App() {
         },
       });
       // Bound the wait even if fetch never settles. Invalidate the load itself
-      // too, so a late reply cannot undo the view/focus that proceeds afterward.
+      // too, so a late reply cannot undo later canvas changes.
       urlSessionBootstrapRef.current = Promise.race([
         load,
         new Promise((resolve) => {
@@ -1244,15 +1513,13 @@ function App() {
           }, SYNC_REQUEST_TIMEOUT_MS);
         }),
       ])
-        .catch(() => {}) // The loader logs errors; URL view/focus may still proceed.
+        .catch(() => {}) // The loader logs errors.
         .finally(() => clearTimeout(timer));
     }
     setSessionsVersion((v) => v + 1);
     return () => {
       expired = true;
       clearTimeout(timer);
-      // StrictMode may already have a saved-view effect awaiting this promise.
-      // Release that waiter when retiring this bootstrap, even if fetch hangs.
       settleBootstrapWait?.();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1305,6 +1572,7 @@ function App() {
           }
         }
         setConfig(schemaData, presentationData, t, language);
+        applyTheme(presentationData?.theme);
         setStats(statsData);
         setLlmAvailable(capabilitiesData.llm_available ?? false);
         setModelProfilesCapability(capabilitiesData.model_profiles);
@@ -1344,51 +1612,13 @@ function App() {
     }
   }, [presentation, startGuide]);
 
-  // Load saved view from URL param ?view=<name> — fires once after stats confirm backend is ready
-  useEffect(() => {
-    if (!stats || urlViewLoadedRef.current) return;
-    const urlViewName = new URLSearchParams(window.location.search).get('view');
-    if (!urlViewName) return;
-    urlViewLoadedRef.current = true;
-    (async () => {
-      try {
-        await loadUrlSavedView({
-          name: urlViewName,
-          sessionBootstrap: urlSessionBootstrapRef.current,
-          sessionId: urlSessionIdRef.current,
-          getCurrentSessionId: () => sessionIdRef.current,
-          getSavedView: api.getSavedView,
-          getCanvasEditEpoch: () => canvasEditEpochRef.current,
-          applyView: (result) => {
-            const positioned = result.nodes.map((n) =>
-              result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
-            );
-            clearVisualization();
-            addNodesToVisualization(positioned, result.edges || []);
-            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-            if (result.groups?.length)
-              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-            if (result.annotations?.length) setPendingAnnotations(result.annotations);
-          },
-        });
-      } catch (err) {
-        console.error('[App] Failed to load view from URL:', err);
-      } finally {
-        setUrlViewSettled(true);
-      }
-    })();
-  }, [
-    stats,
-    clearVisualization,
-    addNodesToVisualization,
-    setHiddenNodeIds,
-    setPendingGroups,
-    setPendingAnnotations,
-  ]);
+  const notificationTimeoutRef = useRef(null);
+  useEffect(() => () => clearTimeout(notificationTimeoutRef.current), []);
 
   const showNotification = useCallback((type, message) => {
+    clearTimeout(notificationTimeoutRef.current);
     setNotification({ type, message });
-    setTimeout(() => setNotification(null), 3000);
+    notificationTimeoutRef.current = setTimeout(() => setNotification(null), 3000);
   }, []);
 
   // "Bring everyone here": the canvas camera request, the summoned-viewer
@@ -1414,24 +1644,28 @@ function App() {
   // builds — the parameter names live in backend/federation/teleport.py, so a
   // route this app hands out is one it can also consume.
   useEffect(() => {
-    // Waits for ?view= to settle: a saved-view load clears the canvas after its
-    // own await, and a gui_url may legitimately carry both parameters.
-    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
+    if (!stats || urlFocusNodeLoadedRef.current) return;
     const params = new URLSearchParams(window.location.search);
     const focusId = params.get('node');
     if (!focusId) return;
     urlFocusNodeLoadedRef.current = true;
     const searchContext = params.get('q');
     const fromGraph = params.get('from_graph');
+    const startingSession = sessionIdRef.current;
     (async () => {
       try {
+        await urlSessionBootstrapRef.current;
+        if (sessionIdRef.current !== startingSession) return;
         const result = await api.getNodeDetails(focusId);
         if (!result?.success || !result.node) {
           showNotification('info', t('federation.teleport_focus_not_found'));
           return;
         }
-        addNodesToVisualization([result.node], result.edges || []);
-        setFocusNodeId(result.node.id);
+        publishMembership('nodes_added', [result.node.id], {
+          nodes: [result.node],
+          edges: result.edges || [],
+          onDrawn: () => setFocusNodeId(result.node.id),
+        });
         // Carry the sender's search text into the search box so the visitor
         // lands on the node without losing what they were looking for.
         if (searchContext) {
@@ -1445,15 +1679,7 @@ function App() {
         showNotification('info', t('federation.teleport_focus_not_found'));
       }
     })();
-  }, [
-    stats,
-    urlViewSettled,
-    addNodesToVisualization,
-    setFocusNodeId,
-    setGuideSearchInput,
-    showNotification,
-    t,
-  ]);
+  }, [stats, publishMembership, setFocusNodeId, setGuideSearchInput, showNotification, t]);
 
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
@@ -1469,6 +1695,7 @@ function App() {
   // Callback: Selection changed in GraphCanvas
   const handleSelectionChange = useCallback(
     (selectedNodes) => {
+      templateSelectionRef.current = selectedNodes;
       // Store full node data for the selected nodes
       const selectedWithData = selectedNodes
         .filter((n) => n.type !== 'group')
@@ -1512,31 +1739,10 @@ function App() {
   // Callback: Double-click on node
   const handleNodeDoubleClick = useCallback(
     async (nodeId, nodeData) => {
-      // If it's a SavedView, load it directly
-      if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
-        await loadSavedViewNode({
-          nodeData,
-          getNodeDetails: api.getNodeDetails,
-          clearVisualization,
-          addNodesToVisualization,
-          setPendingGroups,
-          setPendingAnnotations,
-          showNotification,
-        });
-        return;
-      }
-
-      // For other nodes, show detail dialog
+      // Show node details
       setDetailNode({ id: nodeId, data: nodeData });
     },
-    [
-      clearVisualization,
-      addNodesToVisualization,
-      setPendingGroups,
-      setPendingAnnotations,
-      setDetailNode,
-      showNotification,
-    ]
+    [setDetailNode]
   );
 
   // Callback: leave for the graph that owns this node. The status-to-outcome
@@ -1783,11 +1989,10 @@ function App() {
     await confirmNodeDelete({
       deleteDialog,
       deleteNodes: api.deleteNodes,
-      removeNode,
       setDeleteDialog,
       showNotification,
     });
-  }, [deleteDialog, setDeleteDialog, removeNode, showNotification]);
+  }, [deleteDialog, setDeleteDialog, showNotification]);
 
   // Toolbar: trigger group creation in GraphCanvas
   const handleToolbarCreateGroup = useCallback(() => {
@@ -1852,6 +2057,8 @@ function App() {
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
+        shape_overrides: state.shapeOverrides,
+        type_shapes: state.typeShapes,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
         dimmed_node_ids: state.dimmedNodeIds || [],
@@ -1968,7 +2175,37 @@ function App() {
   const requestSessionSnapshot = useCallback((onDone) => {
     snapshotCallbacksRef.current.push(onDone);
     setSaveViewSignal((prev) => prev + 1);
+    return () => {
+      snapshotCallbacksRef.current = snapshotCallbacksRef.current.filter((cb) => cb !== onDone);
+    };
   }, []);
+
+  const captureNodesRef = useRef(null);
+  const getCaptureState = useCallback(
+    () => ({
+      baseline: readyBaseline(syncForSession(syncRef.current, sessionIdRef.current)),
+      members: useGraphStore.getState().nodes.map((node) => node.id),
+      nodes: captureNodesRef.current?.() || [],
+    }),
+    [syncRef]
+  );
+
+  const [captureFlushQueue] = useState(createCaptureFlushQueue);
+  const flushBeforeCapture = useCallback(
+    (onReady) => {
+      const targetId = sessionIdRef.current;
+      const epoch = useGraphStore.getState().sessionEpoch;
+      return captureFlushQueue({
+        getSync: () => syncRef.current,
+        sessionId: targetId,
+        isCurrent: () =>
+          sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
+        requestSnapshot: requestSessionSnapshot,
+        onReady,
+      });
+    },
+    [captureFlushQueue, requestSessionSnapshot, syncRef]
+  );
 
   // Callback from GraphCanvas when the saveViewSignal round-trip completes.
   // Always persists the session snapshot; additionally opens the Save View
@@ -1980,8 +2217,9 @@ function App() {
       const callbacks = snapshotCallbacksRef.current.splice(0);
       callbacks.forEach((cb) => cb?.());
       if (viewDialogRequestedRef.current) {
+        const name = viewDialogRequestedRef.current;
         viewDialogRequestedRef.current = false;
-        setSaveViewDialog({ viewData });
+        setSaveViewDialog({ name: typeof name === 'string' ? name : '' });
       }
     },
     [persistSessionSnapshot]
@@ -2000,9 +2238,47 @@ function App() {
     if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
       requestSessionSnapshot(null);
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
+
+  // This browser's own membership changes go to the session as explicit ops;
+  // the first add materialises it, as a first save would. Removing from a
+  // session that does not exist yet has nothing to change; the store applies
+  // what is not sent at once. A sent change is rendered when the server
+  // broadcasts the op, and after an add the layout save follows at
+  // once rather than after the debounce: until their positions arrive,
+  // another browser places them itself and its own save would overwrite
+  // them, a drag made here meanwhile included.
+  useEffect(() => {
+    setMembershipPublisher((op, nodeIds, payload) => {
+      const removes = op === 'nodes_removed' || (op === 'nodes_replaced' && !nodeIds.length);
+      const nothingToSend = !nodeIds?.length && op !== 'nodes_replaced';
+      const client =
+        nothingToSend || (removes && !isSessionMaterialized())
+          ? null
+          : ensureSyncConnected(sessionId);
+      if (!client) return false;
+      client.sendMembership(op, nodeIds, {
+        ...payload,
+        onDrawn: () => {
+          payload.onDrawn?.();
+          // Next tick, once the canvas has the nodes; the debounced autosave
+          // would reset this timer on that very render.
+          setTimeout(() => requestSessionSnapshot(null), 0);
+        },
+      });
+      return true;
+    });
+    return () => setMembershipPublisher(null);
+  }, [
+    sessionId,
+    ensureSyncConnected,
+    isSessionMaterialized,
+    setMembershipPublisher,
+    requestSessionSnapshot,
+  ]);
 
   // Realtime publish timing for annotation changes — the "accepted operation
   // timing" from task-annotation-shared-session-realtime's slice_scope, split
@@ -2034,7 +2310,6 @@ function App() {
     });
   }
   const publishAnnotationChange = useCallback((kind) => {
-    canvasEditEpochRef.current += 1;
     annotationSchedulerRef.current.schedule(kind);
   }, []);
 
@@ -2049,13 +2324,52 @@ function App() {
     return () => annotationSchedulerRef.current?.clearPending();
   }, []);
 
+  // Serialize shortcuts and drawer undo, including the canvas snapshot round
+  // trip: the pen's just-completed stroke may still be waiting to publish.
+  const historyQueueRef = useRef(null);
+  if (!historyQueueRef.current) historyQueueRef.current = createHistoryReplayQueue();
+  const replaySessionAction = useCallback(
+    (redo = false) =>
+      historyQueueRef.current(async () => {
+        const targetId = sessionId;
+        try {
+          annotationSchedulerRef.current.clearPending();
+          if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+          autoSaveTimerRef.current = null;
+          await replayCanvasHistory({
+            sessionId: targetId,
+            snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
+            getSync: () => syncRef.current,
+            replay: redo ? api.redoSessionAction : api.undoSessionAction,
+            clientId: api.getClientId(),
+          });
+        } catch (err) {
+          showNotification(
+            'error',
+            t(redo ? 'history.session_redo_failed' : 'history.session_undo_failed')
+          );
+          throw err;
+        }
+      }),
+    [sessionId, requestSessionSnapshot, syncRef, showNotification, t]
+  );
+  const handleSessionUndo = useCallback(() => replaySessionAction(), [replaySessionAction]);
+  const handleSessionRedo = useCallback(() => replaySessionAction(true), [replaySessionAction]);
+  // Keyboard callbacks are fire-and-forget; the shared path reports failures.
+  const shortcutUndo = useCallback(() => {
+    handleSessionUndo().catch(() => {});
+  }, [handleSessionUndo]);
+  const shortcutRedo = useCallback(() => {
+    handleSessionRedo().catch(() => {});
+  }, [handleSessionRedo]);
+
   // Position-change callback GraphCanvas's onNodePositionChange fires for
   // both graph-node and annotation drags/moves alike. Graph node moves keep
   // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
-    (_nodeId, _position, nodeType) => {
-      canvasEditEpochRef.current += 1;
+    (nodeId, _position, nodeType) => {
+      syncRef.current?.noteUserMoved([nodeId]);
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
         return;
@@ -2069,6 +2383,7 @@ function App() {
     scheduleAutoSave();
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
     };
   }, [
     nodes,
@@ -2086,13 +2401,10 @@ function App() {
   // 'group'), so its creation publishes immediately like any other
   // create/delete/style/geometry annotation change, not the generic 1500ms
   // autosave debounce.
-  const handleCreateGroup = useCallback(
-    (position, groupNode) => {
-      showNotification('success', 'Group created');
-      publishAnnotationChange('create');
-    },
-    [showNotification, publishAnnotationChange]
-  );
+  const handleCreateGroup = useCallback(() => {
+    showNotification('success', 'Group created');
+    publishAnnotationChange('create');
+  }, [showNotification, publishAnnotationChange]);
 
   // Confirm save view
   const handleConfirmSaveView = useCallback(
@@ -2101,56 +2413,72 @@ function App() {
 
       setIsSavingView(true);
       try {
-        const parentIds = Object.fromEntries(
-          saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
-        );
-        const annotationDocument = legacyMetadataToAnnotationDocument({
-          groups: saveViewDialog.viewData.groups || [],
-          parentIds,
-          annotations: saveViewDialog.viewData.annotations || [],
-        });
-        const legacyAnnotationMetadata = annotationDocumentToLegacyMetadata(annotationDocument);
-        const viewNode = {
+        annotationSchedulerRef.current.clearPending();
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+        const result = await captureCanvasSession({
+          sessionId,
           name,
-          type: 'SavedView',
-          description: `Saved view: ${name}`,
-          summary: `Contains ${saveViewDialog.viewData.nodes.length} nodes`,
-          metadata: {
-            node_ids: saveViewDialog.viewData.nodes.map((n) => n.id),
-            positions: Object.fromEntries(
-              saveViewDialog.viewData.nodes.map((n) => [n.id, n.position])
-            ),
-            parentIds,
-            edge_ids: (saveViewDialog.viewData.edges || []).map((e) => e.id),
-            edges: saveViewDialog.viewData.edges || [],
-            annotation_schema_version: annotationDocument.schema_version,
-            annotation_document: annotationDocument,
-            groups: legacyAnnotationMetadata.groups,
-            annotations: legacyAnnotationMetadata.annotations,
-          },
-          communities: [],
-        };
-
-        await api.addNodes([viewNode], []);
-        showNotification('success', `View "${name}" saved`);
+          snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
+          getSync: () => ensureSyncConnected(sessionId),
+          capture: () => flushBeforeCapture(() => buildCaptureContents(getCaptureState())),
+          isCurrent: () => sessionIdRef.current === sessionId,
+          read: api.getSession,
+          save: api.saveSessionView,
+        });
+        if (!result.success) throw Object.assign(new Error(), { code: result.error });
+        // Listed under recent sessions so it can be found when no link is returned.
+        sessionStore.touchSession(result.session_id, { name });
+        setSessionsVersion((v) => v + 1);
+        clearTimeout(notificationTimeoutRef.current);
+        setNotification({
+          type: 'success',
+          message: t('save_view.saved'),
+          url: result.session_url,
+        });
       } catch (error) {
-        console.error('Error saving view:', error);
-        showNotification('error', 'Could not save view');
+        const codes = [
+          'invalid_request',
+          'access_denied',
+          'session_not_found',
+          'revision_conflict',
+          'session_busy',
+          'staged_changes',
+          'invalid_presentation',
+          'session_too_large',
+          'too_many_sessions',
+          'storage_error',
+        ];
+        showNotification(
+          'error',
+          t(`save_view.${codes.includes(error.code) ? error.code : 'failed'}`)
+        );
       } finally {
         setIsSavingView(false);
         setSaveViewDialog(null);
       }
     },
-    [saveViewDialog, showNotification]
+    [
+      saveViewDialog,
+      sessionId,
+      requestSessionSnapshot,
+      ensureSyncConnected,
+      flushBeforeCapture,
+      getCaptureState,
+      showNotification,
+      t,
+    ]
   );
 
   // Callback: Create subscription
   const handleCreateSubscription = useCallback(() => {
+    dropPositionRef.current = null;
     setShowSubscriptionDialog(true);
   }, []);
 
   // Callback: Create agent
   const handleCreateAgent = useCallback(() => {
+    dropPositionRef.current = null;
     setEditingAgentData(null);
     setShowAgentDialog(true);
   }, []);
@@ -2187,12 +2515,14 @@ function App() {
             t('notifications.subscription_updated', { name: data.updates.name })
           );
         } else {
-          await persistNewNodes({
-            nodes: [data],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([data], result),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [data],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([data], result, position),
+            })
+          );
           showNotification('success', t('notifications.subscription_created', { name: data.name }));
         }
       } catch (error) {
@@ -2205,7 +2535,7 @@ function App() {
         );
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification, t]
+    [addNodesToVisualization, updateVisualization, showNotification, t, createAtDropPosition]
   );
 
   // Save agent nodes (create or update)
@@ -2224,13 +2554,15 @@ function App() {
         } else {
           // CREATE
           const { nodes: agentNodes, edges: agentEdges } = data;
-          await persistNewNodes({
-            nodes: agentNodes,
-            edges: agentEdges,
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: agentNodes,
+              edges: agentEdges,
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => agentCreateToCanvas(agentNodes, agentEdges, result, position),
+            })
+          );
 
           const agentNode = agentNodes.find((n) => n.type === 'Agent');
           showNotification('success', `Agent "${agentNode?.name || 'Agent'}" created`);
@@ -2240,12 +2572,13 @@ function App() {
         showNotification('error', 'Could not save agent');
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification, createAtDropPosition]
   );
 
   // Callback: Create node from toolbar
   const handleCreateNodeForType = useCallback(
     (nodeType) => {
+      dropPositionRef.current = null;
       if (schema?.node_types?.[nodeType]?.ui_form === 'skill') {
         setEditingSkillData(null);
         setSkillDialogType(nodeType);
@@ -2279,14 +2612,17 @@ function App() {
   // can show them.
   const handleNodeCreated = useCallback(
     (node) =>
-      createDialogNode({
-        node,
-        addNodes: api.addNodes,
-        addNodesToVisualization,
-        showNotification,
-        onDrawn: focusCreatedNode,
-      }),
-    [addNodesToVisualization, showNotification, focusCreatedNode]
+      createAtDropPosition((position) =>
+        createDialogNode({
+          node,
+          addNodes: api.addNodes,
+          addNodesToVisualization,
+          showNotification,
+          onDrawn: focusCreatedNode,
+          position,
+        })
+      ),
+    [addNodesToVisualization, showNotification, focusCreatedNode, createAtDropPosition]
   );
 
   // Callback: Save a skill node (create or update)
@@ -2302,12 +2638,14 @@ function App() {
           });
           showNotification('success', 'Skill updated');
         } else {
-          await persistNewNodes({
-            nodes: [skillData],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([skillData], result),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [skillData],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([skillData], result, position),
+            })
+          );
           showNotification('success', `${skillData.type} "${skillData.name}" created`);
         }
       } catch (error) {
@@ -2315,10 +2653,11 @@ function App() {
         showNotification('error', 'Could not save skill');
       }
     },
-    [updateVisualization, addNodesToVisualization, showNotification]
+    [updateVisualization, addNodesToVisualization, showNotification, createAtDropPosition]
   );
 
   const handleCreateAKC = useCallback(() => {
+    dropPositionRef.current = null;
     setEditingAKCData(null);
     setShowAKCDialog(true);
   }, []);
@@ -2335,12 +2674,14 @@ function App() {
           });
           showNotification('success', 'Knowledge collection updated');
         } else {
-          await persistNewNodes({
-            nodes: [nodeData],
-            addNodes: api.addNodes,
-            addNodesToVisualization,
-            toCanvas: (result) => createdNodesToCanvas([nodeData], result),
-          });
+          await createAtDropPosition((position) =>
+            persistNewNodes({
+              nodes: [nodeData],
+              addNodes: api.addNodes,
+              addNodesToVisualization,
+              toCanvas: (result) => createdNodesToCanvas([nodeData], result, position),
+            })
+          );
           showNotification('success', `Collection "${nodeData.name}" created`);
         }
       } catch (error) {
@@ -2348,12 +2689,83 @@ function App() {
         showNotification('error', 'Could not save knowledge collection');
       }
     },
-    [addNodesToVisualization, updateVisualization, showNotification]
+    [addNodesToVisualization, updateVisualization, showNotification, createAtDropPosition]
+  );
+
+  const openAppearance = useCallback((id) => {
+    const state = useGraphStore.getState();
+    const node = state.nodes.find((item) => item.id === id);
+    if (!node) return;
+    const keys = [`node:${id}`, `type:${node.nodeType || node.type}`];
+    setAppearanceError(null);
+    // The dialog's original appearance is fixed at open, so its revisions are
+    // too: Apply refuses once the store moves past them (NODE_SHAPES.md §
+    // Editor flow), and only this dialog's own settled write advances them.
+    setAppearanceDialog({
+      node,
+      revisions: Object.fromEntries(keys.map((key) => [key, state.shapeRevisions[key] || 0])),
+    });
+  }, []);
+
+  // Library writes for the appearance editor: each commits on its own and the
+  // session's library cache is refreshed to the committed revision.
+  const shapeLibrary = useMemo(() => {
+    const committed = (entry) => {
+      refreshSavedShapes(entry.revision);
+      return entry;
+    };
+    return {
+      usage: (key) => api.getSavedShapeUsage(key),
+      create: (...args) => api.createSavedShape(...args).then(committed),
+      update: (...args) => api.updateSavedShape(...args).then(committed),
+      remove: (...args) => api.deleteSavedShape(...args).then(committed),
+      refresh: () => refreshSavedShapes(null),
+    };
+  }, [refreshSavedShapes]);
+
+  const applyAppearance = useCallback(
+    (scope, selection) => {
+      const client = syncRef.current;
+      if (
+        appearancePendingRef.current ||
+        client
+          ?.getPendingOps()
+          .some((op) => op.op === 'node_shape_set' || op.op === 'type_shape_set')
+      ) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
+        return;
+      }
+      const { node, revisions } = appearanceDialog;
+      const state = useGraphStore.getState();
+      if (
+        !state.nodes.some((item) => item.id === node.id) ||
+        Object.entries(revisions).some(
+          ([key, revision]) => (state.shapeRevisions[key] || 0) !== revision
+        )
+      ) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'changed' });
+        return;
+      }
+      if (!client || client.sessionId !== sessionId) {
+        setAppearanceError({ dialog: appearanceDialog, code: 'pending' });
+        return;
+      }
+      const op = appearanceOperation(scope, node, selection, revisions, crypto.randomUUID());
+      appearancePendingRef.current = {
+        id: op.operation_id,
+        dialog: appearanceDialog,
+        edited: false,
+      };
+      setAppearanceError(null);
+      applyRemoteOp(op);
+      client.sendOps([op]);
+    },
+    [appearanceDialog, syncRef, sessionId, applyRemoteOp]
   );
 
   // Callback: Context menu action triggered from schema-defined callback items
   const handleContextMenuAction = useCallback(
-    (actionName, nodeId, nodeData) => {
+    (actionName) => {
       // Dispatch named callback actions from schema context_menu entries.
       // Add cases here as new callback-type actions are implemented.
       switch (actionName) {
@@ -2629,15 +3041,60 @@ function App() {
       onRemoteOps: (ops, meta = {}) => {
         if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => {
-          if (!handleStagedSessionOp(op)) {
-            applyRemoteOp(op);
-          } else if (op.op === 'graph_change_staged') {
-            refreshStagedEntities(op);
-          } else if (op.op === 'graph_changes_merged' || op.op === 'graph_changes_discarded') {
-            // Merged entities now read from the graph; discarded ones are
-            // back to what the graph holds, or gone.
-            refreshStagedEntities(op, { removeMissing: true });
-          }
+          const generation = sessionGenerationRef.current;
+          // Hold from receipt through the canvas commit, including queued work.
+          const client = syncRef.current;
+          const release = client?.holdLayoutSave() || null;
+          remoteOpsChainRef.current = remoteOpsChainRef.current
+            .then(async () => {
+              // An edit can start after the wait resolves but before this
+              // continuation runs: re-check after every await, then apply
+              // synchronously with the last check.
+              while (client?.hasLocalEdits()) await client.waitForLocalEdits();
+              if (generation !== sessionGenerationRef.current) {
+                release?.();
+                return;
+              }
+              const baselineResult = meta.applyBaseline?.();
+              if (meta.ownAppearance && appearancePendingRef.current?.id === op.operation_id) {
+                const pending = appearancePendingRef.current;
+                appearancePendingRef.current = null;
+                // A dialog kept open for further edits now builds on this write.
+                for (const key of Object.keys(pending.dialog.revisions)) {
+                  if (op.revisions?.[key] != null)
+                    pending.dialog.revisions[key] = op.revisions[key];
+                }
+                setAppearanceDialog((current) =>
+                  current === pending.dialog && !pending.edited ? null : current
+                );
+                setAppearanceError((error) => (error?.dialog === pending.dialog ? null : error));
+              }
+              if (baselineResult === false && !meta.currentAppearance) {
+                release?.();
+                return;
+              }
+              let deferredRelease = false;
+              try {
+                if (!handleStagedSessionOp(op)) {
+                  deferredRelease = op.op === 'nodes_added' || op.op === 'nodes_replaced';
+                  await applyRemoteOp(
+                    meta.ownAppearance ? meta.currentAppearance : op,
+                    release,
+                    generation
+                  );
+                } else if (op.op === 'graph_change_staged') {
+                  refreshStagedEntities(op);
+                } else if (
+                  op.op === 'graph_changes_merged' ||
+                  op.op === 'graph_changes_discarded'
+                ) {
+                  refreshStagedEntities(op, { removeMissing: true });
+                }
+              } finally {
+                if (!deferredRelease && release) releaseAfterDraw(release);
+              }
+            })
+            .catch(() => release?.());
         });
       },
       // This client's own annotation write just got acked with a fresh
@@ -2747,11 +3204,27 @@ function App() {
       // "someone else is editing this annotation" text the direct-acquire
       // denial already uses (GraphCanvas.jsx's annotationRemoteLocked).
       onDropped: (batch, status, body) => {
-        (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
+        (batch || []).forEach((op) => {
+          recentlyDroppedOpsRef.current.add(op);
+          if (op.operation_id && op.operation_id === appearancePendingRef.current?.id) {
+            const pending = appearancePendingRef.current;
+            appearancePendingRef.current = null;
+            setAppearanceError((error) =>
+              error && error.dialog !== pending.dialog
+                ? error
+                : {
+                    dialog: pending.dialog,
+                    code: body?.detail?.error === 'shape_revision_conflict' ? 'changed' : 'failed',
+                  }
+            );
+          }
+        });
         if (status === 409) {
           const detail = body && typeof body.detail === 'object' ? body.detail : null;
           if (detail && detail.error === 'field_conflict') {
             showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else if (detail?.error === 'shape_revision_conflict') {
+            showNotification('error', t('sessions.change_not_saved'));
           } else {
             showNotification('info', t('context_menu.annotation_remote_locked'));
           }
@@ -2760,6 +3233,8 @@ function App() {
         }
         resyncFromServer(sessionId);
       },
+      // A change made while a broadcast held autosave is saved now.
+      onHeldSaveReleased: () => requestSessionSnapshot(null),
     };
   }, [
     sessionId,
@@ -2772,6 +3247,7 @@ function App() {
     refreshStagedEntities,
     refreshStagedDiff,
     resyncFromServer,
+    requestSessionSnapshot,
     applyRemoteOp,
     applyAnnotationUpsertToCanvas,
     clearVisualization,
@@ -2799,7 +3275,7 @@ function App() {
           reflectSessionUrl(targetId);
           if (register) sessionStore.touchSession(targetId);
           setSessionsVersion((v) => v + 1);
-        } catch (error) {
+        } catch {
           showNotification('error', t('sessions.connect_error'));
         }
       });
@@ -2825,16 +3301,45 @@ function App() {
     [sessionId, switchToSession]
   );
 
-  // Copy the canonical share link for a session (contract §5 form
-  // `<base>/?session=<id>`), built from the current origin+path so it stays
-  // correct across deployments without needing the server base URL client-side.
+  const handleCopySession = useCallback(
+    async (targetId) => {
+      try {
+        if (targetId === sessionId) {
+          await new Promise((resolve) => requestSessionSnapshot(resolve));
+          await syncRef.current?.flushPending();
+        }
+        const source = sessionStore.listSessions().find((entry) => entry.id === targetId);
+        const created = await api.copySession(
+          targetId,
+          // The server caps session names at 200 code points; slicing UTF-16
+          // units could leave a lone surrogate the session store cannot save.
+          Array.from(t('sessions.copy_name', { name: source?.name || targetId }))
+            .slice(0, 200)
+            .join('')
+        );
+        sessionStore.touchSession(created.id);
+        sessionStore.renameSession(created.id, created.name);
+        switchToSession(created.id);
+      } catch (error) {
+        showNotification(
+          'error',
+          t(error?.status === 413 ? 'sessions.copy_size_error' : 'sessions.copy_error')
+        );
+      }
+    },
+    [sessionId, syncRef, requestSessionSnapshot, switchToSession, showNotification, t]
+  );
+
   const handleCopySessionLink = useCallback(
     async (targetId) => {
-      const url = new URL(window.location.href);
-      url.hash = '';
-      url.search = '';
-      url.searchParams.set('session', targetId);
-      const link = url.toString();
+      let link;
+      try {
+        ({ session_url: link } = await api.getSession(targetId));
+        if (!link) throw new Error();
+      } catch {
+        showNotification('error', t('sessions.link_unavailable'));
+        return;
+      }
       try {
         await navigator.clipboard.writeText(link);
       } catch {
@@ -2958,6 +3463,16 @@ function App() {
         // and U+0085 survives `String.prototype.trim()`, so a stored target
         // the shared fixture lists as valid resolved against the app's own
         // origin instead of the author's page.
+        //
+        // The trim also strips the C0 controls that are in the gate's
+        // whitespace class (U+0009-U+000D) from either end, so the gate's
+        // control check never sees those edge ones; every other C0 control
+        // (U+0000-U+0008, U+000E-U+001F) is not trimmed and is refused
+        // wherever it sits. That is accepted here: the trimmed string is what
+        // gets opened, so no scheme or destination is gained, and refusing a
+        // control-bearing target of any kind is the backend's rule
+        // (`_has_control_characters` in session_annotations.py), applied
+        // before a target is stored.
         const safeTarget = trimReferenceTarget(target);
         if (!isSafeReferenceUrl(safeTarget)) {
           showNotification('error', t('context_menu.reference_unsafe_target'));
@@ -2980,14 +3495,16 @@ function App() {
             showNotification('error', t('context_menu.reference_broken_target'));
             return;
           }
-          await addNodesToVisualization([details.node], []);
-          setFocusNodeId(target);
+          publishMembership('nodes_added', [details.node.id], {
+            nodes: [details.node],
+            onDrawn: () => setFocusNodeId(target),
+          });
         } catch {
           showNotification('error', t('context_menu.reference_broken_target'));
         }
       }
     },
-    [sessionId, switchToSession, showNotification, t, addNodesToVisualization, setFocusNodeId]
+    [sessionId, switchToSession, showNotification, t, publishMembership, setFocusNodeId]
   );
 
   const handleRenameSession = useCallback(
@@ -3219,13 +3736,14 @@ function App() {
       if (syncRef.current?.sessionId !== sessionAtStart) return;
       const nodes = found.map((r) => r?.node).filter(Boolean);
       if (nodes.length) {
-        addNodesToVisualization(
-          nodes,
-          found.flatMap((r) => r?.edges || [])
+        publishMembership(
+          'nodes_added',
+          nodes.map((n) => n.id),
+          { nodes, edges: found.flatMap((r) => r?.edges || []) }
         );
       }
     },
-    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, addNodesToVisualization]
+    [refreshStagedDiff, refreshStagedEntities, sessionId, syncRef, publishMembership]
   );
 
   const closeStagedReview = useCallback(() => setStagedReviewOpen(false), []);
@@ -3287,7 +3805,8 @@ function App() {
     }
   }, [showNotification, t]);
 
-  // Handle drop from toolbar onto canvas
+  // Handle drop from toolbar onto canvas: open the type's create dialog, and
+  // remember the drop point so the created node is drawn there.
   const handleDropCreateNode = useCallback(
     (nodeType, position) => {
       if (nodeType === 'Agent') {
@@ -3302,6 +3821,7 @@ function App() {
       } else {
         setCreateNodeType(nodeType);
       }
+      dropPositionRef.current = position || null;
     },
     [handleCreateAgent, handleCreateSubscription, handleCreateAKC, schema]
   );
@@ -3375,6 +3895,133 @@ function App() {
     setDeleteSessionDialog,
   };
 
+  const handleRequestRenameSession = useCallback(
+    (id) => {
+      const entry = sessions.find((s) => s.id === id);
+      setRenameDialog({ id, name: entry?.name || '' });
+    },
+    [sessions, setRenameDialog]
+  );
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+  const handleOpenConnectSession = useCallback(() => setConnectDialogOpen(true), []);
+  const handleToggleLock = useCallback(
+    () => setCanvasLocked(!canvasLocked),
+    [canvasLocked, setCanvasLocked]
+  );
+
+  // Activates an annotation tool as the toolbox's keyboard activation does.
+  const [annotationToolRequest, setAnnotationToolRequest] = useState(null);
+  const handleSelectAnnotationTool = useCallback((kind, options) => {
+    setAnnotationToolRequest((prev) => ({ kind, options, seq: (prev?.seq ?? 0) + 1 }));
+  }, []);
+
+  const openTemplateDialog = useCallback(
+    (selection = templateSelectionRef.current) => {
+      const selected = selection.map((node) => ({
+        id: node.id,
+        annotation: CANVAS_ANNOTATION_TYPES.has(node.type),
+      }));
+      setTemplateDialog({ sessionId, selected, id: ++templateDialogIdRef.current });
+    },
+    [sessionId]
+  );
+
+  // The command box's registry. Only this interactive view provides it; kiosk
+  // views render outside App and so register nothing.
+  const [commandRegistry] = useState(createCommandRegistry);
+  useEffect(
+    () =>
+      commandRegistry.register({
+        id: 'template:insert',
+        isAvailable: () => false,
+        execute: async (_context, template) => {
+          const targetId = sessionId;
+          const sync = ensureSyncConnected(targetId);
+          await sync?.whenReady();
+          if (sessionIdRef.current !== targetId || syncRef.current !== sync)
+            throw new Error('Session is no longer available');
+          await flushBeforeCapture();
+          await new Promise((resolve) => requestSessionSnapshot(resolve));
+          await sync?.flushPending();
+          if (sessionIdRef.current !== targetId || syncRef.current !== sync)
+            throw new Error('Session is no longer available');
+          await api.insertTemplate(targetId, { template_id: template.template_id });
+          if (sessionIdRef.current === targetId && syncRef.current === sync)
+            await resyncFromServer(targetId);
+        },
+      }),
+    [
+      commandRegistry,
+      sessionId,
+      ensureSyncConnected,
+      flushBeforeCapture,
+      requestSessionSnapshot,
+      syncRef,
+      resyncFromServer,
+    ]
+  );
+  const appCommands = useMemo(
+    () =>
+      buildAppCommands(
+        {
+          schema,
+          language,
+          sessionId,
+          sessionListed: sessions.some((entry) => entry.id === sessionId),
+          canvasLocked,
+        },
+        {
+          onCreateNode: handleCreateNodeForType,
+          onCreateAgent: handleCreateAgent,
+          onCreateSubscription: handleCreateSubscription,
+          onSaveView: handleToolbarSaveView,
+          onSaveTemplate: openTemplateDialog,
+          onCreateGroup: handleToolbarCreateGroup,
+          onCreateActiveKnowledgeCollection: handleCreateAKC,
+          onOpenSettings: handleOpenSettings,
+          onNewSession: handleNewSession,
+          onConnectSession: handleOpenConnectSession,
+          onRenameSession: handleRequestRenameSession,
+          onCopySession: handleCopySession,
+          onCopySessionLink: handleCopySessionLink,
+          onCopyTriggerUrl: handleCopyTriggerUrl,
+          onDeleteSession: handleRequestDeleteSession,
+          onToggleLock: handleToggleLock,
+          onEnterFullscreen: enterFullscreenCanvas,
+          onSelectAnnotationTool: handleSelectAnnotationTool,
+        }
+      ),
+    [
+      schema,
+      language,
+      sessionId,
+      sessions,
+      canvasLocked,
+      handleCreateNodeForType,
+      handleCreateAgent,
+      handleCreateSubscription,
+      handleToolbarSaveView,
+      openTemplateDialog,
+      handleToolbarCreateGroup,
+      handleCreateAKC,
+      handleOpenSettings,
+      handleNewSession,
+      handleOpenConnectSession,
+      handleRequestRenameSession,
+      handleCopySession,
+      handleCopySessionLink,
+      handleCopyTriggerUrl,
+      handleRequestDeleteSession,
+      handleToggleLock,
+      enterFullscreenCanvas,
+      handleSelectAnnotationTool,
+    ]
+  );
+  useEffect(() => {
+    const cleanups = appCommands.map((command) => commandRegistry.register(command));
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [commandRegistry, appCommands]);
+
   // The session drawer is non-modal (in either shell), so any dialog can be
   // stacked on top of it; while one is open, Escape belongs to that dialog.
   const suspendEscape = !!(
@@ -3401,36 +4048,37 @@ function App() {
   );
 
   const shellProps = {
+    flushBeforeCapture,
+    getCaptureState,
     sessionId,
+    onSaveView: handleToolbarSaveView,
     onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
     onNewSession: handleNewSession,
-    onConnectSession: () => setConnectDialogOpen(true),
+    onConnectSession: handleOpenConnectSession,
     onSelectSession: handleSelectSession,
-    onRenameSession: (id) => {
-      const entry = sessions.find((s) => s.id === id);
-      setRenameDialog({ id, name: entry?.name || '' });
-    },
+    onRenameSession: handleRequestRenameSession,
     onDeleteSession: handleRequestDeleteSession,
     onCopySessionLink: handleCopySessionLink,
+    onCopySession: handleCopySession,
     onCopyTriggerUrl: handleCopyTriggerUrl,
-    onOpenSettings: () => setSettingsOpen(true),
+    onOpenSettings: handleOpenSettings,
     canvasLocked,
-    onToggleLock: () => setCanvasLocked(!canvasLocked),
+    onToggleLock: handleToggleLock,
     suspendEscape,
     onCreateNodeForType: handleCreateNodeForType,
     onCreateAgent: handleCreateAgent,
     onCreateSubscription: handleCreateSubscription,
-    onSaveView: handleToolbarSaveView,
     onCreateGroup: handleToolbarCreateGroup,
     onCreateActiveKnowledgeCollection: handleCreateAKC,
     llmAvailable,
     akcShortName,
     onEnterFullscreen: enterFullscreenCanvas,
+    hideClassicSurfaces,
   };
 
-  return (
+  const appContent = (
     <div
       ref={appRef}
       className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
@@ -3450,6 +4098,7 @@ function App() {
           clearGroupsFlag={clearGroupsFlag}
           onExpand={handleExpand}
           onEdit={handleEdit}
+          onAppearance={openAppearance}
           onDelete={handleDelete}
           onHide={handleHide}
           onDeleteMultiple={handleDeleteMultiple}
@@ -3466,8 +4115,7 @@ function App() {
           onCreateGroup={handleCreateGroup}
           onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
-          onCreateSubscription={handleCreateSubscription}
-          onCreateAgent={handleCreateAgent}
+          captureNodesRef={captureNodesRef}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
           onReferenceOpen={handleReferenceOpen}
@@ -3479,6 +4127,7 @@ function App() {
           focusNodeId={focusNodeId}
           onFocusComplete={clearFocusNode}
           createGroupSignal={createGroupSignal}
+          annotationToolRequest={annotationToolRequest}
           saveViewSignal={saveViewSignal}
           closeMenusSignal={closeMenusSignal}
           groupsToRestore={pendingGroups}
@@ -3486,6 +4135,8 @@ function App() {
           annotationsToRestore={pendingAnnotations}
           onAnnotationsRestored={() => setPendingAnnotations(null)}
           onAnnotationChange={handleAnnotationChange}
+          onUndo={shortcutUndo}
+          onRedo={shortcutRedo}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
@@ -3527,11 +4178,17 @@ function App() {
           compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
+          savedShapes={savedShapes}
+          shapeOverrides={shapeOverrides}
+          typeShapes={typeShapes}
           onContextMenuAction={handleContextMenuAction}
+          onSaveSelectionAsTemplate={openTemplateDialog}
           stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
           stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
+            saveAsTemplate: t('template.save'),
             edit: t('context_menu.edit'),
+            appearance: t('node_appearance.title'),
             hide: t('context_menu.hide'),
             expand: t('context_menu.expand'),
             delete: t('context_menu.delete'),
@@ -3624,10 +4281,8 @@ function App() {
             groupLayer: t('context_menu.group_layer'),
             groupLayerFront: t('context_menu.group_layer_front'),
             groupLayerBack: t('context_menu.group_layer_back'),
-            annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
-            annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
-            annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
-            annotationNearbyText: t('context_menu.annotation_nearby_text'),
+            groupTextColor: t('context_menu.group_text_color'),
+            groupTextColorAuto: t('context_menu.group_text_color_auto'),
             annotationOpacity: t('context_menu.annotation_opacity'),
             editAnnotation: t('context_menu.edit_annotation'),
             ariaKindNote: t('context_menu.aria_kind_note'),
@@ -3765,6 +4420,7 @@ function App() {
         sessionId={sessionId}
         currentClientId={api.getClientId()}
         roster={roster}
+        onUndo={handleSessionUndo}
       />
       {clearConfirm && (
         <ConfirmDialog
@@ -3780,7 +4436,7 @@ function App() {
           cancelText={t('common.cancel')}
           confirmStyle="danger"
           onConfirm={() => {
-            clearVisualization();
+            clearBoard();
             setClearConfirm(null);
           }}
           onCancel={() => setClearConfirm(null)}
@@ -3791,6 +4447,55 @@ function App() {
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
         </div>
       )}
+      {templateDialog && (
+        <SaveTemplateDialog
+          key={templateDialog.id}
+          {...templateDialog}
+          schema={schema}
+          prepare={async () => {
+            const epoch = useGraphStore.getState().sessionEpoch;
+            const annotationPending = annotationSchedulerRef.current.clearPending();
+            const canvasPending = autoSaveTimerRef.current != null;
+            if (canvasPending) clearTimeout(autoSaveTimerRef.current);
+            autoSaveTimerRef.current = null;
+            return prepareTemplateCapture({
+              annotationPending,
+              canvasPending,
+              isCurrent: () =>
+                sessionIdRef.current === templateDialog.sessionId &&
+                useGraphStore.getState().sessionEpoch === epoch,
+              scheduleAnnotation: () => annotationSchedulerRef.current.schedule('text'),
+              scheduleCanvas: scheduleAutoSave,
+              prepare: async () => {
+                await flushBeforeCapture(() => buildCaptureContents(getCaptureState()));
+                await new Promise((resolve) => requestSessionSnapshot(resolve));
+                if (
+                  sessionIdRef.current !== templateDialog.sessionId ||
+                  useGraphStore.getState().sessionEpoch !== epoch
+                )
+                  throw new Error();
+                const sync = syncForSession(syncRef.current, templateDialog.sessionId);
+                if (!sync) return null;
+                if (
+                  sync.sessionId !== templateDialog.sessionId ||
+                  sessionIdRef.current !== templateDialog.sessionId
+                )
+                  throw new Error();
+                await sync.flushPending();
+                const source = await api.getSession(templateDialog.sessionId, { resolve: true });
+                if (sessionIdRef.current !== templateDialog.sessionId || syncRef.current !== sync)
+                  throw new Error();
+                return source;
+              },
+            });
+          }}
+          onClose={() => setTemplateDialog(null)}
+          onSaved={(counts) => {
+            setTemplateDialog((current) => (current === templateDialog ? null : current));
+            showNotification('success', t('template.saved', counts));
+          }}
+        />
+      )}
       <NodeHistoryPanel />
 
       {notification && (
@@ -3799,7 +4504,10 @@ function App() {
           role={notification.type === 'error' ? 'alert' : 'status'}
           aria-live={notification.type === 'error' ? 'assertive' : 'polite'}
         >
-          <span>{notification.message}</span>
+          <span>
+            {notification.message}{' '}
+            {notification.url && <a href={notification.url}>{t('save_view.open_link')}</a>}
+          </span>
           <button
             onClick={() => setNotification(null)}
             aria-label={t('common.close')}
@@ -3865,6 +4573,26 @@ function App() {
         </div>
       )}
 
+      {appearanceDialog && (
+        <NodeAppearanceDialog
+          node={appearanceDialog.node}
+          schema={schema}
+          color={getNodeColor(appearanceDialog.node.nodeType || appearanceDialog.node.type)}
+          shapeOverrides={shapeOverrides}
+          typeShapes={typeShapes}
+          nodes={nodes}
+          savedShapes={savedShapes}
+          savedShapesRevision={savedShapesRevision}
+          library={shapeLibrary}
+          error={appearanceError?.dialog === appearanceDialog ? appearanceError.code : null}
+          onDraftChange={() => {
+            const pending = appearancePendingRef.current;
+            if (pending?.dialog === appearanceDialog) pending.edited = true;
+          }}
+          onApply={applyAppearance}
+          onClose={() => setAppearanceDialog(null)}
+        />
+      )}
       <AppDialogs
         dialogs={dialogs}
         t={t}
@@ -3898,6 +4626,12 @@ function App() {
       <GuideOverlay />
       <AppInstallPrompt />
     </div>
+  );
+
+  return (
+    <CommandRegistryContext.Provider value={commandRegistry}>
+      {appContent}
+    </CommandRegistryContext.Provider>
   );
 }
 

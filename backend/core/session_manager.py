@@ -34,10 +34,15 @@ the single entry point used by the REST/SSE endpoints and by MCP pushes:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
+import functools
 import json
 import logging
 import time
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .image_ingest import (
@@ -46,7 +51,15 @@ from .image_ingest import (
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
-from .session_annotations import IMAGE_TYPE, annotation_type_of, is_embedded_image_url
+from .session_annotations import (
+    IMAGE_TYPE,
+    annotation_type_of,
+    image_annotation_error,
+    is_embedded_image_url,
+    reference_annotation_error,
+    sanitize_saved_view_metadata,
+    _validate_generic_content,
+)
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
@@ -56,12 +69,18 @@ from .session_hub import (
     Subscription,
 )
 from .session_store import (
+    MAX_SESSION_DESCRIPTION_CHARS,
     SERVER_ONLY_OPS,
     STATE_OPS,
+    AppearanceVersionRequired,
     OpError,
     Session,
     SessionRetired,
+    SessionLimitReached as SessionLimitReached,
     SessionStore,
+    _empty_state,
+    _now_iso,
+    _validate_annotation,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -75,6 +94,8 @@ from .write_modes import (
 from . import layer_store
 
 logger = logging.getLogger(__name__)
+
+_deferred_staging = contextvars.ContextVar("deferred_staging", default=None)
 
 # AnnotationFieldConflict is raised by SessionStore.apply_state_op and
 # propagates through this module's write paths unchanged; callers import it
@@ -168,10 +189,6 @@ class OpBatchTooLarge(Exception):
     pass
 
 
-class SessionLimitReached(Exception):
-    pass
-
-
 class AnnotationNotFound(Exception):
     """No annotation with the given id exists in this session (or it was just deleted)."""
 
@@ -250,6 +267,32 @@ class RevisionConflict(Exception):
         super().__init__(f"expected revision {expected}, session is at {actual}")
         self.expected = expected
         self.actual = actual
+
+
+class CaptureRefused(Exception):
+    """A saved-view capture refused before anything was published; ``code``
+    is its stable error code (``staged_changes``, ``invalid_presentation``)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+# The presentation a saved-view capture keeps. Everything else in the state
+# (appearance receipts and other bookkeeping) starts empty.
+_CAPTURED_STATE = (
+    "node_refs",
+    "annotations",
+    "positions",
+    "hidden_node_ids",
+    "hidden_edge_ids",
+    "dimmed_node_ids",
+    "dimmed_edge_ids",
+    "edge_intensity",
+    "shape_overrides",
+    "type_shapes",
+    "shape_revisions",
+)
 
 
 class LeaseConflict(Exception):
@@ -438,6 +481,27 @@ def _document_bytes(snapshot: Dict[str, Any], session: Session) -> int:
     return total
 
 
+def _pushed_view(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The layout a pushed result carries, as a ``nodes_replaced`` view.
+
+    Passed through unfiltered, so the store validates it exactly as it does a
+    browser's replace and refuses the whole load when any part is malformed.
+    Only a result in the session's annotation format (``annotation_document``)
+    replaces the annotations; a legacy-only view leaves them as they are.
+    """
+    view = {
+        key: result[key]
+        for key in ("positions", "hidden_node_ids")
+        if result.get(key) is not None
+    }
+    document = result.get("annotation_document")
+    if isinstance(document, dict):
+        document = document.get("annotations")
+    if document is not None:
+        view["annotations"] = document
+    return view
+
+
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
@@ -529,14 +593,33 @@ def _annotation_embedded_image_bytes(annotation: Any) -> int:
     return data_url_byte_length(url)
 
 
-def _op_embedded_image_bytes(op: Dict[str, Any]) -> int:
-    """``_annotation_embedded_image_bytes`` for an ops-batch entry: only
-    ``annotation_created``/``annotation_updated`` ops can carry an
-    annotation payload at all.
+def _check_op_image_sizes(op: Dict[str, Any]) -> int:
+    """Raise ``ImageBudgetExceeded`` if an embedded image *op* carries is over
+    the per-image limit; else return the JSON length of their data URLs.
+
+    ``annotation_created``/``annotation_updated`` carry one annotation and
+    ``nodes_replaced`` a loaded view's whole list, so a view load is held to
+    the per-image limit whether a browser batch or a push applies it.
     """
-    if op.get("op") not in ("annotation_created", "annotation_updated"):
+    if op.get("op") in ("annotation_created", "annotation_updated"):
+        annotations = [op.get("annotation")]
+    elif op.get("op") == "nodes_replaced" and isinstance(op.get("annotations"), list):
+        annotations = op["annotations"]
+    else:
         return 0
-    return _annotation_embedded_image_bytes(op.get("annotation"))
+    url_bytes = 0
+    for annotation in annotations:
+        image_bytes = _annotation_embedded_image_bytes(annotation)
+        if not image_bytes:
+            continue
+        if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
+            raise ImageBudgetExceeded(
+                f"embedded image is {image_bytes} bytes, exceeding "
+                f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
+                "per-image limit"
+            )
+        url_bytes += len(json.dumps(annotation["image"]["url"]))
+    return url_bytes
 
 
 def _check_image_budgets(
@@ -591,6 +674,134 @@ def _check_image_budgets(
         )
 
 
+def _check_session_totals(
+    session: "Session",
+    snapshot: Dict[str, Any],
+    *,
+    max_session_image_bytes: int,
+    max_session_document_bytes: int,
+) -> None:
+    """Raise ``ImageBudgetExceeded`` if the session, with its ops already
+    applied in memory (``snapshot`` from ``_detached_snapshot``), is over the
+    session image or document budget.
+
+    Shared by a browser batch (``apply_ops``) and a pushed result's membership
+    op, so the same view load is admitted or refused on both paths; both
+    check each image against the per-image limit first
+    (``_check_op_image_sizes``).
+    """
+    total_image_bytes = _session_image_bytes(session)
+    if total_image_bytes > max_session_image_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session's total "
+            f"embedded image data to {total_image_bytes} "
+            f"bytes, over the {max_session_image_bytes}-byte "
+            "session limit"
+        )
+    total_doc_bytes = _document_bytes(snapshot, session)
+    if total_doc_bytes > max_session_document_bytes:
+        raise ImageBudgetExceeded(
+            f"this batch would bring the session document to "
+            f"{total_doc_bytes} bytes, over the "
+            f"{max_session_document_bytes}-byte document limit"
+        )
+
+
+# Push actions whose nodes a browser renders as the whole view, and those it
+# merges into the view (``update_in_visualization`` appends unknown nodes).
+_REPLACING_ACTIONS = frozenset(
+    {"load_visualization", "replace_visualization", "clear_visualization"}
+)
+_ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"})
+# Activity actor for an auto-add agent's pushes: the prefix plus its agent id.
+AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
+
+
+def _refresh_annotation_ids(
+    state: Dict[str, Any], *, relink: bool = True
+) -> Dict[str, str]:
+    """Give every annotation a fresh id; returns source id to fresh id.
+    ``relink=False`` leaves references to annotations for the caller."""
+    ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
+
+    # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
+    # resolved by id alone, so any reference naming a copied annotation
+    # follows it; a node-typed one keeps the shared node id.
+    def remap_attachment(value):
+        if isinstance(value, dict):
+            if value.get("target_type") in (None, "annotation"):
+                target = value.get("target_id")
+                if isinstance(target, str) and target in ids:
+                    value["target_id"] = ids[target]
+            for child in value.values():
+                remap_attachment(child)
+        elif isinstance(value, list):
+            for child in value:
+                remap_attachment(child)
+
+    # Every copied annotation lands on a fresh id, so it is a new write as
+    # duplicate_annotation's is: a legacy non-embedded image URL or an
+    # unsafe reference target refuses the whole copy before anything
+    # is allocated.
+    for annotation in state["annotations"]:
+        error = image_annotation_error(annotation) or reference_annotation_error(
+            annotation, require_complete=True
+        )
+        if error:
+            raise OpError(error)
+    for annotation in state["annotations"]:
+        annotation["id"] = ids[annotation["id"]]
+        annotation["version"] = 1
+        annotation["field_versions"] = {}
+        annotation.pop("created_by", None)
+        annotation.pop("updated_by", None)
+        if relink:
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
+            remap_attachment(annotation)
+    return ids
+
+
+def validate_captured_annotations(state: Dict[str, Any], max_annotations: int) -> None:
+    annotations = state["annotations"]
+    if not isinstance(annotations, list):
+        raise CaptureRefused("invalid_presentation")
+    if len(annotations) > max_annotations:
+        raise OpBatchTooLarge()
+    try:
+        seen = set()
+        for annotation in annotations:
+            validated = _validate_annotation(annotation, require_id=True)
+            ann_id = validated["id"]
+            if not ann_id or ann_id in seen:
+                raise OpError("invalid annotation id")
+            seen.add(ann_id)
+            members = annotation.get("member_node_ids", [])
+            if not isinstance(members, list) or any(
+                not isinstance(member, str) for member in members
+            ):
+                raise OpError("invalid group members")
+            if _validate_generic_content(validated["type"], annotation):
+                raise OpError("invalid annotation content")
+            content = annotation.get("content")
+            if isinstance(content, dict) and validated["type"] != "reference":
+                if _validate_generic_content(validated["type"], content):
+                    raise OpError("invalid annotation content")
+        metadata = {"annotations": annotations}
+        if sanitize_saved_view_metadata(metadata) != metadata:
+            raise OpError("unsafe annotation")
+        _check_op_image_sizes({"op": "nodes_replaced", "annotations": annotations})
+        if (
+            sum(_annotation_embedded_image_bytes(a) for a in annotations)
+            > DEFAULT_MAX_SESSION_IMAGE_BYTES
+        ):
+            raise OpBatchTooLarge()
+    except (OpError, TypeError, ValueError) as exc:
+        raise CaptureRefused("invalid_presentation") from exc
+
+
 class SessionManager:
     """High-level façade over the session store, event bus, presence, selection
     claims and edit leases."""
@@ -615,6 +826,14 @@ class SessionManager:
         write_modes: Optional[WriteModes] = None,
     ) -> None:
         self.store = store
+        from backend.core.session_store import InMemorySessionPersistenceBackend
+        from backend.core.template_store import TemplateStore
+
+        self.template_store = TemplateStore(InMemorySessionPersistenceBackend())
+        # A template id never names a session; creation holds the template
+        # store's transaction (see _creating_session) so the check is atomic
+        # with save_template's, which takes the same locks in the same order.
+        store.id_reserved = self._template_holds
         # Every session is direct without one (docs/SESSION_OVERLAY_CONTRACT.md
         # §5): nothing can be staged, nothing is ever retired.
         self.write_modes = write_modes or WriteModes()
@@ -655,6 +874,14 @@ class SessionManager:
         # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._pending_pushes: set[asyncio.Task] = set()
+        # The app's loop, so a push from a worker thread is applied there.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # The ShapeLibrary whose revision catch-up carries, when one is wired.
+        self.shape_library = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     @staticmethod
     def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
@@ -757,6 +984,19 @@ class SessionManager:
 
     # ---------------- session CRUD ----------------
 
+    def _template_holds(self, session_id: str) -> bool:
+        return self.template_store.holds(session_id)
+
+    @contextmanager
+    def _creating_session(self):
+        # Match template mutations and shape writes: sessions before templates.
+        with (
+            self.store._lock,
+            self.store._backend.transaction(),
+            self.template_store._backend.transaction(),
+        ):
+            yield
+
     def create_session(
         self, name: Optional[str] = None, write_mode: Optional[str] = None
     ) -> Session:
@@ -767,37 +1007,322 @@ class SessionManager:
         Raises WriteModeRefused for a mode this deployment cannot hold.
         """
         mode, source = self.write_modes.choose(write_mode)
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
-        return self.store.create(
-            name,
-            write_mode=mode,
-            write_mode_source=source,
-            on_allocate=(
-                self.write_modes.record_staged if mode == WRITE_MODE_STAGED else None
-            ),
+        with self._creating_session():
+            return self.store.create_with_capacity(
+                name,
+                max_sessions=self._max_sessions,
+                write_mode=mode,
+                write_mode_source=source,
+                on_allocate=(
+                    self.write_modes.record_staged
+                    if mode == WRITE_MODE_STAGED
+                    else None
+                ),
+            )[0]
+
+    def copy_session(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        authorize_staging: Optional[Callable[[], None]] = None,
+        staged_by: str = "anonymous",
+        assign_access: Optional[Callable[[str], None]] = None,
+    ) -> Session:
+        """Copy a session: its canvas, write mode and staged graph changes.
+
+        The copy is named ``name``, else "Copy of <source name>". Staged
+        entries are copied into the copy's own layer, so a copy never changes
+        the graph; ``authorize_staging`` runs first when there are any, and
+        refuses by raising. The copied entries are staged by ``staged_by``,
+        the copier, at the copy time. ``assign_access`` runs with the copy's
+        id before it is saved, so access assignments exist before the copy
+        does; if it raises, nothing is saved. Synchronous callers refuse an in-flight state
+        batch. REST holds the same source lock, then calls the internal method
+        without yielding. Like create_session, copying allocates through
+        store.create without consuming an MCP rate-limit bucket; the session
+        limit still applies.
+        """
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        return self._copy_session(
+            session_id, name, authorize_staging, staged_by, assign_access
         )
 
-    def get_or_create(self, session_id: str) -> Tuple[Session, bool]:
+    async def copy_session_async(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        authorize_staging: Optional[Callable[[], None]] = None,
+        staged_by: str = "anonymous",
+        assign_access: Optional[Callable[[str], None]] = None,
+    ) -> Session:
+        async with self._lock(session_id):
+            return self._copy_session(
+                session_id, name, authorize_staging, staged_by, assign_access
+            )
+
+    def _copy_session(
+        self,
+        session_id: str,
+        name: Optional[str],
+        authorize_staging: Optional[Callable[[], None]],
+        staged_by: str,
+        assign_access: Optional[Callable[[str], None]],
+    ) -> Session:
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        self.store.check_capacity(self._max_sessions)
+        # Check before allocating an id or cloning embedded images. History is
+        # deliberately excluded from both the copy and its document budget.
+        # Measured as apply_ops measures the document (ASCII-escaped), so a
+        # copy that fits here still accepts later op batches.
+        name = name or f"Copy of {source.name or 'Untitled session'}"
+        document = {
+            "state": source.state,
+            "name": name,
+            "description": source.description,
+        }
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        entries = (
+            self.write_modes.layer_store.load_layer(session_id)
+            if mode == WRITE_MODE_STAGED
+            else []
+        )
+        if entries and authorize_staging is not None:
+            authorize_staging()
+        state = copy.deepcopy(source.state)
+        # Appearance receipts deduplicate the source's own op retries.
+        state["shape_operation_ids"] = {}
+        _refresh_annotation_ids(state)
+        document["state"] = state
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+
+        staged_copies = []
+
+        def allocate(copy_id: str) -> None:
+            if mode == WRITE_MODE_STAGED:
+                allocate_staged(copy_id)
+            if assign_access is not None:
+                try:
+                    assign_access(copy_id)
+                except BaseException:
+                    if mode == WRITE_MODE_STAGED:
+                        self.write_modes.retire(copy_id, require_empty=False)
+                    raise
+            if mode == WRITE_MODE_STAGED:
+                staged_copies.append(copy_id)
+
+        def allocate_staged(copy_id: str) -> None:
+            self.write_modes.record_staged(copy_id)
+            if not entries:
+                return
+            # The copy's own versions of the source's entries: they belong to
+            # its layer, predate its first op and are staged by the copier.
+            token = uuid.uuid4().hex
+            staged_at = datetime.now(timezone.utc).isoformat()
+            try:
+                self.write_modes.layer_store.stage(
+                    copy_id,
+                    [
+                        {
+                            **entry,
+                            "session_id": copy_id,
+                            "session_seq": 0,
+                            "stage_token": token,
+                            "staged_by": staged_by,
+                            "staged_at": staged_at,
+                        }
+                        for entry in entries
+                    ],
+                    max_entries=self.write_modes.max_entries,
+                )
+            except Exception:
+                self.write_modes.retire(copy_id, require_empty=False)
+                raise
+
+        try:
+            with self._creating_session():
+                return self.store.create_with_capacity(
+                    name,
+                    max_sessions=self._max_sessions,
+                    description=source.description,
+                    state=state,
+                    write_mode=mode,
+                    write_mode_source="explicit",
+                    on_allocate=allocate,
+                )[0]
+        except BaseException:
+            # The document save failed after allocation: the staged record and
+            # copied entries must not outlive the copy that was never published.
+            for copy_id in staged_copies:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
+
+    def capture_source(
+        self, session_id: str, expected_revision: int
+    ) -> Tuple[Session, str]:
+        """Check a source at the shared session capture boundary."""
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if source.seq != expected_revision:
+            raise RevisionConflict(expected_revision, source.seq)
+        try:
+            mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        except WriteModeRefused:
+            # A staged source whose layer this deployment cannot read.
+            raise CaptureRefused("staged_changes")
+        if mode == WRITE_MODE_STAGED and self.write_modes.layer_store.load_layer(
+            session_id
+        ):
+            raise CaptureRefused("staged_changes")
+        return source, mode
+
+    def save_session_view(
+        self,
+        session_id: str,
+        name: str,
+        expected_revision: int,
+        *,
+        authorize_capture: Callable[[Dict[str, Any]], List[str]],
+        relink_capture: Callable[[Dict[str, Any], Dict[str, str]], None],
+        assign_access: Callable[[str], None],
+        revoke_access: Callable[[str], None],
+    ) -> Tuple[Session, List[str]]:
+        """Capture a session's presentation at ``expected_revision`` into a
+        new session named ``name``; returns it and the missing node ids
+        ``authorize_capture`` reported for the captured state.
+        ``relink_capture`` points the copied annotations' links at their fresh
+        ids.
+
+        Runs without yielding and refuses an in-flight state batch, so the
+        checks, snapshot and publication see one revision. Access is assigned
+        only after publication; if that fails, ``revoke_access`` runs and the
+        copy is removed before the failure propagates.
+        """
+        source, mode = self.capture_source(session_id, expected_revision)
+        self.store.check_capacity(self._max_sessions)
+        state = _empty_state()
+        state.update(
+            copy.deepcopy(
+                {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
+            )
+        )
+        validate_captured_annotations(state, self.store._max_annotations)
+        annotations = state["annotations"]
+        # A removed node's revision outlives it; copying it would carry an id
+        # the capture neither authorizes nor reports.
+        on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}
+        state["shape_revisions"] = {
+            k: v
+            for k, v in state["shape_revisions"].items()
+            if k.startswith("type:") or k in on_canvas
+        }
+        document = {"state": state, "name": name, "description": source.description}
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        # Authorize the original references before filtering group membership.
+        missing = authorize_capture(state)
+        try:
+            ids = _refresh_annotation_ids(state, relink=False)
+        except OpError as exc:
+            raise CaptureRefused("invalid_presentation") from exc
+        relink_capture(state, ids)
+        for annotation in annotations:
+            annotation["updated_at"] = _now_iso()
+        # Fresh annotation ids and timestamps can grow the document: checked again.
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
+        staged = []
+
+        def allocate(copy_id: str) -> None:
+            self.write_modes.record_staged(copy_id)
+            staged.append(copy_id)
+
+        try:
+            with self._creating_session():
+                session = self.store.create_with_capacity(
+                    name,
+                    max_sessions=self._max_sessions,
+                    description=source.description,
+                    state=state,
+                    write_mode=mode,
+                    write_mode_source="explicit",
+                    on_allocate=allocate if mode == WRITE_MODE_STAGED else None,
+                )[0]
+        except BaseException:
+            for copy_id in staged:
+                self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        try:
+            assign_access(session.id)
+        except BaseException:
+            try:
+                revoke_access(session.id)
+            finally:
+                self.store.delete(session.id)
+                for copy_id in staged:
+                    self.write_modes.retire(copy_id, require_empty=False)
+            raise
+        return session, missing
+
+    def get_or_create(
+        self, session_id: str, *, initial_op: Optional[Dict[str, Any]] = None
+    ) -> Tuple[Session, bool]:
         session = self.store.get(session_id)
         if session is not None:
             return session, False
-        if self.store.session_count() >= self._max_sessions:
-            raise SessionLimitReached()
         # Materialising a session the browser already holds is never a create
         # request, so it is direct whatever the graph default (§5.1): a staged
         # session is created explicitly, where the hook is asked.
+        applied = []
+
+        def prepare(session: Session) -> None:
+            if initial_op is not None:
+                op = self.store.apply_state_op(session, initial_op)
+                _check_session_totals(
+                    session,
+                    _detached_snapshot(session),
+                    max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                    max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                )
+                if op is not None:
+                    applied.append(op)
+
+        def publish_initial(session: Session) -> None:
+            if applied:
+                self.bus.publish(
+                    session.id,
+                    {
+                        "type": "op",
+                        "client_id": initial_op["client_id"],
+                        "op": applied[0],
+                        "seq": applied[0]["seq"],
+                    },
+                )
+
         try:
-            return self.store.get_or_create(
-                session_id,
-                write_mode_source=(
-                    "explicit"
-                    if self.write_modes.default_mode == WRITE_MODE_STAGED
-                    else "inherited"
-                ),
-            )
+            with self._creating_session():
+                session, created = self.store.get_or_create(
+                    session_id,
+                    prepare=prepare,
+                    on_publish=publish_initial,
+                    max_sessions=self._max_sessions,
+                    write_mode_source=(
+                        "explicit"
+                        if self.write_modes.default_mode == WRITE_MODE_STAGED
+                        else "inherited"
+                    ),
+                )
         except SessionRetired:
             raise SessionNotFound() from None
+        return session, created
 
     def write_mode_of(self, session: Session) -> Dict[str, str]:
         """The write mode a response describing ``session`` reports (§5.1).
@@ -926,6 +1451,20 @@ class SessionManager:
             raise SessionSeqConflict(expected_session_seq, session.seq)
         return session.seq
 
+    @contextmanager
+    def defer_staged_events(self, session_id: str):
+        """Collect staged versions and notifications until the caller succeeds."""
+        pending = {"session_id": session_id, "entries": [], "events": []}
+        token = _deferred_staging.set(pending)
+        try:
+            yield pending
+        finally:
+            _deferred_staging.reset(token)
+
+    def publish_staged_events(self, pending: Dict[str, Any]) -> None:
+        for event in pending["events"]:
+            self.bus.publish(pending["session_id"], event)
+
     def stage_graph_change(
         self,
         session_id: str,
@@ -939,8 +1478,7 @@ class SessionManager:
         the sequence number the op takes - and returns the op's payload:
         ``{"entries": [...], "removals": [...]}``. It is the commit point:
         if it raises, nothing changed. After it, the op is applied, persisted
-        and broadcast; a failure to persist the session document is logged
-        and does not undo a change the layer already holds.
+        and broadcast. A session persistence failure propagates to the caller.
 
         Synchronous like ``apply_layout``: refuses with ``LayoutBusy`` while
         an ``apply_ops`` batch holds the session's lock.
@@ -949,43 +1487,53 @@ class SessionManager:
             raise SessionNotFound()
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-        if expected_session_seq is not None and expected_session_seq != session.seq:
-            raise SessionSeqConflict(expected_session_seq, session.seq)
-        payload = commit(session.seq + 1)
-        op = {
-            "op": "graph_change_staged",
-            # What changed, not the main-graph snapshot each entry keeps as
-            # its base nor the writer's resolved actor id: the stream reaches
-            # anyone holding the session id, and those are the diff's, read
-            # with authorization.
-            "entries": [
-                {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
-                for entry in payload.get("entries", [])
-            ],
-            "removals": payload.get("removals", []),
-            "client_id": GRAPH_STAGING_CLIENT_ID,
-        }
-        applied = self.store.apply_state_op(session, op, record_activity=False)
-        try:
-            self.store.persist(session)
-        except Exception:
-            logger.exception(
-                "staged change in session %s landed; persisting its seq failed",
-                session_id,
-            )
-        self.bus.publish(
-            session_id,
-            {
-                "type": "op",
+        # The marker is taken before the commit point, so failing to take it
+        # leaves the layer untouched; the seq check, the commit stamped with
+        # the next seq and the op that takes that seq are one live write.
+        with self.store.writing(session_id):
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+            if expected_session_seq is not None and expected_session_seq != session.seq:
+                raise SessionSeqConflict(expected_session_seq, session.seq)
+            payload = commit(session.seq + 1)
+            versions = [
+                {
+                    "kind": e["kind"],
+                    "entity_id": e["entity_id"],
+                    "version": layer_store.entry_version(e),
+                }
+                for e in payload.get("entries", [])
+            ]
+            pending = _deferred_staging.get()
+            if pending is not None and pending["session_id"] == session_id:
+                pending["entries"].extend(versions)
+            op = {
+                "op": "graph_change_staged",
+                # What changed, not the main-graph snapshot each entry keeps as
+                # its base nor the writer's resolved actor id: the stream reaches
+                # anyone holding the session id, and those are the diff's, read
+                # with authorization.
+                "entries": [
+                    {k: v for k, v in entry.items() if k not in _STREAM_WITHHELD}
+                    for entry in payload.get("entries", [])
+                ],
+                "removals": payload.get("removals", []),
                 "client_id": GRAPH_STAGING_CLIENT_ID,
-                "op": applied,
-                "seq": applied["seq"],
-            },
-        )
-        return applied
+            }
+            applied = self.store.apply_state_op(session, op, record_activity=False)
+            self.store.persist(session)
+        event = {
+            "type": "op",
+            "client_id": GRAPH_STAGING_CLIENT_ID,
+            "op": applied,
+            "seq": applied["seq"],
+        }
+        if pending is not None and pending["session_id"] == session_id:
+            pending["events"].append(event)
+        else:
+            self.bus.publish(session_id, event)
+        return {**applied, "entry_versions": versions}
 
     def check_layer_op(self, session_id: str) -> None:
         """Refuse a discard or merge up front, as a staging op is refused:
@@ -1028,21 +1576,25 @@ class SessionManager:
                 session_id,
             )
             return None
+        # The commit point is behind us, so a failure to take the marker is
+        # caught and logged like a failed op, never raised.
         try:
-            applied = self.store.apply_state_op(
-                session,
-                {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
-                record_activity=True,
-            )
+            with self.store.writing(session_id):
+                applied = self.store.apply_state_op(
+                    session,
+                    {**op, "client_id": GRAPH_STAGING_CLIENT_ID},
+                    record_activity=True,
+                )
+                try:
+                    self.store.persist(session)
+                except Exception:
+                    logger.exception(
+                        "layer of session %s changed; persisting its seq failed",
+                        session_id,
+                    )
         except Exception:
             logger.exception("layer of session %s changed; its op failed", session_id)
             return None
-        try:
-            self.store.persist(session)
-        except Exception:
-            logger.exception(
-                "layer of session %s changed; persisting its seq failed", session_id
-            )
         self.bus.publish(
             session_id,
             {
@@ -1077,14 +1629,36 @@ class SessionManager:
         still take effect rather than 404, or the name is lost the moment the
         session later materialises with a null server name.
         """
-        self.get_or_create(session_id)
+        actor = client_id or "rest"
+        rename_op = {"op": "session_renamed", "name": name}
+        op = {**rename_op, "client_id": actor}
+        if self.store.get(session_id) is None:
+            # Charge and validate before publishing, as apply_ops does.
+            if (
+                1 > self._max_ops
+                or len(json.dumps(rename_op)) > self._max_op_batch_bytes
+            ):
+                raise OpBatchTooLarge()
+            if not isinstance(actor, str) or not actor:
+                raise OpError("client_id is required")
+            if 1 > self._bucket.capacity:
+                raise OpBatchTooLarge()
+            if not self._bucket.consume(actor, 1):
+                raise RateLimited()
+            session, created = self.get_or_create(session_id, initial_op=op)
+            if created:
+                return session
+            precharged = True
+        else:
+            precharged = False
         await self.apply_ops(
             session_id,
-            client_id or "rest",
+            actor,
             None,
             [
                 {"op": "session_renamed", "name": name},
             ],
+            precharged=precharged,
         )
         return self.store.get(session_id)
 
@@ -1168,14 +1742,48 @@ class SessionManager:
             self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
         ):
             raise RateLimited()
-        self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-
         op = {"op": "session_renamed", "name": name, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
+        self._apply_op_sync(session, session_id, actor, op)
+        return session
+
+    def describe_session_sync(
+        self,
+        session_id: str,
+        description: Optional[str],
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
+    ) -> Session:
+        """Set or clear a session's description, as ``rename_session_sync``
+        sets its name: a ``session_described`` op applied inline, refused with
+        ``LayoutBusy`` while an ``apply_ops`` batch holds the lock. The
+        description is checked before the rate token and ``get_or_create``, so
+        a refused call spends nothing and materialises no session.
+        """
+        if not is_valid_session_id(session_id):
+            raise SessionNotFound()
+        if description is not None and not isinstance(description, str):
+            raise OpError("'description' must be a string or null")
+        if description is not None and len(description) > MAX_SESSION_DESCRIPTION_CHARS:
+            raise OpError(
+                f"session description exceeds {MAX_SESSION_DESCRIPTION_CHARS} characters"
+            )
+        actor = client_id or "rest"
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
+        ):
+            raise RateLimited()
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        op = {"op": "session_described", "description": description, "client_id": actor}
+        session, created = self.get_or_create(session_id, initial_op=op)
+        if created:
+            return session
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
@@ -1252,6 +1860,9 @@ class SessionManager:
         *,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+        appearance_version: Optional[int] = None,
+        authorize_appearance: Optional[Callable[[], None]] = None,
+        precharged: bool = False,
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1268,21 +1879,16 @@ class SessionManager:
         # reference-only ops, not a multi-hundred-KB picture
         # (smallfix-embedded-image-over-op-batch-cap-immovable) — so it is
         # excluded from this sum rather than making every non-image op share a
-        # cap wide enough to admit one.
+        # cap wide enough to admit one. A `nodes_replaced` view load is
+        # charged for everything but its embedded images' data URLs.
         non_image_bytes = 0
         for op in ops:
             if not isinstance(op, dict):
                 continue
-            image_bytes = _op_embedded_image_bytes(op)
-            if image_bytes:
-                if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
-                    raise ImageBudgetExceeded(
-                        f"embedded image is {image_bytes} bytes, exceeding "
-                        f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
-                        "per-image limit"
-                    )
+            image_url_bytes = _check_op_image_sizes(op)
+            if image_url_bytes and op.get("op") != "nodes_replaced":
                 continue
-            non_image_bytes += len(json.dumps(op))
+            non_image_bytes += len(json.dumps(op)) - image_url_bytes
         if non_image_bytes > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
@@ -1293,7 +1899,7 @@ class SessionManager:
         # retryable rate limit — the same rule as ``_consume_mcp_budget``.
         if cost > self._bucket.capacity:
             raise OpBatchTooLarge()
-        if not self._bucket.consume(client_id, cost):
+        if not precharged and not self._bucket.consume(client_id, cost):
             raise RateLimited()
 
         if self.store.get(session_id) is None:
@@ -1324,126 +1930,151 @@ class SessionManager:
             if session is None:
                 raise SessionNotFound()
 
-            # Snapshot for rollback. persist() is inside the protected region so
-            # a persistence-layer failure (disk full, IO error) rolls back too —
-            # otherwise in-memory state/seq/ring would advance while disk and all
-            # subscribers stayed behind, duplicating non-idempotent ops on retry.
-            # The activity log is copied shallowly: inside this region it is
-            # only appended to and pruned (``apply_state_op``), never edited in
-            # place, so a list copy restores it exactly. Deep-copying it here
-            # and again in the snapshot below cost ~28 ms of event-loop time
-            # per batch at the default 500-record cap.
-            saved_state = copy.deepcopy(session.state)
-            saved_seq = session.seq
-            saved_name = session.name
-            saved_updated_at = session.updated_at
-            saved_activity_log = list(session.activity_log)
-            saved_deleted_ids = list(session._deleted_annotation_ids)
-            ring = self.store.ring(session_id)
-            saved_ring = list(ring) if ring is not None else None
+            has_appearance = (
+                session.state.get("shape_overrides")
+                or session.state.get("type_shapes")
+                or session.state.get("shape_operation_ids")
+                or any(
+                    op["op"] in {"node_shape_set", "type_shape_set"}
+                    or (
+                        op["op"] == "nodes_replaced"
+                        and op.get("inserted_shape_overrides")
+                    )
+                    for op in ops
+                )
+            )
+            if authorize_appearance and has_appearance:
+                authorize_appearance()
 
-            # Read once, before this batch applies anything: acquire()/release()
-            # for this session only ever commit to the real map later in this
-            # same critical section (below, under this same lock; see the
-            # "commit succeeded" block) — so a fresh copy taken here is a
-            # consistent view of who held what when the batch started, matching
-            # apply_ops' own all-or-nothing semantics (see LeaseConflict's
-            # docstring for what this does not cover yet). Walked as a mutable
-            # working copy (not re-read) so that an `edit_lease_acquired`/
-            # `edit_lease_released` op earlier in *this* batch is visible to a
-            # mutating op — or another lease op — later in the same batch,
-            # exactly the way `self.store.apply_state_op` below sees each
-            # state op's effect on `session.state` as it walks the same list.
-            working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
+            if has_appearance and (
+                type(appearance_version) is not int or appearance_version != 1
+            ):
+                raise AppearanceVersionRequired("appearance version 1 required")
 
-            # ("state", applied) | ("claim", op_type, element_ids)
-            # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
-            # in arrival order
-            pending: List[Tuple[Any, ...]] = []
-            state_changed = False
-            try:
-                for op in ops:
-                    op_type = op["op"]
-                    if op_type in CLAIM_OPS:
-                        pending.append(("claim", op_type, list(op["element_ids"])))
-                    elif op_type == "edit_lease_acquired":
-                        granted: List[str] = []
-                        denied: Dict[str, str] = {}
-                        # De-duplicated so a caller listing the same id twice in
-                        # one request cannot inflate `granted`/broadcast it twice.
-                        for eid in dict.fromkeys(op["element_ids"]):
-                            holder = working_leases.get(eid)
-                            if holder is not None and holder != client_id:
-                                denied[eid] = holder
-                            else:
-                                working_leases[eid] = client_id
-                                granted.append(eid)
-                        pending.append(("lease_acquire", granted, denied))
-                    elif op_type == "edit_lease_released":
-                        released: List[str] = []
-                        for eid in dict.fromkeys(op["element_ids"]):
-                            if working_leases.get(eid) == client_id:
-                                del working_leases[eid]
-                                released.append(eid)
-                        pending.append(("lease_release", released))
-                    else:
-                        conflict_id = _claimed_annotation_target(op, session)
-                        if conflict_id is not None:
-                            holder = working_leases.get(conflict_id)
-                            if holder is not None and holder != client_id:
-                                raise LeaseConflict(conflict_id, holder)
-                        result = self.store.apply_state_op(
-                            session, {**op, "client_id": client_id}
-                        )
-                        if result is None:
-                            continue  # legitimate no-op (e.g. update on deleted annotation)
-                        state_changed = True
-                        pending.append(("state", result))
-                if state_changed:
-                    # Snapshot on the loop thread, persist the copy off-thread:
-                    # the worker must never read ``session.state`` while a
-                    # loop-thread writer (the synchronous ``apply_layout`` path)
-                    # may be mutating it during this await. See persist_snapshot.
-                    snapshot = _detached_snapshot(session)
+            cancelled = False
+            # One live write from the rollback snapshot to the persist or the
+            # rollback (docs/design/node-shapes/live-writers.md), held until the
+            # save thread has finished even if this task is cancelled meanwhile.
+            with self.store.writing(session_id):
+                # Snapshot for rollback. persist() is inside the protected region so
+                # a persistence-layer failure (disk full, IO error) rolls back too —
+                # otherwise in-memory state/seq/ring would advance while disk and all
+                # subscribers stayed behind, duplicating non-idempotent ops on retry.
+                # The activity log is copied shallowly: inside this region it is
+                # only appended to and pruned (``apply_state_op``), never edited in
+                # place, so a list copy restores it exactly. Deep-copying it here
+                # and again in the snapshot below cost ~28 ms of event-loop time
+                # per batch at the default 500-record cap.
+                saved_state = copy.deepcopy(session.state)
+                saved_seq = session.seq
+                saved_name = session.name
+                saved_description = session.description
+                saved_updated_at = session.updated_at
+                saved_activity_log = list(session.activity_log)
+                saved_deleted_ids = list(session._deleted_annotation_ids)
+                ring = self.store.ring(session_id)
+                saved_ring = list(ring) if ring is not None else None
 
-                    # Cumulative budget check (smallfix-session-ops-path-ignores-
-                    # image-budgets): the per-batch caps above only bound *one*
-                    # request. Without this, many small batches — each legally
-                    # under the flat cap, or each carrying one budget-legal
-                    # image — can still walk the session's total document size
-                    # (and total embedded-image bytes) arbitrarily far past the
-                    # configured budgets over time. Checked against the
-                    # *resulting* state (the snapshot, after every op in this
-                    # batch has been applied in-memory) rather than the
-                    # arriving ops, so it catches growth from any op type —
-                    # not just images — before that snapshot is persisted; the
-                    # `except Exception` below rolls it back like any other
-                    # mid-batch failure.
-                    total_image_bytes = _session_image_bytes(session)
-                    if total_image_bytes > max_session_image_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session's total "
-                            f"embedded image data to {total_image_bytes} "
-                            f"bytes, over the {max_session_image_bytes}-byte "
-                            "session limit"
+                # Read once, before this batch applies anything: acquire()/release()
+                # for this session only ever commit to the real map later in this
+                # same critical section (below, under this same lock; see the
+                # "commit succeeded" block) — so a fresh copy taken here is a
+                # consistent view of who held what when the batch started, matching
+                # apply_ops' own all-or-nothing semantics (see LeaseConflict's
+                # docstring for what this does not cover yet). Walked as a mutable
+                # working copy (not re-read) so that an `edit_lease_acquired`/
+                # `edit_lease_released` op earlier in *this* batch is visible to a
+                # mutating op — or another lease op — later in the same batch,
+                # exactly the way `self.store.apply_state_op` below sees each
+                # state op's effect on `session.state` as it walks the same list.
+                working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
+
+                # ("state", applied) | ("claim", op_type, element_ids)
+                # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
+                # in arrival order
+                pending: List[Tuple[Any, ...]] = []
+                state_changed = False
+                try:
+                    for op in ops:
+                        op_type = op["op"]
+                        if op_type in CLAIM_OPS:
+                            pending.append(("claim", op_type, list(op["element_ids"])))
+                        elif op_type == "edit_lease_acquired":
+                            granted: List[str] = []
+                            denied: Dict[str, str] = {}
+                            # De-duplicated so a caller listing the same id twice in
+                            # one request cannot inflate `granted`/broadcast it twice.
+                            for eid in dict.fromkeys(op["element_ids"]):
+                                holder = working_leases.get(eid)
+                                if holder is not None and holder != client_id:
+                                    denied[eid] = holder
+                                else:
+                                    working_leases[eid] = client_id
+                                    granted.append(eid)
+                            pending.append(("lease_acquire", granted, denied))
+                        elif op_type == "edit_lease_released":
+                            released: List[str] = []
+                            for eid in dict.fromkeys(op["element_ids"]):
+                                if working_leases.get(eid) == client_id:
+                                    del working_leases[eid]
+                                    released.append(eid)
+                            pending.append(("lease_release", released))
+                        else:
+                            conflict_id = _claimed_annotation_target(op, session)
+                            if conflict_id is not None:
+                                holder = working_leases.get(conflict_id)
+                                if holder is not None and holder != client_id:
+                                    raise LeaseConflict(conflict_id, holder)
+                            for target in self.store.replaced_annotation_targets(
+                                session, op
+                            ):
+                                holder = working_leases.get(target)
+                                if holder is not None and holder != client_id:
+                                    raise LeaseConflict(target, holder)
+                            result = self.store.apply_state_op(
+                                session, {**op, "client_id": client_id}
+                            )
+                            if result is None:
+                                continue  # legitimate no-op (e.g. update on deleted annotation)
+                            state_changed = True
+                            pending.append(("state", result))
+                    if state_changed:
+                        # Snapshot on the loop thread, persist the copy off-thread:
+                        # the worker must never read ``session.state`` while a
+                        # loop-thread writer (the synchronous ``apply_layout`` path)
+                        # may be mutating it during this await. See persist_snapshot.
+                        snapshot = _detached_snapshot(session)
+
+                        # Cumulative budget check (smallfix-session-ops-path-ignores-
+                        # image-budgets): the per-batch caps above only bound *one*
+                        # request. Without this, many small batches — each legally
+                        # under the flat cap, or each carrying one budget-legal
+                        # image — can still walk the session's total document size
+                        # (and total embedded-image bytes) arbitrarily far past the
+                        # configured budgets over time. Checked against the
+                        # *resulting* state (the snapshot, after every op in this
+                        # batch has been applied in-memory) rather than the
+                        # arriving ops, so it catches growth from any op type —
+                        # not just images — before that snapshot is persisted; the
+                        # `except Exception` below rolls it back like any other
+                        # mid-batch failure.
+                        _check_session_totals(
+                            session,
+                            snapshot,
+                            max_session_image_bytes=max_session_image_bytes,
+                            max_session_document_bytes=max_session_document_bytes,
                         )
-                    total_doc_bytes = _document_bytes(snapshot, session)
-                    if total_doc_bytes > max_session_document_bytes:
-                        raise ImageBudgetExceeded(
-                            f"this batch would bring the session document to "
-                            f"{total_doc_bytes} bytes, over the "
-                            f"{max_session_document_bytes}-byte document limit"
-                        )
-                    await asyncio.to_thread(self.store.persist_snapshot, snapshot)
-            except Exception:
-                session.state = saved_state
-                session.seq = saved_seq
-                session.name = saved_name
-                session.updated_at = saved_updated_at
-                session.activity_log = saved_activity_log
-                _restore_deleted_ids(session, saved_deleted_ids)
-                self.store.restore_ring(session_id, saved_ring)
-                raise
+                        cancelled = await self._persist_uncancellable(snapshot)
+                except Exception:
+                    session.state = saved_state
+                    session.seq = saved_seq
+                    session.name = saved_name
+                    session.description = saved_description
+                    session.updated_at = saved_updated_at
+                    session.activity_log = saved_activity_log
+                    _restore_deleted_ids(session, saved_deleted_ids)
+                    self.store.restore_ring(session_id, saved_ring)
+                    raise
 
             # Commit succeeded: apply ephemeral claim/lease effects and broadcast
             # every op in arrival order (originator included; clients apply
@@ -1535,7 +2166,40 @@ class SessionManager:
                         {"op": "edit_lease_released", "element_ids": element_ids}
                     )
 
+        if cancelled:
+            # The batch is committed and broadcast like any other; only now
+            # does the caller see its cancellation.
+            raise asyncio.CancelledError()
         return {"applied": applied, "seq": session.seq}
+
+    async def _persist_uncancellable(self, snapshot: Dict[str, Any]) -> bool:
+        """Persist ``snapshot`` off-thread and wait for the save to finish even
+        if the awaiting task is cancelled meanwhile; return whether it was.
+
+        A save thread cannot be stopped, so releasing the writing marker and
+        the per-session lock while it still runs would let a library commit
+        or another batch interleave with a write whose outcome is unknown,
+        and rolling back memory could contradict a save that then lands.
+        Waiting keeps memory, disk and the marker in step; a failed save
+        still raises and rolls back as before. The save is a bare executor
+        future rather than a Task, so loop teardown (``asyncio.run`` cancelling
+        every task) cannot mark it done while its thread still writes.
+        """
+        loop = asyncio.get_running_loop()
+        save = loop.run_in_executor(
+            None,
+            functools.partial(
+                contextvars.copy_context().run, self.store.persist_snapshot, snapshot
+            ),
+        )
+        cancelled = False
+        while not save.done():
+            try:
+                await asyncio.shield(save)
+            except asyncio.CancelledError:
+                cancelled = True
+        save.result()
+        return cancelled
 
     def apply_layout(
         self,
@@ -1683,6 +2347,22 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._add_node_refs(session, client_id, node_ids)
+
+    def _add_node_refs(
+        self,
+        session: Session,
+        client_id: str,
+        node_ids: List[str],
+        *,
+        positions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Commit one membership change after the caller has serialized access.
+
+        Request caps belong to the public MCP method; trusted visualization
+        results may contain more ids and still represent a single activity.
+        """
+        session_id = session.id
         # Dedupe against the session *and* against the rest of this call, in
         # order: a repeated id would otherwise be reported as added twice and
         # ride the broadcast twice, while the stored state (a union) holds it
@@ -1707,6 +2387,8 @@ class SessionManager:
             "node_ids": added,
             "client_id": client_id,
         }
+        if positions is not None:
+            op["positions"] = positions
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {
             "applied": applied,
@@ -1761,6 +2443,13 @@ class SessionManager:
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
 
+        return self._remove_node_refs(session, client_id, node_ids)
+
+    def _remove_node_refs(
+        self, session: Session, client_id: str, node_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Apply trusted removals without the public MCP request caps or charge."""
+        session_id = session.id
         present = set(session.state.get("node_refs", []))
         removed: List[str] = []
         for node_id in node_ids:
@@ -1781,7 +2470,9 @@ class SessionManager:
             "node_ids": removed,
             "client_id": client_id,
         }
-        applied = self._apply_op_sync(session, session_id, client_id, op)
+        applied = self._apply_op_sync(
+            session, session_id, client_id, op, enforce_session_budgets=True
+        )
         return {
             "applied": applied,
             "revision": session.seq,
@@ -2264,6 +2955,31 @@ class SessionManager:
         *,
         expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Revert the requesting actor's latest eligible session action."""
+        return self._replay_action(
+            session_id, client_id, expected_revision=expected_revision
+        )
+
+    def redo_last_action(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Reapply the actor's most recently undone action through session sync."""
+        return self._replay_action(
+            session_id, client_id, expected_revision=expected_revision, redo=True
+        )
+
+    def _replay_action(
+        self,
+        session_id: str,
+        client_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+        redo: bool = False,
+    ) -> Dict[str, Any]:
         """Revert the requesting actor's latest eligible action **synchronously**.
 
         "Eligible" means: the actor's most recent not-yet-undone activity
@@ -2301,98 +3017,159 @@ class SessionManager:
         if self._lock(session_id).locked():
             raise LayoutBusy()
 
-        session = self.store.get(session_id)
-        if session is None:
-            raise SessionNotFound()
-        if expected_revision is not None and expected_revision != session.seq:
-            raise RevisionConflict(expected_revision, session.seq)
+        # The whole lookup-check-mutate-restore span is one live write: the
+        # record flags, history revisions and deleted-id memory change here,
+        # before and after the nested _apply_op_sync section.
+        with self.store.writing(session_id):
+            session = self.store.get(session_id)
+            if session is None:
+                raise SessionNotFound()
+            if expected_revision is not None and expected_revision != session.seq:
+                raise RevisionConflict(expected_revision, session.seq)
 
-        record = self.store.find_latest_undoable(session, client_id)
-        if record is None:
-            raise NoUndoableAction(client_id)
-        conflict_reason = self.store.undo_conflict_reason(session, record)
-        if conflict_reason is not None:
-            raise UndoConflict(record["id"], conflict_reason)
+            if redo:
+                record = max(
+                    (
+                        r
+                        for r in session.activity_log
+                        if r.get("actor") == client_id
+                        and r.get("undone")
+                        and r.get("redo_seq")
+                        and r.get("forward_op")
+                    ),
+                    key=lambda r: r["redo_seq"],
+                    default=None,
+                )
+            else:
+                record = self.store.find_latest_undoable(session, client_id)
+            if record is None:
+                raise NoUndoableAction(client_id)
+            expected_record = record
+            if redo:
+                expected_record = {**record, "after": record["before"]}
+                if record["affected"].get("kind") == "node_position":
+                    expected_record["after"] = record["inverse_op"]["position"]
+                elif record["affected"].get("kind") == "layout":
+                    expected_record["after"] = record["inverse_op"]["positions"]
+            conflict_reason = self.store.undo_conflict_reason(session, expected_record)
+            if conflict_reason is not None:
+                raise UndoConflict(record["id"], conflict_reason)
 
-        # Deep, so the replay never shares objects with the record: state an
-        # op later edits in place must not reach back into the activity log,
-        # whose rollback copies are shallow.
-        inverse_op = copy.deepcopy(record["inverse_op"])
-        # Undo is a browser write like any other, so it answers to the same
-        # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
-        # undo reverts *your own* past action, but the annotation it touches
-        # may be under someone else's live edit lease since you made it —
-        # participating in the *new* lease semantics rather than the old
-        # advisory ClaimMap is exactly the point of this check (PR #456
-        # originally gated undo on the claim map; the mechanism underneath
-        # changed, not this call site's intent). Placed ahead of every
-        # mutation below so a refusal leaves the session as it found it; the
-        # two do not actually overlap today (the _deleted_annotation_ids
-        # branch runs only for an annotation_created inverse, whose id
-        # undo_conflict_reason has already rejected if it still exists), but
-        # the ordering should not rely on that.
-        conflict_id = _claimed_annotation_target(inverse_op, session)
-        if conflict_id is not None:
-            holder = self.leases.snapshot(session_id).get(conflict_id)
-            if holder is not None and holder != client_id:
-                raise LeaseConflict(conflict_id, holder)
+            # Deep, so the replay never shares objects with the record: state an
+            # op later edits in place must not reach back into the activity log,
+            # whose rollback copies are shallow.
+            inverse_op = copy.deepcopy(record["forward_op" if redo else "inverse_op"])
+            # Undo is a browser write like any other, so it answers to the same
+            # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
+            # undo reverts *your own* past action, but the annotation it touches
+            # may be under someone else's live edit lease since you made it —
+            # participating in the *new* lease semantics rather than the old
+            # advisory ClaimMap is exactly the point of this check (PR #456
+            # originally gated undo on the claim map; the mechanism underneath
+            # changed, not this call site's intent). Placed ahead of every
+            # mutation below so a refusal leaves the session as it found it; the
+            # two do not actually overlap today (the _deleted_annotation_ids
+            # branch runs only for an annotation_created inverse, whose id
+            # undo_conflict_reason has already rejected if it still exists), but
+            # the ordering should not rely on that.
+            conflict_id = _claimed_annotation_target(inverse_op, session)
+            if conflict_id is not None:
+                holder = self.leases.snapshot(session_id).get(conflict_id)
+                if holder is not None and holder != client_id:
+                    raise LeaseConflict(conflict_id, holder)
 
-        saved_deleted_ids = list(session._deleted_annotation_ids)
-        if inverse_op.get("op") == "annotation_created":
-            ann_id = (inverse_op.get("annotation") or {}).get("id")
-            if isinstance(ann_id, str):
-                try:
-                    session._deleted_annotation_ids.remove(ann_id)
-                except ValueError:
-                    pass
-        # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
-        # docstring. Every check above (claim conflict included) has already
-        # used the real client_id; only the op that goes to _apply_op_sync
-        # (and therefore the SSE event's client_id) is re-attributed here, so
-        # the requesting browser's own subscription does not drop it as a
-        # self-echo.
-        inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
+            saved_deleted_ids = list(session._deleted_annotation_ids)
+            if inverse_op.get("op") == "annotation_created":
+                ann_id = (inverse_op.get("annotation") or {}).get("id")
+                if isinstance(ann_id, str):
+                    try:
+                        session._deleted_annotation_ids.remove(ann_id)
+                    except ValueError:
+                        pass
+            # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
+            # docstring. Every check above (claim conflict included) has already
+            # used the real client_id; only the op that goes to _apply_op_sync
+            # (and therefore the SSE event's client_id) is re-attributed here, so
+            # the requesting browser's own subscription does not drop it as a
+            # self-echo.
+            inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
 
-        # Marked before the replay so its one persist writes the reverted state
-        # and the flag together; a second write afterwards could fail and leave
-        # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
-        # back the state on failure; the record is not part of its (shallow)
-        # log copy, so its flags are restored here — but only while seq shows
-        # nothing was committed: a broadcast that fails after the persist
-        # landed must leave memory matching what is now on disk.
-        saved_flags = {k: record[k] for k in ("undone", "undone_at") if k in record}
-        seq_before = session.seq
-        record["undone"] = True
-        record["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        applied = None
-        try:
-            applied = self._apply_op_sync(
-                session,
-                session_id,
-                _UNDO_REPLAY_CLIENT_ID,
-                inverse_op,
-                record_activity=False,
-                trusted_replay=True,
+            # Marked before the replay so its one persist writes the reverted state
+            # and the flag together; a second write afterwards could fail and leave
+            # the record undone in memory but not on disk. ``_apply_op_sync`` rolls
+            # back the state on failure; the record is not part of its (shallow)
+            # log copy, so its flags are restored here — but only while seq shows
+            # nothing was committed: a broadcast that fails after the persist
+            # landed must leave memory matching what is now on disk.
+            flag_keys = ("undone", "undone_at", "redo_seq")
+            saved_flags = {k: record[k] for k in flag_keys if k in record}
+            seq_before = session.seq
+            record["undone"] = not redo
+            record["undone_at"] = (
+                None if redo else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             )
-        finally:
-            if session.seq == seq_before:
-                record.pop("undone", None)
-                record.pop("undone_at", None)
-                record.update(saved_flags)
-                _restore_deleted_ids(session, saved_deleted_ids)
-        if applied is None:
-            # The conflict check above passed but the replay still turned out
-            # to be a no-op (e.g. the store dropped it as an update on a
-            # since-deleted annotation) — surface it the same way any other
-            # unsafe-to-undo state does, rather than marking the record undone.
-            raise UndoConflict(record["id"], "action could not be reverted")
+            record["redo_seq"] = None if redo else session.seq + 1
+            # Replays create fresh target revisions. Carry those revisions into
+            # history snapshots that describe the restored version, so successive
+            # undo/redo remains possible without accepting a collaborator's write.
+            saved_appearance_snapshots = []
+            if record["affected"].get("kind") == "appearance":
+                destination = record["after" if redo else "before"].get("revisions", {})
+                fresh = {
+                    k: session.state["shape_revisions"].get(k, 0) + 1
+                    for k in destination
+                }
+                for history in session.activity_log:
+                    for field in ("before", "after"):
+                        snapshot = history.get(field)
+                        if (
+                            not isinstance(snapshot, dict)
+                            or "revisions" not in snapshot
+                        ):
+                            continue
+                        updated = {
+                            k: fresh[k]
+                            if k in destination and v == destination[k]
+                            else v
+                            for k, v in snapshot["revisions"].items()
+                        }
+                        saved_appearance_snapshots.append((history, field, snapshot))
+                        session._activity_record_bytes.pop(id(history), None)
+                        history[field] = {**snapshot, "revisions": updated}
+            applied = None
+            try:
+                applied = self._apply_op_sync(
+                    session,
+                    session_id,
+                    _UNDO_REPLAY_CLIENT_ID,
+                    inverse_op,
+                    record_activity=False,
+                    trusted_replay=True,
+                    enforce_session_budgets=True,
+                )
+            finally:
+                if session.seq == seq_before:
+                    for history, field, snapshot in saved_appearance_snapshots:
+                        history[field] = snapshot
+                        session._activity_record_bytes.pop(id(history), None)
+                    session._activity_record_bytes.pop(id(record), None)
+                    for key in flag_keys:
+                        record.pop(key, None)
+                    record.update(saved_flags)
+                    _restore_deleted_ids(session, saved_deleted_ids)
+            if applied is None:
+                # The conflict check above passed but the replay still turned out
+                # to be a no-op (e.g. the store dropped it as an update on a
+                # since-deleted annotation) — surface it the same way any other
+                # unsafe-to-undo state does, rather than marking the record undone.
+                raise UndoConflict(record["id"], "action could not be reverted")
 
-        return {
-            "undone_activity_id": record["id"],
-            "undone_op": record["op"],
-            "applied": applied,
-            "revision": session.seq,
-        }
+            return {
+                ("redone_activity_id" if redo else "undone_activity_id"): record["id"],
+                ("redone_op" if redo else "undone_op"): record["op"],
+                "applied": applied,
+                "revision": session.seq,
+            }
 
     def _reject_if_leased(
         self, session: Session, session_id: str, client_id: str, op: Dict[str, Any]
@@ -2431,12 +3208,15 @@ class SessionManager:
         *,
         record_activity: bool = True,
         trusted_replay: bool = False,
+        enforce_session_budgets: bool = False,
+        before_broadcast: Optional[Callable[[], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
         name, seq and ring untouched — mirroring apply_ops' all-or-nothing
-        guarantee (``session_renamed`` writes ``session.name``, not the state).
+        guarantee (``session_renamed``/``session_described`` write the session's
+        name/description, not the state).
         Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
@@ -2448,38 +3228,52 @@ class SessionManager:
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
         prior state is not re-judged as fresh caller input.
+        ``enforce_session_budgets`` applies apply_ops' session image/document
+        budgets to the result, for an op that can carry embedded images.
         """
-        saved_state = copy.deepcopy(session.state)
-        saved_seq = session.seq
-        saved_name = session.name
-        saved_updated_at = session.updated_at
-        # Shallow, as in apply_ops: an op only appends to and prunes the log.
-        saved_activity_log = list(session.activity_log)
-        saved_deleted_ids = list(session._deleted_annotation_ids)
-        ring = self.store.ring(session_id)
-        saved_ring = list(ring) if ring is not None else None
-        try:
-            applied = self.store.apply_state_op(
-                session,
-                op,
-                record_activity=record_activity,
-                trusted_replay=trusted_replay,
-            )
-            if applied is not None:
-                self.store.persist(session)
-        except Exception:
-            session.state = saved_state
-            session.seq = saved_seq
-            session.name = saved_name
-            session.updated_at = saved_updated_at
-            session.activity_log = saved_activity_log
-            _restore_deleted_ids(session, saved_deleted_ids)
-            self.store.restore_ring(session_id, saved_ring)
-            raise
+        with self.store.writing(session_id):
+            saved_state = copy.deepcopy(session.state)
+            saved_seq = session.seq
+            saved_name = session.name
+            saved_description = session.description
+            saved_updated_at = session.updated_at
+            # Shallow, as in apply_ops: an op only appends to and prunes the log.
+            saved_activity_log = list(session.activity_log)
+            saved_deleted_ids = list(session._deleted_annotation_ids)
+            ring = self.store.ring(session_id)
+            saved_ring = list(ring) if ring is not None else None
+            try:
+                applied = self.store.apply_state_op(
+                    session,
+                    op,
+                    record_activity=record_activity,
+                    trusted_replay=trusted_replay,
+                )
+                if applied is not None:
+                    if enforce_session_budgets:
+                        _check_session_totals(
+                            session,
+                            _detached_snapshot(session),
+                            max_session_image_bytes=DEFAULT_MAX_SESSION_IMAGE_BYTES,
+                            max_session_document_bytes=DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+                        )
+                    self.store.persist(session)
+            except Exception:
+                session.state = saved_state
+                session.seq = saved_seq
+                session.name = saved_name
+                session.description = saved_description
+                session.updated_at = saved_updated_at
+                session.activity_log = saved_activity_log
+                _restore_deleted_ids(session, saved_deleted_ids)
+                self.store.restore_ring(session_id, saved_ring)
+                raise
 
         if applied is None:
             return None
 
+        if before_broadcast is not None:
+            before_broadcast()
         self.bus.publish(
             session_id,
             {
@@ -2560,11 +3354,32 @@ class SessionManager:
                 session_id, {"type": "presence_left", "client_id": client_id}
             )
 
-    def catch_up(self, session_id: str, since_seq: Optional[int]) -> Dict[str, Any]:
+    def library_revision(self) -> Optional[int]:
+        """The shape library revision, or ``None`` when it cannot be read.
+
+        Blocks on the library lock and disk, so the stream reads it off the
+        event loop; a client receiving ``None`` fetches the library anyway.
+        """
+        if self.shape_library is None:
+            return None
+        try:
+            return self.shape_library.revision()
+        except Exception:
+            logger.exception("shape library revision unreadable")
+            return None
+
+    def catch_up(
+        self,
+        session_id: str,
+        since_seq: Optional[int],
+        library_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Return the initial payload for a (re)connecting stream.
 
         With a usable ``since_seq`` and an intact ring buffer, returns the missed
         ops; otherwise returns a full snapshot the client applies wholesale.
+        ``library_revision`` comes from ``library_revision()``, read by the
+        caller before this call so no library I/O runs here.
         """
         session = self.store.get(session_id)
         if session is None:
@@ -2572,38 +3387,253 @@ class SessionManager:
         roster = self.presence.roster(session_id)
         claims = self.claims.snapshot(session_id)
         leases = self.leases.snapshot(session_id)
+        missed = None
         if since_seq is not None:
             missed = self.store.ops_since(session_id, since_seq)
-            if missed is not None:
-                return {
-                    "type": "catch_up",
-                    "seq": session.seq,
-                    "ops": missed,
-                    "roster": roster,
-                    "claims": claims,
-                    "leases": leases,
-                }
-        return {
-            "type": "snapshot",
-            "seq": session.seq,
-            "session": session.to_dict(),
-            "roster": roster,
-            "claims": claims,
-            "leases": leases,
-        }
+        if missed is not None:
+            payload: Dict[str, Any] = {
+                "type": "catch_up",
+                "seq": session.seq,
+                "ops": missed,
+                "roster": roster,
+                "claims": claims,
+                "leases": leases,
+            }
+        else:
+            payload = {
+                "type": "snapshot",
+                "seq": session.seq,
+                "session": session.to_dict(),
+                "roster": roster,
+                "claims": claims,
+                "leases": leases,
+            }
+        if self.shape_library is not None:
+            # The client fetches the library at this revision before it
+            # resolves the session state, so saved references never render a
+            # definition an edit or delete missed while it was disconnected.
+            payload["library_revision"] = library_revision
+        return payload
+
+    def publish_library_invalidation(
+        self, key: str, revision: int, session_ids: List[str]
+    ) -> None:
+        """Tell each session referencing library entry ``key`` it changed.
+
+        Ephemeral like a summon: never sequenced or replayed, since catch-up
+        carries the library revision instead. The event names only the entry
+        and revision, never the definition or the other sessions using it.
+        """
+        event = {"type": "library_invalidated", "key": key, "revision": revision}
+        for session_id in session_ids:
+            self.bus.publish(session_id, dict(event))
 
     # ---------------- MCP push ----------------
 
-    def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
-        """Broadcast an MCP visualization command to all subscribers.
+    def materialize_command(self, session_id: str, command: Dict[str, Any]) -> bool:
+        """Publish a missing session with the pushed membership already applied."""
+        result = command.get("result") or {}
+        action = result.get("action")
+        node_ids = list(
+            dict.fromkeys(
+                node["id"]
+                for node in result.get("nodes") or []
+                if isinstance(node, dict)
+                and isinstance(node.get("id"), str)
+                and node.get("type") != "Community"
+                and (node.get("data") or {}).get("type") != "Community"
+            )
+        )
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        op = None
+        if action in _REPLACING_ACTIONS:
+            op = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            op = {
+                "op": "nodes_added",
+                "node_ids": node_ids,
+                "client_id": actor,
+                "positions": _pushed_view(result).get("positions") or {},
+            }
+        return self.get_or_create(session_id, initial_op=op)[1]
 
-        Returns ``False`` when the session is unknown so callers can fall back to
-        the legacy single-consumer registry during the transition.
+    def push_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+        *,
+        membership_applied: bool = False,
+    ) -> bool:
+        """Apply server-owned membership once, then broadcast the command.
+
+        Pushed results bypass MCP request caps; see _apply_command_membership.
+        During an in-flight batch, acceptance queues delivery behind its lock;
+        otherwise delivery completes inline. ``on_published`` runs only once
+        the membership is applied and the command broadcast, inline or queued.
+        Returns ``False`` when the session is unknown so callers can fall back
+        to the legacy registry.
         """
         if self.store.get(session_id) is None:
             return False
+        try:
+            running: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = self._loop
+        if loop is not None and loop.is_running() and running is not loop:
+            # A producer off the loop (a node-create listener in a worker
+            # thread) must not touch session state or the lock concurrently
+            # with apply_ops: the push is accepted and applied on the loop.
+            command = copy.deepcopy(command)
+            loop.call_soon_threadsafe(
+                self._push_command_on_loop,
+                session_id,
+                command,
+                on_published,
+                membership_applied,
+            )
+            return True
+        queue_name = f"session-push:{session_id}"
+        if self._lock(session_id).locked() or any(
+            task.get_name() == queue_name for task in self._pending_pushes
+        ):
+            # A synchronous producer cannot await the batch's persistence. Keep
+            # the command alive and deliver it only after that batch commits or
+            # rolls back, preserving op/command order for every subscriber.
+            command = copy.deepcopy(command)
+            task = asyncio.get_running_loop().create_task(
+                self._push_command_after_batch(
+                    session_id, command, on_published, membership_applied
+                ),
+                name=queue_name,
+            )
+            self._pending_pushes.add(task)
+            task.add_done_callback(self._pending_pushes.discard)
+            return True
+        return self._publish_command(
+            session_id, command, on_published, membership_applied
+        )
+
+    def _push_command_on_loop(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]],
+        membership_applied: bool,
+    ) -> None:
+        try:
+            self.push_command(
+                session_id, command, on_published, membership_applied=membership_applied
+            )
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    async def _push_command_after_batch(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
+    ) -> None:
+        try:
+            async with self._lock(session_id):
+                self._publish_command(
+                    session_id, command, on_published, membership_applied
+                )
+        except Exception:
+            logger.exception("queued command failed for session %s", session_id)
+
+    def _publish_command(
+        self,
+        session_id: str,
+        command: Dict[str, Any],
+        on_published: Optional[Callable[[], None]] = None,
+        membership_applied: bool = False,
+    ) -> bool:
+        session = self.store.get(session_id)
+        if session is None:
+            return False
+        if not membership_applied:
+            self._apply_command_membership(session, command)
         self.bus.publish(session_id, {"type": "command", "command": command})
+        if on_published is not None:
+            on_published()
         return True
+
+    def _apply_command_membership(
+        self, session: Session, command: Dict[str, Any]
+    ) -> None:
+        """Apply a push's node membership here, so browsers only render it.
+
+        The server is the only writer of membership: the resulting op reaches
+        every subscriber before the command, and browsers never send
+        membership back for what they render. A change is one activity record,
+        attributed to the pusher.
+        """
+        result = command.get("result")
+        if not isinstance(result, dict):
+            return
+        action = result.get("action")
+        node_ids = [
+            node["id"]
+            for node in result.get("nodes") or []
+            if isinstance(node, dict)
+            and isinstance(node.get("id"), str)
+            and node.get("type") != "Community"
+            and (node.get("data") or {}).get("type") != "Community"
+        ]
+        agent_id = result.get("agent_id")
+        actor = (
+            f"{AUTO_ADD_ACTOR_PREFIX}{agent_id}"
+            if command.get("tool") == "session_auto_add_agent"
+            and isinstance(agent_id, str)
+            and agent_id
+            else "mcp-agent"
+        )
+        if action == "clear_visualization" and not node_ids:
+            # A plain clear is recorded as what it removed, not as an empty
+            # replace; a clear carrying nodes is a replace.
+            self._remove_node_refs(
+                session, actor, list(session.state.get("node_refs", []))
+            )
+        elif action in _REPLACING_ACTIONS:
+            # Browsers swap the whole view for the result's nodes: one op,
+            # carrying a loaded view's layout, applied all-or-nothing.
+            op: Dict[str, Any] = {
+                "op": "nodes_replaced",
+                "node_ids": node_ids,
+                "client_id": actor,
+                **_pushed_view(result),
+            }
+            _check_op_image_sizes(op)
+            for target in self.store.replaced_annotation_targets(session, op):
+                holder = self.leases.snapshot(session.id).get(target)
+                if holder is not None and holder != actor:
+                    raise LeaseConflict(target, holder)
+            self._apply_op_sync(
+                session, session.id, actor, op, enforce_session_budgets=True
+            )
+        elif action in _ADDITIVE_ACTIONS and node_ids:
+            self._add_node_refs(
+                session,
+                actor,
+                node_ids,
+                positions=_pushed_view(result).get("positions") or {},
+            )
 
     # ---------------- summon to viewport ----------------
 

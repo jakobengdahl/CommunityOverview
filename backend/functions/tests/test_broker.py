@@ -1,3 +1,4 @@
+# covers: backend/functions/broker.py
 """Invariants of the user-function tool broker (USER_FUNCTION_CONTRACT §6.3–§7, §9)."""
 
 import json
@@ -403,6 +404,7 @@ def test_every_captured_authorization_input_is_rebound_for_the_call(storage):
             return super().evaluate(context)
 
     inputs = {
+        "authenticated_principal": {"kind": "user", "id": "user-42"},
         "headers": {"x-communityoverview-actor-id": "h-actor"},
         "actor_id": "user-42",
         "actor_type": "human",
@@ -681,6 +683,73 @@ def test_every_node_in_a_batch_is_scope_checked(service):
         "invalid_arguments"
     )
     assert service.calls == []
+
+
+def test_webhook_broker_intersects_every_service_decision_with_bound_graph(storage):
+    hook = RecordingHook(
+        narrowing=GraphAccessNarrowing(
+            enabled=True, allow_local_graph=True, include_graph_ids=("g1", "g2")
+        )
+    )
+    service = SpyService(storage, authorization_hook=hook)
+    storage.add_nodes(
+        [
+            Node(
+                id="one",
+                name="First",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "g1"},
+            ),
+            Node(
+                id="two",
+                name="Second",
+                type=NodeType.ACTOR,
+                metadata={"origin_graph_id": "g2"},
+            ),
+            Node(id="local", name="Local", type=NodeType.ACTOR),
+        ],
+        [],
+    )
+    enabled = {GRANT_GRAPH_READ, GRANT_GRAPH_WRITE}
+    broker = make_broker(
+        service,
+        grant_enabled=lambda grant: grant in enabled,
+        authorization_inputs={
+            "actor_id": "fn",
+            "actor_type": "function_webhook",
+            "graph_id": "g1",
+        },
+    )
+    assert "result" in call(broker, "graph.get_node", {"node_id": "one"})
+    for node_id in ("two", "local"):
+        assert "error" in call(broker, "graph.get_node", {"node_id": node_id})
+        assert "error" in call(
+            broker,
+            "graph.update_node",
+            {"node_id": node_id, "updates": {"name": "Changed"}},
+        )
+    assert "result" in call(
+        broker, "graph.update_node", {"node_id": "one", "updates": {"name": "Changed"}}
+    )
+    assert "result" in call(
+        broker, "graph.add", {"nodes": [{"id": "new", "name": "New", "type": "Actor"}]}
+    )
+    assert storage.nodes["new"].metadata["origin_graph_id"] == "g1"
+    assert "result" in call(broker, "graph.get_node", {"node_id": "new"})
+    assert "error" in call(
+        broker,
+        "graph.add",
+        {"nodes": [], "edges": [{"source": "new", "target": "two"}]},
+    )
+    hook.narrowing = GraphAccessNarrowing(enabled=True, include_graph_ids=("g2",))
+    assert (
+        error_code(
+            call(broker, "graph.add", {"nodes": [{"name": "Denied", "type": "Actor"}]})
+        )
+        == "access_denied"
+    )
+    enabled.remove(GRANT_GRAPH_WRITE)
+    assert error_code(call(broker, "graph.add", {"nodes": []})) == "grant_denied"
 
 
 def test_grant_enablement_has_no_default():
@@ -994,3 +1063,197 @@ def test_malformed_nodes_and_edges_are_refused(service, arguments):
     response = call(make_broker(service), "graph.add", arguments)
     assert error_code(response) == "invalid_arguments"
     assert service.calls == []
+
+
+def test_run_file_tools_are_scoped_authorized_and_return_bounded_untrusted_text(
+    service, hook, tmp_path
+):
+    from backend.functions.run_files import RunFiles
+
+    first, second = RunFiles(tmp_path), RunFiles(tmp_path)
+    file_id = first.add("../notes.txt", "application/octet-stream")
+    first.append(file_id, b"abcdef")
+    second.add("other.txt", "text/plain")
+    other_id = second.add("secret.txt", "text/plain")
+    second.append(other_id, b"secret")
+    broker = make_broker(service, grants=(), run_files=first)
+    try:
+        listing = call(broker, "run_files.list")["result"]
+        assert listing["untrusted_content"] is True
+        assert listing["files"] == [
+            {
+                "file_id": file_id,
+                "filename": "notes.txt",
+                "size": 6,
+            }
+        ]
+        result = call(
+            broker, "run_files.read", {"file_id": file_id, "offset": 1, "max_chars": 2}
+        )["result"]
+        assert result["untrusted_content"] is True
+        assert result["filename"] == "notes.txt"
+        assert result["content_type"] == "text/plain"
+        assert [c.target for c in hook.contexts] == ["list_run_files", "read_run_file"]
+        assert result["segments"][0]["text"] == "bc"
+        assert result["next_offset"] == 3
+        for args in (
+            {"file_id": other_id},
+            {"file_id": "../notes.txt"},
+            {"file_id": file_id, "path": "/tmp/x"},
+            {"file_id": file_id, "offset": True},
+        ):
+            assert "error" in call(broker, "run_files.read", args)
+        assert (
+            call(make_broker(service, run_files=None), "run_files.list")["result"][
+                "files"
+            ]
+            == []
+        )
+        hook.evaluate = lambda context: GraphAuthorizationDecision(
+            allowed=False, reason="revoked", mode="custom", source="test"
+        )
+        assert error_code(call(broker, "run_files.list")) == "access_denied"
+        response = call(broker, "run_files.read", {"file_id": file_id})
+        assert error_code(response) == "access_denied"
+    finally:
+        first.close()
+        second.close()
+
+
+def test_run_file_read_applies_type_policy_and_extraction_limits(
+    service, tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from backend.functions.run_files import RunFiles
+    from backend.core import attachment_extract
+
+    files = RunFiles(tmp_path)
+    text_id = files.add("note.txt", "text/plain")
+    files.append(text_id, b"abcdef")
+    bad_id = files.add("bad.txt", "text/plain")
+    files.append(bad_id, b"<html>")
+    broker = make_broker(service, run_files=files)
+    tools = service._attachment_read_tools
+    try:
+        assert "error" in call(broker, "run_files.read", {"file_id": bad_id})
+        monkeypatch.setenv("ATTACHMENT_ALLOWED_TYPES", "application/pdf")
+        assert "error" in call(broker, "run_files.read", {"file_id": text_id})
+        monkeypatch.delenv("ATTACHMENT_ALLOWED_TYPES")
+        monkeypatch.setattr(tools, "limits", replace(tools.limits, read_max_chars=2))
+        observed = []
+        original = attachment_extract.detect_and_extract
+
+        def detect_and_extract(data, filename, allowed, limits):
+            observed.append(limits)
+            return original(data, filename, allowed, limits)
+
+        monkeypatch.setattr(
+            attachment_extract, "detect_and_extract", detect_and_extract
+        )
+        result = call(broker, "run_files.read", {"file_id": text_id, "max_chars": 100})[
+            "result"
+        ]
+        assert result["returned_chars"] == 2
+        assert observed == [
+            replace(tools.extraction_limits, max_input_bytes=25 * 1024 * 1024)
+        ]
+    finally:
+        files.close()
+
+
+def test_attach_run_file_uses_upload_authorization_and_audits(
+    service, hook, tmp_path, monkeypatch, caplog
+):
+    from backend.config import config_loader
+    from backend.core.attachment_store import FileAttachmentStore
+    from backend.functions.run_files import RunFiles
+    from backend.service.attachments import AttachmentSettings
+
+    schema = tmp_path / "schema.json"
+    schema.write_text(
+        json.dumps(
+            {
+                "schema": {
+                    "node_types": {
+                        "Document": {"fields": ["name"], "allows_attachments": True}
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("SCHEMA_FILE", str(schema))
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read")
+    config_loader.reset_loader()
+    service._attachment_settings = AttachmentSettings(
+        FileAttachmentStore(tmp_path / "attachments"), "test"
+    )
+    files, other = RunFiles(tmp_path / "runs"), RunFiles(tmp_path / "runs")
+    file_id = files.add("note.txt", "text/plain")
+    files.append(file_id, b"untrusted input")
+    other.add("first.txt", "text/plain")
+    other_id = other.add("other.txt", "text/plain")
+    broker = make_broker(service, run_files=files, contract_version="3")
+    try:
+        node_id = call(
+            broker, "graph.add", {"nodes": [{"name": "Doc", "type": "Document"}]}
+        )["result"]["added_node_ids"][0]
+        args = {"node_id": node_id, "file_id": file_id}
+        assert (
+            error_code(
+                call(
+                    make_broker(service, run_files=files), "graph.attach_run_file", args
+                )
+            )
+            == "unknown_tool"
+        )
+        disabled = make_broker(
+            service,
+            run_files=files,
+            contract_version="3",
+            grant_enabled=lambda grant: False,
+        )
+        assert (
+            error_code(call(disabled, "graph.attach_run_file", args)) == "grant_denied"
+        )
+        denied = make_broker(service, grants=(), run_files=files, contract_version="3")
+        assert error_code(call(denied, "graph.attach_run_file", args)) == "grant_denied"
+        hook.deny_mutate = True
+        assert (
+            error_code(call(broker, "graph.attach_run_file", args)) == "access_denied"
+        )
+        hook.deny_mutate = False
+        for bad in (
+            {**args, "file_id": other_id},
+            {**args, "file_id": "../note.txt"},
+            {**args, "path": "/tmp/note.txt"},
+        ):
+            assert "error" in call(broker, "graph.attach_run_file", bad)
+        # The instance ceiling binds this tool like every attachment write.
+        assert "error" in call(broker, "graph.attach_run_file", args)
+        assert service.list_node_attachments(node_id)["attachments"] == []
+        monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", "read_write")
+        with caplog.at_level("INFO", logger="attachments.audit"):
+            result = call(broker, "graph.attach_run_file", args)["result"]
+        attachment = result["attachment"]
+        assert broker.tool_calls[-1].outcome == "ok"
+        assert any(
+            c.action == GRAPH_ACTION_MUTATE and c.target == "add_node_attachment"
+            for c in hook.contexts
+        )
+        audit = [r for r in caplog.records if r.name == "attachments.audit"][-1]
+        assert (audit.event, audit.node_id, audit.attachment_id, audit.outcome) == (
+            "attachment_added",
+            node_id,
+            attachment["id"],
+            "ok",
+        )
+        assert audit.correlation_id == "corr-1"
+        read = service._attachment_read_tools.read(
+            node_id=node_id, attachment_id=attachment["id"]
+        )
+        assert read["untrusted_content"] is True
+        assert read["segments"][0]["text"] == "untrusted input"
+    finally:
+        files.close()
+        other.close()
+        config_loader.reset_loader()

@@ -1,3 +1,4 @@
+// covers: frontend/web/src/components/ChatPanel.jsx
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -641,21 +642,23 @@ describe('ChatPanel', () => {
       expect(clearSpy).not.toHaveBeenCalled();
     });
 
+    // With no session to send the replace to, the store draws it at once.
     it('replace_visualization replaces the whole view', async () => {
-      const { addSpy, updateSpy } = setupSpies();
+      const { addSpy, clearSpy } = setupSpies();
       await send({ action: 'replace_visualization', nodes: [ACTOR], edges: [] });
-      expect(updateSpy).toHaveBeenCalledTimes(1);
-      expect(addSpy).not.toHaveBeenCalled();
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(addSpy).toHaveBeenCalledWith([ACTOR], []);
+      expect(clearSpy.mock.invocationCallOrder[0]).toBeLessThan(addSpy.mock.invocationCallOrder[0]);
     });
 
     it('clear-and-add (clear_visualization carrying nodes) clears then shows the nodes', async () => {
       // "clear the view and show X": the backend emits clear_visualization with
       // the searched nodes. The view must be cleared AND the nodes rendered.
-      const { addSpy, updateSpy, clearSpy } = setupSpies();
+      const { addSpy, clearSpy } = setupSpies();
       await send({ action: 'clear_visualization', nodes: [ACTOR], edges: [] });
       expect(clearSpy).toHaveBeenCalledTimes(1);
-      expect(updateSpy).toHaveBeenCalledWith([ACTOR], []);
-      expect(addSpy).not.toHaveBeenCalled();
+      expect(addSpy).toHaveBeenCalledWith([ACTOR], []);
+      expect(clearSpy.mock.invocationCallOrder[0]).toBeLessThan(addSpy.mock.invocationCallOrder[0]);
     });
 
     it('an empty replace_visualization clears the view and renders nothing', async () => {

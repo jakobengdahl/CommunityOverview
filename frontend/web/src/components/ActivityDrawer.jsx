@@ -24,7 +24,7 @@ const SESSION_ACTIVITY_LIMIT = 100;
  * Session activity lives on the session document and disappears with it;
  * Graph history is the permanent record of what changed in the graph itself.
  */
-function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
+function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster, onUndo }) {
   const { t } = useI18n();
   const { isMobile } = useViewportMode();
   const [tab, setTab] = useState('session');
@@ -138,7 +138,8 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
     setUndoing(true);
     setUndoNotice(null);
     try {
-      await api.undoSessionAction(sessionId, currentClientId);
+      if (onUndo) await onUndo();
+      else await api.undoSessionAction(sessionId, currentClientId);
       setUndoNotice({ kind: 'success' });
       // The undo's inverse op reaches this browser's own canvas via the
       // existing session-stream broadcast (session_manager.py's
@@ -160,7 +161,7 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
     } finally {
       setUndoing(false);
     }
-  }, [sessionId, currentClientId, undoing, loadSessionActivity]);
+  }, [sessionId, currentClientId, undoing, loadSessionActivity, onUndo]);
 
   // Body scroll lock, focus move-in on open and focus restore on close, for
   // the mobile full-screen overlay only.

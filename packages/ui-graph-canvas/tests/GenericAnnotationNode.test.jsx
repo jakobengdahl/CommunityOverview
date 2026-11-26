@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/GenericAnnotationNode.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode, {
@@ -637,6 +638,50 @@ describe('GenericAnnotationNode property editor', () => {
     openGroup('Rotation');
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: the default text/icon/vote-dot colour is the near-black
+  // #111827 defined by DEFAULT_COLOR, never #1e293b or any other value.
+  describe('default text colour', () => {
+    it('renders text without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'hello' }} />);
+      const el = screen.getByText('hello').parentElement;
+      expect(el.style.color).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on text unchanged', () => {
+      render(
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'hello', color: '#ef4444' }} />
+      );
+      const el = screen.getByText('hello').parentElement;
+      expect(el.style.color).toBe('rgb(239, 68, 68)');
+    });
+
+    it('renders an icon without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag' }} />);
+      const el = screen.getByTitle('flag');
+      expect(el.style.color).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on icon unchanged', () => {
+      render(
+        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag', color: '#22c55e' }} />
+      );
+      const el = screen.getByTitle('flag');
+      expect(el.style.color).toBe('rgb(34, 197, 94)');
+    });
+
+    it('renders a vote_dot without a stored colour using the DEFAULT_COLOR (#111827)', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+      const el = document.querySelector('.kind-vote_dot');
+      expect(el.style.backgroundColor).toBe('rgb(17, 24, 39)');
+    });
+
+    it('renders a stored colour on vote_dot unchanged', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ color: '#a855f7' }} />);
+      const el = document.querySelector('.kind-vote_dot');
+      expect(el.style.backgroundColor).toBe('rgb(168, 85, 247)');
+    });
   });
 
   // task-annotation-render-direct-manipulation remaining_scope: "No
@@ -1633,80 +1678,6 @@ describe('text/shape typography', () => {
     openGroup('Alignment');
     expect(document.querySelector('.context-menu-align')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
-  });
-});
-
-// task-annotation-render-direct-manipulation / task-annotation-responsive-
-// bottom-toolbox's "Nearby object menu" contract entry point: every generic
-// kind rendered by this component — `shape` included, whatever its
-// fill/border — can itself be the target this menu creates a new attachable
-// annotation near. `frame` used to be excluded here the same way it was
-// excluded from computeDroppedAttachment's own target candidacy; now that it
-// is folded into `shape` (task-annotation-merge-frame-into-shape-rectangle),
-// that exclusion is gone too — see GenericAnnotationNode's own
-// `onAttachNearby` wiring for the reasoning.
-describe('GenericAnnotationNode "Nearby object menu"', () => {
-  const nearbyLabels = {
-    nearbyMenu: 'Add nearby',
-    nearbyLabel: 'Label',
-    nearbyIcon: 'Icon',
-    nearbyText: 'Text',
-  };
-
-  it("calls the context attachNearby with this icon's id and the picked kind", () => {
-    const attachNearby = vi.fn();
-    render(
-      <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
-      >
-        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(screen.getByTitle('circle'));
-    openGroup('More actions');
-    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
-    expect(attachNearby).toHaveBeenCalledWith('i1', 'label');
-  });
-
-  // Deliberate decision (task-annotation-merge-frame-into-shape-rectangle):
-  // the retired `frame` kind used to be excluded from this menu; a `shape`
-  // stays included regardless of its fill/border, including a
-  // transparent-fill one that looks exactly like the old frame.
-  it("includes the section on a shape's menu, even with a transparent fill and a coloured border", () => {
-    const attachNearby = vi.fn();
-    render(
-      <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
-      >
-        <GenericAnnotationNode
-          id="s1"
-          type="shape"
-          data={{ shape: 'rectangle', fill: 'transparent', border: '#94a3b8' }}
-        />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
-    openGroup('More actions');
-    expect(screen.getByText('Add nearby')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
-    expect(attachNearby).toHaveBeenCalledWith('s1', 'label');
-  });
-
-  it("omits the section from a locked annotation's menu (capability baseline: only unlock/copy)", () => {
-    render(
-      <AnnotationContext.Provider
-        value={{
-          notifyChange: vi.fn(),
-          attachNearby: vi.fn(),
-          labels: { ...nearbyLabels, unlock: 'Unlock', duplicate: 'Duplicate' },
-        }}
-      >
-        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />
-      </AnnotationContext.Provider>
-    );
-    fireEvent.contextMenu(document.querySelector('.kind-vote_dot'));
-    openGroup('More actions');
-    expect(screen.queryByText('Add nearby')).toBeNull();
   });
 });
 

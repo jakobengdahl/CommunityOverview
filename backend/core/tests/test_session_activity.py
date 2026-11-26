@@ -1,3 +1,4 @@
+# covers: backend/core/session_activity.py, backend/core/session_store.py
 """
 Tests for the per-session activity log (``backend/core/session_activity.py``)
 and its integration into ``SessionStore.apply_state_op``: record shape,
@@ -295,12 +296,12 @@ class TestSessionStoreActivityIntegration:
         )
         assert session.activity_log == []
 
-    def test_non_undoable_op_does_not_log(self):
+    def test_untracked_op_does_not_log(self):
         store = _store()
         session = store.create()
         store.apply_state_op(
             session,
-            {"op": "nodes_added", "node_ids": ["n1"], "client_id": "actor-1"},
+            {"op": "session_renamed", "name": "Renamed", "client_id": "actor-1"},
         )
         assert session.activity_log == []
 
@@ -379,3 +380,47 @@ class TestSessionStoreActivityIntegration:
             },
         )
         assert session.activity_log == []
+
+
+def test_appearance_conflicts_on_identical_collaborator_write():
+    store = _store()
+    session = store.create()
+    store.apply_state_op(session, {"op": "nodes_added", "node_ids": ["a"]})
+    op = dict(
+        op="type_shape_set",
+        type="Thing",
+        selection={"builtin": True},
+        clear_node_id="a",
+        clear_base_revision=0,
+        version=1,
+        base_revision=0,
+        operation_id="first",
+        client_id="first",
+    )
+    store.apply_state_op(session, op)
+    record = store.find_latest_undoable(session, "first")
+    assert store.undo_conflict_reason(session, record) is None
+    store.apply_state_op(
+        session,
+        dict(
+            op="node_shape_set",
+            node_id="a",
+            selection=None,
+            version=1,
+            base_revision=1,
+            operation_id="second",
+            client_id="second",
+        ),
+    )
+    assert store.undo_conflict_reason(session, record) is not None
+    store.apply_state_op(
+        session,
+        {
+            **op,
+            "base_revision": 1,
+            "clear_base_revision": 2,
+            "operation_id": "third",
+            "client_id": "second",
+        },
+    )
+    assert store.undo_conflict_reason(session, record) is not None

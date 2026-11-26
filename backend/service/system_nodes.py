@@ -2,14 +2,13 @@
 
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from backend.core.events.delivery import is_safe_url
-from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_OPERATION_STAGE
 
@@ -98,18 +97,6 @@ class ActiveKnowledgeCollectionInput(NamedInput):
     tool_allowlist: List[str] = Field(default_factory=list)
 
 
-class PositionInput(CreateInput):
-    x: float = Field(allow_inf_nan=False)
-    y: float = Field(allow_inf_nan=False)
-
-
-class SavedViewInput(NamedInput):
-    node_ids: List[str] = Field(min_length=1)
-    positions: Dict[str, PositionInput] = Field(default_factory=dict)
-    hidden_nodes: List[str] = Field(default_factory=list)
-    annotation_document: Optional[Dict[str, Any]] = None
-
-
 class AnswerInput(CreateInput):
     field_id: str = Field(min_length=1)
     value: JsonValue
@@ -129,7 +116,6 @@ SYSTEM_CREATE_MODELS = {
     "create_event_subscription": EventSubscriptionInput,
     "create_skill": SkillInput,
     "create_active_knowledge_collection": ActiveKnowledgeCollectionInput,
-    "create_saved_view": SavedViewInput,
     "create_collection_response": CollectionResponseInput,
 }
 
@@ -211,31 +197,6 @@ def _assemble(config, storage, graph_access):
         # merges conflict rather than publishing two kiosks under the same slug.
         node_id = f"active-knowledge-collection-{config.short_name}"
         metadata = config.model_dump(exclude=set(NamedInput.model_fields))
-    elif isinstance(config, SavedViewInput):
-        node_type = "SavedView"
-        ids = list(dict.fromkeys(config.node_ids))
-        for nid in ids:
-            visible(nid)
-        if set(config.positions) - set(ids) or set(config.hidden_nodes) - set(ids):
-            raise ValueError("positions and hidden_nodes must reference node_ids")
-        metadata = {
-            "node_ids": ids,
-            "positions": {
-                nid: config.positions[nid].model_dump()
-                if nid in config.positions
-                else {"x": i * 250, "y": 0}
-                for i, nid in enumerate(ids)
-            },
-            "hidden_nodes": config.hidden_nodes,
-        }
-        if config.annotation_document is not None:
-            metadata.update(
-                annotation_schema_version=1,
-                annotation_document=config.annotation_document,
-            )
-        error = saved_view_annotation_error(metadata)
-        if error:
-            raise ValueError(error)
     else:
         node_type = "CollectionResponse"
         collection = visible(config.collection_id, "ActiveKnowledgeCollection")
@@ -373,19 +334,6 @@ def make_system_create_tools(service, *, event_origin=None):
             expected_session_seq,
         )
 
-    def create_saved_view(
-        config: SavedViewInput,
-        visualization_session_id: Optional[str] = None,
-        expected_session_seq: Optional[int] = None,
-    ):
-        """Persist a SavedView from explicit node IDs and optional positions; no browser needed."""
-        return create(
-            SavedViewInput,
-            config,
-            visualization_session_id,
-            expected_session_seq,
-        )
-
     def create_collection_response(
         config: CollectionResponseInput,
         visualization_session_id: Optional[str] = None,
@@ -406,7 +354,6 @@ def make_system_create_tools(service, *, event_origin=None):
             create_event_subscription,
             create_skill,
             create_active_knowledge_collection,
-            create_saved_view,
             create_collection_response,
         )
     }

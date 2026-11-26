@@ -10,11 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import sqlite3
 import sys
-import tempfile
-from pathlib import Path
 from typing import Optional, Protocol
 
 from backend.core.actor_attribution import validate_erasure
@@ -35,6 +31,7 @@ class ActorErasureService:
         proposals: Optional[ActorErasureStore] = None,
         session_activity: Optional[ActorErasureStore] = None,
         staged_layers: Optional[ActorErasureStore] = None,
+        merge_records: Optional[ActorErasureStore] = None,
     ):
         self._stores = {
             "mutation_history": mutation_history,
@@ -42,6 +39,7 @@ class ActorErasureService:
             "proposals": proposals,
             "session_activity": session_activity,
             "staged_layers": staged_layers,
+            "merge_records": merge_records,
         }
 
     def erase_actor(self, actor_id: str, replacement_token: str) -> dict:
@@ -62,37 +60,6 @@ class ActorErasureService:
                 counts[name] = None
                 failed.append(name)
         return {"counts": counts, "failed_stores": failed}
-
-
-def _sqlite_schema_matches(path: str, table: str, version: int) -> bool:
-    """Check that *path* is a current-schema store owning *table*.
-
-    Nothing next to *path* is created or changed. immutable=1 keeps SQLite
-    from creating -shm/-wal sidecars, but it also ignores a pending WAL,
-    which may hold the schema; such a store is probed as a private copy.
-    """
-    with tempfile.TemporaryDirectory() as scratch:
-        if Path(f"{path}-wal").exists():
-            probe = Path(scratch) / "probe.db"
-            shutil.copyfile(path, probe)
-            shutil.copyfile(f"{path}-wal", f"{probe}-wal")
-            # The copy is private, so SQLite may recover the WAL into it.
-            uri = probe.as_uri()
-        else:
-            uri = f"{Path(path).resolve().as_uri()}?mode=ro&immutable=1"
-        try:
-            conn = sqlite3.connect(uri, uri=True)
-            try:
-                found = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                    (table,),
-                ).fetchone()
-                current = conn.execute("PRAGMA user_version").fetchone()[0]
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            return False
-    return found is not None and current == version
 
 
 class _Parser(argparse.ArgumentParser):
@@ -123,16 +90,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Staged-session layers sidecar (<graph>.layers.json); "
         "the merge log beside it is included",
     )
+    parser.add_argument(
+        "--postgres-schema",
+        help="PostgreSQL graph store schema whose staged-merge records to "
+        "include; connects with GRAPH_POSTGRES_DSN and GRAPH_POSTGRES_SCOPE",
+    )
     args = parser.parse_args(argv)
     try:
         validate_erasure(args.actor_id, args.replacement_token)
-        from backend.agents.execution.sqlite_store import (
-            _SCHEMA_VERSION as execution_schema_version,
-        )
         from backend.agents.execution.sqlite_store import SqliteExecutionStore
-        from backend.agents.governance.store import (
-            _SCHEMA_VERSION as governance_schema_version,
-        )
         from backend.agents.governance.store import SqliteProposalStore
         from backend.core.history_store import GraphHistoryStore
         from backend.core.session_store import (
@@ -144,43 +110,80 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("error: actor attribution erasure failed", file=sys.stderr)
         return 2
 
-    sqlite_schemas = {
-        "run_history": ("execution_jobs", execution_schema_version),
-        "proposals": ("proposals", governance_schema_version),
-    }
     targets = []
-    for name, path, factory in (
-        ("mutation_history", args.history_path, GraphHistoryStore),
-        ("run_history", args.run_history_db, SqliteExecutionStore),
-        ("proposals", args.governance_db, SqliteProposalStore),
-        (
-            "session_activity",
-            args.sessions_dir,
-            lambda p: SessionStore(FileSessionPersistenceBackend(p)),
-        ),
-        ("staged_layers", args.layers_path, StagedLayersFile),
-    ):
-        # An empty path would resolve to the working directory, not a store.
-        if not path:
-            continue
+    try:
+        # Every store is asked before any is opened: the read-write SQLite
+        # and session constructors write, so a refusal must come first.
+        for name, path, factory, preflight in (
+            (
+                "mutation_history",
+                args.history_path,
+                GraphHistoryStore,
+                GraphHistoryStore.preflight,
+            ),
+            (
+                "run_history",
+                args.run_history_db,
+                SqliteExecutionStore,
+                SqliteExecutionStore.preflight,
+            ),
+            (
+                "proposals",
+                args.governance_db,
+                SqliteProposalStore,
+                SqliteProposalStore.preflight,
+            ),
+            (
+                "session_activity",
+                args.sessions_dir,
+                lambda p: SessionStore(FileSessionPersistenceBackend(p)),
+                FileSessionPersistenceBackend.preflight,
+            ),
+            (
+                "staged_layers",
+                args.layers_path,
+                StagedLayersFile,
+                lambda p: StagedLayersFile(p).preflight(),
+            ),
+        ):
+            # An empty path would resolve to the working directory, not a store.
+            if path and preflight(path):
+                targets.append((name, path, factory))
+    except Exception:
+        # The exception would print the path.
+        print("error: a store path is not a usable store of its kind", file=sys.stderr)
+        return 2
+
+    if args.postgres_schema:
+        # Checked last, so an exit 2 above leaves no connection to close.
+        # The DSN comes only from the environment: argv is visible to other
+        # local users and it usually carries a password.
+        dsn = (os.getenv("GRAPH_POSTGRES_DSN") or "").strip()
+        merge_records = None
         try:
-            if not Path(path).exists():
-                continue
-            is_dir = name == "session_activity"
-            valid = Path(path).is_dir() if is_dir else Path(path).is_file()
-            if valid and name in sqlite_schemas:
-                valid = _sqlite_schema_matches(path, *sqlite_schemas[name])
-        except OSError:
-            # An unreadable path is refused like a mis-pointed one; the
-            # exception would print the path.
-            valid = False
-        if not valid:
-            # A mis-pointed path is an invocation error: refuse before any
-            # store is opened, because the read-write SQLite constructors
-            # create and migrate schema in whatever file they are given.
-            print("error: a store path is not a store of its kind", file=sys.stderr)
+            if not dsn:
+                raise ValueError("no DSN")
+            from backend.core.postgres_backend import PostgresMergeRecords
+
+            merge_records = PostgresMergeRecords(
+                dsn,
+                schema=args.postgres_schema,
+                scope=os.getenv("GRAPH_POSTGRES_SCOPE"),
+            )
+            present = merge_records.preflight()
+        except Exception:
+            # Connection errors can quote the DSN, password included.
+            if merge_records is not None:
+                merge_records.close()
+            print(
+                "error: the PostgreSQL graph store is unavailable or not writable",
+                file=sys.stderr,
+            )
             return 2
-        targets.append((name, path, factory))
+        if present:
+            targets.append(("merge_records", None, lambda _: merge_records))
+        else:
+            merge_records.close()
 
     # From here on stores may be modified, so every failure is reported per
     # store with exit 1; exit 2 is reserved for runs that touched nothing.

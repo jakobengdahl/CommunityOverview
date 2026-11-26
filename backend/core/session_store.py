@@ -21,7 +21,10 @@ stays a pure state layer with no asyncio dependency.
 from __future__ import annotations
 
 import copy
+import errno
 import json
+import logging
+import math
 import os
 import re
 import secrets
@@ -30,15 +33,36 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Protocol
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Deque,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+)
 
-from .actor_attribution import replace_attribution, validate_erasure
+from backend.config.node_shapes import ShapeSelection
+from pydantic import ValidationError
+
+from .actor_attribution import (
+    preflight_directory,
+    preflight_file,
+    replace_attribution,
+    validate_erasure,
+)
 from .session_activity import (
     DEFAULT_ACTIVITY_MAX_AGE_DAYS,
     DEFAULT_MAX_ACTIVITY_RECORDS,
     RECORDED_ONLY_OPS,
+    MEMBERSHIP_OPS,
+    MAX_ACTIVITY_NODE_IDS,
     UNDOABLE_OPS,
     build_activity_record,
     find_latest_undoable as _find_latest_undoable,
@@ -46,6 +70,8 @@ from .session_activity import (
     undo_conflict_reason as _undo_conflict_reason,
 )
 from .session_annotations import image_annotation_error, reference_annotation_error
+
+logger = logging.getLogger(__name__)
 
 # Session IDs use the grouped-digit shape DDDD-DDDD-DDDD-DDDD (four groups,
 # ~10^16 address space) so an unauthenticated caller cannot feasibly enumerate
@@ -70,6 +96,7 @@ _ANNOTATION_TYPES = {
 _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
+MAX_SESSION_DESCRIPTION_CHARS = 4000
 
 # Per-annotation versioning (task-smallfix-whole-annotation-clobber-on-
 # concurrent-different-field-edit / dec-annotation-field-patches-and-
@@ -90,8 +117,11 @@ _ANNOTATION_META_FIELDS = frozenset(
 
 # State-mutating ops that are persisted, sequenced and mirrored to catch-up.
 STATE_OPS = {
+    "node_shape_set",
+    "type_shape_set",
     "nodes_added",
     "nodes_removed",
+    "nodes_replaced",
     "node_moved",
     "nodes_hidden",
     "nodes_shown",
@@ -110,6 +140,7 @@ STATE_OPS = {
     "annotation_deleted",
     "group_membership_changed",
     "session_renamed",
+    "session_described",
     "layout_applied",
     # docs/SESSION_OVERLAY_CONTRACT.md §15. Sequenced and fanned out like any
     # other op, but emitted only by the server, after the layer store or the
@@ -120,8 +151,12 @@ STATE_OPS = {
     "write_mode_changed",
 }
 
+# session_described is written only through the MCP describe tool
+# (SessionManager.describe_session_sync); the browser /ops batch has no
+# description editor, so it may not set one either.
 SERVER_ONLY_OPS = frozenset(
     {
+        "session_described",
         "graph_change_staged",
         "graph_changes_discarded",
         "graph_changes_merged",
@@ -140,6 +175,10 @@ def _now_iso() -> str:
 
 def _empty_state() -> Dict[str, Any]:
     return {
+        "shape_overrides": {},
+        "type_shapes": {},
+        "shape_revisions": {},
+        "shape_operation_ids": {},
         "node_refs": [],
         "positions": {},
         "hidden_node_ids": [],
@@ -161,6 +200,22 @@ def _empty_state() -> Dict[str, Any]:
 
 class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
+
+
+class AnnotationLimitReached(OpError):
+    """The session cannot hold any more annotations."""
+
+
+class AppearanceVersionRequired(OpError):
+    """The writer has not declared support for appearance state."""
+
+
+class ShapeRevisionConflict(Exception):
+    """An appearance target changed since the caller read it."""
+
+    def __init__(self, target, revision):
+        self.target, self.revision = target, revision
+        super().__init__("appearance revision conflict")
 
 
 class SessionRetired(OpError):
@@ -237,6 +292,9 @@ class Session:
 
     id: str
     name: Optional[str] = None
+    # What the session is for and what the next participant should pick up.
+    # Session metadata like the name, so clearing the canvas keeps it.
+    description: Optional[str] = None
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
     seq: int = 0
@@ -246,8 +304,8 @@ class Session:
     # nor layout; a document written before the field existed is direct.
     write_mode: str = "direct"
     write_mode_source: str = "inherited"
-    # Persistent per-session activity log (annotation/canvas ops with an
-    # inverse), see session_activity.py. Newest entries last; bounded by
+    # Persistent per-session activity log, including membership without an
+    # inverse; see session_activity.py. Newest entries last; bounded by
     # retention applied on every append.
     activity_log: List[Dict[str, Any]] = field(default_factory=list)
     # Ephemeral (not persisted, not part of to_dict/from_dict): recently
@@ -270,6 +328,7 @@ class Session:
         return {
             "id": self.id,
             "name": self.name,
+            "description": self.description,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
@@ -283,6 +342,7 @@ class Session:
         return {
             "id": self.id,
             "name": self.name,
+            "description": self.description,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "seq": self.seq,
@@ -299,6 +359,11 @@ class Session:
         return cls(
             id=data["id"],
             name=data.get("name"),
+            description=(
+                data.get("description")
+                if isinstance(data.get("description"), str)
+                else None
+            ),
             created_at=data.get("created_at") or _now_iso(),
             updated_at=data.get("updated_at") or _now_iso(),
             seq=int(data.get("seq") or 0),
@@ -329,25 +394,104 @@ class SessionPersistenceBackend(Protocol):
 
     def list_ids(self) -> List[str]: ...
 
+    def transaction(self) -> ContextManager[None]:
+        """Hold the backend's exclusive lock; reentrant within one thread.
+
+        ``load``, ``save`` and ``delete`` each run inside one, so a caller that
+        groups several of them in an outer transaction is never observed half
+        done by a reader in another thread or process. A no-op context does
+        not conform, even when each single call is atomic on its own.
+        """
+        ...
+
 
 # Cross-platform file locking mirrors storage_backends.py so session writes get
-# the same guarantees as graph writes.
+# the same guarantees as graph writes. msvcrt has no shared mode, so every
+# Windows lock is exclusive, and no mode that waits indefinitely (LK_NBLCK
+# fails at once, LK_LOCK gives up after about ten seconds), so LK_LOCK is
+# retried until it succeeds, as flock would block.
 if sys.platform == "win32":  # pragma: no cover - platform specific
     import msvcrt
-
-    def _lock_file(f, exclusive: bool = True) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_LOCK, 1)
-
-    def _unlock_file(f) -> None:
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
 
-    def _lock_file(f, exclusive: bool = True) -> None:
-        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    msvcrt = None
 
-    def _unlock_file(f) -> None:
+
+def _msvcrt_lock_byte_zero(fd: int, mode: int) -> None:
+    # msvcrt.locking acts on the byte at the current file position. Handles
+    # opened for append sit at EOF while readers sit at 0, so without pinning
+    # the byte two contenders would lock different bytes and never wait for
+    # each other, and an unlock after a write would target an unlocked byte.
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, mode, 1)
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
+
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    if msvcrt is None:
+        fcntl.flock(f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    while True:
+        try:
+            _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_LOCK)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EDEADLOCK, errno.EACCES):
+                raise
+
+
+def _unlock_file(f) -> None:
+    if msvcrt is None:
         fcntl.flock(f, fcntl.LOCK_UN)
+    else:
+        _msvcrt_lock_byte_zero(f.fileno(), msvcrt.LK_UNLCK)
+
+
+def _fsync_directory(directory: str | Path) -> None:
+    """Make the renames in ``directory`` durable.
+
+    Windows cannot open a directory, and some filesystems refuse to fsync one;
+    there the rename stands as before rather than failing a write it completed.
+    """
+    if sys.platform == "win32":  # pragma: no cover - platform specific
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+    finally:
+        os.close(fd)
+
+
+def _make_directory(directory: Path) -> None:
+    """Create ``directory`` and make each new entry durable in its parent."""
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        _fsync_directory(created.parent)
+
+
+class SessionLimitReached(Exception):
+    pass
+
+
+def _session_files(directory: Path) -> List[Path]:
+    # A dangling symlink is no session, as load() treats it.
+    return [
+        p
+        for p in directory.iterdir()
+        if p.suffix == ".json" and is_valid_session_id(p.stem) and p.exists()
+    ]
 
 
 class FileSessionPersistenceBackend:
@@ -360,28 +504,101 @@ class FileSessionPersistenceBackend:
 
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
+        self._lock = threading.RLock()
+        self._depth = 0
+        with self.transaction():
+            for path in self.directory.glob("session_*.json"):
+                if path.is_file():
+                    path.unlink()
+
+    @staticmethod
+    def preflight(directory: str | Path) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        Opens what an erasure opens: the lock file read-write and every
+        session file it lists for reading; rewrites are renamed in, and the
+        constructor removes leftover temp files, so the directory takes writes.
+        """
+        directory = Path(directory)
+        if not directory.exists():
+            return False
+        sessions = _session_files(directory)
+        leftovers = [p for p in directory.glob("session_*.json") if p.is_file()]
+        preflight_directory(directory, replaces=sessions + leftovers)
+        lock = directory / ".sessions.lock"
+        if os.path.lexists(lock):
+            preflight_file(lock, write=True)
+        for path in sessions:
+            preflight_file(path)
+        return True
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            if self._depth:
+                # flock and msvcrt locks are per handle: a second handle in the
+                # same thread would wait on the lock it already holds.
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            _make_directory(self.directory)
+            with open(self.directory / ".sessions.lock", "a+") as lock:
+                _lock_file(lock, exclusive=True)
+                self._depth = 1
+                try:
+                    yield
+                finally:
+                    self._depth = 0
+                    _unlock_file(lock)
 
     def _path(self, session_id: str) -> Path:
         # session_id is always validated before it reaches here, so it cannot
         # contain path separators — but guard anyway to keep this a hard boundary.
         if not is_valid_session_id(session_id):
             raise OpError(f"invalid session id: {session_id!r}")
-        return self.directory / f"{session_id}.json"
+        # Containment check in a form static analysis recognises as a path
+        # sanitiser; the id regex above already rules out separators.
+        base = os.path.normpath(os.path.abspath(self.directory))
+        full = os.path.normpath(os.path.join(base, f"{session_id}.json"))
+        if not full.startswith(base.rstrip(os.sep) + os.sep):
+            raise OpError(f"invalid session id: {session_id!r}")
+        return Path(full)
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
         path = self._path(session_id)
-        if not path.exists():
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            _lock_file(f, exclusive=False)
-            try:
-                return json.load(f)
-            finally:
-                _unlock_file(f)
+        with self.transaction():
+            if not path.exists():
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                _lock_file(f, exclusive=False)
+                try:
+                    return json.load(f)
+                finally:
+                    _unlock_file(f)
 
     def save(self, session: Dict[str, Any]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(session["id"])
+        with self.transaction():
+            self._save_locked(path, session)
+
+    def _save_locked(self, path: Path, session: Dict[str, Any]) -> None:
+        # A failed save leaves the previous file in place, even when only the
+        # directory fsync after the rename fails.
+        previous = path.read_bytes() if path.exists() else None
+        self._replace_locked(path, json.dumps(session, indent=2, ensure_ascii=False))
+        try:
+            _fsync_directory(self.directory)
+        except Exception:
+            if previous is None:
+                os.unlink(path)
+            else:
+                self._replace_locked(path, previous.decode("utf-8"))
+            raise
+
+    def _replace_locked(self, path: Path, text: str) -> None:
         temp_fd, temp_path = tempfile.mkstemp(
             suffix=".json", prefix="session_", dir=self.directory
         )
@@ -389,7 +606,7 @@ class FileSessionPersistenceBackend:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 _lock_file(f, exclusive=True)
                 try:
-                    json.dump(session, f, indent=2, ensure_ascii=False)
+                    f.write(text)
                     f.flush()
                     os.fsync(f.fileno())
                 finally:
@@ -405,19 +622,16 @@ class FileSessionPersistenceBackend:
 
     def delete(self, session_id: str) -> None:
         path = self._path(session_id)
-        if path.exists():
-            os.unlink(path)
+        with self.transaction():
+            if path.exists():
+                os.unlink(path)
 
     def list_ids(self) -> List[str]:
         # Enumerate without decoding so erasure cannot silently skip a damaged
         # session that the ordinary metadata listing tolerates.
         if not self.directory.exists():
             return []
-        return [
-            p.stem
-            for p in self.directory.iterdir()
-            if p.suffix == ".json" and is_valid_session_id(p.stem)
-        ]
+        return [p.stem for p in _session_files(self.directory)]
 
     def list_meta(self) -> List[Dict[str, Any]]:
         if not self.directory.exists():
@@ -446,16 +660,25 @@ class InMemorySessionPersistenceBackend:
 
     def __init__(self) -> None:
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            yield
 
     def load(self, session_id: str) -> Optional[Dict[str, Any]]:
-        raw = self._data.get(session_id)
-        return json.loads(json.dumps(raw)) if raw is not None else None
+        with self._lock:
+            raw = self._data.get(session_id)
+            return json.loads(json.dumps(raw)) if raw is not None else None
 
     def save(self, session: Dict[str, Any]) -> None:
-        self._data[session["id"]] = json.loads(json.dumps(session))
+        with self._lock:
+            self._data[session["id"]] = json.loads(json.dumps(session))
 
     def delete(self, session_id: str) -> None:
-        self._data.pop(session_id, None)
+        with self._lock:
+            self._data.pop(session_id, None)
 
     def list_ids(self) -> List[str]:
         return list(self._data)
@@ -596,6 +819,75 @@ def _remove_all(existing: List[str], removals: List[str]) -> List[str]:
     return [item for item in existing if item not in drop]
 
 
+def _drop_node_refs(state: Dict[str, Any], removals: List[str]) -> None:
+    """Remove nodes from ``state`` with their position, flags and group slots."""
+    drop = set(removals)
+    for node_id in drop & set(state["node_refs"]):
+        key = "node:" + node_id
+        state["shape_revisions"][key] = state["shape_revisions"].get(key, 0) + 1
+    state["shape_overrides"] = {
+        k: v for k, v in state.get("shape_overrides", {}).items() if k not in drop
+    }
+    state["node_refs"] = _remove_all(state["node_refs"], removals)
+    state["positions"] = {k: v for k, v in state["positions"].items() if k not in drop}
+    state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
+    state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], removals)
+    for ann in state["annotations"]:
+        members = ann.get("member_node_ids")
+        if isinstance(members, list):
+            ann["member_node_ids"] = [m for m in members if m not in drop]
+
+
+_PLACEMENT_CELL_W = 280.0
+_PLACEMENT_CELL_H = 180.0
+
+
+def _given_positions(op: Dict[str, Any], node_ids: List[str]) -> Dict[str, Any]:
+    """The op's ``positions`` for ``node_ids``; other keys and nulls are skipped."""
+    positions = op.get("positions")
+    if positions is None:
+        return {}
+    if not isinstance(positions, dict):
+        raise OpError(f"{op.get('op')}: 'positions' must be an object")
+    wanted = set(node_ids)
+    return {
+        node_id: _validate_position(position)
+        for node_id, position in positions.items()
+        if node_id in wanted and position is not None
+    }
+
+
+def _place_unplaced(state: Dict[str, Any], node_ids: List[str]) -> Dict[str, Any]:
+    """Grid places for the members in ``node_ids`` that have no position yet.
+
+    Right of the members already placed, so every browser draws a node a push,
+    a replace or an add brought in without a position at the same place.
+    """
+    unplaced = [n for n in node_ids if n not in state["positions"]]
+    if not unplaced:
+        return {}
+    placed = [
+        state["positions"][n]
+        for n in state["node_refs"]
+        if n in state["positions"] and n not in unplaced
+    ]
+    cols = max(1, math.ceil(math.sqrt(len(unplaced))))
+    if placed:
+        x0 = max(p["x"] for p in placed) + _PLACEMENT_CELL_W
+        y0 = min(p["y"] for p in placed)
+    else:
+        x0, y0 = 400.0, 300.0
+    positions = {
+        node_id: {
+            "x": x0 + (i % cols) * _PLACEMENT_CELL_W,
+            "y": y0 + (i // cols) * _PLACEMENT_CELL_H,
+        }
+        for i, node_id in enumerate(unplaced)
+    }
+    state["positions"].update(positions)
+    return positions
+
+
 class SessionStore:
     """In-memory registry of sessions backed by a persistence seam.
 
@@ -627,6 +919,11 @@ class SessionStore:
         self._sessions: Dict[str, Session] = {}
         self._rings: Dict[str, Deque[Dict[str, Any]]] = {}
         self._lock = threading.RLock()
+        # Session id -> number of open ``writing`` sections.
+        self._writers: Dict[str, int] = {}
+        # Session id -> callbacks run once its outermost section exits.
+        self._after_write: Dict[str, List[Callable[[Session], None]]] = {}
+        self._writers_lock = threading.Lock()
         # Cache of the backend's persisted meta list (R13): a full disk scan
         # otherwise runs on every drawer-open GET /api/sessions *and* every
         # session_count() cap check, and session_count() previously counted
@@ -635,6 +932,9 @@ class SessionStore:
         # endpoint grow data/sessions/ past max_sessions across restarts.
         # Invalidated on every backend.save()/delete() call.
         self._meta_cache: Optional[List[Dict[str, Any]]] = None
+        # Ids another store holds (templates authorize as sessions by id), so
+        # no session is ever created under one. Called under ``_lock``.
+        self.id_reserved: Optional[Callable[[str], bool]] = None
 
     # ---------------- lifecycle ----------------
 
@@ -650,6 +950,7 @@ class SessionStore:
                     self._staged_status is None
                     or self._staged_status(candidate) == "none"
                 )
+                and (self.id_reserved is None or not self.id_reserved(candidate))
             ):
                 return candidate
         raise RuntimeError("could not allocate a free session id")
@@ -667,66 +968,102 @@ class SessionStore:
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
     ) -> Session:
-        """Create a session under a fresh id.
+        session, _ = self.create_with_capacity(
+            name,
+            write_mode=write_mode,
+            write_mode_source=write_mode_source,
+            on_allocate=on_allocate,
+            state=state,
+            description=description,
+        )
+        return session
 
-        ``on_allocate`` runs with the id before the document is saved - the
-        staged-session record is written there, so a document never names a
-        staged session the graph backend has no record of. If it raises,
-        nothing is saved.
-        """
-        with self._lock:
+    def create_with_capacity(
+        self,
+        name: Optional[str] = None,
+        *,
+        max_sessions: Optional[int] = None,
+        session_id: Optional[str] = None,
+        write_mode: str = "direct",
+        write_mode_source: str = "inherited",
+        on_allocate: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
+        prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
+    ) -> "tuple[Session, bool]":
+        """Check capacity and publish a new document under the store transaction."""
+        if session_id is not None and not is_valid_session_id(session_id):
+            raise OpError(f"invalid session id: {session_id!r}")
+        with self._lock, self._backend.transaction():
+            if session_id is not None:
+                existing = self.get(session_id)
+                if existing is not None:
+                    return existing, False
+                self._refuse_retired(session_id)
+                if self.id_reserved is not None and self.id_reserved(session_id):
+                    raise SessionRetired(session_id)
+            self._check_capacity(max_sessions)
             session = Session(
-                id=self._new_id(),
+                id=session_id if session_id is not None else self._new_id(),
                 name=name,
+                description=description,
+                state=state if state is not None else _empty_state(),
                 write_mode=write_mode,
                 write_mode_source=write_mode_source,
             )
             if on_allocate is not None:
                 on_allocate(session.id)
+            try:
+                if prepare is not None:
+                    prepare(session)
+                self._backend.save(session.to_dict())
+            except BaseException:
+                self._rings.pop(session.id, None)
+                raise
             self._sessions[session.id] = session
-            self._rings[session.id] = deque(maxlen=self._ring_size)
-            self._backend.save(session.to_dict())
+            self._rings.setdefault(session.id, deque(maxlen=self._ring_size))
             self._meta_cache = None
-            return session
+            if on_publish is not None:
+                on_publish(session)
+            return session, True
+
+    def _check_capacity(self, max_sessions: Optional[int]) -> None:
+        ids = set(self._backend.list_ids()) | self._sessions.keys()
+        if max_sessions is not None and len(ids) >= max_sessions:
+            raise SessionLimitReached()
+
+    def check_capacity(self, max_sessions: int) -> None:
+        """Refuse a full store before doing preparatory work for a create.
+
+        Creation must still recheck under its own transaction.
+        """
+        with self._lock, self._backend.transaction():
+            self._check_capacity(max_sessions)
 
     def get_or_create(
         self,
         session_id: str,
         *,
+        max_sessions: Optional[int] = None,
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
+        prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
     ) -> "tuple[Session, bool]":
-        """Return ``(session, created)``, creating it with the given id if absent.
-
-        Supports the connect-by-ID / share-URL flow where a client joins a
-        specific session id that may not exist server-side yet (design 3.6).
-        A session created here takes ``write_mode``; ``on_allocate`` runs
-        before its document is saved, as in ``create``.
-        """
-        if not is_valid_session_id(session_id):
-            raise OpError(f"invalid session id: {session_id!r}")
-        existing = self.get(session_id)
-        if existing is not None:
-            return existing, False
-        self._refuse_retired(session_id)
-        with self._lock:
-            existing = self._sessions.get(session_id)
-            if existing is not None:
-                return existing, False
-            session = Session(
-                id=session_id,
-                write_mode=write_mode,
-                write_mode_source=write_mode_source,
-            )
-            if on_allocate is not None:
-                on_allocate(session_id)
-            self._sessions[session_id] = session
-            self._rings[session_id] = deque(maxlen=self._ring_size)
-            self._backend.save(session.to_dict())
-            self._meta_cache = None
-            return session, True
+        return self.create_with_capacity(
+            session_id=session_id,
+            max_sessions=max_sessions,
+            write_mode=write_mode,
+            write_mode_source=write_mode_source,
+            on_allocate=on_allocate,
+            prepare=prepare,
+            on_publish=on_publish,
+        )
 
     def get(self, session_id: str) -> Optional[Session]:
         if not is_valid_session_id(session_id):
@@ -735,10 +1072,13 @@ class SessionStore:
             session = self._sessions.get(session_id)
             if session is not None:
                 return session
-            raw = self._backend.load(session_id)
-            if raw is None:
-                return None
-            session = Session.from_dict(raw)
+            # Decode under the backend's lock too, so the session cached here
+            # is the one persisted before or after a concurrent transaction.
+            with self._backend.transaction():
+                raw = self._backend.load(session_id)
+                if raw is None:
+                    return None
+                session = Session.from_dict(raw)
             self._sessions[session_id] = session
             self._rings.setdefault(session_id, deque(maxlen=self._ring_size))
             return session
@@ -805,6 +1145,53 @@ class SessionStore:
             self._backend.save(snapshot)
             self._meta_cache = None
 
+    @contextmanager
+    def writing(self, session_id: str) -> Iterator[None]:
+        """Mark a live mutation of ``session_id`` that ends in persist or
+        rollback, possibly after an await (docs/design/node-shapes/live-writers.md).
+
+        Entry waits for a backend transaction in flight, so a shape library
+        commit that checks ``is_writing`` under one never adopts state into a
+        session whose rollback snapshot is already taken. Sections nest; the
+        marker clears when the outermost one exits.
+        """
+        with self._backend.transaction(), self._writers_lock:
+            self._writers[session_id] = self._writers.get(session_id, 0) + 1
+        try:
+            yield
+        finally:
+            callbacks: List[Callable[[Session], None]] = []
+            with self._writers_lock:
+                if self._writers[session_id] == 1:
+                    del self._writers[session_id]
+                    callbacks = self._after_write.pop(session_id, [])
+                else:
+                    self._writers[session_id] -= 1
+            session = self._sessions.get(session_id) if callbacks else None
+            for callback in callbacks:
+                if session is None:
+                    break
+                try:
+                    callback(session)
+                except Exception:
+                    logger.exception("after-write callback failed for %s", session_id)
+
+    def is_writing(self, session_id: str) -> bool:
+        with self._writers_lock:
+            return session_id in self._writers
+
+    def after_writes(self, callback: Callable[[Session], None]) -> None:
+        """Run ``callback(session)`` once each session now being written has
+        persisted or rolled back, on that writer's own thread.
+
+        Its live state may differ from disk until then, so a reader of persisted
+        sessions defers to this for those sessions instead of reading the state
+        mid-write.
+        """
+        with self._writers_lock:
+            for session_id in self._writers:
+                self._after_write.setdefault(session_id, []).append(callback)
+
     def session_count(self) -> int:
         """Number of sessions that exist, on disk or in memory (R13).
 
@@ -819,6 +1206,147 @@ class SessionStore:
             return len(disk_ids)
 
     # ---------------- op application ----------------
+
+    def _replaced_state(
+        self, session: Session, op: Dict[str, Any]
+    ) -> Optional[tuple[Dict[str, Any], List[str], List[str]]]:
+        """The state a ``nodes_replaced`` op leaves, built on a copy.
+
+        Returns ``(state, tombstoned annotation ids, restored annotation ids)``,
+        or ``None`` when nothing would change. Raises ``OpError`` before
+        anything is touched when any part of the op cannot apply.
+
+        Membership becomes exactly ``node_ids``. The optional view layout:
+        ``positions`` (members only, nulls skipped), ``hidden_node_ids`` (the
+        hidden set, members only) and ``annotations`` (the session's whole
+        annotation list, by stable id; groups are annotations). A view's
+        annotation is restored even when an earlier delete tombstoned its id.
+        Every member left without a position is given one.
+        """
+        before = session.state
+        kept = _union([], _require_id_list(op, "node_ids"))
+        members = set(kept)
+        given = _given_positions(op, kept)
+        hidden = op.get("hidden_node_ids")
+        if hidden is not None:
+            hidden = _require_id_list(op, "hidden_node_ids")
+        view_annotations = op.get("annotations")
+        if view_annotations is not None and not isinstance(view_annotations, list):
+            raise OpError("nodes_replaced: 'annotations' must be a list")
+
+        state = copy.deepcopy(before)
+        if members != set(before["node_refs"]):
+            _drop_node_refs(state, [n for n in state["node_refs"] if n not in members])
+            state["node_refs"] = kept
+        state["positions"].update(given)
+        _place_unplaced(state, state["node_refs"])
+        if "inserted_shape_overrides" in op:
+            for node_id in before["node_refs"]:
+                if node_id not in before["positions"]:
+                    state["positions"].pop(node_id, None)
+        overrides = op.get("inserted_shape_overrides", {})
+        if not isinstance(overrides, dict) or any(
+            key not in members - set(before["node_refs"]) for key in overrides
+        ):
+            raise OpError("invalid inserted shape overrides")
+        for key, selection in overrides.items():
+            try:
+                ShapeSelection.model_validate(selection)
+            except (ValidationError, ValueError, TypeError) as exc:
+                raise OpError("invalid inserted shape selection") from exc
+            state["shape_overrides"][key] = copy.deepcopy(selection)
+            rev_key = "node:" + key
+            state["shape_revisions"][rev_key] = (
+                state["shape_revisions"].get(rev_key, 0) + 1
+            )
+        if hidden is not None:
+            state["hidden_node_ids"] = [h for h in _union([], hidden) if h in members]
+        tombstoned: List[str] = []
+        restored: List[str] = []
+        if view_annotations is not None:
+            held = {a.get("id"): a for a in state["annotations"]}
+            annotations: List[Dict[str, Any]] = []
+            # An id listed twice keeps its last entry, as a map by id would.
+            last = {
+                a.get("id"): i
+                for i, a in enumerate(view_annotations)
+                if isinstance(a, dict) and isinstance(a.get("id"), str)
+            }
+            for i, raw in enumerate(view_annotations):
+                if isinstance(raw, dict) and last.get(raw.get("id"), i) != i:
+                    continue
+                annotation = _validate_annotation(raw, require_id=False)
+                if not isinstance(annotation.get("id"), str):
+                    annotation["id"] = secrets.token_hex(8)
+                if isinstance(annotation.get("member_node_ids"), list):
+                    annotation["member_node_ids"] = [
+                        m for m in annotation["member_node_ids"] if m in members
+                    ]
+                existing = held.pop(annotation["id"], None)
+                if existing is not None and existing.get("type") != annotation["type"]:
+                    existing = None
+                _require_ingested_image(annotation, existing)
+                _require_safe_reference_target(annotation, existing)
+                changed = [
+                    k
+                    for k in annotation
+                    if k not in _ANNOTATION_META_FIELDS
+                    and annotation[k] != (existing or {}).get(k)
+                ]
+                removed = [
+                    k
+                    for k in existing or {}
+                    if k not in _ANNOTATION_META_FIELDS and k not in annotation
+                ]
+                if existing is not None and not changed and not removed:
+                    annotations.append(existing)
+                    continue
+                if existing is None:
+                    annotation.setdefault("created_by", op.get("client_id"))
+                    annotation["version"] = _INITIAL_ANNOTATION_VERSION
+                    annotation["field_versions"] = {}
+                else:
+                    version = int(existing.get("version") or 1) + 1
+                    field_versions = dict(existing.get("field_versions") or {})
+                    field_versions.update({k: version for k in changed + removed})
+                    annotation["created_by"] = existing.get("created_by")
+                    annotation["version"] = version
+                    annotation["field_versions"] = field_versions
+                annotation["updated_at"] = _now_iso()
+                annotations.append(annotation)
+                if annotation["id"] in session._deleted_annotation_ids:
+                    restored.append(annotation["id"])
+            if len(annotations) > self._max_annotations:
+                raise AnnotationLimitReached(
+                    "annotation limit reached for this session"
+                )
+            state["annotations"] = annotations
+            tombstoned = [a for a in held if isinstance(a, str)]
+
+        if state == before:
+            return None
+        return state, tombstoned, restored
+
+    def replaced_annotation_targets(
+        self, session: Session, op: Dict[str, Any]
+    ) -> List[str]:
+        """Ids of the held annotations a ``nodes_replaced`` op would change or drop.
+
+        Derived from the state the op would leave, so the edit-lease check
+        sees exactly what applying it changes. Raises ``OpError`` when the op
+        cannot apply.
+        """
+        if op.get("op") != "nodes_replaced" or op.get("annotations") is None:
+            return []
+        replaced = self._replaced_state(session, op)
+        if replaced is None:
+            return []
+        after = {a.get("id"): a for a in replaced[0]["annotations"]}
+        return [
+            a.get("id")
+            for a in session.state.get("annotations", [])
+            if after.get(a.get("id")) != a
+        ]
 
     def apply_state_op(
         self,
@@ -841,7 +1369,7 @@ class SessionStore:
         ``session.activity_log``, subject to the store's retention policy.
         ``record_activity=False`` suppresses that — used when replaying an
         undo's inverse op, so undoing an action does not itself become a new
-        undoable action (no redo stack).
+        undoable action.
 
         ``trusted_replay=True`` is set by that same undo path: the annotation
         in an inverse op is a copy of state this session already held, not
@@ -857,23 +1385,204 @@ class SessionStore:
         applied: Optional[Dict[str, Any]] = dict(op)
         activity_kwargs: Optional[Dict[str, Any]] = None
 
-        if op_type == "nodes_added":
-            state["node_refs"] = _union(
-                state["node_refs"], _require_id_list(op, "node_ids")
-            )
-        elif op_type == "nodes_removed":
-            removals = _require_id_list(op, "node_ids")
-            drop = set(removals)
-            state["node_refs"] = _remove_all(state["node_refs"], removals)
-            state["positions"] = {
-                k: v for k, v in state["positions"].items() if k not in drop
+        membership_before = (
+            set(state["node_refs"]) if op_type in MEMBERSHIP_OPS else set()
+        )
+        if op_type in {"node_shape_set", "type_shape_set"}:
+            allowed = {
+                "op",
+                "version",
+                "selection",
+                "operation_id",
+                "base_revision",
+                "client_id",
             }
-            state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
-            state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], removals)
-            for ann in state["annotations"]:
-                members = ann.get("member_node_ids")
-                if isinstance(members, list):
-                    ann["member_node_ids"] = [m for m in members if m not in drop]
+            node = op_type == "node_shape_set"
+            allowed.update(
+                {"node_id"}
+                if node
+                else {"type", "clear_node_id", "clear_base_revision"}
+            )
+            if trusted_replay:
+                allowed.update({"restore_selection", "seq", "revisions"})
+            if set(op) - allowed:
+                raise OpError("unknown appearance operation fields")
+            key = "node_id" if node else "type"
+            target = op.get(key)
+            if not isinstance(target, str) or not target or len(target) > 256:
+                raise OpError("appearance target must be a nonempty string")
+            if type(op.get("version")) is not int or op["version"] != 1:
+                raise OpError("unsupported appearance operation version")
+            if "selection" not in op:
+                raise OpError("selection is required")
+            selection = op["selection"]
+            if selection is not None:
+                try:
+                    selection = ShapeSelection.model_validate(selection).model_dump(
+                        exclude_unset=True
+                    )
+                except (ValidationError, TypeError, ValueError) as exc:
+                    raise OpError("invalid appearance selection") from exc
+            operation_id = op.get("operation_id")
+            if not trusted_replay and (
+                not isinstance(operation_id, str)
+                or not operation_id
+                or len(operation_id) > 100
+            ):
+                raise OpError("appearance operation_id is required")
+            receipts = state["shape_operation_ids"]
+            receipt = json.dumps([operation_id])
+            # Older sessions stored receipts as [client_id, operation_id].
+            legacy_suffix = ", " + json.dumps(operation_id) + "]"
+            if not trusted_replay and (
+                receipt in receipts or any(k.endswith(legacy_suffix) for k in receipts)
+            ):
+                return None
+            if node and target not in state["node_refs"]:
+                raise OpError("appearance node must belong to the session")
+            clear = op.get("clear_node_id") if not node else None
+            if clear is not None and (
+                not isinstance(clear, str) or clear not in state["node_refs"]
+            ):
+                raise OpError("cleared node must belong to the session")
+            revisions = state["shape_revisions"]
+            revision_key = ("node:" if node else "type:") + target
+            targets = [revision_key] + (["node:" + clear] if clear is not None else [])
+            for rev_key, base in zip(
+                targets, [op.get("base_revision"), op.get("clear_base_revision")]
+            ):
+                if not trusted_replay:
+                    if type(base) is not int or base < 0:
+                        raise OpError("base revision must be a nonnegative integer")
+                    if base != revisions.get(rev_key, 0):
+                        raise ShapeRevisionConflict(rev_key, revisions.get(rev_key, 0))
+            mapping = state["shape_overrides" if node else "type_shapes"]
+            before = {
+                "selection": copy.deepcopy(mapping.get(target)),
+                "revisions": {k: revisions.get(k, 0) for k in targets},
+            }
+            if clear is not None:
+                before["cleared_selection"] = copy.deepcopy(
+                    state["shape_overrides"].get(clear)
+                )
+            if selection is None:
+                mapping.pop(target, None)
+            else:
+                mapping[target] = copy.deepcopy(selection)
+            if clear is not None:
+                state["shape_overrides"].pop(clear, None)
+                if trusted_replay and op.get("restore_selection") is not None:
+                    state["shape_overrides"][clear] = copy.deepcopy(
+                        op["restore_selection"]
+                    )
+            for rev_key in targets:
+                revisions[rev_key] = revisions.get(rev_key, 0) + 1
+            if not trusted_replay:
+                receipts[receipt] = {
+                    "seq": session.seq + 1,
+                    "client_id": op.get("client_id"),
+                }
+            applied.update(
+                selection=selection, revisions={k: revisions[k] for k in targets}
+            )
+            after = {
+                "selection": copy.deepcopy(mapping.get(target)),
+                "revisions": {k: revisions[k] for k in targets},
+            }
+            if clear is not None:
+                after["cleared_selection"] = copy.deepcopy(
+                    state["shape_overrides"].get(clear)
+                )
+            activity_kwargs = {
+                "affected": {
+                    "kind": "appearance",
+                    "map": "shape_overrides" if node else "type_shapes",
+                    "id": target,
+                    "clear_node_id": clear,
+                },
+                "before": before,
+                "after": after,
+                "inverse_op": {
+                    "op": op_type,
+                    "version": 1,
+                    key: target,
+                    "selection": before["selection"],
+                    **(
+                        {
+                            "clear_node_id": clear,
+                            "restore_selection": before.get("cleared_selection"),
+                        }
+                        if clear is not None
+                        else {}
+                    ),
+                },
+            }
+        elif op_type == "nodes_added":
+            node_ids = _require_id_list(op, "node_ids")
+            added = [n for n in _union([], node_ids) if n not in membership_before]
+            given = _given_positions(op, added)
+            state["node_refs"] = _union(state["node_refs"], node_ids)
+            # A node joins at the position it was sent with. An op carrying
+            # positions (a push, a browser's add) has the server place the rest
+            # in this same op; the MCP add leaves them for the agent to arrange.
+            state["positions"].update(given)
+            placed = dict(given)
+            if op.get("positions") is not None:
+                placed.update(_place_unplaced(state, added))
+            # Only a replace carries a view's layout; a browser's add relayed
+            # with those keys would have every receiver apply and save them.
+            for key in (
+                "positions",
+                "hidden_node_ids",
+                "annotations",
+                "removed_annotation_ids",
+            ):
+                applied.pop(key, None)
+            if placed:
+                applied["positions"] = placed
+        elif op_type == "nodes_removed":
+            _drop_node_refs(state, _require_id_list(op, "node_ids"))
+        elif op_type == "nodes_replaced":
+            # One op for a whole-view swap (a saved-view load, a clear), so it
+            # is one sequenced change and one activity record. A loaded view's
+            # layout rides along and is applied all-or-nothing with it.
+            replaced = self._replaced_state(session, op)
+            if replaced is None:
+                return None
+            state, tombstoned, restored = replaced
+            held_before = {a.get("id"): a for a in session.state["annotations"]}
+            session.state = state
+            for ann_id in restored:
+                while ann_id in session._deleted_annotation_ids:
+                    session._deleted_annotation_ids.remove(ann_id)
+            session._deleted_annotation_ids.extend(tombstoned)
+            applied["node_ids"] = list(state["node_refs"])
+            applied["positions"] = {
+                n: state["positions"][n]
+                for n in state["node_refs"]
+                if n in state["positions"]
+            }
+            applied["hidden_node_ids"] = list(state["hidden_node_ids"])
+            applied.pop("inserted_shape_revisions", None)
+            if op.get("inserted_shape_overrides"):
+                applied["inserted_shape_overrides"] = copy.deepcopy(
+                    op["inserted_shape_overrides"]
+                )
+                applied["inserted_shape_revisions"] = {
+                    "node:" + key: state["shape_revisions"]["node:" + key]
+                    for key in op["inserted_shape_overrides"]
+                }
+            if op.get("annotations") is not None:
+                # Only what this op changes: the op is kept in the ring and
+                # sent to every subscriber and catch-up, so repeating unchanged
+                # annotations (image data URLs included) on every load would
+                # multiply payloads with nothing to show for it.
+                applied["annotations"] = [
+                    copy.deepcopy(a)
+                    for a in state["annotations"]
+                    if held_before.get(a.get("id")) != a
+                ]
+                applied["removed_annotation_ids"] = tombstoned
         elif op_type == "node_moved":
             node_id = op.get("node_id")
             if not isinstance(node_id, str):
@@ -1104,7 +1813,9 @@ class SessionStore:
                 }
             else:
                 if len(state["annotations"]) >= self._max_annotations:
-                    raise OpError("annotation limit reached for this session")
+                    raise AnnotationLimitReached(
+                        "annotation limit reached for this session"
+                    )
                 if not isinstance(annotation.get("id"), str):
                     annotation["id"] = secrets.token_hex(8)
                 annotation.setdefault("created_by", op.get("client_id"))
@@ -1257,6 +1968,20 @@ class SessionStore:
             if name is not None and not isinstance(name, str):
                 raise OpError("session_renamed 'name' must be a string or null")
             session.name = name
+        elif op_type == "session_described":
+            description = op.get("description")
+            if description is not None and not isinstance(description, str):
+                raise OpError(
+                    "session_described 'description' must be a string or null"
+                )
+            if description is not None and len(description) > (
+                MAX_SESSION_DESCRIPTION_CHARS
+            ):
+                raise OpError(
+                    "session description exceeds "
+                    f"{MAX_SESSION_DESCRIPTION_CHARS} characters"
+                )
+            session.description = description
         elif op_type == "graph_change_staged":
             # The layer itself lives in the graph backend; the op carries
             # what changed in it, for every participant's composed view.
@@ -1272,6 +1997,13 @@ class SessionStore:
                 op.get("merge_id"), str
             ):
                 raise OpError("graph_changes_merged carries its merge id")
+            # Nodes the change took out of the graph (a discarded create, a
+            # merged delete, a create merged under a new id) leave the session
+            # with it, in this one op, so no browser has to remove them.
+            members = set(state["node_refs"])
+            dropped = [n for n in op.get("dropped_node_ids") or [] if n in members]
+            _drop_node_refs(state, dropped)
+            applied["dropped_node_ids"] = dropped
             activity_kwargs = {
                 "affected": {"kind": "layer", "keys": copy.deepcopy(removals)},
                 "before": None,
@@ -1320,10 +2052,39 @@ class SessionStore:
             applied
         )
 
+        if op_type in MEMBERSHIP_OPS:
+            membership_after = set(state["node_refs"])
+            if op_type == "nodes_replaced":
+                # A replace is described by the view it leaves behind.
+                ids = list(state["node_refs"])
+            else:
+                changed = (
+                    membership_after - membership_before
+                    if op_type == "nodes_added"
+                    else membership_before - membership_after
+                )
+                ids = list(dict.fromkeys(op["node_ids"]))
+                ids = [node_id for node_id in ids if node_id in changed]
+            if ids or op_type == "nodes_replaced":
+                activity_kwargs = {
+                    "affected": {
+                        "kind": "nodes",
+                        "count": len(ids),
+                        "ids": ids[:MAX_ACTIVITY_NODE_IDS],
+                    },
+                    "before": None,
+                    "after": None,
+                    "inverse_op": None,
+                }
+
         if (
             record_activity
             and activity_kwargs is not None
-            and (op_type in UNDOABLE_OPS or op_type in RECORDED_ONLY_OPS)
+            and (
+                op_type in UNDOABLE_OPS
+                or op_type in RECORDED_ONLY_OPS
+                or op_type in MEMBERSHIP_OPS
+            )
             and isinstance(actor, str)
             and actor
         ):
@@ -1335,6 +2096,18 @@ class SessionStore:
                 correlation_id=op.get("correlation_id"),
                 **activity_kwargs,
             )
+            if op_type not in MEMBERSHIP_OPS:
+                record["forward_op"] = copy.deepcopy(applied)
+            # A fresh action invalidates only this actor's redo future. Replace
+            # records so the manager's shallow rollback snapshot stays intact.
+            session.activity_log[:] = [
+                {**r, "redo_seq": None}
+                if op_type not in MEMBERSHIP_OPS
+                and r.get("actor") == actor
+                and r.get("redo_seq")
+                else r
+                for r in session.activity_log
+            ]
             session.activity_log.append(record)
             session.activity_log[:] = prune_activity_log(
                 session.activity_log,

@@ -33,9 +33,7 @@ const ASSISTANT_TOOLS = [
   { name: 'update_node', label: 'Update a node' },
   { name: 'delete_nodes', label: 'Delete nodes' },
   { name: 'delete_edges', label: 'Delete edges' },
-  { name: 'save_view', label: 'Save a view' },
-  { name: 'get_saved_view', label: 'Load a saved view' },
-  { name: 'list_saved_views', label: 'List saved views' },
+  { name: 'list_visualization_sessions', label: 'List sessions' },
   { name: 'clear_visualization', label: 'Clear the visualization' },
   { name: 'mark_nodes', label: 'Mark nodes' },
   { name: 'present_form', label: 'Present an input form' },
@@ -383,7 +381,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                   checked={linkResults}
                   onChange={(e) => setLinkResults(e.target.checked)}
                   style={{
-                    accentColor: '#646cff',
+                    accentColor: 'var(--co-accent)',
                     width: '1rem',
                     height: '1rem',
                     marginTop: '0.15rem',
@@ -448,7 +446,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                                 checked={!!perms[op]}
                                 onChange={(e) => handlePermissionChange(type, op, e.target.checked)}
                                 style={{
-                                  accentColor: '#646cff',
+                                  accentColor: 'var(--co-accent)',
                                   width: '1rem',
                                   height: '1rem',
                                   cursor: 'pointer',
@@ -479,7 +477,12 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                 type="checkbox"
                 checked={restrictTools}
                 onChange={(e) => setRestrictTools(e.target.checked)}
-                style={{ accentColor: '#646cff', width: '1rem', height: '1rem', cursor: 'pointer' }}
+                style={{
+                  accentColor: 'var(--co-accent)',
+                  width: '1rem',
+                  height: '1rem',
+                  cursor: 'pointer',
+                }}
               />
               <span style={{ color: '#ddd', fontSize: '0.9rem' }}>
                 {t('active_data_collection.restrict_tools_label')}
@@ -512,7 +515,7 @@ export default function CreateActiveKnowledgeCollectionDialog({ onClose, onSave,
                       checked={!!allowedTools[tool.name]}
                       onChange={(e) => handleToolToggle(tool.name, e.target.checked)}
                       style={{
-                        accentColor: '#646cff',
+                        accentColor: 'var(--co-accent)',
                         width: '1rem',
                         height: '1rem',
                         cursor: 'pointer',

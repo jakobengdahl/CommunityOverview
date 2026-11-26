@@ -1,3 +1,4 @@
+# covers: backend/evaluation/cases.py, backend/evaluation/dimensions.py
 """
 Tests for the case set and the dimension table.
 
@@ -33,18 +34,12 @@ from backend.evaluation.dimensions import (
 
 class TestShippedCases:
     def test_the_case_set_is_the_size_the_docs_state(self):
-        """
-        Exact, not a lower bound.
-
-        docs/SKILL_EVALUATION.md says "Nine cases"; a tenth would make the doc
-        quietly wrong, which is the same drift the dimension-table test exists
-        to stop.
-        """
+        """The documented case count matches the bundled scenarios exactly."""
         import re
         from pathlib import Path
 
         cases = load_cases()
-        assert len(cases) == 9
+        assert len(cases) == 10
 
         doc = (
             Path(__file__).resolve().parents[3] / "docs" / "SKILL_EVALUATION.md"
@@ -132,7 +127,17 @@ class TestShippedCases:
             )
             if case.expect.discriminating_first_call:
                 named.add(case.expect.discriminating_first_call)
-            unknown = named - advertised
+            case_advertised = advertised
+            if case.attachments:
+                from backend.service.attachment_tools import tool_definitions
+
+                case_advertised = advertised | {
+                    t["name"]
+                    for t in ChatProcessor(
+                        {t["name"]: lambda: None for t in tool_definitions()}
+                    ).tool_definitions
+                }
+            unknown = named - case_advertised
             assert not unknown, f"case {case.id!r} names unadvertised tool(s) {unknown}"
 
     def test_fixture_graphs_are_well_formed(self):

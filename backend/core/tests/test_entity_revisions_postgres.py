@@ -1,3 +1,4 @@
+# covers: backend/core/storage.py, backend/core/postgres_backend.py
 """Entity revisions in a shared store (docs/SESSION_OVERLAY_CONTRACT.md §4.4).
 
 PostgreSQL assigns every revision from one sequence, checks each expectation
@@ -19,7 +20,16 @@ import uuid
 from typing import Any, List
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from backend.agents.execution import (
+    ExecutionJob,
+    ExecutionKind,
+    ExecutionState,
+    InMemoryExecutionStore,
+)
+from backend.agents.execution.import_worker import drain_import_jobs
 from backend.core.models import Edge, Node, NodeType
 
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
@@ -46,7 +56,10 @@ from backend.core.storage_backends import (  # noqa: E402
     GraphWriteFailed,
     GraphWriteOutcomeUnknown,
 )
+from backend.core.storage_merge import MergeWrites, NodeOverwrite  # noqa: E402
 from backend.core.tests.layer_store_contract import A, entry  # noqa: E402
+from backend.service import GraphService, create_rest_router  # noqa: E402
+from backend.service import import_service  # noqa: E402
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
@@ -993,3 +1006,185 @@ def test_a_stale_rename_cannot_remove_subtypes_required_by_a_new_edge(
     assert events == []
     assert _stored(schema, "graph_nodes", "a") == stored
     assert _stored(schema, "graph_edges", "ab")["type"] == "SUBTYPE_LINK"
+
+
+def _merge_job_encoded_as_ones(storage, monkeypatch, during=lambda: None):
+    """A merge's embeddings job for `storage`, encoding every node as [1, 0]
+    with no model loaded, and running `during` inside the first encode."""
+
+    def no_model(self):
+        raise ImportError("no model in this test")
+
+    def compute(nodes):
+        during()
+        return {node.id: [1.0, 0.0] for node in nodes}
+
+    monkeypatch.setattr("backend.core.vector_store.VectorStore._load_model", no_model)
+    monkeypatch.setattr(storage.vector_store, "compute_node_embeddings", compute)
+    store = InMemoryExecutionStore()
+    job = store.enqueue(
+        ExecutionJob(
+            agent_id="system:graph-import",
+            kind=ExecutionKind.IMPORT,
+            idempotency_key="import:merge",
+            payload={"mode": "merge", "graph_generation": storage.generation},
+        )
+    )
+    return store, job
+
+
+def test_a_merge_embedding_commit_writes_only_its_unmoved_nodes(
+    instances, schema, monkeypatch
+):
+    one = instances(deaf=True)
+    one.add_nodes([_node("a"), _node("b")], [])
+    two = instances(deaf=True)
+
+    def elsewhere():
+        two.update_node("b", {"metadata": {"by": "two"}})
+        two.add_nodes([_node("c")], [])
+
+    store, job = _merge_job_encoded_as_ones(one, monkeypatch, elsewhere)
+
+    def whole_graph_save(data):
+        raise AssertionError("a merge's embedding commit saved the whole graph")
+
+    monkeypatch.setattr(one._persistence_backend, "save_graph_data", whole_graph_save)
+
+    drain_import_jobs(store, one)
+
+    # b, moved by two, is refused on every pass and the job retries later.
+    assert store.get(job.id).state == ExecutionState.PENDING
+    assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
+    b = _stored(schema, "graph_nodes", "b")
+    assert b["metadata"] == {"by": "two"}
+    assert not b.get("embedding")
+    assert not one.vector_store.has_embedding("b")
+    assert _stored(schema, "graph_nodes", "c") is not None
+
+
+def test_another_scopes_replace_does_not_supersede_a_merge_job(
+    instances, schema, monkeypatch
+):
+    one = instances(deaf=True, scope="scope-a")
+    one.add_nodes([_node("a")], [])
+    store, job = _merge_job_encoded_as_ones(one, monkeypatch)
+    other = instances(deaf=True, scope="scope-b")
+    other.replace_all_nodes_and_edges([_node("x")], [])
+    one.reload()
+    assert one.generation != job.payload["graph_generation"]
+
+    drain_import_jobs(store, one)
+
+    assert store.get(job.id).state == ExecutionState.SUCCEEDED
+    assert _stored(schema, "graph_nodes", "a")["embedding"] == [1.0, 0.0]
+    assert _stored(schema, "graph_nodes", "x") is not None
+
+
+@pytest.mark.parametrize(
+    "move", [None, "update", "delete", "replace", "racing_replace", "duplicate"]
+)
+def test_a_merge_lands_only_while_what_its_plan_read_still_holds_in_the_store(
+    instances, schema, monkeypatch, tmp_path, move
+):
+    """POST /import/merge commits in PostgreSQL mode. A move this instance
+    never saw - the node a skip kept updated or deleted, the graph replaced
+    at the same revisions or from the same generation, or the edge a
+    duplicate check would have found created - refuses it as stale, writing
+    nothing."""
+    monkeypatch.setattr(import_service, "_start_embedding_drain", lambda *a: None)
+    one = instances(deaf=True)
+    monkeypatch.setattr(one, "json_path", tmp_path / "graph.json")
+    one.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
+    two = instances(deaf=True)
+    if move == "update":
+        two.update_node("kept", {"name": "moved"})
+    elif move == "delete":
+        two.delete_nodes(["kept"], confirmed=True)
+    elif move == "replace":
+        two.replace_all_nodes_and_edges([_node("kept", "other")], [])
+    elif move == "racing_replace":
+        one.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
+        two.replace_all_nodes_and_edges([_node("kept"), _node("peer")], [])
+        assert one.generation == two.generation
+    elif move == "duplicate":
+        two.add_edge(Edge(id="theirs", source="kept", target="peer"))
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(
+            GraphService(one), import_job_store=InMemoryExecutionStore()
+        ),
+        prefix="/api/graph",
+    )
+    client = TestClient(app)
+    body = {
+        "document": {
+            "nodes": [
+                {"id": "kept", "type": "Actor", "name": "kept"},
+                {"id": "peer", "type": "Actor", "name": "peer"},
+                {"id": "new", "type": "Actor", "name": "new"},
+            ],
+            "edges": [{"id": "ours", "source": "kept", "target": "peer"}],
+        },
+        "policy": {"default": "skip"},
+    }
+    preview = client.post("/api/graph/import/merge/preview", json=body)
+    response = client.post(
+        "/api/graph/import/merge",
+        json={**body, "plan_digest": preview.json()["plan_digest"]},
+    )
+
+    if move is None:
+        assert response.status_code == 200
+        stored = _stored(schema, "graph_nodes", "new")
+        assert stored["revision"] == one.nodes["new"].revision
+    else:
+        assert response.status_code == 409
+        assert response.json()["detail"]["error_code"] == "import_plan_stale"
+        assert _stored(schema, "graph_nodes", "new") is None
+        assert _stored(schema, "graph_edges", "ours") is None
+        assert "new" not in one.nodes
+
+
+@pytest.mark.parametrize("failure", ["mutation_check", "operations"])
+def test_a_merge_failing_before_the_store_puts_a_stray_vector_back(
+    instances, monkeypatch, failure
+):
+    one = instances()
+    one.vector_store.absorb_embeddings({"n": [4.0, 0.0]})
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(failure)
+
+    if failure == "mutation_check":
+        monkeypatch.setattr(one.runtime_extensions, "evaluate_mutation", fail)
+    else:
+        monkeypatch.setattr(one, "_operations", fail)
+
+    with pytest.raises(RuntimeError):
+        one.apply_import_merge(lambda: MergeWrites(node_creates=[_node("n")]))
+
+    assert "n" not in one.nodes
+    assert one.vector_store.get_vector_list("n") == [4.0, 0.0]
+
+
+def test_a_merge_changing_subtypes_and_drawing_an_edge_to_that_node_lands(
+    instances, schema
+):
+    """The incident edges the store checks for a subtype change leave out
+    the edges the same merge creates, which it does not hold yet."""
+    one = instances()
+    one.add_nodes([_node("a"), _node("b")], [])
+
+    applied = one.apply_import_merge(
+        lambda: MergeWrites(
+            node_overwrites=[
+                NodeOverwrite("a", one.nodes["a"].revision, {"subtypes": ["x"]}, False)
+            ],
+            edge_creates=[Edge(id="new", source="b", target="a")],
+        )
+    )
+
+    assert _stored(schema, "graph_nodes", "a")["subtypes"] == ["x"]
+    edge = _stored(schema, "graph_edges", "new")
+    assert edge["revision"] == applied.revisions[("edge", "new")]

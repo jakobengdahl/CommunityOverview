@@ -1,3 +1,4 @@
+// covers: packages/ui-graph-canvas/src/components/ContextMenus.jsx
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import {
@@ -6,11 +7,12 @@ import {
   MultiNodeContextMenu,
   EdgeContextMenu,
   PaneContextMenu,
-  NearbyObjectMenuSection,
 } from '../src/components/ContextMenus';
 
 const labels = {
+  saveAsTemplate: 'Save as template',
   edit: 'Edit',
+  appearance: 'Node appearance',
   hide: 'Hide',
   expand: 'Find related nodes',
   delete: 'Delete',
@@ -53,10 +55,6 @@ const labels = {
   addNote: 'Add note',
   addLabel: 'Add label',
   addArrow: 'Add arrow',
-  annotationNearbyMenu: 'Add nearby',
-  annotationNearbyLabel: 'Label',
-  annotationNearbyIcon: 'Icon',
-  annotationNearbyText: 'Text',
   openInSourceGraph: 'Open in source graph',
   openInSourceGraphTooltip: 'Open this node in the graph that owns it',
 };
@@ -87,6 +85,22 @@ describe('NodeContextMenu', () => {
   it('renders nothing when menu is null', () => {
     const { container } = render(<NodeContextMenu menu={null} labels={labels} />);
     expect(container.querySelector('.node-context-menu')).toBeNull();
+  });
+
+  it('opens the selected node appearance and closes the menu', () => {
+    const onAppearance = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <NodeContextMenu
+        menu={{ x: 0, y: 0, node }}
+        labels={labels}
+        onAppearance={onAppearance}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: labels.appearance }));
+    expect(onAppearance).toHaveBeenCalledWith('n1');
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('positions the menu from the descriptor coordinates', () => {
@@ -232,52 +246,6 @@ describe('NodeContextMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: /do it/i }));
     expect(onContextMenuAction).toHaveBeenCalledWith('do_it', 'n1', node.data);
     expect(onClose).toHaveBeenCalled();
-  });
-
-  // task-annotation-render-direct-manipulation / task-annotation-responsive-
-  // bottom-toolbox's "Nearby object menu" contract entry point
-  // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces").
-  describe('"Nearby object menu" section', () => {
-    it('omits the section entirely when onAttachNearby is absent', () => {
-      render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
-      expect(screen.queryByText('Add nearby')).toBeNull();
-      expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
-    });
-
-    it('offers exactly the three attachable kinds — label, icon, text — not arrow or vote dot', () => {
-      render(
-        <NodeContextMenu
-          menu={{ x: 0, y: 0, node }}
-          labels={labels}
-          onAttachNearby={vi.fn()}
-          onClose={vi.fn()}
-        />
-      );
-      expect(screen.getByRole('button', { name: '+ Label' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: '+ Icon' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: '+ Text' })).toBeTruthy();
-      expect(screen.queryByRole('button', { name: '+ Arrow' })).toBeNull();
-      // vote_dot is not attachable any more (task-annotation-vote-dot-simplify)
-      // and is not offered here, though it remains a valid *target* for the
-      // three kinds that are — see the "target candidacy" test below.
-      expect(screen.queryByRole('button', { name: '+ Vote dot' })).toBeNull();
-    });
-
-    it('calls onAttachNearby with the target node id and the picked kind, then closes', () => {
-      const onAttachNearby = vi.fn();
-      const onClose = vi.fn();
-      render(
-        <NodeContextMenu
-          menu={{ x: 0, y: 0, node }}
-          labels={labels}
-          onAttachNearby={onAttachNearby}
-          onClose={onClose}
-        />
-      );
-      fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
-      expect(onAttachNearby).toHaveBeenCalledWith('n1', 'icon');
-      expect(onClose).toHaveBeenCalled();
-    });
   });
 
   it('focuses the first item on open and ArrowDown/ArrowUp rove focus, wrapping at the ends', () => {
@@ -550,6 +518,23 @@ describe('NodeContextMenu teleport action (task-federated-graph-teleport)', () =
 });
 
 describe('MultiNodeContextMenu', () => {
+  it('passes the complete selection to the template action', () => {
+    const nodes = [{ id: 'a' }, { id: 'note', type: 'note' }];
+    const save = vi.fn();
+    const close = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onSaveAsTemplate={save}
+        onClose={close}
+      />
+    );
+    fireEvent.click(screen.getByText(labels.saveAsTemplate));
+    expect(save).toHaveBeenCalledWith(nodes);
+    expect(close).toHaveBeenCalled();
+  });
+
   const nodes = [
     { id: 'a', data: { nodeType: 'Actor' } },
     { id: 'b', data: { nodeType: 'Theme' } },
@@ -1342,11 +1327,10 @@ describe('PaneContextMenu', () => {
       />
     );
     fireEvent.click(screen.getByRole('button', { name: /add note/i }));
-    fireEvent.click(screen.getByRole('button', { name: /add label/i }));
+    expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /add arrow/i }));
     expect(createAnnotation).toHaveBeenNthCalledWith(1, 'note', flowPosition);
-    expect(createAnnotation).toHaveBeenNthCalledWith(2, 'label', flowPosition);
-    expect(createAnnotation).toHaveBeenNthCalledWith(3, 'arrow', flowPosition);
+    expect(createAnnotation).toHaveBeenNthCalledWith(2, 'arrow', flowPosition);
   });
 
   it('attaches the forwarded menuRef to the menu element (outside-click dismiss relies on it)', () => {
@@ -1482,38 +1466,5 @@ describe('root menu viewport-edge clamping (c3174865-f36e-4eb2-befa-cb10784babf0
     } finally {
       restore();
     }
-  });
-});
-
-// NearbyObjectMenuSection is the shared piece NodeContextMenu (tested via the
-// `annotationNearby*`-keyed `cml` labels above) and every annotation-kind
-// context menu (NoteNode/LabelNode/ArrowNode/GenericAnnotationNode/
-// FreehandAnnotationNode, which each pass AnnotationContext's own short-keyed
-// `labels` object instead) render it from. Testing it in isolation, with the
-// short-key `labels` shape those five components actually pass, is what
-// catches a caller passing the wrong key scheme without going through five
-// separate component render trees.
-describe('NearbyObjectMenuSection', () => {
-  const shortLabels = {
-    nearbyMenu: 'Add nearby',
-    nearbyLabel: 'Label',
-    nearbyIcon: 'Icon',
-    nearbyText: 'Text',
-  };
-
-  it('renders nothing when onAttach is absent', () => {
-    const { container } = render(
-      <NearbyObjectMenuSection labels={shortLabels} onAttach={undefined} />
-    );
-    expect(container.firstChild).toBeNull();
-  });
-
-  it('renders the three kinds and calls onAttach with the picked kind', () => {
-    const onAttach = vi.fn();
-    render(<NearbyObjectMenuSection labels={shortLabels} onAttach={onAttach} />);
-    expect(screen.getByText('Add nearby')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '+ Vote dot' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
-    expect(onAttach).toHaveBeenCalledWith('icon');
   });
 });

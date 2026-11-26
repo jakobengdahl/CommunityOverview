@@ -227,6 +227,103 @@ delivery-queue depth at return was 0 only because the measurement's
 loopback target is refused at once, so the enqueued count is the depth a
 slower target sees.
 
+### Slice 3a: the merge job's embedding commit
+
+Slice 3 is split. 3a, this section, adds §6's per-node commit for a merge's
+IMPORT job (`mode: "merge"`) on every backend; `POST /import/merge` still
+answers 501 `import_merge_not_supported` in PostgreSQL mode until 3b lifts it.
+A replace's job is unchanged.
+
+**The commit rule**, implemented once in `GraphStorage.commit_merge_embeddings`
+and used by file and PostgreSQL mode alike. The job reads the nodes without a
+vector under `_lock`, as detached copies, and records a fingerprint (SHA-256)
+of each copy's embedding text; it encodes those copies, so the text
+fingerprinted is the text encoded. At commit, under `_lock`, a node gets its
+computed vector only if it still exists, still has no vector, and the
+fingerprint of its current embedding text equals the recorded one. Neither its
+revision nor `generation` decides: a metadata- or subtype-only update moves
+the revision and leaves the text, and a replace — another scope's included,
+since in PostgreSQL mode the generation sits in the metadata row every scope
+in a schema shares — moves the generation and says nothing about whether a
+given node's text still matches. A node whose text changed is re-enqueued: the
+job reads and encodes it again, for at most three passes, and fails if nodes
+are still moving after them, which reschedules it with the store's backoff.
+On a store that applies entity batches (the file journal, PostgreSQL) the
+commit writes only those nodes, as entity upserts each expecting the revision
+this instance holds, and never a whole-graph save; a node the store refuses
+because another instance moved it is dropped, re-enqueued, and the rest
+re-issued. A failed commit leaves no vector behind for its nodes and does not
+regenerate one: undoing the write would otherwise re-embed the restored node
+in memory only, where the store lacks it and the next pass would take it as
+embedded. A commit of unknown outcome drops its pending vectors from memory
+too, whatever the store holds; a later pass encodes those nodes again.
+
+Because the generation no longer decides, a merge job is not `superseded` by a
+later replace: it embeds whatever still lacks a vector, which after a replace
+in its own scope overlaps that replace's job. Every vector it writes still
+matches its node's text.
+
+### Slice 3b as implemented
+
+3b lifts the PostgreSQL refusal: `POST /import/merge` runs there through the
+same `commit_merge_import` and `apply_import_merge` path as in file mode,
+with the same authorization (`GRAPH_ACTION_MUTATE` and `GRAPH_ACTION_READ`,
+narrowed callers refused), digest binding, `import_merge_blocked` and
+`import_plan_stale` answers, backup and audit record. Replace and the 3a
+embedding commit are unchanged. Choices it made inside the decisions above:
+
+- **§3's checks reach the store as batch conditions.** Slice 2's comparison
+  under `_lock` verifies the plan against this instance's memory, which in
+  PostgreSQL mode can be behind another instance's writes. The expectations
+  on every write were already the store's (`revision_enforcement`), as were
+  an edge create's endpoint type and subtype checks (`FOR KEY SHARE`) and the
+  incident-edge check for a node whose subtypes change (`FOR UPDATE`, which
+  excludes concurrent edge inserts). What was missing goes with the batch as
+  `BatchConditions`: every entity the locked plan read and does not write,
+  at the revision read (absent included), the `generation` read under the
+  same lock with the `graph_replace_token` beside it, and, for every pair
+  and type the duplicate-triple check listed, the ids of the live edges it
+  found. PostgreSQL verifies them first in the batch's transaction:
+  a row read as present under `FOR SHARE`, so another instance's update or
+  delete of it waits for the commit or is seen; one read as absent only by
+  lookup, so an insert after it is an ordinary concurrent write (§4); and
+  `graph_generation` from `graph_metadata`, which needs no row lock because
+  a replace's whole-graph save takes the save lock the batch holds in SHARE
+  mode; each listed pair by its edges between the two endpoints, held
+  `FOR UPDATE` so no edge insert lands between them before the commit, as
+  PostgreSQL has no uniqueness rule on a triple. A failed condition rolls the batch back and answers
+  `import_plan_stale`. Its plan is recomputed from this instance's memory,
+  which may still lag, so the same digest can come back; a retry once the
+  instance has caught up sees the current plan.
+- **A capability, not a removed check.** A backend declares
+  `batch_conditions`; PostgreSQL does. One that assigns revisions without it
+  would ignore the conditions, so it is still refused with 501
+  `import_merge_not_supported`.
+- **The incident-edge list leaves out the batch's own edge creates.** It is
+  built from memory after the merge is applied there, so it named edges the
+  store did not hold yet and refused every merge that changes a node's
+  subtypes and draws an edge to it.
+- **No whole-graph re-save on a shared store.** A failure `_commit` does not
+  classify is re-raised rather than arming the re-save that follows a file
+  backend's lost batch, which would write this instance's graph over other
+  instances' writes. Memory is undone by then, and the vectors the merge
+  dropped from ids its creates take are put back with it.
+- **Generation limits.** The generation sits in the metadata row every scope
+  in a schema shares, so another scope's replace refuses this scope's merges
+  as stale until this instance reloads on that replace's announcement, which
+  every instance on the schema receives: fail-safe, and brief. Two replaces
+  racing from one generation store the same value, so a replace in a store
+  that assigns revisions also stamps a fresh `graph_replace_token` into the
+  metadata; a merge on the instance whose replace lost, before it reloads,
+  is refused on that token rather than matching revision 0 with revision 0.
+  Other writes in that window are not merges and are outside this slice.
+- **Per instance.** The backup is this instance's memory, which for every
+  entity the merge overwrites equals the store (its expectation held), and
+  the audit record is in this instance's `import_jobs.db` (§7).
+- **No schema or migration change.**
+- **Not measured.** §8's multi-instance figures need a PostgreSQL server
+  under load and are not part of this slice.
+
 ## Context
 
 ### What exists today
