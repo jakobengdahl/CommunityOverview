@@ -15,6 +15,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Right-click context menu](#24-right-click-context-menu)
    - [Groups and annotations](#25-groups-and-annotations)
    - [Saved views](#26-saved-views)
+   - [Saving templates](#saving-templates)
    - [Agents](#27-agents)
    - [Recent nodes (navigation trail)](#28-recent-nodes-navigation-trail)
 3. [Search](#3-search)
@@ -594,6 +595,18 @@ checking the session list before trying again.
 
 Older SavedView nodes remain available: double-click one in the graph, or search for
 it and click "Restore view" in its detail panel.
+
+### Saving templates
+
+Select nodes and annotations, then right-click the selection and choose **Save as
+Template…**. You can also choose **Save as Template…** from the command box; if
+nothing is selected, it saves the whole session. Enter a name, an optional
+description and comma-separated tags. The dialog summarizes the included nodes,
+connections between them and annotations before saving. The counts are a preview;
+graph changes can occur independently, so the confirmation shows the counts
+actually saved. System nodes are excluded, and resource references whose target is
+outside the selection are omitted. Resolve any staged changes before saving. If the session changes while the dialog is open,
+close and reopen it to review the latest contents.
 
 ### 2.7 Agents
 

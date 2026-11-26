@@ -2,6 +2,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+import { useContext } from 'react';
+import { AnnotationContext } from '../src/components/AnnotationContext';
+
+function TemplateActionProbe() {
+  const { saveAsTemplate } = useContext(AnnotationContext);
+  return <button onClick={() => saveAsTemplate('group-1', 'group')}>Save probe</button>;
+}
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), selectionOnChange: null }));
 
@@ -20,6 +27,7 @@ vi.mock('reactflow', () => {
       />
       <div data-testid="selection" onContextMenu={(event) => onSelectionContextMenu?.(event)} />
       {children}
+      <TemplateActionProbe />
     </div>
   );
   return {
@@ -76,6 +84,21 @@ function findCreatedNode(type) {
 
 describe('GraphCanvas annotation creation', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('saves the entire selection when an included annotation is used', () => {
+    const save = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onSaveSelectionAsTemplate={save} />);
+    const selected = [
+      { id: 'group-1', type: 'group' },
+      { id: 'node-1', type: 'Actor' },
+    ];
+    act(() => hoisted.selectionOnChange({ nodes: selected, edges: [] }));
+    fireEvent.click(screen.getByText('Save probe'));
+    expect(save).toHaveBeenCalledWith(selected);
+    act(() => hoisted.selectionOnChange({ nodes: [selected[1]], edges: [] }));
+    fireEvent.click(screen.getByText('Save probe'));
+    expect(save).toHaveBeenLastCalledWith([selected[0]]);
+  });
 
   it('opens the annotation menu on a plain pane right-click', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);

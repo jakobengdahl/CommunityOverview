@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
@@ -492,6 +493,11 @@ function GroupNode({ id, data, selected }) {
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
             onKeyDown={handleMenuKeyDown}
           >
+            <AnnotationSaveTemplateControl
+              id={id}
+              type="group"
+              onClose={() => setContextMenu(null)}
+            />
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
               // every other kind. The unlocked menu has exactly five other

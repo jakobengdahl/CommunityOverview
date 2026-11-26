@@ -29,6 +29,7 @@ const TOOLBAR_HANDLERS = [
 ];
 const APP_HANDLERS = [
   ...TOOLBAR_HANDLERS,
+  'onSaveTemplate',
   'onOpenSettings',
   'onNewSession',
   'onConnectSession',

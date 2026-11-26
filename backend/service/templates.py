@@ -69,11 +69,10 @@ def _freehand_points(annotation):
     return points
 
 
-def _rendered_bounds(positions, annotations):
+def _rendered_bounds(positions, annotations, *, legacy=False):
     """Canvas-space bounds, including fallback geometry and point-based marks."""
     boxes = []
-    # Dimensions mirror ui-graph-canvas's nodeShapeGeometry and include the
-    # label above triangles. A missing definition renders as the built-in card.
+    # Placement sizes are specified in docs/TEMPLATES_CONTRACT.md.
     bases = {
         "rectangle": (200, 120),
         "rectangle-flat": (240, 96),
@@ -92,6 +91,8 @@ def _rendered_bounds(positions, annotations):
         points = _line_points(annotation)
         points += _freehand_points(annotation)
         if annotation_type_of(annotation) == "line":
+            if not legacy:
+                points = []
             # The canvas derives absent endpoints from position and dx/dy.
             start = (
                 annotation.get("from")
@@ -104,6 +105,8 @@ def _rendered_bounds(positions, annotations):
                 "y": start.get("y", 0) + annotation.get("dy", 0),
             }
             points.extend((start, end))
+        if not legacy and annotation_type_of(annotation) == "freehand" and not points:
+            points = [annotation.get("position") or annotation.get("geometry") or {}]
         if points:
             boxes.extend(
                 (p.get("x", 0), p.get("y", 0), p.get("x", 0), p.get("y", 0))
@@ -131,7 +134,20 @@ def _rendered_bounds(positions, annotations):
         height = geometry.get(
             "h", geometry.get("height", size.get("h", size.get("height", default[1])))
         )
-        boxes.append((px, py, px + max(0, width), py + max(0, height)))
+        width, height = max(0, width), max(0, height)
+        rotation = geometry.get("rotation", annotation.get("rotation", 0))
+        if rotation is None:
+            rotation = 0
+        if not legacy:
+            angle = math.radians(_placement_number(rotation) % 360)
+            rotated_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
+            rotated_height = abs(width * math.sin(angle)) + abs(
+                height * math.cos(angle)
+            )
+            px -= (rotated_width - width) / 2
+            py -= (rotated_height - height) / 2
+            width, height = rotated_width, rotated_height
+        boxes.append((px, py, px + width, py + height))
     if not boxes:
         return None
     for box in boxes:
@@ -893,7 +909,8 @@ def insert_template(
             v is not None and (type(v) is not int or v < 0)
             for v in (expected_revision, template_revision)
         )
-        or not all(valid_coordinate(v) for v in (x, y))
+        or (x is None) != (y is None)
+        or (x is not None and not all(valid_coordinate(v) for v in (x, y)))
     ):
         return _failure("invalid_request")
     if mode not in ("reference", "copy"):
@@ -972,6 +989,9 @@ def insert_template(
                 copy_ids = {
                     node["key"]: new.id for node, new in zip(doc["nodes"], copies)
                 }
+                copies_by_key = dict(
+                    zip((node["key"] for node in doc["nodes"]), copies)
+                )
             shape_config = {
                 "types": {
                     k: v.model_dump() for k, v in config_data.schema_.node_types.items()
@@ -1002,12 +1022,20 @@ def insert_template(
                     ).get(name) or shape.get("inline")
                 return shape.get("inline")
 
-            source_bounds = _rendered_bounds(
-                ((node["position"], source_definition(node)) for node in doc["nodes"]),
-                doc["annotation_document"]["annotations"],
-            ) or (0, 0, 0, 0)
-            dx = _placement_number(x - source_bounds[0])
-            dy = _placement_number(y - source_bounds[1])
+            default_placement = x is None
+            if not default_placement:
+                source_bounds = _rendered_bounds(
+                    (
+                        (node["position"], source_definition(node))
+                        for node in doc["nodes"]
+                    ),
+                    doc["annotation_document"]["annotations"],
+                    legacy=True,
+                ) or (0, 0, 0, 0)
+                dx = _placement_number(x - source_bounds[0])
+                dy = _placement_number(y - source_bounds[1])
+            else:
+                dx = dy = 0
             config = config_data.node_shapes
             shape_report = []
             for node in doc["nodes"]:
@@ -1095,6 +1123,57 @@ def insert_template(
                 if new not in kept
             )
             fresh = {old: new for old, new in fresh.items() if new in kept}
+            if default_placement:
+                source_bounds = _rendered_bounds(
+                    (
+                        (
+                            node["position"],
+                            _shape(
+                                copies_by_key[node["key"]]
+                                if mode == "copy"
+                                else service._storage.get_node(node["source_node_id"]),
+                                session.state,
+                                shape_config,
+                                saved,
+                            )["inline"]
+                            if node["shape"] is None
+                            else source_definition(node),
+                        )
+                        for node in doc["nodes"]
+                        if (
+                            copy_ids[node["key"]]
+                            if mode == "copy"
+                            else node["source_node_id"]
+                        )
+                        in added
+                    ),
+                    annotations,
+                ) or (0, 0, 0, 0)
+                state = session.state
+                existing_positions = state.get("positions") or {}
+
+                def existing_node_bounds():
+                    for node_id in state.get("node_refs", []):
+                        position = existing_positions.get(node_id)
+                        node = service._storage.get_node(node_id) if position else None
+                        shape = (
+                            _shape(node, state, shape_config, saved) if node else None
+                        )
+                        yield position, shape.get("inline") if shape else None
+
+                existing_bounds = _rendered_bounds(
+                    existing_node_bounds(), state.get("annotations") or []
+                )
+                x, y = (
+                    (existing_bounds[2] + 80, existing_bounds[1])
+                    if existing_bounds
+                    else (0, 0)
+                )
+                dx = _placement_number(x - source_bounds[0])
+                dy = _placement_number(y - source_bounds[1])
+                for position in positions.values():
+                    position["x"] = _placement_number(position["x"] + dx)
+                    position["y"] = _placement_number(position["y"] + dy)
             for a in annotations:
                 # The canvas defaults absent coordinates to zero. Materialize them
                 # before translating, including resize-only geometry records.
@@ -1122,7 +1201,11 @@ def insert_template(
                         seen.add(id(p))
                         p["x"] = _placement_number(p.get("x", 0) + dx)
                         p["y"] = _placement_number(p.get("y", 0) + dy)
-            _rendered_bounds(((p, None) for p in positions.values()), annotations)
+            _rendered_bounds(
+                ((p, None) for p in positions.values()),
+                annotations,
+                legacy=not default_placement,
+            )
             op = {
                 "op": "nodes_replaced",
                 "client_id": "mcp-agent",
