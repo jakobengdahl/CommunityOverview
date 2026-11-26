@@ -1,0 +1,139 @@
+# covers: backend/service/templates.py
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from backend.core import Edge, GraphStorage, Node
+from backend.core.session_manager import CaptureRefused, SessionManager
+from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
+from backend.service.service import GraphService
+from backend.service.templates import capture_template
+
+
+@pytest.fixture
+def capture(tmp_path):
+    storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
+    service = GraphService(storage)
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    session = manager.create_session("source")
+    a = Node(
+        id="a", type="Actor", name="A", metadata={"color": "red", "private": "secret"}
+    )
+    b = Node(id="b", type="Actor", name="B")
+    storage.nodes.update(a=a, b=b)
+    storage.graph.add_edge(
+        "a", "b", data=Edge(id="e", source="a", target="b", type="LINK")
+    )
+    session.state.update(
+        node_refs=["a", "b", "missing", "group-old"],
+        positions={"a": {"x": 3, "y": 4}},
+        annotations=[{"id": "note", "type": "label", "attachment": {"target_id": "a"}}],
+    )
+
+    def run(**kwargs):
+        return capture_template(
+            service,
+            manager,
+            session.id,
+            template_id="1234-5678",
+            name="Example",
+            created_by="author",
+            expected_revision=session.seq,
+            **kwargs,
+        )
+
+    return run, service, manager, session
+
+
+def test_selection_edges_metadata_and_annotation_links(capture):
+    run, _, _, _ = capture
+    doc = run()["document"]
+    assert [n["source_node_id"] for n in doc["nodes"]] == ["a", "b"]
+    assert doc["nodes"][0]["snapshot"]["metadata"] == {"color": "red"}
+    assert len(doc["edges"]) == 1
+    selected = run(node_ids=["a"], annotation_ids=["note"])["document"]
+    assert len(selected["nodes"]) == 1
+    assert selected["edges"] == []
+    assert (
+        selected["annotation_document"]["annotations"][0]["attachment"]["target_id"]
+        == selected["nodes"][0]["key"]
+    )
+
+
+def test_denials_and_missing_references(capture):
+    run, _, _, session = capture
+    with patch(
+        "backend.service.templates.access.authorize_graph_access", return_value=True
+    ):
+        assert run() == {"success": False, "error": "session_not_found"}
+    with patch("backend.service.templates.access.is_node_visible", return_value=False):
+        assert run() == {"success": False, "error": "access_denied"}
+    session.state["annotations"][0]["attachment"]["target_id"] = "missing"
+    assert run()["success"]
+
+
+def test_staged_source_refused(capture):
+    run, _, manager, _ = capture
+    with patch.object(
+        manager, "capture_source", side_effect=CaptureRefused("staged_changes")
+    ):
+        assert run() == {"success": False, "error": "staged_changes"}
+
+
+def test_shape_selection_and_tombstone(capture):
+    run, _, manager, session = capture
+    definition = {
+        "version": 1,
+        "base": "rectangle",
+        "scale": 1.0,
+        "placement": "top-left",
+        "areas": {"first": "name", "second": None, "third": None},
+    }
+    session.state["type_shapes"] = {"Actor": {"ref": "saved:card"}}
+    session.state["shape_overrides"] = {"b": {"inline": definition}}
+    manager.shape_library = SimpleNamespace(
+        snapshot=lambda: {"entries": {"card": {"definition": definition}}}
+    )
+    nodes = run()["document"]["nodes"]
+    assert nodes[0]["shape"] == {
+        "ref": "saved:card",
+        "inline": definition,
+        "builtin": False,
+    }
+    assert nodes[1]["shape"] == {"ref": None, "inline": definition, "builtin": False}
+    manager.shape_library = SimpleNamespace(snapshot=lambda: {"entries": {}})
+    assert run()["document"]["nodes"][0]["shape"] == {
+        "ref": None,
+        "inline": None,
+        "builtin": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "field, limit, code",
+    [("node_refs", 501, "nodes_limit"), ("annotations", 2001, "annotations_limit")],
+)
+def test_limits_fail_without_truncation(capture, field, limit, code):
+    run, service, _, session = capture
+    if field == "node_refs":
+        for i in range(limit):
+            service._storage.nodes[str(i)] = Node(id=str(i), type="Actor", name="N")
+        session.state[field] = [str(i) for i in range(limit)]
+    else:
+        session.state[field] = [{"id": str(i), "type": "label"} for i in range(limit)]
+    assert run() == {"success": False, "error": code}
+
+
+def test_edge_limit_and_excluded_system_types(capture):
+    run, service, _, session = capture
+    service._storage.nodes["system"] = Node(
+        id="system", type="SavedView", name="System"
+    )
+    session.state["node_refs"].append("system")
+    edge = Edge(id="e", source="a", target="b", type="LINK")
+    with patch.object(
+        service._storage, "get_edges_between_nodes", return_value=[edge] * 2001
+    ):
+        assert run() == {"success": False, "error": "edges_limit"}
+    assert "system" not in {n["source_node_id"] for n in run()["document"]["nodes"]}

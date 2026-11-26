@@ -1096,6 +1096,28 @@ class SessionManager:
                 self.write_modes.retire(copy_id, require_empty=False)
             raise
 
+    def capture_source(
+        self, session_id: str, expected_revision: int
+    ) -> Tuple[Session, str]:
+        """Check a source at the shared session capture boundary."""
+        if self._lock(session_id).locked():
+            raise LayoutBusy()
+        source = self.get_session(session_id)
+        if source is None or self.write_modes.is_retired(session_id):
+            raise SessionNotFound()
+        if source.seq != expected_revision:
+            raise RevisionConflict(expected_revision, source.seq)
+        try:
+            mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
+        except WriteModeRefused:
+            # A staged source whose layer this deployment cannot read.
+            raise CaptureRefused("staged_changes")
+        if mode == WRITE_MODE_STAGED and self.write_modes.layer_store.load_layer(
+            session_id
+        ):
+            raise CaptureRefused("staged_changes")
+        return source, mode
+
     def save_session_view(
         self,
         session_id: str,
@@ -1118,22 +1140,7 @@ class SessionManager:
         only after publication; if that fails, ``revoke_access`` runs and the
         copy is removed before the failure propagates.
         """
-        if self._lock(session_id).locked():
-            raise LayoutBusy()
-        source = self.get_session(session_id)
-        if source is None or self.write_modes.is_retired(session_id):
-            raise SessionNotFound()
-        if source.seq != expected_revision:
-            raise RevisionConflict(expected_revision, source.seq)
-        try:
-            mode, _ = self.write_modes.choose(self.write_mode_of(source)["write_mode"])
-        except WriteModeRefused:
-            # A staged source whose layer this deployment cannot read.
-            raise CaptureRefused("staged_changes")
-        if mode == WRITE_MODE_STAGED and self.write_modes.layer_store.load_layer(
-            session_id
-        ):
-            raise CaptureRefused("staged_changes")
+        source, mode = self.capture_source(session_id, expected_revision)
         self.store.check_capacity(self._max_sessions)
         state = _empty_state()
         state.update(
