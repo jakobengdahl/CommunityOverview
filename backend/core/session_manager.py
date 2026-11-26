@@ -764,6 +764,44 @@ def _refresh_annotation_ids(
     return ids
 
 
+def validate_captured_annotations(state: Dict[str, Any], max_annotations: int) -> None:
+    annotations = state["annotations"]
+    if not isinstance(annotations, list):
+        raise CaptureRefused("invalid_presentation")
+    if len(annotations) > max_annotations:
+        raise OpBatchTooLarge()
+    try:
+        seen = set()
+        for annotation in annotations:
+            validated = _validate_annotation(annotation, require_id=True)
+            ann_id = validated["id"]
+            if not ann_id or ann_id in seen:
+                raise OpError("invalid annotation id")
+            seen.add(ann_id)
+            members = annotation.get("member_node_ids", [])
+            if not isinstance(members, list) or any(
+                not isinstance(member, str) for member in members
+            ):
+                raise OpError("invalid group members")
+            if _validate_generic_content(validated["type"], annotation):
+                raise OpError("invalid annotation content")
+            content = annotation.get("content")
+            if isinstance(content, dict) and validated["type"] != "reference":
+                if _validate_generic_content(validated["type"], content):
+                    raise OpError("invalid annotation content")
+        metadata = {"annotations": annotations}
+        if sanitize_saved_view_metadata(metadata) != metadata:
+            raise OpError("unsafe annotation")
+        _check_op_image_sizes({"op": "nodes_replaced", "annotations": annotations})
+        if (
+            sum(_annotation_embedded_image_bytes(a) for a in annotations)
+            > DEFAULT_MAX_SESSION_IMAGE_BYTES
+        ):
+            raise OpBatchTooLarge()
+    except (OpError, TypeError, ValueError) as exc:
+        raise CaptureRefused("invalid_presentation") from exc
+
+
 class SessionManager:
     """High-level façade over the session store, event bus, presence, selection
     claims and edit leases."""
@@ -1176,41 +1214,8 @@ class SessionManager:
                 {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
             )
         )
+        validate_captured_annotations(state, self.store._max_annotations)
         annotations = state["annotations"]
-        if not isinstance(annotations, list):
-            raise CaptureRefused("invalid_presentation")
-        if len(annotations) > self.store._max_annotations:
-            raise OpBatchTooLarge()
-        try:
-            seen = set()
-            for annotation in annotations:
-                validated = _validate_annotation(annotation, require_id=True)
-                ann_id = validated["id"]
-                if not ann_id or ann_id in seen:
-                    raise OpError("invalid annotation id")
-                seen.add(ann_id)
-                members = annotation.get("member_node_ids", [])
-                if not isinstance(members, list) or any(
-                    not isinstance(member, str) for member in members
-                ):
-                    raise OpError("invalid group members")
-                if _validate_generic_content(validated["type"], annotation):
-                    raise OpError("invalid annotation content")
-                content = annotation.get("content")
-                if isinstance(content, dict) and validated["type"] != "reference":
-                    if _validate_generic_content(validated["type"], content):
-                        raise OpError("invalid annotation content")
-            metadata = {"annotations": annotations}
-            if sanitize_saved_view_metadata(metadata) != metadata:
-                raise OpError("unsafe annotation")
-            _check_op_image_sizes({"op": "nodes_replaced", "annotations": annotations})
-            if (
-                sum(_annotation_embedded_image_bytes(a) for a in annotations)
-                > DEFAULT_MAX_SESSION_IMAGE_BYTES
-            ):
-                raise OpBatchTooLarge()
-        except (OpError, TypeError, ValueError) as exc:
-            raise CaptureRefused("invalid_presentation") from exc
         # A removed node's revision outlives it; copying it would carry an id
         # the capture neither authorizes nor reports.
         on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}

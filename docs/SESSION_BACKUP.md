@@ -62,6 +62,48 @@ which can differ from the authoritative staged-session record.
 The document `integrity.sha256` is over UTF-8 JSON of the entire document with
 `integrity` omitted, sorted keys, no whitespace, unescaped Unicode, and no
 non-finite numbers. These hashes detect accidental corruption; they do not
-provide authentication. Restore is not available yet and is planned separately.
-Retain both artifacts securely until a restore can be tested against a separate
-store; a graph-only backup cannot recover sessions.
+provide authentication. Retain both artifacts securely; a graph-only backup cannot recover sessions.
+
+
+## Restore
+
+Stop all application instances and writers. Work with a private offline copy of
+the paired graph backup, never a live store. Use the same trusted authorization
+module and graph snapshot settings as backup. The operator policy must allow the
+`restore_sessions` admin action, session reads, and reads of every referenced
+node, edge and session. The default policy denies admin access.
+
+```sh
+export SESSION_BACKUP_AUTH_MODULE=my_deployment.backup_auth
+export SESSION_BACKUP_GRAPH=/snapshot/graph.json
+python3 scripts/restore_sessions.py --integration scripts.session_restore_file_snapshot \
+  --input /secure/session-backup.json --output /secure/restored-workspace
+```
+
+The output must not exist, and its parent must be on a filesystem supporting
+Linux atomic no-replace rename. The new directory contains the copied graph,
+sidecars, `snapshot.journal.ndjson`, and a `sessions` directory. Configure the
+graph journal path to the copied journal if present. Verify the graph and
+sessions in a separate offline instance before switching any application to
+them. The command prints a JSON report of missing node references, subject to
+the operator's graph visibility; missing edges remain stored but are not
+reported. Protect the report as session data.
+
+Restore checks document and asset hashes, IDs, revisions, annotation safety and
+the normal session and image limits before publication. Version 1 supports up
+to 10,000 sessions and 2,000 annotations per session, subject also to the
+normal document and image size limits. The whole backup must fit in memory and
+the copied graph and restored data must fit on disk. Nonempty import mapping or
+report tables are refused: version 1 backup currently writes empty tables.
+Existing session IDs or staged-session records in the target graph are
+collisions, including retired IDs; resolve them in a separate clean graph
+workspace before retrying. No data is overwritten.
+
+All writes occur in a private temporary workspace. A failed validation or
+write leaves the output unpublished; discard any leftover temporary directory
+after an interruption and retry from the original artifacts. Keep both original
+backups until the restored graph and sessions have been verified. The supplied
+integration is for file storage; another backend needs a trusted offline
+integration whose `open_restore(hook, output)` yields the service, empty session
+backend, write modes and an atomic publish callback, and discards its workspace
+on failure.
