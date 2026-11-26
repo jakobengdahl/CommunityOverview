@@ -147,11 +147,6 @@ export function applyLayout(nodes, edges, layoutType = null) {
   }
 }
 
-// Existing mixed-position sessions use the supplied positions for every node.
-export function applyPartialLayout(nodes, edges, savedIds, layoutType = null) {
-  return savedIds.size ? nodes : applyLayout(nodes, edges, layoutType);
-}
-
 /**
  * Check if two nodes overlap
  * @param {Object} pos1 - Position {x, y} of first node

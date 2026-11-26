@@ -770,7 +770,8 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
     assert line["end"]["attachment"]["target_id"] == "b"
     assert line["from"] == line["start"]["point"] == {"x": 101, "y": 202}
     assert line["end"]["point"] == {"x": 104, "y": 205}
-    assert stroke["points"] == [{"x": 105, "y": 206}, {"x": 107, "y": 208}]
+    assert stroke["position"] == {"x": 100, "y": 200}
+    assert stroke["points"] == [{"x": 5, "y": 6}, {"x": 7, "y": 8}]
 
 
 def test_insert_requires_both_coordinates(capture):
@@ -830,3 +831,29 @@ def test_insert_rejects_overflow_without_writing(capture):
     )
     assert result == {"success": False, "error": "invalid_request"}
     assert target.state == before and target.seq == 0
+
+
+def test_insert_freehand_preserves_relative_points_and_rendered_origin(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state["node_refs"] = []
+    source.state["annotations"] = [
+        {
+            "id": "stroke",
+            "type": "freehand",
+            "position": {"x": 30, "y": 40},
+            "points": [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
+        }
+    ]
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=100, y=200
+    )
+    assert result["success"]
+    stroke = target.state["annotations"][0]
+    assert stroke["position"] == {"x": 95, "y": 194}
+    assert stroke["points"] == [{"x": 5, "y": 6}, {"x": 7, "y": 8}]

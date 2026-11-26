@@ -42,7 +42,7 @@ import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
 import { useViewportRequest } from '../hooks/useViewportRequest';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import {
-  applyPartialLayout,
+  applyLayout,
   getCircularLayout,
   reconcileSessionNodes,
   arrangeNodes,
@@ -1591,7 +1591,7 @@ function GraphCanvasInner({
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
-    const savedIds = new Set(nodesToRender.filter((n) => n._savedPosition).map((n) => n.id));
+    const hasSavedPositions = nodesToRender.some((n) => n._savedPosition);
 
     const nodesWithoutPosition = nodesToRender.map((node) => {
       const mark = nodeMarks[node.id];
@@ -1657,7 +1657,11 @@ function GraphCanvasInner({
       return root ? [{ ...root, position: { ...FOCUS_CENTER } }, ...ring] : ring;
     }
 
-    return applyPartialLayout(nodesWithoutPosition, reactFlowEdges, savedIds, layoutType);
+    if (hasSavedPositions) {
+      return nodesWithoutPosition;
+    }
+
+    return applyLayout(nodesWithoutPosition, reactFlowEdges, layoutType);
   }, [
     nodesToRender,
     reactFlowEdges,

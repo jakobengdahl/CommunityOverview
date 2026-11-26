@@ -88,7 +88,15 @@ def _rendered_bounds(positions, annotations):
         label = 28 * scale if base in ("triangle-up", "triangle-down") else 0
         boxes.append((px, py - label, px + width * scale, py + height * scale))
     for annotation in annotations:
-        points = _line_points(annotation) + _freehand_points(annotation)
+        points = _line_points(annotation)
+        position = annotation.get("position") or annotation.get("geometry") or {}
+        points += [
+            {
+                "x": position.get("x", 0) + p.get("x", 0),
+                "y": position.get("y", 0) + p.get("y", 0),
+            }
+            for p in _freehand_points(annotation)
+        ]
         if annotation_type_of(annotation) == "line":
             # The canvas derives absent endpoints from position and dx/dy.
             start = (
@@ -1052,7 +1060,6 @@ def insert_template(
                     a.get("position"),
                     a.get("geometry"),
                     *_line_points(a),
-                    *_freehand_points(a),
                 ]
                 seen = set()
                 for p in points:
