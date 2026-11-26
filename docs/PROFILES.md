@@ -516,4 +516,4 @@ The toolbar uses a two-column grid layout to accommodate many node types.
 
 ### Profile templates
 
-Place individual v1 template JSON documents in `config/<profile>/templates/` alongside the active schema configuration. They load at startup and appear as read-only templates. Invalid documents or IDs already used by another profile or stored template or session (including deleted records) prevent startup; correct the files or resolve the ID collision before restarting. See [Templates contract](TEMPLATES_CONTRACT.md) for the document format.
+Place individual v1 template JSON documents in `config/<profile>/templates/` alongside the active schema configuration. Valid documents load at startup and appear as read-only templates; invalid documents are logged and skipped. IDs already used by another profile or stored template or session (including deleted records) prevent startup; resolve the ID collision before restarting. See [Templates contract](TEMPLATES_CONTRACT.md) for the document format.
