@@ -23,7 +23,14 @@ from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
-    def test_create_and_get(self, test_app: TestClient):
+    @pytest.mark.parametrize("base", [None, "/root?view=old&collect=kiosk&node=n"])
+    def test_create_and_get(self, test_app: TestClient, monkeypatch, base):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        if base is None:
+            monkeypatch.delenv(PUBLIC_BASE_URL_ENV, raising=False)
+        else:
+            monkeypatch.setenv(PUBLIC_BASE_URL_ENV, base)
         resp = test_app.post("/api/sessions", json={"name": "My session"})
         assert resp.status_code == 200
         body = resp.json()
@@ -35,13 +42,62 @@ class TestSessionCrud:
         got = test_app.get(f"/api/sessions/{sid}")
         assert got.status_code == 200
         assert got.json()["id"] == sid
+        assert (
+            body["session_url"] == got.json()["session_url"] == build_session_url(sid)
+        )
+        if base is not None:
+            assert got.json()["session_url"] == f"/root?session={sid}"
+        listed = test_app.get("/api/sessions").json()["sessions"]
+        assert next(item for item in listed if item["id"] == sid)[
+            "session_url"
+        ] == build_session_url(sid)
 
-    def test_list_sessions(self, test_app: TestClient):
+    def test_list_sessions(self, test_app: TestClient, monkeypatch):
         a = test_app.post("/api/sessions", json={"name": "a"}).json()["id"]
         b = test_app.post("/api/sessions", json={"name": "b"}).json()["id"]
         listed = test_app.get("/api/sessions").json()["sessions"]
         ids = {s["id"] for s in listed}
         assert {a, b} <= ids
+
+        from backend.service import access
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV
+
+        monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "/app")
+        original = access.authorize_graph_access
+
+        def authorize(hook, **kwargs):
+            if (
+                kwargs.get("target") == "get_visualization_session"
+                and kwargs.get("session_id") == b
+            ):
+                return {"message": "denied"}
+            return original(hook, **kwargs)
+
+        monkeypatch.setattr(access, "authorize_graph_access", authorize)
+        listed = test_app.get("/api/sessions").json()["sessions"]
+        assert a in {item["id"] for item in listed}
+        assert b not in {item["id"] for item in listed}
+        assert (
+            test_app.get(f"/api/sessions/{a}").json()["session_url"]
+            == f"/app?session={a}"
+        )
+        assert test_app.get(f"/api/sessions/{b}").json()["session_url"] is None
+        assert (
+            test_app.patch(f"/api/sessions/{b}", json={"name": "b"}).json()[
+                "session_url"
+            ]
+            is None
+        )
+
+        def deny_listing(hook, **kwargs):
+            if kwargs.get("target") == "list_visualization_sessions":
+                return {"message": "listing denied"}
+            return authorize(hook, **kwargs)
+
+        monkeypatch.setattr(access, "authorize_graph_access", deny_listing)
+        response = test_app.get("/api/sessions")
+        assert response.status_code == 403
+        assert response.json()["detail"] == "listing denied"
 
     def test_rename(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]

@@ -1363,7 +1363,9 @@ class TestBuildSessionUrl:
     def test_base_path_is_preserved(self):
         from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
 
-        os.environ[PUBLIC_BASE_URL_ENV] = "https://example.test/app"
+        os.environ[PUBLIC_BASE_URL_ENV] = (
+            "https://example.test/app?view=old&collect=kiosk&akc=x&node=n&guide=g&keep=yes&session=stale#fragment"
+        )
         assert (
             build_session_url("1234-5678")
             == "https://example.test/app?session=1234-5678"

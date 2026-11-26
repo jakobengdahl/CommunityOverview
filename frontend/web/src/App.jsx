@@ -133,14 +133,6 @@ function reflectSessionUrl(id) {
   }
 }
 
-function browserSessionUrl(id) {
-  const url = new URL(window.location.href);
-  url.hash = '';
-  url.search = '';
-  url.searchParams.set('session', id);
-  return url.toString();
-}
-
 function App() {
   const akcShortName = _akcShortName;
   const {
@@ -3445,12 +3437,16 @@ function App() {
     [sessionId, syncRef, requestSessionSnapshot, switchToSession, showNotification, t]
   );
 
-  // Copy the canonical share link for a session (contract §5 form
-  // `<base>/?session=<id>`), built from the current origin+path so it stays
-  // correct across deployments without needing the server base URL client-side.
   const handleCopySessionLink = useCallback(
     async (targetId) => {
-      const link = browserSessionUrl(targetId);
+      let link;
+      try {
+        ({ session_url: link } = await api.getSession(targetId));
+        if (!link) throw new Error();
+      } catch {
+        showNotification('error', t('sessions.link_unavailable'));
+        return;
+      }
       try {
         await navigator.clipboard.writeText(link);
       } catch {
