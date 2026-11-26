@@ -8,18 +8,6 @@ import {
   overlaysToAnnotations,
 } from './sessionAnnotations';
 
-// smallfix-annotation-version-dropped-by-browser-pipeline: this is the exact
-// pipeline the independent review traced and reproduced —
-// useSharedSession.js's serverStateToMirror pipes a raw server annotation
-// through annotationsToOverlays then overlaysToAnnotations before it is ever
-// handed to the sync client's baseline. Neither function used to read or
-// write `version`/`field_versions`, so a browser's own base_version was
-// always `undefined` on every real annotation_updated op it sent (JSON.
-// stringify drops the key), landing every real write on the server's
-// no-base_version legacy fallback instead of the same-field-conflict check
-// dec-annotation-field-patches-and-conflicts describes. These pin that a
-// server-assigned version now survives the full round trip, for every v1
-// annotation kind, not only note/label.
 describe('version/field_versions survive the server <-> overlay round trip', () => {
   it.each([
     { type: 'note', kind: 'note', extra: { text: 'hi' } },
@@ -73,7 +61,6 @@ describe('version/field_versions survive the server <-> overlay round trip', () 
       version: 7,
       field_versions: { shape: 5 },
     };
-    // This is exactly useSharedSession.js's serverStateToMirror pipeline.
     const overlays = annotationsToOverlays([serverAnnotation]);
     const annotations = overlaysToAnnotations(overlays);
     expect(annotations).toHaveLength(1);
@@ -99,38 +86,29 @@ describe('version/field_versions survive the server <-> overlay round trip', () 
 });
 
 describe('group description round-trip (R12)', () => {
-  it('carries description through groupsToAnnotations', () => {
+  it.each([
+    [
+      'a description',
+      { description: 'Drag nodes here to group them' },
+      'Drag nodes here to group them',
+    ],
+    ['no description', {}, ''],
+  ])('converts a canvas group with %s to an annotation', (_case, fields, expected) => {
     const [ann] = groupsToAnnotations(
-      [
-        {
-          id: 'g1',
-          label: 'Team',
-          description: 'Drag nodes here to group them',
-          position: { x: 0, y: 0 },
-        },
-      ],
+      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, ...fields }],
       {}
     );
-    expect(ann.description).toBe('Drag nodes here to group them');
+    expect(ann.description).toBe(expected);
   });
 
-  it('defaults to an empty string when the canvas group has no description', () => {
-    const [ann] = groupsToAnnotations([{ id: 'g1', label: 'Team', position: { x: 0, y: 0 } }], {});
-    expect(ann.description).toBe('');
-  });
-
-  it('carries description through annotationsToGroups', () => {
+  it.each([
+    ['a description', { description: 'Hi there' }, 'Hi there'],
+    ['no description', {}, ''],
+  ])('converts a server group with %s to a canvas group', (_case, fields, expected) => {
     const { groups } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', description: 'Hi there', position: { x: 0, y: 0 } },
+      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 }, ...fields },
     ]);
-    expect(groups[0].description).toBe('Hi there');
-  });
-
-  it('defaults to an empty string when the server annotation has no description', () => {
-    const { groups } = annotationsToGroups([
-      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 } },
-    ]);
-    expect(groups[0].description).toBe('');
+    expect(groups[0].description).toBe(expected);
   });
 
   it('round-trips a description through both directions unchanged', () => {
@@ -171,11 +149,6 @@ describe('group description round-trip (R12)', () => {
   });
 });
 
-// task-annotation-doubleclick-to-edit-text: a shape's optional caption text
-// must survive the host-level overlay <-> server-document round trip too,
-// not only the canvas-node round trip overlaySerialization.test.js covers —
-// this is the layer legacyMetadataToAnnotationDocument/
-// annotationDocumentToLegacyMetadata actually use for session save/restore.
 describe('shape caption round-trip', () => {
   it('carries a caption through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata', () => {
     const overlay = {
@@ -202,11 +175,6 @@ describe('shape caption round-trip', () => {
   });
 });
 
-// task-annotation-render-direct-manipulation: label/text/icon attachments
-// round-trip between the server annotation document and the canvas overlay
-// shape, not only through the JS annotation model. `vote_dot` used to be a
-// fourth member of this list; task-annotation-vote-dot-simplify retired its
-// attachment behaviour — see the dedicated test below for what it does now.
 describe('attachment round-trip through the server annotation document', () => {
   const attachment = { target_id: 'node-1', target_type: 'node', offset: { x: 4, y: -6 } };
 
@@ -238,10 +206,6 @@ describe('attachment round-trip through the server annotation document', () => {
     expect(document.annotations[0].attachment).toBeUndefined();
   });
 
-  // Explicit regression for task-annotation-vote-dot-simplify: a vote_dot
-  // overlay carrying a stale `attachment` (from before this change — no
-  // migration was written) must not have it resurface on either leg of this
-  // round trip.
   it('drops a vote_dot attachment on both legs of the round trip, not just one', () => {
     const overlay = {
       id: 'vote-dot-1',
@@ -261,11 +225,6 @@ describe('attachment round-trip through the server annotation document', () => {
   });
 });
 
-// smallfix-annotation-unsized-generic-geometry-clobber: icon/vote_dot/text
-// used to lose their geometry.w/h on this round trip and get re-materialised
-// at createAnnotation's 160x96 default by the next autosave. shape/image
-// already carried size through; this locks in that all five generic
-// kinds now behave the same way.
 describe('geometry w/h round-trip for generic overlay kinds', () => {
   const overlayFor = (kind) => ({
     id: `${kind}-1`,
@@ -290,27 +249,13 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
       const metadata = annotationDocumentToLegacyMetadata(document);
       const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
       expect(roundTripped.size).toEqual({ w: 32, h: 41 });
-    }
-  );
-
-  it.each(['icon', 'vote_dot', 'text'])(
-    'no longer falls back to the 160x96 default for %s when a size was set',
-    (kind) => {
-      const overlay = overlayFor(kind);
-      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
-      const metadata = annotationDocumentToLegacyMetadata(document);
-      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
-      expect(roundTripped.size).not.toEqual({ w: 160, h: 96 });
+      if (['icon', 'vote_dot', 'text'].includes(kind)) {
+        expect(roundTripped.size).not.toEqual({ w: 160, h: 96 });
+      }
     }
   );
 });
 
-// smallfix-browser-clobbers-unsized-annotation-geometry: build_annotation
-// defaults geometry.w/h to 0 for an agent-created label/line/freehand, but
-// these three translator branches (unlike GENERIC_OVERLAY_TYPES above) never
-// carried geometry.w/h through at all — so the very first browser round trip
-// (no user resize) silently rewrote the stored 0 into createAnnotation's
-// 160x96 default, and rewrote an agent-set, non-default size the same way.
 describe('geometry w/h round-trip for label/line/freehand', () => {
   const serverAnnotationFor = (type, w, h, extra) => ({
     id: `${type}-1`,
@@ -340,8 +285,6 @@ describe('geometry w/h round-trip for label/line/freehand', () => {
     (type, extra) => {
       const server = [serverAnnotationFor(type, 0, 0, extra)];
       const overlays = annotationsToOverlays(server);
-      // A browser that only loads and re-serializes (no user resize) must not
-      // change the stored geometry at all.
       const roundTripped = overlaysToAnnotations(overlays);
       expect(roundTripped[0].geometry.w).toBe(0);
       expect(roundTripped[0].geometry.h).toBe(0);
@@ -375,12 +318,6 @@ describe('geometry w/h round-trip for label/line/freehand', () => {
     }
   );
 
-  // The saved-view path (App.jsx's handleConfirmSaveView) builds
-  // annotation_document via legacyMetadataToAnnotationDocument from canvas
-  // overlays, then annotationDocumentToLegacyMetadata for the legacy mirror —
-  // both built on overlaysToAnnotations/annotationsToOverlays, so this pins
-  // the same guarantee through that entry point, mirroring the generic-kind
-  // coverage above.
   const overlayFor = (kind) => {
     if (kind === 'label') {
       return {
@@ -429,9 +366,6 @@ describe('geometry w/h round-trip for label/line/freehand', () => {
   );
 });
 
-// A group has always carried the same envelope fields as other annotations, but
-// dropping any of them before the browser's save path makes the next autosave
-// write a default back over server-owned state.
 describe('group envelope round-trip (locked, z, rotation)', () => {
   it('carries locked, z and rotation from the server annotation onto the canvas group', () => {
     const { groups } = annotationsToGroups([
@@ -469,9 +403,6 @@ describe('group envelope round-trip (locked, z, rotation)', () => {
     expect(ann.geometry.rotation).toBe(45);
   });
 
-  // The autosave path: a locked group loaded from the server is re-serialised
-  // on every save. Before this round-trip existed the save wrote envelope
-  // defaults back, silently changing a group nobody had touched.
   it('survives the save/restore round trip instead of reverting to defaults', () => {
     const { groups, parentIds } = annotationsToGroups([
       {
@@ -517,9 +448,6 @@ describe('group envelope round-trip (locked, z, rotation)', () => {
   });
 });
 
-// Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half) was
-// previously freehand-only on this leg too (`style.opacity`, freehand's own
-// pre-existing convention); every kind now carries it the same way.
 describe('opacity round-trip through the server annotation document', () => {
   it('carries opacity into a note/label/line annotation as style.opacity', () => {
     const [note, label, line] = overlaysToAnnotations([
@@ -567,9 +495,6 @@ describe('opacity round-trip through the server annotation document', () => {
   });
 });
 
-// smallfix-label-overlay-drops-nonvisual-style-keys: label and line listed
-// their style keys explicitly, so any other key an agent stored in `style`
-// was gone after the browser's first write-back.
 describe('label/line style keys the canvas has no control for', () => {
   const label = {
     id: 'l1',
@@ -683,8 +608,6 @@ describe('heat-map annotations survive the server <-> overlay round trip', () =>
     expect(overlay.intensity).toBe(10);
   });
 
-  // Written by a client or agent that stored the level as a string; it is
-  // still a readable level, so it must not fall back to the default.
   it('reads a stored string intensity as its whole level', () => {
     const [overlay] = annotationsToOverlays([
       { id: 'heat-3', type: 'heatmap', position: { x: 0, y: 0 }, intensity: '7' },
@@ -696,12 +619,6 @@ describe('heat-map annotations survive the server <-> overlay round trip', () =>
 });
 
 describe('reference annotations survive the server <-> overlay round trip', () => {
-  // The leg that matters most: this is the browser's hydrate -> canvas ->
-  // autosave path, and a field missing from either translator is diffed back
-  // to its default on the next autosave. For a reference that means a live
-  // tile silently turning into a broken one (a dropped `target`) or being
-  // reclassified (a dropped `target_kind`) — the "unsized-geometry clobber"
-  // class of bug with a navigation target instead of a width.
   it.each([
     ['session', '8244-1742-3391-0057'],
     ['url', 'https://example.org/handbook'],
@@ -757,8 +674,6 @@ describe('reference annotations survive the server <-> overlay round trip', () =
     expect(back.label).toBe('');
   });
 
-  // An unrecognised stored target kind is carried through, not coerced: the
-  // tile must render as broken, and a coercion would make it look live.
   it('carries an unrecognised target kind through verbatim', () => {
     const [overlay] = annotationsToOverlays([
       {
