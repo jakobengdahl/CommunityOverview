@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
@@ -901,6 +902,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const menu = contextMenu && (
     <ContextMenuPortal
       menuRef={contextMenuRef}
+      onClose={() => setContextMenu(null)}
       position={contextMenu}
       sheet={Boolean(contextMenu.sheet)}
       sheetContainer={sheetContainer}
@@ -1379,6 +1381,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // instead.
 function ContextMenuPortal({
   menuRef,
+  onClose,
   position,
   sheet = false,
   sheetContainer = null,
@@ -1458,6 +1461,7 @@ function ContextMenuPortal({
   if (locked) {
     return createPortal(
       <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
+        <AnnotationSaveTemplateControl id={id} type={kind} onClose={onClose} />
         <button type="button" className="context-menu-unlock" onClick={onUnlock}>
           🔓 {labels.unlock}
         </button>
@@ -1875,6 +1879,7 @@ function ContextMenuPortal({
           instead of each spending a slot in the bar. Delete stays out of it,
           directly reachable, because it is the action a user most often opens
           this menu for. */}
+      <AnnotationSaveTemplateControl id={id} type={kind} onClose={onClose} />
       <AnnotationMenuGroup
         groupKey="actions"
         label={gl('moreActions', 'More actions')}

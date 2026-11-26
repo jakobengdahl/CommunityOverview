@@ -27,7 +27,7 @@ export const DEFAULT_ANNOTATION_TEXT_DEBOUNCE_MS = 300;
  * @param {number} [opts.debounceMs] - Debounce window for 'text' changes.
  * @param {Function} [opts.setTimeoutFn]
  * @param {Function} [opts.clearTimeoutFn]
- * @returns {{schedule: (kind?: string) => void, clearPending: () => void}}
+ * @returns {{schedule: (kind?: string) => void, clearPending: () => boolean}}
  */
 export function createAnnotationChangeScheduler({
   publish,
@@ -38,10 +38,12 @@ export function createAnnotationChangeScheduler({
   let timer = null;
 
   function clearPending() {
+    const pending = timer != null;
     if (timer != null) {
       clearTimeoutFn(timer);
       timer = null;
     }
+    return pending;
   }
 
   /**

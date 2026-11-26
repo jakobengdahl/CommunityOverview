@@ -396,6 +396,7 @@ function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
 }
 
 export function NodeContextMenu({
+  onSaveAsTemplate,
   menu,
   labels: cml,
   schema,
@@ -438,6 +439,18 @@ export function NodeContextMenu({
       style={{ left: menu.x, top: menu.y }}
       onKeyDown={handleRootKeyDown}
     >
+      {onSaveAsTemplate && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onSaveAsTemplate([menu.node]);
+            onClose();
+          }}
+        >
+          {cml.saveAsTemplate}
+        </button>
+      )}
       {onEdit && (
         <button
           type="button"
@@ -628,6 +641,7 @@ export function NodeContextMenu({
 }
 
 export function MultiNodeContextMenu({
+  onSaveAsTemplate,
   menu,
   labels: cml,
   onShowOnly,
@@ -751,6 +765,18 @@ export function MultiNodeContextMenu({
       <div className="context-menu-header">
         {cml.nodesSelected.replace('{count}', menu.nodes.length)}
       </div>
+      {onSaveAsTemplate && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            onSaveAsTemplate(menu.nodes);
+            onClose();
+          }}
+        >
+          {cml.saveAsTemplate}
+        </button>
+      )}
       {onShowOnly && nodeIds.length > 0 && (
         <button
           type="button"

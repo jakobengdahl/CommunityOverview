@@ -18,6 +18,7 @@ import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import NodeAppearanceDialog, { appearanceOperation } from './components/NodeAppearanceDialog';
 import ConfirmDialog from './components/ConfirmDialog';
+import SaveTemplateDialog from './components/SaveTemplateDialog';
 import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
 import { teleportToSourceGraph } from './utils/teleport';
@@ -72,6 +73,7 @@ import {
 import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
 import { buildCaptureContents, readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
+import { prepareTemplateCapture } from './utils/templateCapture';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
@@ -249,6 +251,9 @@ function App() {
   const [notification, setNotification] = useState(null);
   const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
+  const [templateDialog, setTemplateDialog] = useState(null);
+  const templateDialogIdRef = useRef(0);
+  const templateSelectionRef = useRef([]);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
   const [showAgentDialog, setShowAgentDialog] = useState(false);
@@ -321,6 +326,7 @@ function App() {
   const remoteOpsChainRef = useRef(Promise.resolve());
   const setSessionId = useCallback((id) => {
     if (id !== sessionIdRef.current) {
+      setTemplateDialog(null);
       sessionGenerationRef.current += 1;
       appearancePendingRef.current = null;
       setAppearanceDialog(null);
@@ -1371,6 +1377,7 @@ function App() {
       editingEdge ||
       deleteDialog ||
       saveViewDialog ||
+      templateDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
       showAgentRunsDialog ||
@@ -1396,6 +1403,7 @@ function App() {
     editingEdge,
     deleteDialog,
     saveViewDialog,
+    templateDialog,
     showSubscriptionDialog,
     showAgentDialog,
     showAgentRunsDialog,
@@ -1779,6 +1787,7 @@ function App() {
   // Callback: Selection changed in GraphCanvas
   const handleSelectionChange = useCallback(
     (selectedNodes) => {
+      templateSelectionRef.current = selectedNodes;
       // Store full node data for the selected nodes
       const selectedWithData = selectedNodes
         .filter((n) => n.type !== 'group')
@@ -2342,6 +2351,7 @@ function App() {
     if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
       requestSessionSnapshot(null);
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
@@ -2439,6 +2449,7 @@ function App() {
         try {
           annotationSchedulerRef.current.clearPending();
           if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+          autoSaveTimerRef.current = null;
           await replayCanvasHistory({
             sessionId: targetId,
             snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
@@ -2487,6 +2498,7 @@ function App() {
     scheduleAutoSave();
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
     };
   }, [
     nodes,
@@ -2518,6 +2530,7 @@ function App() {
       try {
         annotationSchedulerRef.current.clearPending();
         if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
         const result = await captureCanvasSession({
           sessionId,
           name,
@@ -4013,6 +4026,17 @@ function App() {
     setAnnotationToolRequest((prev) => ({ kind, options, seq: (prev?.seq ?? 0) + 1 }));
   }, []);
 
+  const openTemplateDialog = useCallback(
+    (selection = templateSelectionRef.current) => {
+      const selected = selection.map((node) => ({
+        id: node.id,
+        annotation: CANVAS_ANNOTATION_TYPES.has(node.type),
+      }));
+      setTemplateDialog({ sessionId, selected, id: ++templateDialogIdRef.current });
+    },
+    [sessionId]
+  );
+
   // The command box's registry. Only this interactive view provides it; kiosk
   // views render outside App and so register nothing.
   const [commandRegistry] = useState(createCommandRegistry);
@@ -4031,6 +4055,7 @@ function App() {
           onCreateAgent: handleCreateAgent,
           onCreateSubscription: handleCreateSubscription,
           onSaveView: handleToolbarSaveView,
+          onSaveTemplate: openTemplateDialog,
           onCreateGroup: handleToolbarCreateGroup,
           onCreateActiveKnowledgeCollection: handleCreateAKC,
           onOpenSettings: handleOpenSettings,
@@ -4056,6 +4081,7 @@ function App() {
       handleCreateAgent,
       handleCreateSubscription,
       handleToolbarSaveView,
+      openTemplateDialog,
       handleToolbarCreateGroup,
       handleCreateAKC,
       handleOpenSettings,
@@ -4236,9 +4262,11 @@ function App() {
           shapeOverrides={shapeOverrides}
           typeShapes={typeShapes}
           onContextMenuAction={handleContextMenuAction}
+          onSaveSelectionAsTemplate={openTemplateDialog}
           stagedStates={sessionWriteMode === 'staged' ? canvasStagedStates : null}
           stagedStateLabels={stagedStateLabels}
           contextMenuLabels={{
+            saveAsTemplate: t('template.save'),
             edit: t('context_menu.edit'),
             appearance: t('node_appearance.title'),
             hide: t('context_menu.hide'),
@@ -4498,6 +4526,55 @@ function App() {
         <div className="app-a11y-depth-live" aria-live="polite" aria-atomic="true">
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
         </div>
+      )}
+      {templateDialog && (
+        <SaveTemplateDialog
+          key={templateDialog.id}
+          {...templateDialog}
+          schema={schema}
+          prepare={async () => {
+            const epoch = useGraphStore.getState().sessionEpoch;
+            const annotationPending = annotationSchedulerRef.current.clearPending();
+            const canvasPending = autoSaveTimerRef.current != null;
+            if (canvasPending) clearTimeout(autoSaveTimerRef.current);
+            autoSaveTimerRef.current = null;
+            return prepareTemplateCapture({
+              annotationPending,
+              canvasPending,
+              isCurrent: () =>
+                sessionIdRef.current === templateDialog.sessionId &&
+                useGraphStore.getState().sessionEpoch === epoch,
+              scheduleAnnotation: () => annotationSchedulerRef.current.schedule('text'),
+              scheduleCanvas: scheduleAutoSave,
+              prepare: async () => {
+                await flushBeforeCapture(() => buildCaptureContents(getCaptureState()));
+                await new Promise((resolve) => requestSessionSnapshot(resolve));
+                if (
+                  sessionIdRef.current !== templateDialog.sessionId ||
+                  useGraphStore.getState().sessionEpoch !== epoch
+                )
+                  throw new Error();
+                const sync = syncForSession(syncRef.current, templateDialog.sessionId);
+                if (!sync) return null;
+                if (
+                  sync.sessionId !== templateDialog.sessionId ||
+                  sessionIdRef.current !== templateDialog.sessionId
+                )
+                  throw new Error();
+                await sync.flushPending();
+                const source = await api.getSession(templateDialog.sessionId, { resolve: true });
+                if (sessionIdRef.current !== templateDialog.sessionId || syncRef.current !== sync)
+                  throw new Error();
+                return source;
+              },
+            });
+          }}
+          onClose={() => setTemplateDialog(null)}
+          onSaved={(counts) => {
+            setTemplateDialog((current) => (current === templateDialog ? null : current));
+            showNotification('success', t('template.saved', counts));
+          }}
+        />
       )}
       <NodeHistoryPanel />
 

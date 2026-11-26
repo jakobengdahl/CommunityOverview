@@ -1175,5 +1175,27 @@
     "results": "{count} förslag",
     "search_failed": "Nodsökningen misslyckades; bara nodtyper föreslås",
     "command_failed": "Kunde inte köra {label}. Din text finns kvar."
+  },
+  "template": {
+    "save": "Spara som mall…",
+    "command_description": "Spara markeringen eller hela sessionen som en mall",
+    "name": "Namn (obligatoriskt)",
+    "description": "Beskrivning",
+    "tags": "Taggar (kommaseparerade)",
+    "summary": "Ungefärlig förhandsvisning: {nodes} noder, {edges} kopplingar, {annotations} anteckningar. Exakta antal visas efter sparandet.",
+    "loading": "Förbereder sessionen…",
+    "empty": "Det finns inget att spara ännu.",
+    "saving": "Sparar…",
+    "save_button": "Spara",
+    "saved": "Mallen har sparats: {nodes} noder, {edges} kopplingar, {annotations} anteckningar",
+    "errors": {
+      "access_denied": "Du har inte behörighet att spara mallen.",
+      "staged_changes": "Hantera mellanlagrade ändringar innan du sparar en mall.",
+      "nodes_limit": "Mallen har för många noder.",
+      "edges_limit": "Mallen har för många kopplingar.",
+      "annotations_limit": "Mallen har för många anteckningar.",
+      "other": "Mallen kunde inte sparas. Försök igen.",
+      "revision_conflict": "Sessionen har ändrats. Stäng och öppna dialogen igen för att granska den."
+    }
   }
 }

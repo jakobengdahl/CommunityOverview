@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useState, useRef, useEffect, useContext, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
@@ -400,6 +401,11 @@ function ArrowNode({ id, data, selected }) {
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
             onKeyDown={handleMenuKeyDown}
           >
+            <AnnotationSaveTemplateControl
+              id={id}
+              type="arrow"
+              onClose={() => setContextMenu(null)}
+            />
             {locked ? (
               <>
                 <button type="button" className="context-menu-unlock" onClick={unlock}>

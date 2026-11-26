@@ -117,6 +117,18 @@ describe('staged-session binding in api.js', () => {
     expect(JSON.parse(calls[0].options.body)).toEqual({ name: 'Copy of Plan' });
   });
 
+  it('sends a template capture to the selected session and preserves structured failures', async () => {
+    const calls = mockFetch(409, { success: false, error: 'staged_changes' });
+    const body = { name: 'Example', expected_revision: 7, node_ids: ['a'], annotation_ids: [] };
+    await expect(api.saveTemplate('1111-2222', body)).rejects.toMatchObject({
+      code: 'staged_changes',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toMatch(/\/sessions\/1111-2222\/templates$/);
+    expect(calls[0].options.method).toBe('POST');
+    expect(JSON.parse(calls[0].options.body)).toEqual(body);
+  });
+
   it('captures the specified revision as a session', async () => {
     const calls = mockFetch(200, { success: true, kind: 'saved_session', session_url: '/session' });
     const result = await api.saveSessionView('1111-2222', 'Overview', 7);
