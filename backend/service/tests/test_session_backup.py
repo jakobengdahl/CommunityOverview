@@ -400,24 +400,58 @@ def test_authorization_runs_outside_session_transaction(backend):
     )
 
 
-def test_file_snapshot_integration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("custom_journal", [False, True])
+def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
+    from backend.core import Node
     from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.runtime.authorization import GraphAccessNarrowing
     from scripts import session_backup_file_snapshot as integration
 
     graph = tmp_path / "graph.json"
-    layer = FileGraphPersistenceBackend(graph, staged_sessions=True)
+    journal = tmp_path / "custom" / "writes.ndjson" if custom_journal else None
+    layer = FileGraphPersistenceBackend(graph, journal_path=journal, staged_sessions=True)
     layer.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
     layer.record_staged("1234-5678")
+    if custom_journal:
+        journal.parent.mkdir()
+        journal.touch()
     sessions = tmp_path / "sessions"
     FileSessionPersistenceBackend(sessions).save(Session("1234-5678").to_dict())
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
     monkeypatch.setenv("SESSION_BACKUP_SESSIONS", str(sessions))
+    if custom_journal:
+        monkeypatch.setenv("SESSION_BACKUP_GRAPH_JOURNAL", str(journal))
     with integration.open_backup(Hook()) as (service, backend, modes):
         backup = create_backup(service, backend, modes)
     assert backup["sessions"][0]["id"] == "1234-5678"
     assert {p: p.read_bytes() for p in before} == before
-    layer.journal_path.write_bytes(b"partial")
-    with pytest.raises(BackupRefused, match="incomplete snapshot journal"):
-        with integration.open_backup(Hook()):
-            pass
+    session = Session("1234-5678")
+    session.state["node_refs"] = ["secret"]
+    FileSessionPersistenceBackend(sessions).save(session.to_dict())
+    layer.upsert_node(Node(id="secret", type="Actor", name="Secret",
+                           metadata={"origin_graph_id": "other"}).to_dict())
+
+    class NarrowHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=False, include_graph_ids=("allowed",)
+                )
+            )
+
+    with integration.open_backup(NarrowHook()) as (service, backend, modes):
+        with pytest.raises(BackupRefused, match="^access denied$"):
+            create_backup(service, backend, modes)
+    original = layer.journal_path.read_bytes()
+    for tail in (b"partial", b"malformed\n", b'{}\n'):
+        layer.journal_path.write_bytes(original + tail)
+        with pytest.raises(BackupRefused, match="incomplete snapshot journal"):
+            with integration.open_backup(Hook()):
+                pass
+        assert layer.journal_path.read_bytes() == original + tail
+    if custom_journal:
+        layer.journal_path.unlink()
+        with pytest.raises(BackupRefused, match="snapshot unavailable"):
+            with integration.open_backup(Hook()):
+                pass

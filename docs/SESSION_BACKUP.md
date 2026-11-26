@@ -24,6 +24,14 @@ python3 scripts/backup_sessions.py --integration scripts.session_backup_file_sna
   --output /secure/session-backup.json
 ```
 
+If the graph backend uses a custom `journal_path`, include that journal in the
+same coordinated snapshot and set `SESSION_BACKUP_GRAPH_JOURNAL` to its snapshot
+path. The integration requires that file when the variable is set; otherwise it
+uses the default journal beside the graph. The operator must match this setting
+to the backend configuration, because the graph file does not record the path.
+An incomplete or malformed journal is refused; repair it through the normal
+recovery workflow and take a fresh snapshot before retrying.
+
 The command checks `backup_sessions` admin authorization before opening stores,
 and checks every session and reference before producing a document. The default
 hook denies admin access. The integration makes private working copies, and

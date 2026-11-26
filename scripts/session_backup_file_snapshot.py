@@ -34,14 +34,26 @@ class SnapshotModes(WriteModes):
         yield self
 
 
+class SnapshotGraphBackend(FileGraphPersistenceBackend):
+    def _cut_journal_to(self, length):
+        # Recovery would authorize references against an incomplete graph.
+        raise BackupRefused("incomplete snapshot journal")
+
+
 @contextmanager
 def open_backup(hook):
     source_graph = Path(os.environ["SESSION_BACKUP_GRAPH"])
     source_sessions = Path(os.environ["SESSION_BACKUP_SESSIONS"])
+    custom_journal = os.environ.get("SESSION_BACKUP_GRAPH_JOURNAL")
+    source_journal = (
+        Path(custom_journal) if custom_journal else
+        source_graph.with_name(source_graph.stem + ".journal.ndjson")
+    )
     if (
         source_graph.suffix != ".json"
         or not source_graph.is_file()
         or not source_sessions.is_dir()
+        or (custom_journal is not None and not source_journal.is_file())
     ):
         raise BackupRefused("snapshot unavailable")
     with tempfile.TemporaryDirectory(prefix="session-backup-") as temp:
@@ -51,7 +63,6 @@ def open_backup(hook):
         # directory isolates any backend load-time cleanup from the artifact.
         for suffix in (
             ".json",
-            ".journal.ndjson",
             ".layers.json",
             ".merges.ndjson",
             ".embeddings.bin",
@@ -59,10 +70,13 @@ def open_backup(hook):
             source = source_graph.with_name(source_graph.stem + suffix)
             if source.exists():
                 shutil.copyfile(source, root / source.name)
+        journal = root / "snapshot.journal.ndjson"
+        if source_journal.exists():
+            shutil.copyfile(source_journal, journal)
         if not graph.is_file():
             raise BackupRefused("snapshot unavailable")
         shutil.copytree(source_sessions, root / "sessions")
-        layer = FileGraphPersistenceBackend(graph, staged_sessions=True)
+        layer = SnapshotGraphBackend(graph, journal_path=journal, staged_sessions=True)
         for path in (layer.journal_path, layer.merge_log_path):
             if path.exists():
                 data = path.read_bytes()
