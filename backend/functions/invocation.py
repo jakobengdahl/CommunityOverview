@@ -277,7 +277,11 @@ class FunctionInvocationService:
         enabled=None,
         runner=None,
         isolation_minimum="degraded",
+        chain_depth_limit=3,
     ):
+        if type(chain_depth_limit) is not int or chain_depth_limit < 0:
+            raise ValueError("Invalid chain depth limit")
+        self.chain_depth_limit = chain_depth_limit
         if isolation_minimum not in {"degraded", "full"}:
             raise ValueError("Invalid isolation minimum")
         policy = getattr(store, "_retry", None)
@@ -523,6 +527,7 @@ class FunctionInvocationService:
         actor_binding,
         idempotency_key=None,
         correlation_id=None,
+        chain_depth=0,
     ) -> RunRecord:
         admitted = self.admit(
             function_id,
@@ -531,6 +536,7 @@ class FunctionInvocationService:
             actor_binding=actor_binding,
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
+            chain_depth=chain_depth,
         )
         if not isinstance(admitted, Admission):
             return admitted
@@ -545,6 +551,7 @@ class FunctionInvocationService:
         actor_binding,
         idempotency_key=None,
         correlation_id=None,
+        chain_depth=0,
         reservation=None,
     ):
         """Claim the run record, or return the replayed or rejected record.
@@ -554,6 +561,10 @@ class FunctionInvocationService:
         """
         if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
             raise ValueError("Invalid function id")
+        if type(chain_depth) is not int or chain_depth < 0:
+            raise ValueError("Invalid chain depth")
+        if trigger in {"manual", "webhook"} and chain_depth != 0:
+            raise ValueError("Manual and webhook invocations have depth zero")
         self._require_durable_history()
         started = time.monotonic()
         # Only the trusted binding supplies identity and scope. In particular,
@@ -569,6 +580,7 @@ class FunctionInvocationService:
             payload={
                 "function_id": function_id,
                 "trigger": trigger,
+                "chain_depth": chain_depth,
                 "attribution": {
                     "actor": {
                         key: binding[key]
@@ -602,6 +614,8 @@ class FunctionInvocationService:
             code, manifest, package = self._refusal(
                 function_id, binding, trigger, input
             )
+            if code is None and chain_depth > self.chain_depth_limit:
+                code = "chain_depth_exceeded"
             if manifest is not None:
                 job.payload["function_version"] = manifest["version"]
                 job.origin = f"function:{function_id}@{manifest['version']}"
@@ -722,7 +736,7 @@ class FunctionInvocationService:
                     "trigger": trigger,
                     "input": input,
                     "idempotency_key": idempotency_key,
-                    "chain_depth": 0,
+                    "chain_depth": job.payload["chain_depth"],
                     "deadline": (
                         job.started_at + timedelta(seconds=spec.timeout_seconds)
                     ).isoformat(),

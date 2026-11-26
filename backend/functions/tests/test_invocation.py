@@ -529,3 +529,41 @@ def test_webhook_version_and_write_switch_use_bound_actor(host):
     assert context.grant_enabled("graph:write")
     service.webhook_policy.get.return_value = (False, True)
     assert not context.grant_enabled("graph:write")
+
+
+def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypatch):
+    service, execute, _, _ = host
+    refusal = service._refusal
+    monkeypatch.setattr(
+        service,
+        "_refusal",
+        lambda function_id, binding, trigger, input: refusal(
+            function_id, binding, "manual", input
+        ),
+    )
+    binding = {"actor_id": "operator"}
+    accepted = service.invoke(
+        "example",
+        {},
+        trigger="future",
+        actor_binding=binding,
+        correlation_id="chain",
+        chain_depth=3,
+    )
+    envelope = execute.call_args.args[3]
+    assert accepted.state == ExecutionState.SUCCEEDED
+    assert envelope["invocation"]["trigger"] == "future"
+    assert envelope["invocation"]["chain_depth"] == 3
+    assert envelope["origin"]["event_correlation_id"] == "chain"
+    rejected = service.invoke(
+        "example",
+        {},
+        trigger="future",
+        actor_binding=binding,
+        correlation_id="chain",
+        chain_depth=4,
+    )
+    assert rejected.result["error"]["code"] == "chain_depth_exceeded"
+    assert rejected.payload["chain_depth"] == 4
+    assert rejected.correlation_id == "chain"
+    assert execute.call_count == 1
