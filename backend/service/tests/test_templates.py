@@ -771,7 +771,7 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
     assert line["from"] == line["start"]["point"] == {"x": 101, "y": 202}
     assert line["end"]["point"] == {"x": 104, "y": 205}
     assert stroke["position"] == {"x": 100, "y": 200}
-    assert stroke["points"] == [{"x": 5, "y": 6}, {"x": 7, "y": 8}]
+    assert stroke["points"] == [{"x": 105, "y": 206}, {"x": 107, "y": 208}]
 
 
 def test_insert_requires_both_coordinates(capture):
@@ -833,7 +833,7 @@ def test_insert_rejects_overflow_without_writing(capture):
     assert target.state == before and target.seq == 0
 
 
-def test_insert_freehand_preserves_relative_points_and_rendered_origin(capture):
+def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -843,6 +843,7 @@ def test_insert_freehand_preserves_relative_points_and_rendered_origin(capture):
             "id": "stroke",
             "type": "freehand",
             "position": {"x": 30, "y": 40},
+            "geometry": {"x": 30, "y": 40},
             "points": [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
         }
     ]
@@ -855,5 +856,6 @@ def test_insert_freehand_preserves_relative_points_and_rendered_origin(capture):
     )
     assert result["success"]
     stroke = target.state["annotations"][0]
-    assert stroke["position"] == {"x": 95, "y": 194}
-    assert stroke["points"] == [{"x": 5, "y": 6}, {"x": 7, "y": 8}]
+    assert stroke["position"] == {"x": 125, "y": 234}
+    assert stroke["geometry"] == {"x": 125, "y": 234}
+    assert stroke["points"] == [{"x": 100, "y": 200}, {"x": 102, "y": 202}]

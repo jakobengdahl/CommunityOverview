@@ -1563,6 +1563,7 @@ class SessionStore:
                 if n in state["positions"]
             }
             applied["hidden_node_ids"] = list(state["hidden_node_ids"])
+            applied.pop("inserted_shape_revisions", None)
             if op.get("inserted_shape_overrides"):
                 applied["inserted_shape_overrides"] = copy.deepcopy(
                     op["inserted_shape_overrides"]
