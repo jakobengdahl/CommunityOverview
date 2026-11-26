@@ -568,6 +568,7 @@ function GraphCanvasInner({
   savedShapes = null,
   onAppearance = null,
   onContextMenuAction = null,
+  onSaveSelectionAsTemplate = null,
   nodeColorResolver = null,
   onViewportChange = null,
   // A host request to move the camera: a fresh `{ bounds }` (model-space
@@ -5921,6 +5922,7 @@ function GraphCanvasInner({
         <NodeContextMenu
           menu={nodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           schema={schema}
           onEdit={onEdit}
           onAppearance={onAppearance}
@@ -5949,6 +5951,7 @@ function GraphCanvasInner({
         <MultiNodeContextMenu
           menu={multiNodeContextMenu}
           labels={cml}
+          onSaveAsTemplate={onSaveSelectionAsTemplate}
           onShowOnly={onShowOnly}
           onHideSelection={onHideMultiple || onHide ? hideSelectedGraphNodes : undefined}
           onDeleteSelection={

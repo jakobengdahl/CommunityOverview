@@ -1142,6 +1142,13 @@ export function setDisplayName(name) {
 
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
 
+export async function saveTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/templates`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
 /** Capture a revision of a session as a new session. */
 export async function saveSessionView(sessionId, name, expectedRevision) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/save-view`, {
