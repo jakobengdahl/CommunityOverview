@@ -1033,6 +1033,11 @@ def insert_template(
                 a["id"] = fresh[a["id"]]
             annotations, _ = _annotations(source, source, keys)
             kept = {a["id"] for a in annotations}
+            skipped.extend(
+                {"annotation_id": old, "reason": "missing_target"}
+                for old, new in fresh.items()
+                if new not in kept
+            )
             fresh = {old: new for old, new in fresh.items() if new in kept}
             for a in annotations:
                 # The canvas defaults absent coordinates to zero. Materialize them

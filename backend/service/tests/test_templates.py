@@ -599,10 +599,17 @@ def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
     assert target.state["positions"]["b"] == {"x": 100, "y": 200}
 
 
-def test_insert_skips_missing_and_remaps_links(capture):
+@pytest.mark.parametrize("nested", [False, True])
+def test_insert_skips_missing_and_remaps_links(capture, nested):
     from backend.service import templates
 
     _, service, manager, source = capture
+    reference = {"id": "ref", "type": "reference"}
+    payload = {"target_kind": "resource", "target": "a"}
+    reference.update({"content": payload} if nested else payload)
+    source.state["annotations"].extend(
+        [reference, {"id": "child", "type": "label", "parentId": "ref"}]
+    )
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
         "template"
     ]
@@ -612,8 +619,13 @@ def test_insert_skips_missing_and_remaps_links(capture):
         service, manager, target.id, doc["template_id"], x=0, y=0
     )
     assert result["success"] and result["added"] == ["b"]
-    assert result["skipped"] == [{"node_id": "a", "reason": "missing"}]
+    assert result["skipped"] == [
+        {"node_id": "a", "reason": "missing"},
+        {"annotation_id": "ref", "reason": "missing_target"},
+    ]
+    assert "ref" not in result["annotation_id_map"]
     assert "attachment" not in target.state["annotations"][0]
+    assert "parentId" not in target.state["annotations"][1]
     assert target.state["positions"]["b"] == {"x": 0, "y": 0}
 
 
