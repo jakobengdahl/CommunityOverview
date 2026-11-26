@@ -896,7 +896,8 @@ export class SessionSyncClient {
     this._readyWaiters = [];
     this._hadSnapshot = false;
     // Whether the baseline holds server state: setBaseline() was given loaded
-    // state, or a snapshot confirmed the seq a `{}` placeholder was seeded at.
+    // or seq-less state, or a snapshot confirmed the seq a `{}` placeholder
+    // was seeded at.
     this._baselineWritten = false;
     this._refusalProbed = false; // asked once why the stream never opened
     this._probeController = null;
@@ -1579,7 +1580,9 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
-    this._baselineWritten = Object.keys(state || {}).length > 0;
+    // Only a `{}` seeded at a seq is a placeholder awaiting its snapshot; an
+    // empty state without one is a load that found no session server-side.
+    this._baselineWritten = Object.keys(state || {}).length > 0 || typeof seq !== 'number';
     if (typeof seq === 'number') {
       this._loadedSeq = seq;
       this._membershipVersion = seq;

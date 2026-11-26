@@ -37,6 +37,8 @@ function client(seed, ...events) {
   sync.connect();
   for (const event of events) {
     if (event === 'drop') FakeEventSource.last.onerror();
+    // useSharedSession's 404 reload of a session this client already holds.
+    else if (event === 'missing') sync.setBaseline({});
     else FakeEventSource.last.onmessage({ data: JSON.stringify(event) });
   }
   sync.close();
@@ -59,6 +61,11 @@ it.each([
   ['a loaded baseline before the first snapshot', () => client(loaded), baseline],
   ['a loaded baseline once the client is ready', () => client(loaded, snapshot), baseline],
   ['a loaded baseline after the stream dropped', () => client(loaded, snapshot, 'drop'), baseline],
+  [
+    'a same-session reload that found no session',
+    () => client(loaded, snapshot, 'missing'),
+    { node_ids: [], positions: {} },
+  ],
 ])('captures from %s', (_label, makeSync, expected) => {
   const nodes = [
     { id: 'a', position: { x: 1, y: 2 } },
