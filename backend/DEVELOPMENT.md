@@ -211,7 +211,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
 | `GRAPH_POSTGRES_SCOPE` | *(unset)* | Opaque identifier tagging this instance's rows and narrowing the rows it reads (`postgres` only). Unset keeps no scopes apart; set-but-empty, or set without `GRAPH_BACKEND=postgres`, fails at boot. See [PERSISTENCE_BACKENDS.md](../docs/PERSISTENCE_BACKENDS.md) |
 | `GRAPH_STAGED_SESSIONS` | `false` | `true` lets the graph backend hold staged sessions' layers (see Staged sessions below); without it no session can be staged and no layer file or table is created. A value that is not a boolean fails at boot. Set it on every instance sharing a store: an instance without it refuses to boot over a store holding staged sessions, and refuses every request naming a session once another instance has staged one (it asks the store at most every 30 seconds) |
-| `SESSION_WRITE_MODE_DEFAULT` | `direct` | Write mode of a session created without one: `direct` or `staged`. The web app preselects it in its new-session choice. With `staged` (and `GRAPH_STAGED_SESSIONS`), the web app opened without `?session=` (nor `?view=`, `?node=`, `?collect=`, `?akc=`) creates its starting session with `POST /api/sessions` and no `write_mode`, so this default and the hook decide its mode, as it does for the session it moves to after a delete; until `/ui/capabilities` answers, the browser-made starting id holds graph writes. A refused or failed create keeps the browser-made session, which materialises `direct`. `staged` without `GRAPH_STAGED_SESSIONS=true`, or any other value, fails at boot |
+| `SESSION_WRITE_MODE_DEFAULT` | `direct` | Write mode of a session created without one: `direct` or `staged`. The web app preselects it in its new-session choice. With `staged` (and `GRAPH_STAGED_SESSIONS`), the web app opened without `?session=` (nor `?node=`, `?collect=`, `?akc=`) creates its starting session with `POST /api/sessions` and no `write_mode`, so this default and the hook decide its mode, as it does for the session it moves to after a delete; until `/ui/capabilities` answers, the browser-made starting id holds graph writes. A refused or failed create keeps the browser-made session, which materialises `direct`. `staged` without `GRAPH_STAGED_SESSIONS=true`, or any other value, fails at boot |
 | `SESSION_LAYER_MAX_ENTRIES` | `1000` | Most entries one staged session's layer holds; a staging write that would exceed it is refused with `layer_full`. Anything but up to 18 digits (`+5`, `1_000`, `1e3`), or less than 1, fails at boot |
 | `SESSION_MERGE_RECORD_RETENTION_DAYS` | `90` | Days a deleted staged session's merge records are kept before they are purged; while the session exists they are always kept. Purged at start and every 6 hours, at most 10,000 per run, in batches of 500; each purged merge id is logged at INFO, JSON-encoded, with its session id. Anything but up to 18 digits (`+30`, `1_0`, `30.0`), or outside 1 to 36500, fails at boot. Set the same value on every instance sharing a store: each one purges with its own, so the smallest wins |
 | `ATTACHMENT_DIR` | `<graph stem>.attachments` next to the graph | Root of the node attachment store. Required for attachments with `GRAPH_BACKEND=postgres` (every instance serving the schema must share it); without it the attachment routes answer `503 attachments_unavailable` |
@@ -577,9 +577,6 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/import/{job_id}` | Status of one import's background embedding job (`queued`/`running`/`succeeded`/`failed`/`cancelled`, plus `embeddings_status`), or of a merge's audit record (its `import_id`). Requires whole-graph read access: denied callers receive 403, narrowed callers 409 `import_requires_full_graph_access` |
 | GET | `/api/import` | List import jobs, newest first. Each row has a `mode` (`replace`/`merge`); a merge's audit record also carries `merge_status` (`committed`/`outcome_unknown`), `plan_digest`, `counts` and `embeddings_job_id`, and a merge's embeddings job its `import_id`. Requires the same whole-graph read access as the single-job endpoint |
 | GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
-| POST | `/api/views/save` | Request browser capture; does not persist a view. Prefer `/api/sessions/{id}/save-view` |
-| GET | `/api/views/{name}` | Get a saved view |
-| GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
 | GET | `/agents/runs` | List durable AgentRun history (filter by `agent_id`, `kind`, `status`, `limit`), newest-first, limited to the retention read window |
 | GET | `/agents/runs/retention-policy` | Effective run-history retention policy and the last sweep's content-free record |
@@ -1031,9 +1028,9 @@ entity main no longer holds) or `none`; `revision` is main's, or `0` for
 (lexical and semantic), `GET /api/nodes/{id}`, `POST /api/nodes/{id}/related`,
 `POST /api/similar` and `/api/similar/batch`, `GET /api/stats`,
 `GET /api/meta/subtypes`, `GET /api/meta/relationship-applicability/audit`,
-`GET /api/views` and `/api/views/{name}`, `GET /api/export` and `/export_graph`,
-the config-driven typed interfaces, their MCP tools (`list_saved_views` and
-`show_graph_widget` included) and the chat assistant's graph tools. A session's
+`GET /api/export` and `/export_graph`,
+the config-driven typed interfaces, their MCP tools (`show_graph_widget` included)
+and the chat assistant's graph tools. A session's
 own canvas resolves its node ids in its composed view too:
 `GET /api/sessions/{id}?resolve=true`, `add_nodes_to_session` (which accepts a
 staged create) and `get_visualization_layout`. History, event subscriptions,
@@ -1048,13 +1045,10 @@ main vector of every entity with an entry and scores staged creates and
 updates by vectors of their own, embedded in the background when staged
 (where the optional ML stack is installed) and on demand at the first semantic
 read that finds one missing; those vectors live in memory on the instance and
-are never written to the main index. `search_graph`, `get_related_nodes` and
-`get_saved_view` still treat a `visualization_session_id` naming no staged
-session as a push target only.
+are never written to the main index. `search_graph` and `get_related_nodes` still
+treat a `visualization_session_id` naming no staged session as a push target only.
 An id whose session document still says `staged` is bound even if its staged
 record or layer store is missing, so the read returns the session refusal.
-`GET /api/views` and `list_saved_views` summaries include the saved-view node's
-`id`, and in a composing read its `staged_state`.
 
 Any other route or tool refuses the header (or argument) with
 `400 session_not_supported`. A write may carry `expected_session_seq`; it holds
@@ -1122,7 +1116,7 @@ endpoints too) and whose dependencies it covers; a node delete is outside it
 too while main holds an edge to the node the reader cannot see. Any other
 entry is answered as if it were not staged. Every write a merge plans is
 validated as a direct write would be - a `manual` value included; an update of
-a saved view checks the annotations it brings, a create all of them - and an
+a legacy saved-view node checks the annotations it brings, a create all of them - and an
 edge endpoint outside the caller's view is refused exactly as a missing one. A merge applies every write with an expectation and
 the store re-checks every condition inside the unit, so the graph or the layer
 changing in between fails the merge whole.
@@ -1224,7 +1218,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`; a batch of more ops than the full burst can never be admitted however long the client waits, so it is refused as `413` without drawing from the bucket; the browser client chunks its queue at that burst so it never sends one) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (the MCP annotation edit-lease guard), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Server-emitted ops (`session_described` and the staged-change ops) are refused as unknown (`400`). The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (exclusive annotation edit leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below  Appearance operations `node_shape_set` and `type_shape_set` require `appearance_version: 1` on the batch and session mutation permission; see [the appearance operation contract](../docs/design/NODE_SHAPES.md#shared-sessions) for version, operation ID and target revision fields. Incompatible writers to appearance-enabled sessions and stale appearance revisions receive `409`. |
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
-| GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 other records plus 500 node-membership records / 7 days (membership stores a count and at most 100 IDs, once). Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide) plus the `RECORDED_ONLY_OPS` (staged-change discard/merge), which carry no inverse and are never undone; node additions/removals the server applies (MCP add/remove tools and every visualization push to a stored session, including saved-view loads and auto-add agent additions, actor `auto-add-agent:<agent_id>`) and a browser's explicit `nodes_added`/`nodes_removed`/`nodes_replaced` ops are recorded once per change without undo (a replace — saved-view load or clear — is one record); other state ops (edges_*, group/session renames and descriptions) are out of scope for this log |
+| GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 other records plus 500 node-membership records / 7 days (membership stores a count and at most 100 IDs, once). Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide) plus the `RECORDED_ONLY_OPS` (staged-change discard/merge), which carry no inverse and are never undone; node additions/removals the server applies (MCP add/remove tools and every visualization push to a stored session, including auto-add agent additions, actor `auto-add-agent:<agent_id>`) and a browser's explicit `nodes_added`/`nodes_removed`/`nodes_replaced` ops are recorded once per change without undo (a replace or clear is one record); other state ops (edges_*, group/session renames and descriptions) are out of scope for this log |
 | POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict), if the annotation the inverse op would touch is held by another client's live edit lease (`LeaseConflict` — undo is a browser write and answers to the same rule as `POST /ops`; actor-scoping does not cover it, since the action is the caller's own but the annotation may have come under another client's lease since — retryable, unlike the state-changed conflict), or the session is mid-write (retry), `429` rate-limited. A mismatched `expected_revision` is a fourth `409` (`expected revision N, session is at M`). All four are distinguished only by their prose `detail`; the web UI branches on it in `classifyUndoError` so the retryable ones do not read as permanent — it never sends `expected_revision`, so it handles three of the four. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
 | POST | `/api/sessions/{id}/redo` | Reapply the requesting actor's most recently undone activity (`{client_id, expected_revision?}` → `{redone_activity_id, redone_op, applied, revision}`). Uses the same persistence, stream broadcast, revision, lease, rate-limit and conflict checks as undo. A fresh action invalidates that actor's redo future; older records without a stored forward op cannot be redone. |
 | POST | `/api/sessions/{id}/summon` | "Bring everyone here" (`{client_id, bounds: {x, y, width, height}}` → `{bounds, connected_clients}`): broadcasts an ephemeral `{"type": "viewport_summoned", client_id, summoned_by, bounds}` stream event asking every client connected to *that* session to fit the model-space region (x/y = top-left, pixels at zoom 1). Never persisted, sequenced or replayed, so a client joining later is not moved. `summoned_by` is the display name the request's `client_id` joined presence with (no free-text name is accepted; like `/ops`, `client_id` is self-asserted, so the name is a label, not an authenticated identity). Asks the hook as a mutate under its MCP twin's name `summon_session_viewport`, draws from the `/ops` token bucket. `400` invalid bounds (each value a finite number within ±1e7, width/height positive), `403`, `404` unknown session (never created), `429` rate-limited |
@@ -1350,14 +1344,12 @@ generic mutation tools remain available for editing and legacy configurations.
 | `show_graph_widget` | Same search, returned with an MCP Apps UI link (`_meta.ui.resourceUri` → `ui://community-graph/graph-widget.html`) so Claude/ChatGPT render the interactive widget; MCP only, not in the chat/REST tool map |
 | `get_node_details` | Get full details for a node |
 | `get_related_nodes` | Get nodes connected through visible nodes only |
-| `list_saved_views` | List saved-view summaries with node IDs and, in staged sessions, staged state |
 | `find_similar_nodes` | Find nodes with similar names |
 | `add_nodes` | Add new nodes and edges |
 | `create_agent` | Create an Agent (enabled by default) plus its internal EventSubscription and relationship |
 | `create_event_subscription` | Create a subscription with validated filters and a public HTTP(S) delivery URL |
 | `create_skill` | Create a Skill with nonempty content and when-to-use instructions |
 | `create_active_knowledge_collection` | Create a collection with a validated, unique kiosk short name |
-| `create_saved_view` | Persist a SavedView from explicit node IDs and positions, including for headless clients |
 | `create_collection_response` | Persist answers and link the response to its collection by ID |
 | `update_node` | Update node properties |
 | `batch_update_nodes` | Update many nodes in one call (max 100); partial success — one node failing (not found, conflict, forbidden) does not stop the others; rejects the whole call on over-cap or duplicate ids; result is compact with per-node status but no full node bodies |
@@ -1365,7 +1357,6 @@ generic mutation tools remain available for editing and legacy configurations.
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
-| `save_view` | Request browser capture (not confirmation of a save); prefer `save_session_view` |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 membership records plus 500 other records / 7 days. New records can shift offset pages. |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
@@ -1415,8 +1406,8 @@ Two independent things can be true of a session id, and
 A session id with no stored state and nothing draining its legacy push channel is
 reported as not found, by both read tools.
 
-**A push reports its own delivery.** `search_graph`, `get_related_nodes` and
-`get_saved_view` add a `visualization_delivery` object to their result whenever a
+**A push reports its own delivery.** `search_graph` and `get_related_nodes` add
+a `visualization_delivery` object to their result whenever a
 `visualization_session_id` was given. Nothing is added when it was not, so the
 field is additive and does not bump the session contract version (§9):
 
@@ -1430,13 +1421,10 @@ field is additive and does not bump the session contract version (§9):
 
 For a stored shared session the server is the single writer of a push's
 `node_refs`, even with no connected browser: additive and in-place-update results
-add their nodes, and saved-view loads, replacements and clears replace the
-membership with the result's nodes. The `nodes_added` or `nodes_replaced` op is
+add their nodes, and replacements and clears replace the membership. The `nodes_added` or `nodes_replaced` op is
 broadcast before the command, so every browser renders membership from it and
-none writes it back. That one op also carries the layout: a load's positions,
-hidden ids and, when the result has an `annotation_document`, its annotations
-(a legacy-only view leaves the session's annotations as they are), plus a
-server-assigned position for every node it brings in without one. It applies
+none writes it back. That op also carries the layout and a server-assigned position for every
+node it brings in without one. It applies
 all-or-nothing: if any part fails, nothing is stored and the command is not
 broadcast. A change is one activity record, attributed to
 `mcp-agent`, or to `auto-add-agent:<agent_id>` for a session auto-add agent's
@@ -2006,10 +1994,9 @@ separate pair of checks instead of the one above:
 write time (`add_nodes`/`update_node` in `backend/service/mutations.py`,
 with no byte-identical-URL exemption), and `sanitize_saved_view_metadata`
 strips any non-embedded URL at read time regardless of how it reached
-storage (`get_saved_view` in `backend/service/views.py`, and the generic
-`serialize_node` in `backend/service/serializers.py` so every node read —
-search, `get_node_details`, the canvas's double-click-to-open-a-view flow —
-is covered, not only `get_saved_view`). See
+storage (the generic `serialize_node` in `backend/service/serializers.py`
+protects node reads such as search and `get_node_details`). These nodes are no
+longer opened as views. See
 docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" section for the
 full rationale, including the one write path (`adopt_federated_node`) that
 still bypasses the write-side check.

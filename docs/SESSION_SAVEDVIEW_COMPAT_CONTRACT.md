@@ -1,13 +1,12 @@
 # Session and saved-view compatibility contract
 
-**Status:** The save-view transition is in place: `save_session_view` and
-`POST /api/sessions/{session_id}/save-view` capture annotations and groups.
-`save_view` now requests browser capture, and the browser saves through session capture.
-Session backup and restore are in place; legacy import and retirement are pending. This contract specifies the
-transition under [ADR 0015](adr/0015-sessions-as-node-clusters.md). It keeps
-the existing APIs unchanged. The existing session lifecycle and canonical link rules
-are in [MCP session lifecycle](MCP_SESSION_LIFECYCLE_CONTRACT.md); session
-state and sequencing are in [the multi-user design](MULTI_USER_SESSIONS_DESIGN.md).
+**Status:** Retired and complete. Frontend removal (8a, #1264) and backend
+removal (8b, #1265) are complete; 8c completes the documentation. Sessions are
+the supported way to save and share views. No legacy import was implemented.
+SavedView and VisualizationView system types and internal legacy readers remain
+for graph data compatibility; they do not provide a saved-view feature. This
+contract records the transition under [ADR 0015](adr/0015-sessions-as-node-clusters.md).
+Session lifecycle and links are in [MCP session lifecycle](MCP_SESSION_LIFECYCLE_CONTRACT.md).
 
 ## Identity and capture
 
@@ -20,7 +19,7 @@ and edges are not copied or frozen: resolution uses current authorized graph
 data. A missing node is omitted from resolved results and reported, but its
 stored reference is not silently removed. An intentionally empty source is valid.
 
-Introduce MCP `save_session_view(session_id, name, expected_revision)` and
+Use MCP `save_session_view(session_id, name, expected_revision)` and
 `POST /api/sessions/{session_id}/save-view` with body `name` and
 `expected_revision`. All three arguments are required; `name` must be a valid,
 non-empty session name and `expected_revision` a non-negative integer. The
@@ -95,122 +94,16 @@ before repeating a save.
 
 ## Existing save and read surfaces
 
-Today MCP `save_view(name)` and REST `POST /api/views/save` with `{name}`
-return an `action: "save_view"` signal for a browser to capture; they do not
-persist a view. Keep that call and its existing response shape working during
-migration. New clients treat the response as `browser_capture_requested`, not a
-completed save, and must not claim a view was saved without a browser's actual
-save confirmation. The new `save_session_view` result is explicitly
-`kind: "saved_session"`; no overload of the name-only call is permitted. A
-future versioned signal envelope may add `kind: "browser_capture_requested"`
-without removing the existing fields. Legacy clients that rely on the signal
-continue to receive it until their migration and the retirement decision below.
-
-Today `list_saved_views` / `GET /api/views` list graph views and
-`get_saved_view(name)` / `GET /api/views/{name}` load by name; duplicate names
-can select an arbitrary match. Preserve those semantics during the compatibility
-period, including graph export of both legacy types. New clients list and open
-sessions by ID using session APIs, and use the ID-based import below rather than
-name lookup. Do not silently mix sessions into legacy lists or change what a
-name-based read resolves.
-
-## Legacy import
-
-Introduce explicit MCP `import_saved_view(view_id)` and REST
-`POST /api/views/{view_id}/import-session`. The ID identifies a committed graph
-node of type `SavedView` or `VisualizationView`, never a name or staged graph
-view. Require permission to read the legacy node, its referenced graph data and
-to create and access the destination. Preserve the original node and graph
-export. Import creates an independently editable session; it never updates an
-already imported session or deletes the legacy node.
-
-| Legacy source | Destination and conversion |
-|---|---|
-| Node `name`, `description` | Session name and description; names are not unique. `summary` and other node properties are reported as unsupported, not inferred. |
-| `view_data.nodes` with `id` and `position` | When present, takes precedence as in `get_saved_view`: graph IDs become `node_refs` and valid positions become `positions`. `group-*` entries are group presentation, not graph membership. |
-| Otherwise `node_ids`, `positions` | Graph IDs become `node_refs` and valid member positions become `positions`; `group-*` IDs are group presentation. Deduplicate IDs. |
-| `view_data.hidden_nodes` in the first form, otherwise `hidden_nodes` | `hidden_node_ids`, restricted to members. |
-| `annotation_document` and `annotation_schema_version` | Supported v1 document becomes session `annotations`, including groups. Validate and sanitize before conversion; assign fresh annotation IDs and remap internal references. |
-| `groups`, `parentIds`, `annotations` | If no usable annotation document exists, convert legacy groups and annotations to session annotations, using `parentIds` for group `member_node_ids`; group positions from `group-*` entries are a fallback when no groups are supplied. If a document exists it is authoritative; report conflicting or extra legacy fields as skipped. |
-| `edge_ids`, `edges` | Do not create or freeze graph edges. Report as skipped; current authorized edges resolve from the graph. |
-| Other metadata, malformed entries, unsupported versions or annotation kinds | Report each permitted field or entry as unsupported or invalid; do not silently discard it. |
-
-Validate structures and finite positions, membership, group links, annotation
-limits and safe image/reference targets using the existing reader sanitization
-and session write rules. Report sanitization and every skipped or defaulted
-field with a reason. Never fetch a remote image as part of import. Missing graph
-references remain in membership and are reported when disclosure is authorized;
-invalid IDs are skipped and reported. Apply the capture authorization and
-non-disclosure rules to nested references and reports. If safe conversion cannot
-be established, fail without publishing a partial session. An empty converted
-membership is allowed, including a presentation-only view.
-
-Return `success`, `kind: "imported_session"`, `view_id`, `session_id`,
-`revision`, `session_url`, and a `report` containing `converted`, `skipped`
-(with field/entry and reason), and `missing_node_ids`. The report must describe
-the actual committed conversion, not a preview. For inaccessible targets return
-only generic `access_denied`; neither IDs nor counts appear in any report.
-Limit or persistence failures use the save error codes and publish nothing.
-
-Persist a mapping keyed by graph identity and legacy node ID, with source
-revision or content fingerprint, destination ID and conversion report, in the
-same atomic commit as the destination. Concurrent imports and retries return the
-same destination and report, including after a lost response or restart. Check
-current authorization before returning a mapping or report. If the source
-changes after import, return `source_changed` (409) with no new copy; an
-explicit new import/reset workflow must be separately designed. If the mapped
-session is deleted, return `import_target_deleted` (409), not a silent
-recreation. Mapping retention and deletion must survive backup and restore.
-Take a consistent committed graph snapshot for conversion; detect a concurrent
-source change before publication and fail with `source_changed`. The graph and
-session stores need a transaction or equivalent durable recovery protocol; an
-implementation unable to meet these guarantees must refuse import.
+The former saved-view tools and REST endpoints have been removed. Use
+`save_session_view` to capture a session and server-provided session links to
+open it. No import or conversion of legacy views to sessions is available.
 
 ## Backup, migration and retirement
 
-Graph-only export does not contain sessions. Before legacy retirement, provide a
-versioned session backup as a JSON document with a format version, session IDs,
-names, descriptions, revisions, complete persistent session presentation state,
-write-mode metadata and import mappings/reports. Include all referenced embedded
-assets, with integrity checks; exclude transient presence, leases and activity.
-A backup must be a consistent authorized snapshot and must not expose inaccessible
-references or annotation targets. Reject a backup containing unmerged staged
-changes until a separate overlay backup contract exists. Graph data is backed up
-separately; the operator must preserve both artifacts and their association.
+Graph exports and session backups are separate artifacts. Follow the operator
+[backup and restore guide](SESSION_BACKUP.md), including its requirements for a
+coordinated graph backup and verification before relying on recovery.
 
-Restore validates version, integrity, authorization, limits, annotation safety
-and references before any publication. Preserve IDs and revisions on an empty
-target so links and import mappings survive; an ID or mapping collision fails
-the whole restore without overwriting. Missing graph references remain stored and
-are reported under the same disclosure rules. Restore all session records,
-assets and mappings atomically, or recover to the pre-restore state after a
-failure. Unsupported versions, unsafe content, limits and collisions fail
-explicitly; no silent truncation. Test a backup and restore against a separate
-store before relying on it for rollback.
+### Release note: SavedView removal
 
-1. Ship the new save, import and backup/restore alongside all legacy writers,
-   readers and graph exports. Document limits, access requirements, reports and
-   recovery; verify imports and restored sessions before switching consumers.
-2. Inventory legacy nodes and links, import by ID, inspect reports and retain the
-   graph originals and a verified backup. Update browser save UI, assistants and
-   API clients to save and open sessions by ID. Update Active Knowledge
-   Collection kiosks and sorting-round list links to use server-provided session
-   links; verify each consumer before removing its legacy dependency.
-3. Keep `?view=` working during migration, including its current behavior when
-   `?session=` is also present: wait for bootstrap, then apply the named view
-   only if the session and canvas have not changed. Do not silently redirect an
-   ambiguous name. Replace published links with `?session=` links using the
-   verified ID mapping; provide an explicit choice or failure for ambiguous or
-   unimported names. Preserve a documented route back to legacy links and readers.
-4. Only after migration, backup/restore and rollback have been verified, seek an
-   explicit deprecation decision for `SavedView` and `VisualizationView` types,
-   legacy writers, `?view=`, `list_saved_views`, `get_saved_view` and REST
-   counterparts. Announce the compatibility window and removal version. Until
-   then keep legacy reads and graph exports. A later removal must include a
-   supported way to recover original graph data and restore sessions.
-
-Rollback during the compatibility window restores the prior clients and legacy
-readers/writers and uses retained graph views and links. Session edits made after
-import are not written back to legacy nodes; preserve a fresh session backup
-before rollback and restore it when returning to session clients. Do not delete
-legacy data or mappings as part of switching clients.
+SavedView and VisualizationView nodes are no longer read as views by any client or tool, and a `?view=` link no longer opens a view. There is no migration, and existing nodes are not deleted. Before upgrading, export the graph: a plain graph export keeps saved-view nodes as data. Also take a [session backup](SESSION_BACKUP.md) and retain it with the corresponding graph backup. To recover the original graph data, [import the graph export](DATA_MANAGEMENT.md#importing-a-graph); to recover sessions, [restore the session backup](SESSION_BACKUP.md#restore) with its paired graph backup. Integrations calling removed saved-view tools or endpoints must move to sessions, using `save_session_view` and server-provided session links.
