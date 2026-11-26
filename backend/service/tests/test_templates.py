@@ -80,6 +80,7 @@ def test_denials_and_missing_references(capture, denied_id):
     session.state["annotations"][0]["attachment"]["target_id"] = "missing"
     assert run()["success"]
     service._storage.nodes[denied_id] = Node(id=denied_id, type="Actor", name="Denied")
+    session.state["node_refs"].append(denied_id)
     with patch(
         "backend.service.templates.access.is_node_visible",
         side_effect=lambda node, _: node.id != denied_id,
@@ -107,6 +108,13 @@ def test_denials_and_missing_references(capture, denied_id):
             "error": "access_denied",
         }
     assert run(node_ids=["missing", "group-old"])["document"]["nodes"] == []
+
+
+def test_explicit_node_outside_session_is_not_captured(capture):
+    run, service, _, _ = capture
+    service._storage.nodes["outside"] = Node(id="outside", type="Actor", name="O")
+    doc = run(node_ids=["a", "outside"])["document"]
+    assert [n["source_node_id"] for n in doc["nodes"]] == ["a"]
 
 
 @pytest.mark.parametrize("narrowed", [False, True])
@@ -285,6 +293,11 @@ def test_limits_fail_without_truncation(capture, field, limit, code):
             for i in range(limit)
         ]
     assert run() == {"success": False, "error": code}
+    if code == "annotations_limit":
+        with patch(
+            "backend.service.templates.access.is_node_visible", return_value=False
+        ):
+            assert run() == {"success": False, "error": "access_denied"}
 
 
 def test_edge_limit_and_excluded_system_types(capture):

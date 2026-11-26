@@ -214,11 +214,14 @@ def capture_template(
             whole = node_ids is None and annotation_ids is None
             membership = state.get("node_refs") or []
             requested = membership if whole else (node_ids or [])
+            # Like annotation_ids, explicit node_ids select from the session only.
             requested = list(
                 dict.fromkeys(
                     i
                     for i in requested
-                    if isinstance(i, str) and not i.startswith(_LEGACY_GROUP_PREFIX)
+                    if isinstance(i, str)
+                    and i in membership
+                    and not i.startswith(_LEGACY_GROUP_PREFIX)
                 )
             )
             annotations = (
@@ -230,9 +233,6 @@ def capture_template(
                     if isinstance(a, dict) and a.get("id") in (annotation_ids or [])
                 ]
             )
-            # Before filtering, so omitted references cannot bypass the limit.
-            if len(annotations) > _DEFAULT_MAX_ANNOTATIONS:
-                return {"success": False, "error": "annotations_limit"}
             storage = service._storage
             decision = _hook_call(access.evaluate_graph_access)(
                 service.authorization_hook,
@@ -255,6 +255,7 @@ def capture_template(
                     key += "-"
                 used.add(key)
                 keys[node_id] = key
+            selected_count = len(annotations)
             annotations, linked = _annotations(all_annotations, annotations, keys)
             # As on the save path: under narrowing a missing ref is denied too.
             refs = _hook_call(service.authorize_capture_refs)(
@@ -262,6 +263,10 @@ def capture_template(
             )
             if not refs.get("success"):
                 return {"success": False, "error": "access_denied"}
+            # After authorization so a denial wins; counted before omitted
+            # references were dropped so they cannot bypass the limit.
+            if selected_count > _DEFAULT_MAX_ANNOTATIONS:
+                return {"success": False, "error": "annotations_limit"}
             config = ConfigLoader().config
             shapes = {k: v.model_dump() for k, v in config.node_shapes.items()}
             types = {k: v.model_dump() for k, v in config.schema_.node_types.items()}
