@@ -9,7 +9,11 @@ import logging
 from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, Tuple
 
 from backend.config.config_loader import build_session_url
-from backend.core.session_annotations import annotation_type_of
+from backend.core.session_annotations import (
+    ATTACHMENT_ID_KEYS,
+    ATTACHMENT_TYPE_KEYS,
+    annotation_link_fields,
+)
 from backend.core.session_manager import (
     CaptureRefused,
     LayoutBusy,
@@ -67,12 +71,6 @@ def _refused(code: str, **extra: Any) -> Dict[str, Any]:
 # Before groups became annotations, the canvas stored them as nodes keyed
 # "group-<n>"; such a canvas key names no graph node.
 _LEGACY_GROUP_PREFIX = "group-"
-# Top-level fields the canvas resolves by id alone, as a node or an annotation.
-_UNTYPED_LINKS = ("startAnchor", "endAnchor", "parentId", "parent_id", "parentNode")
-# Attachment id and type aliases the canvas accepts (annotationModel.js
-# normalizeAttachment); every alias is read, not only the one it would pick.
-_ATTACHMENT_IDS = ("target_id", "targetId", "node_id", "nodeId")
-_ATTACHMENT_TYPES = ("target_type", "targetType")
 _JS_MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -104,18 +102,6 @@ def _link_id(value: Any) -> Optional[str]:
     raise CaptureRefused("invalid_presentation")
 
 
-def _attachments(annotation: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
-    """Every object the canvas may read as an attachment: ``attachment`` or
-    a text's ``anchor``, and a line endpoint (``start``/``startEndpoint``,
-    ``end``/``endEndpoint``) or its ``attachment``."""
-    holders = [annotation.get("attachment"), annotation.get("anchor")]
-    for key in ("start", "startEndpoint", "end", "endEndpoint"):
-        endpoint = annotation.get(key)
-        if isinstance(endpoint, dict):
-            holders += [endpoint, endpoint.get("attachment")]
-    return (h for h in holders if isinstance(h, dict))
-
-
 def _annotation_links(
     annotation: Dict[str, Any], annotation_ids: Collection[str]
 ) -> Iterator[Tuple[Any, Any, str, str]]:
@@ -123,7 +109,8 @@ def _annotation_links(
     links to, ``kind`` being ``"node"`` or ``"annotation"``.
 
     Every field the canvas resolves is read: a resource reference's
-    ``target``, each attachment form and id alias (see ``_attachments``), the
+    ``target``, each attachment form and id alias (see
+    ``annotation_link_fields``), the
     untyped canvas links and group members. An id other than a resource
     target counts as an annotation whenever the source stores an annotation
     under it, whatever type an attachment declares: the canvas resolves
@@ -132,22 +119,7 @@ def _annotation_links(
     CaptureRefused for a link value the canvas would not resolve as Python
     does.
     """
-    fields: List[Tuple[Any, Any, Optional[str]]] = []
-    if (
-        annotation_type_of(annotation) == "reference"
-        and annotation.get("target_kind") == "resource"
-    ):
-        fields.append((annotation, "target", "node"))
-    for attachment in _attachments(annotation):
-        declared = next(
-            (attachment[k] for k in _ATTACHMENT_TYPES if attachment.get(k)), None
-        )
-        fields.extend((attachment, key, declared) for key in _ATTACHMENT_IDS)
-    fields.extend((annotation, key, None) for key in _UNTYPED_LINKS)
-    members = annotation.get("member_node_ids")
-    if isinstance(members, list):
-        fields.extend((members, i, None) for i in range(len(members)))
-    for holder, key, declared in fields:
+    for holder, key, declared in annotation_link_fields(annotation):
         value = _link_id(holder[key] if isinstance(holder, list) else holder.get(key))
         if value is None:
             continue
@@ -194,9 +166,9 @@ def _relink_nested(value: Any, fresh_ids: Dict[str, str]) -> None:
     """Point every attachment-shaped object nested anywhere in ``value`` that
     names a copied annotation at its fresh id, as session copy does."""
     if isinstance(value, dict):
-        declared = next((value[k] for k in _ATTACHMENT_TYPES if value.get(k)), None)
+        declared = next((value[k] for k in ATTACHMENT_TYPE_KEYS if value.get(k)), None)
         if declared in (None, "annotation"):
-            for key in _ATTACHMENT_IDS:
+            for key in ATTACHMENT_ID_KEYS:
                 target = value.get(key)
                 if isinstance(target, (str, int)) and str(target) in fresh_ids:
                     value[key] = fresh_ids[str(target)]
