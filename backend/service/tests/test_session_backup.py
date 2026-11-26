@@ -63,7 +63,10 @@ def backend(request, tmp_path):
     "legacy_url,legacy_payload",
     [
         ("data:image/png;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
-        ("data:image/svg+xml;charset=utf-8,%3Csvg%3E%00%FF+%3C/svg%3E", b"<svg>\x00\xff+</svg>"),
+        (
+            "data:image/svg+xml;charset=utf-8,%3Csvg%3E%00%FF+%3C/svg%3E",
+            b"<svg>\x00\xff+</svg>",
+        ),
     ],
 )
 def test_backup_keeps_persistent_state_and_checks_integrity(
