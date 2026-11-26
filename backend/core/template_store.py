@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
@@ -246,13 +247,38 @@ def validate_template(document: Any) -> dict[str, Any]:
 class TemplateStore:
     """Use a dedicated session-compatible backend; its transaction serializes CAS."""
 
-    def __init__(self, backend: SessionPersistenceBackend):
+    def __init__(
+        self, backend: SessionPersistenceBackend, profile_dir: Path | None = None
+    ):
         self._backend = backend
+        self._profile: dict[str, dict[str, Any]] = {}
+        if profile_dir is not None:
+            with backend.transaction():
+                for path in sorted(profile_dir.glob("*.json")):
+                    with path.open(encoding="utf-8") as file:
+                        doc = validate_template(json.load(file))
+                    key = doc["template_id"]
+                    if key in self._profile or backend.load(key) is not None:
+                        raise TemplateError("profile_id_collision")
+                    self._profile[key] = doc
+
+    def profile_ids(self) -> frozenset[str]:
+        return frozenset(self._profile)
+
+    def is_profile(self, template_id: str) -> bool:
+        return template_id in self._profile
+
+    def holds(self, template_id: str) -> bool:
+        return (
+            self.is_profile(template_id) or self._backend.load(template_id) is not None
+        )
 
     def get(self, template_id: str) -> dict[str, Any] | None:
         if not is_valid_session_id(template_id):
             raise TemplateError("invalid_id")
         with self._backend.transaction():
+            if self.is_profile(template_id):
+                return copy.deepcopy(self._profile[template_id])
             record = self._backend.load(template_id)
             if record is None or record.get("deleted"):
                 return None
@@ -262,7 +288,7 @@ class TemplateStore:
         with self._backend.transaction():
             return [
                 doc
-                for key in sorted(self._backend.list_ids())
+                for key in sorted(set(self._backend.list_ids()) | self._profile.keys())
                 if (doc := self.get(key)) is not None
             ]
 
@@ -271,6 +297,8 @@ class TemplateStore:
         if type(expected_revision) is not int or expected_revision < 0:
             raise TemplateError("invalid_revision")
         with self._backend.transaction():
+            if self.is_profile(doc["template_id"]):
+                raise TemplateError("read_only")
             old = self._backend.load(doc["template_id"])
             if old and old.get("deleted"):
                 raise TemplateError("deleted")
@@ -285,6 +313,8 @@ class TemplateStore:
         if not is_valid_session_id(template_id):
             raise TemplateError("invalid_id")
         with self._backend.transaction():
+            if self.is_profile(template_id):
+                raise TemplateError("read_only")
             old = self._backend.load(template_id)
             if not old or old.get("deleted"):
                 raise TemplateError("not_found")

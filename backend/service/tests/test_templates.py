@@ -1589,3 +1589,35 @@ def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):
         for node_id in service._storage.nodes
         if node_id not in {"a", "b"}
     )
+
+
+def test_profile_templates_exposed_and_cannot_be_written(capture, tmp_path):
+    import json
+    from backend.core.template_store import TemplateStore
+    from backend.service import templates
+
+    run, service, manager, session = capture
+    doc = run()["document"]
+    profile = tmp_path / "templates"
+    profile.mkdir()
+    (profile / "profile.json").write_text(json.dumps(doc))
+    manager.template_store = TemplateStore(InMemorySessionPersistenceBackend(), profile)
+    tid = doc["template_id"]
+    assert templates.get_template(service, manager, tid)["template"] == {
+        **doc,
+        "source": "profile",
+    }
+    assert templates.list_templates(service, manager)["templates"] == [
+        {**doc, "source": "profile"}
+    ]
+    assert not templates.update_template(
+        service, manager, tid, doc["revision"], name="Changed"
+    )["success"]
+    assert not templates.update_template(
+        service, manager, tid, doc["revision"], replace_from={"session_id": session.id}
+    )["success"]
+    assert not templates.delete_template(service, manager, tid, doc["revision"])[
+        "success"
+    ]
+    assert manager._template_holds(tid)
+    assert manager.template_store.get(tid) == doc

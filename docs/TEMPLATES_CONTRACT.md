@@ -80,7 +80,8 @@ session files; other backends must implement the same transaction contract.
 Read-only profile templates belong as individual v1 JSON documents in
 `config/<profile>/templates/`. Their IDs must not collide with mutable or other
 profile templates; a loader must reject collisions and invalid documents rather
-than silently override one. Profile loading and content are not shipped here.
+than silently override one. The active schema configuration directory supplies the profile templates at startup.
+Documents are listed with source `profile` and cannot be updated or deleted.
 
 ## Reference insertion
 
