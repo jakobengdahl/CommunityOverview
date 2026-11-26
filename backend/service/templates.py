@@ -1,6 +1,7 @@
 """Capture a session as a validated, self-contained template document."""
 
 import copy
+import logging
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -34,6 +35,8 @@ from .session_capture import (
     INVALID_SESSION_ID_MESSAGE,
 )
 from .staging import HookFailed
+
+logger = logging.getLogger(__name__)
 
 
 def _shape(node, state, config, saved):
@@ -421,6 +424,17 @@ def _failure(code, **extra):
     return {"success": False, "error": code, **extra}
 
 
+def _conflict(store, template_id):
+    # The CAS lost to a concurrent writer; answer with what it wrote.
+    try:
+        doc = store.get(template_id)
+    except Exception:
+        return _failure("storage_error")
+    if doc is None:
+        return _failure("template_not_found")
+    return _failure("revision_conflict", current_revision=doc["revision"])
+
+
 def _metadata(name, description, tags):
     return (
         isinstance(name, str)
@@ -503,6 +517,17 @@ def save_template(
             except Exception:
                 denied = True
             if denied:
+                # A refusing or raising hook may still have granted something.
+                try:
+                    with session_context.bind_session(None):
+                        access.revoke_copied_session_access(
+                            hook,
+                            source_session_id=session_id,
+                            copy_session_id=template_id,
+                            target="save_template",
+                        )
+                except Exception:
+                    logger.exception("Revoking access to an unsaved template failed")
                 return _failure("access_denied")
             try:
                 saved = store.save(result["document"], 0)
@@ -661,11 +686,9 @@ def update_template(
             )
             return {"success": True, "template": store.save(doc, expected_revision)}
     except TemplateError as exc:
-        return _failure(
-            "revision_conflict"
-            if exc.code == "revision_conflict"
-            else "invalid_request"
-        )
+        if exc.code == "revision_conflict":
+            return _conflict(store, template_id)
+        return _failure("invalid_request")
     except Exception:
         return _failure("storage_error")
 
@@ -690,8 +713,8 @@ def delete_template(service, manager, template_id, expected_revision):
         manager.template_store.delete(template_id, expected_revision)
         return {"success": True, "deleted": True}
     except TemplateError as exc:
-        return _failure(
-            "template_not_found" if exc.code == "not_found" else "revision_conflict"
-        )
+        if exc.code == "not_found":
+            return _failure("template_not_found")
+        return _conflict(manager.template_store, template_id)
     except Exception:
         return _failure("storage_error")

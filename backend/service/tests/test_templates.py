@@ -365,10 +365,11 @@ def test_template_crud_conflicts_and_authorization(capture):
         )
         assert auth.call_args.kwargs["target"] == "delete_visualization_session"
         assert auth.call_args.kwargs["session_id"] == tid
-    assert (
-        templates.delete_template(service, manager, tid, doc["revision"])["error"]
-        == "revision_conflict"
-    )
+    assert templates.delete_template(service, manager, tid, doc["revision"]) == {
+        "success": False,
+        "error": "revision_conflict",
+        "current_revision": updated["revision"],
+    }
     assert templates.delete_template(service, manager, tid, updated["revision"])[
         "success"
     ]
@@ -472,6 +473,57 @@ def test_save_assigns_creator_access_to_a_fresh_non_session_id(capture, allowed)
         with patch("secrets.randbelow", side_effect=lambda _: next(parts)):
             assert manager.create_session("new").id == "5555-6666-7777-8888"
         assert not manager.store.exists(tid)
+
+
+def test_update_losing_the_store_cas_reports_current_revision(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    store = manager.template_store
+    real_save = store.save
+
+    def concurrent_save(document, expected_revision):
+        real_save(dict(doc), doc["revision"])
+        return real_save(document, expected_revision)
+
+    with patch.object(store, "save", side_effect=concurrent_save):
+        result = templates.update_template(
+            service, manager, doc["template_id"], doc["revision"], name="New"
+        )
+    assert result == {
+        "success": False,
+        "error": "revision_conflict",
+        "current_revision": doc["revision"] + 1,
+    }
+
+
+def test_failed_creator_assignment_leaves_no_grant(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    grants = set()
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=True)
+
+        def assign_copied_session_access(self, context, *, copy_session_id):
+            grants.add(copy_session_id)
+            raise RuntimeError("assignment backend down")
+
+        def revoke_copied_session_access(self, context, *, copy_session_id):
+            grants.discard(copy_session_id)
+
+    service._authorization_hook = Hook()
+    saved = templates.save_template(
+        service, manager, session.id, "Example", session.seq
+    )
+    assert saved == {"success": False, "error": "access_denied"}
+    assert grants == set()
+    assert templates.list_templates(service, manager)["count"] == 0
 
 
 def test_unreadable_stored_template_is_a_storage_error(capture):
