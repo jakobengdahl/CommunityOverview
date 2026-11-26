@@ -421,6 +421,8 @@ class FunctionInvocationService:
                     and existing.idempotency_key
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
+                    if manifest is None:
+                        raise PermissionError("Invalid manifest binding")
                     return self._replay(existing, binding)
             if self._busy(function_id, previous) and not self._in_progress(
                 function_id, idempotency_key
@@ -460,6 +462,12 @@ class FunctionInvocationService:
                     and existing.idempotency_key
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
+                    try:
+                        manifest, _ = load_manifest(self.root, function_id)
+                    except (OSError, ValueError) as exc:
+                        raise PermissionError("Invalid manifest binding") from exc
+                    if manifest.get("write_target", "graph") == "session":
+                        raise PermissionError("A staged session is required")
                     return self._replay(existing, binding)
             return self._rejected(function_id, binding, idempotency_key, code)
 
@@ -643,6 +651,8 @@ class FunctionInvocationService:
             )
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
+                    if current_manifest is None:
+                        raise PermissionError("Invalid manifest binding")
                     return self._replay(existing, binding, write_target, session_id)
             if self._in_progress(function_id, idempotency_key, reservation):
                 job.state, job.started_at = ExecutionState.CANCELLED, None
@@ -681,6 +691,8 @@ class FunctionInvocationService:
                 job.started_at = utcnow()
             stored = self.store.enqueue(job)
             if stored.id != job.id:
+                if current_manifest is None:
+                    raise PermissionError("Invalid manifest binding")
                 if (
                     stored.kind != ExecutionKind.FUNCTION
                     or stored.agent_id != function_id

@@ -600,10 +600,21 @@ def test_session_binding_stages_and_replay_requires_the_same_target_and_session(
 @pytest.mark.parametrize("version", ["1", "2", "3"])
 def test_session_target_requires_version_four(host, version):
     service, execute, manifest, directory = host
+    original = invoke(service, idempotency_key="existing")
     manifest.update(contract_version=version, write_target="session")
     (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(PermissionError):
+        invoke(service, idempotency_key="existing")
+    with pytest.raises(PermissionError):
+        service.replay_webhook("example", "existing", {"actor_id": "operator"})
+    with pytest.raises(PermissionError):
+        service.refuse(
+            "example", "invalid_manifest", actor_binding={"actor_id": "operator"},
+            idempotency_key="existing",
+        )
     assert invoke(service).result["error"]["code"] == "invalid_manifest"
-    execute.assert_not_called()
+    assert execute.call_count == 1
+    assert service.store.get(original.id).state == ExecutionState.SUCCEEDED
 
 
 def test_session_admission_refuses_unauthorized_or_direct_sessions(host):
