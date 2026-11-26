@@ -509,7 +509,7 @@ def capture_template(
 ERROR_STATUS = {
     "unsupported_mode": 400,
     "schema_mismatch": 422,
-    "layer_full": 422,
+    "staged_target_not_supported": 409,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -901,8 +901,7 @@ def insert_template(
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
-        # Staged graph writes take the graph lock before the session store lock.
-        # Hold both stores through validation and publication.
+        # Hold graph and session locks through validation, writes and rollback.
         with (
             service._storage.node_lifecycle_lock if mode == "copy" else nullcontext(),
             service._storage.write_lock if mode == "copy" else nullcontext(),
@@ -923,6 +922,11 @@ def insert_template(
                 return _failure("session_not_found")
             if expected_revision is not None and session.seq != expected_revision:
                 return _failure("revision_conflict", current_revision=session.seq)
+            if mode == "copy" and (
+                session.write_mode == "staged"
+                or manager.write_modes.staged_status(session_id) != "none"
+            ):
+                return _failure("staged_target_not_supported")
             if mode == "copy":
                 attached = service.session_gate.session_manager
                 if attached is not None and attached is not manager:
@@ -1139,140 +1143,72 @@ def insert_template(
                     }
                     for e in doc["edges"]
                 ]
-                # Staging emits a session op of its own; save its state so a
-                # later presentation failure can restore the whole insertion.
                 saved_session = copy.deepcopy(session.__dict__)
                 ring = manager.store.ring(session_id)
                 saved_ring = list(ring) if ring is not None else None
-                staged = service.session_gate.is_staged(session_id)
+                existing = set(service._storage.nodes)
                 from backend.runtime.session_context import bind_session
 
-                with service._storage.node_lifecycle_lock:
-                    existing = set(service._storage.nodes)
-                    layer = manager.write_modes.layer_store if staged else None
-                    existing_layer = (
-                        {
-                            (e["kind"], e["entity_id"])
-                            for e in layer.load_layer(session_id)
-                        }
-                        if staged
-                        else set()
+                try:
+                    with bind_session(session_id):
+                        created = service.add_nodes(
+                            [n.model_dump() for n in copies],
+                            edges,
+                            expect_absent=True,
+                            allow_federated_endpoints=False,
+                        )
+                    if not created.get("success"):
+                        error = created.get("error_code") or created.get("error")
+                        if error in ("write_failed", "write_outcome_unknown"):
+                            error = "storage_error"
+                        elif error == "busy":
+                            error = "session_busy"
+                        raise _CopyRefused(
+                            error if error in ERROR_STATUS else "invalid_request"
+                        )
+                    manager._apply_op_sync(
+                        session,
+                        session_id,
+                        "mcp-agent",
+                        op,
+                        enforce_session_budgets=True,
                     )
-                    try:
-                        with manager.hold_operation_events(session_id) as events:
-                            with bind_session(
-                                session_id
-                                if service.session_gate.session_manager
-                                else None
-                            ):
-                                created = service.add_nodes(
-                                    [n.model_dump() for n in copies],
-                                    edges,
-                                    expect_absent=True,
-                                    allow_federated_endpoints=False,
-                                )
-                            if not created.get("success"):
-                                error = created.get("error_code") or created.get(
-                                    "error"
-                                )
-                                if error in ("write_failed", "write_outcome_unknown"):
-                                    error = "storage_error"
-                                elif error == "busy":
-                                    error = "session_busy"
-                                raise _CopyRefused(
-                                    error
-                                    if error in ERROR_STATUS
-                                    else "invalid_request"
-                                )
-                            manager._apply_op_sync(
-                                session,
-                                session_id,
-                                "mcp-agent",
-                                op,
-                                enforce_session_budgets=True,
-                            )
-                    except Exception:
-                        # Undo in reverse order, attempting every step even if an
-                        # earlier undo fails. Preserve the insertion's original error.
-                        def undo(name, action):
-                            try:
-                                action()
-                            except Exception:
-                                logger.error(
-                                    "Template insertion rollback failed: %s", name
-                                )
+                except Exception:
+                    # Attempt every undo and preserve the insertion's original error.
+                    def undo(name, action):
+                        try:
+                            action()
+                        except Exception:
+                            logger.error("Template insertion rollback failed: %s", name)
 
-                        def restore_session():
-                            session.__dict__.clear()
-                            session.__dict__.update(saved_session)
+                    def restore_session():
+                        session.__dict__.clear()
+                        session.__dict__.update(saved_session)
 
-                        undo("restore session", restore_session)
-                        undo(
-                            "restore session ring",
-                            lambda: manager.store.restore_ring(session_id, saved_ring),
-                        )
-                        undo(
-                            "persist restored session",
-                            lambda: manager.store.persist(session),
-                        )
-                        if staged:
+                    undo("restore session", restore_session)
+                    undo(
+                        "restore session ring",
+                        lambda: manager.store.restore_ring(session_id, saved_ring),
+                    )
+                    undo(
+                        "persist restored session",
+                        lambda: manager.store.persist(session),
+                    )
+                    ids = [
+                        node_id
+                        for node_id in copy_ids.values()
+                        if node_id not in existing
+                    ]
 
-                            def discard_layer():
-                                from backend.core.layer_store import entry_version
+                    def delete_batch(batch):
+                        result = service._storage.delete_nodes(batch, confirmed=True)
+                        if not result.success:
+                            raise RuntimeError(result.message)
 
-                                new_ids = set(copy_ids.values())
-                                entries = [
-                                    e
-                                    for e in layer.load_layer(session_id)
-                                    if (e["kind"], e["entity_id"]) not in existing_layer
-                                    and (
-                                        (
-                                            e["kind"] == "node"
-                                            and e["entity_id"] in new_ids
-                                        )
-                                        or (
-                                            e["kind"] == "edge"
-                                            and e.get("staged", {}).get("source")
-                                            in new_ids
-                                        )
-                                    )
-                                ]
-                                if entries:
-                                    layer.discard(
-                                        session_id,
-                                        [(e["kind"], e["entity_id"]) for e in entries],
-                                        expected={
-                                            (e["kind"], e["entity_id"]): entry_version(
-                                                e
-                                            )
-                                            for e in entries
-                                        },
-                                    )
-
-                            undo("discard staged creations", discard_layer)
-                        else:
-                            ids = [
-                                node_id
-                                for node_id in copy_ids.values()
-                                if node_id not in existing
-                            ]
-
-                            def delete_batch(batch):
-                                result = service._storage.delete_nodes(
-                                    batch, confirmed=True
-                                )
-                                if not result.success:
-                                    raise RuntimeError(result.message)
-
-                            for i in reversed(range(0, len(ids), 10)):
-                                batch = ids[i : i + 10]
-                                undo(
-                                    "delete created nodes",
-                                    lambda: delete_batch(batch),
-                                )
-                        raise
-                    for event in events:
-                        manager.bus.publish(session_id, event)
+                    for i in reversed(range(0, len(ids), 10)):
+                        batch = ids[i : i + 10]
+                        undo("delete created nodes", lambda: delete_batch(batch))
+                    raise
             else:
                 manager._apply_op_sync(
                     session, session_id, "mcp-agent", op, enforce_session_budgets=True

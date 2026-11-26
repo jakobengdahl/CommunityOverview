@@ -757,7 +757,6 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
     for error, status, expected in (
         ("write_failed", 503, "storage_error"),
         ("write_outcome_unknown", 503, "storage_error"),
-        ("layer_full", 422, "layer_full"),
     ):
         with patch.object(
             service, "add_nodes", return_value={"success": False, "error": error}
@@ -980,45 +979,18 @@ def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture)
     assert stroke["points"] == [{"x": 100, "y": 200}, {"x": 102, "y": 202}]
 
 
-@pytest.mark.parametrize(
-    "staged,attached", [(False, False), (True, True), (True, False)]
-)
-def test_copy_inserts_snapshots_and_edges_atomically(
-    capture, tmp_path, staged, attached
-):
+def test_copy_inserts_snapshots_and_edges_atomically(capture):
     import copy
-    from backend.core.storage_backends import FileGraphPersistenceBackend
-    from backend.core.write_modes import WriteModes
     from backend.service import templates
 
     _, service, manager, source = capture
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
         "template"
     ]
-    if staged:
-        backend = FileGraphPersistenceBackend(
-            tmp_path / "staged.json", staged_sessions=True
-        )
-        storage = GraphStorage(
-            str(tmp_path / "staged.json"), persistence_backend=backend
-        )
-        modes = WriteModes(storage.layer_store)
-        manager = SessionManager(
-            SessionStore(
-                InMemorySessionPersistenceBackend(), staged_status=modes.staged_status
-            ),
-            write_modes=modes,
-        )
-        doc["revision"] = 0
-        doc = manager.template_store.save(doc, 0)
-        service = GraphService(storage)
-        if attached:
-            service.attach_sessions(manager)
-    target = manager.create_session("target", "staged" if staged else "direct")
+    target = manager.create_session("target")
     before = copy.deepcopy(target.state)
     graph_before = set(service._storage.nodes)
-    if not staged:
-        service._storage.nodes["a"].name = "Changed after capture"
+    service._storage.nodes["a"].name = "Changed after capture"
     with patch.object(manager, "_apply_op_sync", side_effect=OSError):
         assert (
             templates.insert_template(
@@ -1028,8 +1000,6 @@ def test_copy_inserts_snapshots_and_edges_atomically(
         )
     assert target.state == before and target.seq == 0
     assert set(service._storage.nodes) == graph_before
-    if staged:
-        assert service._storage.layer_store.load_layer(target.id) == []
     with patch(
         "backend.config.config_loader.relationship_type_allows_node_types",
         return_value={"allowed": False},
@@ -1039,64 +1009,19 @@ def test_copy_inserts_snapshots_and_edges_atomically(
         )["success"]
     assert target.state == before and target.seq == 0
     assert set(service._storage.nodes) == graph_before
-    if staged:
-        assert service._storage.layer_store.load_layer(target.id) == []
-    lifecycle_lock = service._storage.node_lifecycle_lock
-    graph_lock = service._storage.write_lock
-    add_nodes = GraphService.add_nodes
-
-    def checked_add_nodes(instance, *args, **kwargs):
-        assert service._storage.write_lock._is_owned()
-        return add_nodes(instance, *args, **kwargs)
-
-    class CheckedLock:
-        def __enter__(self):
-            if not lifecycle_lock._is_owned():
-                assert not manager.store._lock._is_owned()
-            return lifecycle_lock.__enter__()
-
-        def __exit__(self, *args):
-            return lifecycle_lock.__exit__(*args)
-
-    class CheckedGraphLock:
-        def __enter__(self):
-            if not graph_lock._is_owned():
-                assert not manager.store._lock._is_owned()
-            return graph_lock.__enter__()
-
-        def __exit__(self, *args):
-            return graph_lock.__exit__(*args)
-
-        def __getattr__(self, name):
-            return getattr(graph_lock, name)
-
-    with (
-        patch.object(service._storage, "node_lifecycle_lock", CheckedLock()),
-        patch.object(service._storage, "_lock", CheckedGraphLock()),
-        patch.object(GraphService, "add_nodes", new=checked_add_nodes),
-    ):
-        result = templates.insert_template(
-            service, manager, target.id, doc["template_id"], x=10, y=20
-        )
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=10, y=20
+    )
     assert result["success"]
-    if staged and not attached:
-        assert service.session_gate.session_manager is None
     ids = result["node_id_map"]
     assert set(ids) == {n["key"] for n in doc["nodes"]}
     assert not set(ids.values()) & {"a", "b"}
-    # Use the composed layer directly to inspect staged snapshots.
-    if staged:
-        layer = service._storage.layer_store.load_layer(target.id)
-        assert set(service._storage.nodes) == graph_before
-        copied = {e["entity_id"]: e["staged"] for e in layer if e["kind"] == "node"}
-        edges = [e["staged"] for e in layer if e["kind"] == "edge"]
-    else:
-        copied = {i: service._storage.get_node(i).model_dump() for i in ids.values()}
-        edges = [
-            e.model_dump()
-            for e in service._storage.edges.values()
-            if e.source in ids.values()
-        ]
+    copied = {i: service._storage.get_node(i).model_dump() for i in ids.values()}
+    edges = [
+        e.model_dump()
+        for e in service._storage.edges.values()
+        if e.source in ids.values()
+    ]
     for node in doc["nodes"]:
         actual = copied[ids[node["key"]]]
         assert actual["name"] == node["snapshot"]["name"]
@@ -1148,15 +1073,14 @@ def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
     assert set(service._storage.nodes) == before and target.seq == 0
 
 
-def test_copy_holds_staged_broadcast_until_presentation_write(capture, tmp_path):
+def test_copy_refuses_staged_target_without_writes(capture, tmp_path):
+    import copy
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from backend.core.layer_store import LayerRaced
     from backend.core.storage_backends import FileGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
     from backend.service import templates
     from backend.service.rest_api import create_rest_router
-    from backend.service.staging import StagedWrite
 
     _, service, manager, source = capture
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
@@ -1176,52 +1100,29 @@ def test_copy_holds_staged_broadcast_until_presentation_write(capture, tmp_path)
     doc["revision"] = 0
     doc = manager.template_store.save(doc, 0)
     service = GraphService(storage)
-    service.attach_sessions(manager)
     target = manager.create_session("target", "staged")
+    before = copy.deepcopy(target.state)
     subscriber = manager.bus.subscribe(target.id)
-    original = manager._apply_op_sync
-
     app = FastAPI()
     app.include_router(
         create_rest_router(service, session_manager=manager), prefix="/api"
     )
-    with patch.object(
-        StagedWrite, "_commit", side_effect=LayerRaced(target.id, ("node", "raced"))
-    ) as commit:
+    with (
+        patch.object(service, "add_nodes") as add_nodes,
+        patch.object(manager, "_apply_op_sync") as apply,
+    ):
         response = TestClient(app).post(
             f"/api/sessions/{target.id}/insert-template",
             json={"template_id": doc["template_id"], "x": 0, "y": 0},
         )
-    assert commit.call_count == service.STAGING_ATTEMPTS
-    assert response.status_code == 409 and response.json()["error"] == "session_busy"
-    assert target.seq == 0 and not storage.layer_store.load_layer(target.id)
-    assert not storage.nodes and subscriber.queue.empty()
-
-    def fail(*args, **kwargs):
-        assert subscriber.queue.empty()
-        raise OSError("presentation failed")
-
-    with patch.object(manager, "_apply_op_sync", side_effect=fail):
-        assert (
-            templates.insert_template(
-                service, manager, target.id, doc["template_id"], x=0, y=0
-            )["error"]
-            == "storage_error"
-        )
+    assert response.status_code == 409
+    assert response.json()["error"] == "staged_target_not_supported"
+    add_nodes.assert_not_called()
+    apply.assert_not_called()
+    assert target.state == before and target.seq == 0
+    assert not storage.nodes and not storage.edges
+    assert storage.layer_store.load_layer(target.id) == []
     assert subscriber.queue.empty()
-
-    def apply(*args, **kwargs):
-        assert subscriber.queue.empty()
-        return original(*args, **kwargs)
-
-    with patch.object(manager, "_apply_op_sync", side_effect=apply):
-        assert templates.insert_template(
-            service, manager, target.id, doc["template_id"], x=0, y=0
-        )["success"]
-    assert [subscriber.queue.get_nowait()["op"]["op"] for _ in range(2)] == [
-        "graph_change_staged",
-        "nodes_replaced",
-    ]
 
 
 def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):

@@ -112,10 +112,11 @@ exist. The result includes `node_id_map` from template keys to new node IDs,
 as well as the annotation map, shape report and session revision.
 
 The caller needs template read and session write access, and graph creation
-access. In a staged session all creations stay in its staged layer until merged.
+access. Copy insertion into a staged target returns `staged_target_not_supported`
+(HTTP 409) before any writes. Reference insertion remains available.
 A missing target node type returns `schema_mismatch` with `types`; a refused
 edge or stale revision rejects the insertion. If a write fails after creations,
 rollback is best-effort: undo failures are logged and may leave residual graph or
-session changes; the original error is returned. Staged creations are broadcast
-only after the presentation write succeeds. Copy uses the same explicit coordinates, annotation remapping and per-node shape
+session changes; the original error is returned. Copy uses the same explicit
+coordinates, annotation remapping and per-node shape
 resolution as reference insertion.

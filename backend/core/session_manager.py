@@ -95,8 +95,6 @@ from . import layer_store
 
 logger = logging.getLogger(__name__)
 
-_held_operation_events = contextvars.ContextVar("held_operation_events", default=None)
-
 # AnnotationFieldConflict is raised by SessionStore.apply_state_op and
 # propagates through this module's write paths unchanged; callers import it
 # straight from session_store (`from backend.core.session_store import
@@ -1446,23 +1444,6 @@ class SessionManager:
             raise SessionSeqConflict(expected_session_seq, session.seq)
         return session.seq
 
-    @contextmanager
-    def hold_operation_events(self, session_id: str):
-        """Collect this context's session ops until the caller commits them."""
-        events = []
-        token = _held_operation_events.set((self, session_id, events))
-        try:
-            yield events
-        finally:
-            _held_operation_events.reset(token)
-
-    def _publish_operation(self, session_id: str, event: Dict[str, Any]) -> None:
-        held = _held_operation_events.get()
-        if held is not None and held[0] is self and held[1] == session_id:
-            held[2].append(event)
-        else:
-            self.bus.publish(session_id, event)
-
     def stage_graph_change(
         self,
         session_id: str,
@@ -1517,7 +1498,7 @@ class SessionManager:
                     "staged change in session %s landed; persisting its seq failed",
                     session_id,
                 )
-        self._publish_operation(
+        self.bus.publish(
             session_id,
             {
                 "type": "op",
@@ -3264,7 +3245,7 @@ class SessionManager:
         if applied is None:
             return None
 
-        self._publish_operation(
+        self.bus.publish(
             session_id,
             {
                 "type": "op",
