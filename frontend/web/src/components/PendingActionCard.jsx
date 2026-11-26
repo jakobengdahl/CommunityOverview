@@ -47,13 +47,18 @@ function PendingActionCard({ action, conversationId, disabled = false, onConfirm
           response?.message ? { message: response.message } : undefined
         );
       else {
-        settle('chat.pending_action_done', undefined, response.message || null);
-        // The action already ran; a failing view update must not report it as failed.
-        try {
+        // A saved view is created by the client side effect, so its failure is
+        // the action's failure. Other confirmed actions have already run server-side.
+        if (['save_view', 'save_visualization'].includes(response.result?.action)) {
           await onConfirmed?.(response.result);
-        } catch (err) {
-          console.error('[PendingActionCard] Failed to apply the confirmed result:', err);
+        } else {
+          try {
+            await onConfirmed?.(response.result);
+          } catch (err) {
+            console.error('[PendingActionCard] Failed to apply the confirmed result:', err);
+          }
         }
+        settle('chat.pending_action_done', undefined, response.message || null);
       }
     } catch (err) {
       settle('chat.pending_action_failed', { message: err.message });

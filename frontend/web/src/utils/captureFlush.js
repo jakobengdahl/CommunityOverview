@@ -15,6 +15,7 @@ export function flushCanvasForCapture({ getSync, isCurrent, requestSnapshot, tim
       else resolve();
     };
     const deadline = setTimeout(() => finish(new Error('Canvas capture timed out')), timeoutMs);
+    let waitedForHold = false;
     const attempt = () => {
       if (finished) return;
       const sync = getSync();
@@ -23,10 +24,15 @@ export function flushCanvasForCapture({ getSync, isCurrent, requestSnapshot, tim
         return;
       }
       if (sync?._renderHolds > 0) {
+        waitedForHold = true;
         pollTimer = setTimeout(attempt, 25);
         return;
       }
-      cancelSnapshot = requestSnapshot(() => {
+      if (!waitedForHold) {
+        finish();
+        return;
+      }
+      cancelSnapshot = requestSnapshot(async () => {
         cancelSnapshot = () => {};
         const current = getSync();
         if (!isCurrent() || (initialSync && current !== initialSync) || current?._closed) {
@@ -34,7 +40,19 @@ export function flushCanvasForCapture({ getSync, isCurrent, requestSnapshot, tim
         } else if (current?._renderHolds > 0) {
           attempt();
         } else {
-          finish();
+          try {
+            await current?.flushPending();
+            if (finished) return;
+            if (!isCurrent() || (initialSync && getSync() !== initialSync) || current?._closed) {
+              finish(new Error('Session is no longer available'));
+            } else if (current?._renderHolds > 0) {
+              attempt();
+            } else {
+              finish();
+            }
+          } catch (error) {
+            finish(error);
+          }
         }
       });
     };
@@ -42,7 +60,7 @@ export function flushCanvasForCapture({ getSync, isCurrent, requestSnapshot, tim
   });
 }
 
-// Each capture needs a new canvas round trip, even when requests overlap.
+// Serialize held captures so each reads a fresh snapshot.
 export function createCaptureFlushQueue() {
   let tail = Promise.resolve();
   return (options) => {
