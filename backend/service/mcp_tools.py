@@ -1780,19 +1780,10 @@ def register_mcp_tools(
 
     @register_tool
     def save_view(name: str) -> Dict[str, Any]:
-        """
-        Signal intent to save the current view state.
+        """Request browser capture; this signal does not save a view.
 
-        This tool does NOT save the view data itself (positions, etc.) because
-        the backend does not know the client state. Instead, it acts as a signal
-        for the frontend to capture the current visualization state and save it
-        as a SavedView.
-
-        Args:
-            name: Name of the view to save
-
-        Returns:
-            A signal object that the frontend will intercept.
+        Prefer save_session_view with the session ID and its current revision.
+        Do not claim a save succeeded until the browser confirms it.
         """
         return service.save_view(name)
 

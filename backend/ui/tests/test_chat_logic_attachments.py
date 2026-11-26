@@ -319,3 +319,24 @@ def test_pending_loop_hop_does_not_block_another_chat():
         )
     assert started
     assert process.exitcode == 0
+
+
+def test_browser_capture_request_tells_model_nothing_saved_and_keeps_its_answer(
+    chat_service,
+):
+    service, llm = chat_service
+    llm.mock_tool_call_sequence = [
+        [{"name": "save_view", "input": {"name": "Overview"}}],
+        [{"name": "get_graph_stats", "input": {}}],
+    ]
+    llm.mock_text_response = "Grafen har 3 noder."
+    result = service._processor.process_message(
+        [{"role": "user", "content": "save"}], llm_provider=llm
+    )
+    capture = next(
+        p for p in _tool_result_payloads(llm) if p.get("action") == "save_view"
+    )
+    assert capture["saved"] is False
+    assert result["content"] == llm.mock_text_response
+    assert result["toolResult"]["extra_actions"][0]["action"] == "save_view"
+    assert "saved" not in result["toolResult"]["extra_actions"][0]

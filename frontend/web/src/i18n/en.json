@@ -117,6 +117,7 @@
     "pending_action_dismiss": "Dismiss",
     "pending_action_dismissed": "Dismissed. Nothing was run.",
     "pending_action_done": "Done.",
+    "pending_action_capture_requested": "Save requested. Confirm in the browser to save the view.",
     "pending_action_running": "Running…",
     "pending_action_unknown": "This confirmation is no longer valid. Send the request again.",
     "pending_action_denied": "You are not allowed to confirm this action.",
@@ -1117,6 +1118,24 @@
     "review_latest": "Review latest version",
     "library_forbidden": "Saving shapes needs a signed-in user.",
     "library_failed": "The shape library could not be changed. Your draft is kept; try again."
+  },
+  "save_view": {
+    "title": "Save view",
+    "name": "View name",
+    "placeholder": "Enter a name for this view",
+    "saved": "View saved.",
+    "open_link": "Open session",
+    "failed": "Could not save the view.",
+    "invalid_request": "Enter a valid name.",
+    "access_denied": "You do not have access to save this view.",
+    "session_not_found": "The session could not be found.",
+    "revision_conflict": "The session changed. Try again after reviewing it.",
+    "session_busy": "The session is busy. Try again.",
+    "staged_changes": "Merge or discard staged changes before saving.",
+    "invalid_presentation": "The session contains invalid presentation data.",
+    "session_too_large": "The session is too large to save.",
+    "too_many_sessions": "The session limit has been reached.",
+    "storage_error": "The session could not be stored."
   },
   "commands": {
     "create_node": "Create {type}",

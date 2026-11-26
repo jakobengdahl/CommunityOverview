@@ -556,6 +556,34 @@ export async function replayCanvasHistory({ sessionId, snapshot, getSync, replay
   await sync.waitForRevision(result.revision);
 }
 
+/**
+ * Save the source session at its confirmed revision. The hold-aware capture
+ * flush runs first so a layout hold ending during the later waits is still
+ * published; browser-computed positions are never written to the source.
+ */
+export async function captureCanvasSession({
+  sessionId,
+  name,
+  snapshot,
+  getSync,
+  capture,
+  isCurrent,
+  read,
+  save,
+}) {
+  await capture();
+  if (!isCurrent()) throw new Error('session changed');
+  await snapshot();
+  if (!isCurrent()) throw new Error('session changed');
+  const sync = getSync();
+  if (!sync || sync.sessionId !== sessionId) throw new Error('sync unavailable');
+  await sync.flushPending();
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  const source = await read(sessionId);
+  if (!isCurrent() || getSync() !== sync) throw new Error('session changed');
+  return save(sessionId, name, source.seq);
+}
+
 /** Serialize complete history replays while preserving each caller's result. */
 export function createHistoryReplayQueue() {
   let tail = Promise.resolve();

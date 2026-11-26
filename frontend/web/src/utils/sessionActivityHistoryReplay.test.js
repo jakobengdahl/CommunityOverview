@@ -1,6 +1,12 @@
 // covers: frontend/web/src/utils/sessionActivity.js
 import { describe, it, expect, vi } from 'vitest';
-import { replayCanvasHistory, createHistoryReplayQueue } from './sessionActivity';
+import { flushCanvasForCapture } from './captureFlush';
+import { buildCaptureContents } from './captureContents';
+import {
+  captureCanvasSession,
+  replayCanvasHistory,
+  createHistoryReplayQueue,
+} from './sessionActivity';
 
 describe('replayCanvasHistory', () => {
   it('publishes and confirms pending canvas edits before replay, then waits for the stream', async () => {
@@ -111,5 +117,110 @@ describe('createHistoryReplayQueue', () => {
     await expect(failed).rejects.toBe(error);
     await expect(queued).resolves.toBe('undone');
     expect(next).toHaveBeenCalledOnce();
+  });
+});
+
+describe('captureCanvasSession', () => {
+  it('flushes a layout hold before the snapshot and pending edits, then saves the read revision', async () => {
+    const calls = [];
+    const sync = {
+      sessionId: 'source',
+      flushPending: async () => calls.push('flush'),
+      _renderHolds: 1,
+    };
+    const save = vi.fn(async (...args) => {
+      calls.push('save');
+      return { session_url: '/link', args };
+    });
+    const pending = captureCanvasSession({
+      sessionId: 'source',
+      name: 'View',
+      snapshot: async () => calls.push('snapshot'),
+      getSync: () => sync,
+      capture: () =>
+        flushCanvasForCapture({
+          getSync: () => sync,
+          sessionId: 'source',
+          isCurrent: () => true,
+          requestSnapshot: (done) => {
+            calls.push('held snapshot');
+            done();
+            return () => {};
+          },
+          onReady: () => calls.push('capture'),
+        }),
+      isCurrent: () => true,
+      read: async () => {
+        calls.push('read');
+        return { seq: 12 };
+      },
+      save,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(calls).toEqual([]);
+    sync._renderHolds = 0;
+    const result = await pending;
+    expect(calls).toEqual([
+      'held snapshot',
+      'flush',
+      'capture',
+      'snapshot',
+      'flush',
+      'read',
+      'save',
+    ]);
+    expect(save).toHaveBeenCalledWith('source', 'View', 12);
+    expect(result.session_url).toBe('/link');
+  });
+
+  it('never sends browser-computed positions to the source session', async () => {
+    const sync = { sessionId: 'source', flushPending: async () => {}, sendOps: vi.fn() };
+    const read = vi.fn(async () => ({ seq: 4, state: { positions: {} } }));
+    const save = vi.fn(async () => ({ success: true }));
+    await captureCanvasSession({
+      sessionId: 'source',
+      name: 'View',
+      snapshot: async () => {},
+      getSync: () => sync,
+      capture: async () =>
+        buildCaptureContents({
+          baseline: { node_refs: ['computed'], positions: {} },
+          nodes: [{ id: 'computed', position: { x: 3, y: 4 } }],
+        }),
+      isCurrent: () => true,
+      read,
+      save,
+    });
+    expect(sync.sendOps).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledOnce();
+    expect(save).toHaveBeenCalledWith('source', 'View', 4);
+  });
+
+  it('does not capture after a session switch or a failed flush', async () => {
+    for (const failure of ['switch', 'flush', 'capture']) {
+      const save = vi.fn();
+      const sync = {
+        sessionId: 'source',
+        flushPending: async () => {
+          if (failure === 'flush') throw new Error();
+        },
+      };
+      let checks = 0;
+      await expect(
+        captureCanvasSession({
+          sessionId: 'source',
+          name: 'View',
+          snapshot: async () => {},
+          getSync: () => sync,
+          capture: async () => {
+            throw new Error('capture failed');
+          },
+          isCurrent: () => failure !== 'switch' || ++checks === 1,
+          read: async () => ({ seq: 1 }),
+          save,
+        })
+      ).rejects.toThrow();
+      expect(save).not.toHaveBeenCalled();
+    }
   });
 });

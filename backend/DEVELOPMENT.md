@@ -577,7 +577,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/import/{job_id}` | Status of one import's background embedding job (`queued`/`running`/`succeeded`/`failed`/`cancelled`, plus `embeddings_status`), or of a merge's audit record (its `import_id`). Requires whole-graph read access: denied callers receive 403, narrowed callers 409 `import_requires_full_graph_access` |
 | GET | `/api/import` | List import jobs, newest first. Each row has a `mode` (`replace`/`merge`); a merge's audit record also carries `merge_status` (`committed`/`outcome_unknown`), `plan_digest`, `counts` and `embeddings_job_id`, and a merge's embeddings job its `import_id`. Requires the same whole-graph read access as the single-job endpoint |
 | GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
-| POST | `/api/views/save` | Save a named graph view |
+| POST | `/api/views/save` | Request browser capture; does not persist a view. Prefer `/api/sessions/{id}/save-view` |
 | GET | `/api/views/{name}` | Get a saved view |
 | GET | `/api/views` | List saved views |
 | GET | `/agents/schedules` | List all agent schedules (for external scheduler reconciliation) |
@@ -1359,7 +1359,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
 | `get_graph_stats` | Get graph statistics |
-| `save_view` | Ask a connected frontend to capture and save its current canvas |
+| `save_view` | Request browser capture (not confirmation of a save); prefer `save_session_view` |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 membership records plus 500 other records / 7 days. New records can shift offset pages. |
 | `get_visualization_session_state` | Read a session's visible and selected node ids. `node_count` counts every node the session references, hidden ones included (the same meaning as in `get_visualization_layout`, `add_nodes_to_session` and the session resource); `visible_node_count` counts `visible_node_ids` only |
