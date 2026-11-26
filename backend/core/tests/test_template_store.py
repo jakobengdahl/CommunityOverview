@@ -77,6 +77,27 @@ def document():
 
 def test_document_round_trips_without_normalization():
     value = document()
+    value["annotation_document"]["annotations"].extend(
+        [
+            {
+                "id": "ref",
+                "type": "reference",
+                "target_kind": "resource",
+                "target": "a",
+            },
+            {
+                "id": "nested-ref",
+                "type": "reference",
+                "content": {"target_kind": "resource", "target": "a"},
+            },
+            {
+                "id": "url",
+                "type": "reference",
+                "target_kind": "url",
+                "target": "https://example.com",
+            },
+        ]
+    )
     assert validate_template(value) == value
     assert validate_template(value) is not value
 
@@ -85,6 +106,11 @@ def test_document_round_trips_without_normalization():
     "mutation",
     [
         lambda d: d.update(schema_version=2),
+        lambda d: d.update(schema_version=True),
+        lambda d: d.update(schema_version=1.0),
+        lambda d: d["annotation_document"].update(schema_version=True),
+        lambda d: d["annotation_document"].update(schema_version=1.0),
+        lambda d: d["annotation_document"].update(schema_version=2),
         lambda d: d.pop("name"),
         lambda d: d["nodes"].append(copy.deepcopy(d["nodes"][0])),
         lambda d: d["edges"][0].update(target="outside"),
@@ -94,6 +120,21 @@ def test_document_round_trips_without_normalization():
         lambda d: d["annotation_document"]["annotations"][1]["content"][
             "attachment"
         ].update(target_id="outside"),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "ref",
+                "type": "reference",
+                "target_kind": "resource",
+                "target": "outside",
+            }
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "ref",
+                "type": "reference",
+                "content": {"target_kind": "resource", "target": "outside"},
+            }
+        ),
         lambda d: d["nodes"][0]["snapshot"].update(type="SavedView"),
         lambda d: d["nodes"][0]["snapshot"]["metadata"].update(secret="x"),
         lambda d: d["nodes"][0]["shape"].update(inline=None),

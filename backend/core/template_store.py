@@ -6,7 +6,14 @@ import copy
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES
 from backend.config.node_shapes import ShapeDefinition, ShapeSelection
@@ -99,13 +106,22 @@ class TemplateEdge(StrictModel):
     label: str
 
 
-class AnnotationDocument(StrictModel):
+class VersionedDocument(StrictModel):
     schema_version: Literal[1]
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def integer_version(cls, value):
+        if type(value) is not int:
+            raise ValueError("invalid version")
+        return value
+
+
+class AnnotationDocument(VersionedDocument):
     annotations: list[dict[str, Any]]
 
 
-class TemplateDocument(StrictModel):
-    schema_version: Literal[1]
+class TemplateDocument(VersionedDocument):
     template_id: str
     name: str = Field(min_length=1)
     description: str
@@ -132,11 +148,6 @@ class TemplateDocument(StrictModel):
             edge.source not in keys or edge.target not in keys for edge in self.edges
         ):
             raise ValueError("edge outside template")
-        if (
-            type(self.schema_version) is not int
-            or type(self.annotation_document.schema_version) is not int
-        ):
-            raise ValueError("invalid version")
         annotations = self.annotation_document.annotations
         ids = [a.get("id") for a in annotations]
         if any(not isinstance(i, str) or not i or i in keys for i in ids) or len(
@@ -156,6 +167,12 @@ class TemplateDocument(StrictModel):
                 raise ValueError("invalid annotation content")
             if image_annotation_error(payload):
                 raise ValueError("invalid image annotation")
+            if (
+                (annotation.get("type") or annotation.get("kind")) == "reference"
+                and payload.get("target_kind") == "resource"
+                and payload.get("target") not in keys
+            ):
+                raise ValueError("invalid resource target")
             for payload in (annotation, annotation.get("content")):
                 if not isinstance(payload, dict):
                     continue
