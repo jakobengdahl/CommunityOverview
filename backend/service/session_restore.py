@@ -17,6 +17,7 @@ from backend.core.session_store import (
     _validate_position,
     is_valid_session_id,
 )
+from backend.core.template_store import validate_template
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN
 from backend.service import session_capture, views
@@ -94,7 +95,15 @@ def _validate_state_values(state):
 
 
 def restore_backup(
-    service, backend, modes, document, *, max_sessions=10000, max_annotations=2000
+    service,
+    backend,
+    modes,
+    document,
+    *,
+    template_backend=None,
+    profile_template_ids=(),
+    max_sessions=10000,
+    max_annotations=2000,
 ):
     """Check limits, authorize references, then validate and restore to an isolated target."""
     with session_context.bind_session(None):
@@ -122,6 +131,7 @@ def restore_backup(
                     > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
                 ):
                     raise ValueError()
+            # Preserve all existing session checks before authorizing templates.
             reports = []
             for item in sessions:
                 sid, state = item["id"], item["state"]
@@ -169,12 +179,19 @@ def restore_backup(
                         ),
                     }
                 )
+            if document.get("format_version") == 2:
+                for template in document["templates"]:
+                    _authorize(
+                        service.authorization_hook,
+                        target="get_visualization_session",
+                        session_id=template["template_id"],
+                    )
         except Exception:
             raise RestoreRefused("access denied") from None
 
         try:
             if (
-                document.get("format_version") != 1
+                document.get("format_version") not in (1, 2)
                 or type(document.get("format_version")) is not int
             ):
                 raise RestoreRefused("unsupported version")
@@ -185,17 +202,37 @@ def restore_backup(
                 "sha256": hashlib.sha256(canonical_bytes(unsigned)).hexdigest(),
             }:
                 raise RestoreRefused("integrity failure")
-            if set(document) != {
+            expected_fields = {
                 "format_version",
                 "sessions",
                 "assets",
                 "import_mappings",
                 "import_reports",
                 "integrity",
-            }:
+            }
+            if document["format_version"] == 2:
+                expected_fields.add("templates")
+            if set(document) != expected_fields:
                 raise RestoreRefused("invalid format")
             if document["import_mappings"] != [] or document["import_reports"] != []:
                 raise RestoreRefused("unsupported mappings")
+            templates = []
+            if document["format_version"] == 2:
+                if template_backend is None or not isinstance(
+                    document["templates"], list
+                ):
+                    raise RestoreRefused("invalid templates")
+                template_ids = set(
+                    profile_template_ids()
+                    if callable(profile_template_ids)
+                    else profile_template_ids
+                )
+                for item in document["templates"]:
+                    doc = validate_template(item)
+                    if doc["template_id"] in template_ids:
+                        raise RestoreRefused("template collision")
+                    template_ids.add(doc["template_id"])
+                    templates.append(doc)
             assets, records, seen = {}, [], set()
             for item in sessions:
                 if set(item) != {
@@ -287,13 +324,24 @@ def restore_backup(
             raise RestoreRefused("invalid or unsafe backup") from None
         # The caller owns an isolated workspace and publishes it only after this
         # completes. Discarding that workspace is the rollback for every failure.
-        with backend.transaction():
-            if backend.list_ids() or any(
-                modes.staged_status(r["id"])
-                not in (("none", "active") if mode == "staged" else ("none",))
-                for r, mode in records
+        from contextlib import nullcontext
+
+        with (
+            backend.transaction(),
+            template_backend.transaction() if template_backend else nullcontext(),
+        ):
+            if (
+                (template_backend is not None and template_backend.list_ids())
+                or backend.list_ids()
+                or any(
+                    modes.staged_status(r["id"])
+                    not in (("none", "active") if mode == "staged" else ("none",))
+                    for r, mode in records
+                )
             ):
                 raise RestoreRefused("target collision")
+            for doc in templates:
+                template_backend.save({"id": doc["template_id"], "document": doc})
             for record, mode in records:
                 if mode == "staged":
                     modes.record_staged(record["id"])

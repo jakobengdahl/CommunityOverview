@@ -13,6 +13,7 @@ from urllib.parse import unquote_to_bytes
 
 from backend.core.session_annotations import annotation_type_of
 from backend.core.session_store import Session, _empty_state
+from backend.core.template_store import validate_template
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
 from backend.service import access, session_capture
@@ -77,7 +78,7 @@ def _load_session(session_backend, session_id):
         raise BackupRefused("session_load_failed") from None
 
 
-def create_backup(service, session_backend, write_modes):
+def create_backup(service, session_backend, write_modes, *, template_backend=None):
     """Read every persisted session under the deployment layer snapshot lock.
 
     The caller supplies its configured access hook and graph. Authorization is
@@ -119,6 +120,27 @@ def create_backup(service, session_backend, write_modes):
                 target="get_visualization_session",
                 session_id=session_id,
             )
+        templates = []
+        if template_backend is not None:
+            ids = sorted(template_backend.list_ids())
+            for template_id in ids:
+                _authorize(
+                    service.authorization_hook,
+                    target="get_visualization_session",
+                    session_id=template_id,
+                )
+            try:
+                originals = {
+                    key: copy.deepcopy(template_backend.load(key)) for key in ids
+                }
+            except Exception:
+                raise BackupRefused("template load failed") from None
+            for template_id in ids:
+                _authorize(
+                    service.authorization_hook,
+                    target="get_visualization_session",
+                    session_id=template_id,
+                )
         with session_backend.transaction():
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")
@@ -150,6 +172,29 @@ def create_backup(service, session_backend, write_modes):
                     ):
                         raise BackupRefused("invalid session state")
                     captured.append((session_id, copy.deepcopy(raw), mode))
+                if template_backend is not None:
+                    try:
+                        with template_backend.transaction():
+                            if sorted(template_backend.list_ids()) != ids:
+                                raise BackupRefused("template list changed")
+                            for key in ids:
+                                record = template_backend.load(key)
+                                if (
+                                    record != originals[key]
+                                    or not isinstance(record, dict)
+                                    or record.get("id") != key
+                                ):
+                                    raise BackupRefused("invalid template record")
+                                if record.get("deleted"):
+                                    continue
+                                doc = validate_template(record["document"])
+                                if doc["template_id"] != key:
+                                    raise BackupRefused("invalid template record")
+                                templates.append(doc)
+                    except BackupRefused:
+                        raise
+                    except Exception:
+                        raise BackupRefused("invalid template record") from None
         # Reference authorization can consult SessionStore and must not run
         # under either persistence lock. The collected records are detached.
         for session_id, raw, mode in captured:
@@ -203,6 +248,9 @@ def create_backup(service, session_backend, write_modes):
         "import_mappings": [],
         "import_reports": [],
     }
+    if template_backend is not None:
+        document["format_version"] = 2
+        document["templates"] = templates
     document["integrity"] = {
         "algorithm": "sha256",
         "sha256": hashlib.sha256(canonical_bytes(document)).hexdigest(),

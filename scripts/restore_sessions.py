@@ -47,7 +47,14 @@ def main():
             if service.authorization_hook is not hook:
                 raise RestoreRefused("access denied")
             restoring = True
-            report = restore_backup(service, sessions, modes, document)
+            report = restore_backup(
+                service,
+                sessions,
+                modes,
+                document,
+                template_backend=service.backup_template_backend,
+                profile_template_ids=service.backup_profile_template_ids,
+            )
             authorized = True
             publish()
     except RestoreRefused:

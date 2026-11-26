@@ -670,6 +670,9 @@ def test_file_snapshot_authorizes_before_loading_malformed_layer(
     )
     monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
     monkeypatch.setenv("SESSION_BACKUP_SESSIONS", str(sessions))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    monkeypatch.setenv("SESSION_BACKUP_TEMPLATES", str(templates))
 
     for hook, error in (
         (Hook(denied=session.id), "access denied"),
@@ -706,11 +709,23 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
     monkeypatch.setenv("SESSION_BACKUP_SESSIONS", str(sessions))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    monkeypatch.setenv("SESSION_BACKUP_TEMPLATES", str(templates))
+    from backend.core.tests.test_template_store import document
+
+    template = document()
+    FileSessionPersistenceBackend(templates).save(
+        {"id": template["template_id"], "document": template}
+    )
     if custom_journal:
         monkeypatch.setenv("SESSION_BACKUP_GRAPH_JOURNAL", str(journal))
     with integration.open_backup(Hook()) as (service, backend, modes):
-        backup = create_backup(service, backend, modes)
+        backup = create_backup(
+            service, backend, modes, template_backend=service.backup_template_backend
+        )
     assert backup["sessions"][0]["id"] == "1234-5678"
+    assert backup["templates"] == [template]
     assert {p: p.read_bytes() for p in before} == before
     session = Session("1234-5678")
     session.state["node_refs"] = ["secret"]
@@ -777,3 +792,28 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
         with pytest.raises(BackupRefused, match="snapshot unavailable"):
             with integration.open_backup(Hook()):
                 pass
+
+
+def test_templates_are_authorized_validated_and_integrity_protected(backend):
+    from backend.core.tests.test_template_store import document
+
+    templates = InMemorySessionPersistenceBackend()
+    doc = document()
+    templates.save({"id": doc["template_id"], "document": doc})
+    result = create_backup(Service(), backend, WriteModes(), template_backend=templates)
+    assert result["templates"] == [doc]
+    unsigned = {k: v for k, v in result.items() if k != "integrity"}
+    assert (
+        result["integrity"]["sha256"]
+        == hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
+    )
+    with pytest.raises(BackupRefused):
+        create_backup(
+            Service(denied=doc["template_id"]),
+            backend,
+            WriteModes(),
+            template_backend=templates,
+        )
+    templates.save({"id": doc["template_id"], "document": {}})
+    with pytest.raises(BackupRefused):
+        create_backup(Service(), backend, WriteModes(), template_backend=templates)

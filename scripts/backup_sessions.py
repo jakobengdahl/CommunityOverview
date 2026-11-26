@@ -34,7 +34,9 @@ def main():
     with integration.open_backup(hook) as (service, sessions, modes):
         if service.authorization_hook is not hook:
             raise BackupRefused("invalid authorization integration")
-        document = create_backup(service, sessions, modes)
+        document = create_backup(
+            service, sessions, modes, template_backend=service.backup_template_backend
+        )
     fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as output:

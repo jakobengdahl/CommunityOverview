@@ -368,3 +368,118 @@ def test_write_failure_discards_unpublished_workspace(tmp_path, monkeypatch):
             publish()
     assert not output.exists()
     assert not list(tmp_path.glob("session-restore-*"))
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "invalid", "duplicate", "profile", "integrity", "denied"]
+)
+def test_templates_restore_atomically_with_sessions(damage):
+    from backend.core.tests.test_template_store import document as template_document
+
+    service = Service()
+    source = InMemorySessionPersistenceBackend()
+    doc = template_document()
+    source.save({"id": doc["template_id"], "document": doc})
+    document = create_backup(
+        service, InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    document["sessions"] = backup()["sessions"]
+    profiles = set()
+    if damage == "invalid":
+        document["templates"][0]["revision"] = -1
+    elif damage == "duplicate":
+        document["templates"].append(copy.deepcopy(doc))
+    elif damage == "profile":
+        profiles.add(doc["template_id"])
+    if damage != "integrity":
+        sign(document)
+    if damage == "denied":
+        original = service.authorization_hook.evaluate
+        service.authorization_hook.evaluate = lambda context: (
+            GraphAuthorizationDecision(allowed=False)
+            if context.session_id == doc["template_id"]
+            else original(context)
+        )
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    if damage:
+        with pytest.raises(RestoreRefused):
+            restore_backup(
+                service,
+                sessions,
+                Modes(),
+                document,
+                template_backend=templates,
+                profile_template_ids=profiles,
+            )
+        assert not sessions.list_ids() and not templates.list_ids()
+    else:
+        restore_backup(
+            service,
+            sessions,
+            Modes(),
+            document,
+            template_backend=templates,
+            profile_template_ids=profiles,
+        )
+        assert sessions.load("1234-5678") is not None
+        assert templates.load(doc["template_id"])["document"] == doc
+
+
+def test_file_workspace_restores_templates_and_rejects_profile_collision(
+    tmp_path, monkeypatch
+):
+    import json
+    from backend.core.session_store import FileSessionPersistenceBackend
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.tests.test_template_store import document as template_document
+    from scripts.session_restore_file_snapshot import open_restore
+
+    graph = tmp_path / "graph.json"
+    FileGraphPersistenceBackend(graph, staged_sessions=True).save_graph_data(
+        {"nodes": [], "edges": [], "metadata": {}}
+    )
+    monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("SCHEMA_FILE", str(profile / "schema_config.json"))
+    doc = template_document()
+    source = InMemorySessionPersistenceBackend()
+    source.save({"id": doc["template_id"], "document": doc})
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    profile_templates = profile / "templates"
+    profile_templates.mkdir()
+    (profile_templates / "example.json").write_text(json.dumps(doc))
+    output = tmp_path / "restored"
+    with open_restore(Hook(), output) as (service, sessions, modes, publish):
+        with pytest.raises(RestoreRefused):
+            restore_backup(
+                service,
+                sessions,
+                modes,
+                document,
+                template_backend=service.backup_template_backend,
+                profile_template_ids=service.backup_profile_template_ids,
+            )
+    assert not output.exists()
+    (profile_templates / "example.json").unlink()
+    with open_restore(Hook(), output) as (service, sessions, modes, publish):
+        restore_backup(
+            service,
+            sessions,
+            modes,
+            document,
+            template_backend=service.backup_template_backend,
+            profile_template_ids=service.backup_profile_template_ids,
+        )
+        publish()
+    assert (
+        FileSessionPersistenceBackend(output / "templates").load(doc["template_id"])[
+            "document"
+        ]
+        == doc
+    )
