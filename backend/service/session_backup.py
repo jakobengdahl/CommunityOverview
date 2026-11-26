@@ -194,6 +194,11 @@ def create_backup(service, session_backend, write_modes):
                         if mode != session.write_mode
                         else session.write_mode_source
                     ),
+                    "write_mode_mirror": {
+                        key: raw[key]
+                        for key in ("write_mode", "write_mode_source")
+                        if key in raw
+                    },
                     "state": state,
                 }
             )

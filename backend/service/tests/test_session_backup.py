@@ -60,6 +60,14 @@ def backend(request, tmp_path):
 
 
 @pytest.mark.parametrize(
+    "mirror",
+    [
+        {"write_mode": "direct", "write_mode_source": "inherited"},
+        {"write_mode": "direct", "write_mode_source": "explicit"},
+        {},
+    ],
+)
+@pytest.mark.parametrize(
     "legacy_url,legacy_payload",
     [
         ("data:image/png;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
@@ -72,7 +80,7 @@ def backend(request, tmp_path):
     ],
 )
 def test_backup_keeps_persistent_state_and_checks_integrity(
-    backend, monkeypatch, legacy_url, legacy_payload
+    backend, monkeypatch, legacy_url, legacy_payload, mirror
 ):
     session = Session("1234-5678", name="Map", description="Details", seq=7)
     payload = b"pixels"
@@ -91,7 +99,11 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
         shape_overrides={"group-local": "circle"},
     )
     session.activity_log = [{"actor": "private"}]
-    backend.save(session.to_dict())
+    raw = session.to_dict()
+    raw.pop("write_mode")
+    raw.pop("write_mode_source")
+    raw.update(mirror)
+    backend.save(raw)
 
     def unexpected_save(*args, **kwargs):
         pytest.fail("backup saved a session")
@@ -109,6 +121,8 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
     ) == (session.id, session.name, session.description, session.seq)
     assert stored["state"] == session.state
     assert stored["write_mode"] == "staged"
+    assert stored["write_mode_source"] == "explicit"
+    assert stored["write_mode_mirror"] == mirror
     assert "activity_log" not in stored
     assert service.references == [(["a", "group-local", "old"], ["edge"])]
     assert backup["import_mappings"] == backup["import_reports"] == []

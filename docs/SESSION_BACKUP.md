@@ -56,6 +56,9 @@ embedded assets. It does not back up templates or graph data.
 
 Format version 1 stores embedded image data URLs in the presentation state and
 in a deduplicated asset table. Each asset's SHA-256 is over its decoded bytes.
+Each session's `write_mode` and `write_mode_source` describe its effective mode;
+`write_mode_mirror` preserves the original fields present in the session record,
+which can differ from the authoritative staged-session record.
 The document `integrity.sha256` is over UTF-8 JSON of the entire document with
 `integrity` omitted, sorted keys, no whitespace, unescaped Unicode, and no
 non-finite numbers. These hashes detect accidental corruption; they do not
