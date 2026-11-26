@@ -905,6 +905,54 @@ def test_default_placement_aligns_rotated_template_bounds(capture, coords, expec
     assert geometry["y"] == pytest.approx(expected[1])
 
 
+@pytest.mark.parametrize("rotation", [{}, {"rotation": None}])
+def test_default_insertion_with_missing_or_null_existing_rotation(capture, rotation):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    target.state["annotations"] = [
+        {
+            "id": "existing",
+            "type": "shape",
+            "geometry": {"w": 100, "h": 40, **rotation},
+        }
+    ]
+    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
+        "success"
+    ]
+    assert target.state["positions"]["b"] == {"x": 180, "y": 0}
+
+
+@pytest.mark.parametrize("rotation", [{}, {"rotation": None}])
+def test_explicit_insertion_with_missing_or_null_template_rotation(capture, rotation):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state.update(
+        node_refs=[],
+        annotations=[
+            {
+                "id": "shape",
+                "type": "shape",
+                "geometry": {"x": 10, "y": 20, "w": 100, "h": 40, **rotation},
+            }
+        ],
+    )
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    assert templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=50, y=60
+    )["success"]
+    geometry = target.state["annotations"][0]["geometry"]
+    assert (geometry["x"], geometry["y"]) == (50, 60)
+
+
 @pytest.mark.parametrize(
     "positions, annotations, expected",
     [

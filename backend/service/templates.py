@@ -135,6 +135,8 @@ def _rendered_bounds(positions, annotations, *, legacy=False):
         )
         width, height = max(0, width), max(0, height)
         rotation = geometry.get("rotation", annotation.get("rotation", 0))
+        if rotation is None:
+            rotation = 0
         if not legacy:
             angle = math.radians(_placement_number(rotation) % 360)
             rotated_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
