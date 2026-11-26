@@ -574,7 +574,8 @@ class TestVisualizationSessionIdPush:
                 "arguments": {"name": "view", "visualization_session_id": session_id},
             },
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
+        assert response.json() == {"error": "Tool get_saved_view not found"}
         assert "get_saved_view" not in test_app.app.state.tools_map
         assert test_app.app.state.session_registry._sessions[session_id][
             "queue"
