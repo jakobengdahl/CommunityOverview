@@ -3418,9 +3418,9 @@ def register_mcp_tools(
         since answers ``revision_conflict`` with ``current_revision``: inspect
         it and retry explicitly. ``name`` is 1-200 characters and need not be
         unique. Node references (hidden ones too), positions, visibility,
-        dimming, appearance and the description are copied; graph content is
-        not. A source with staged changes (``staged_changes``) or annotations
-        (``invalid_presentation``) is refused, and so is the whole save when
+        dimming, appearance, annotations and the description are copied; graph content
+        is not. A source with staged changes (``staged_changes``) or invalid
+        annotations (``invalid_presentation``) is refused, and so is the save when
         it references a node the caller may not read (``access_denied``).
 
         Returns:

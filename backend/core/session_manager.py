@@ -56,6 +56,8 @@ from .session_annotations import (
     image_annotation_error,
     is_embedded_image_url,
     reference_annotation_error,
+    sanitize_saved_view_metadata,
+    _validate_generic_content,
 )
 from .session_hub import (
     ClaimMap,
@@ -76,6 +78,8 @@ from .session_store import (
     SessionLimitReached as SessionLimitReached,
     SessionStore,
     _empty_state,
+    _now_iso,
+    _validate_annotation,
     is_valid_session_id,
 )
 from .write_modes import (
@@ -272,9 +276,10 @@ class CaptureRefused(Exception):
 
 
 # The presentation a saved-view capture keeps. Everything else in the state
-# (annotations until slice 2, appearance receipts) starts empty.
+# (appearance receipts and other bookkeeping) starts empty.
 _CAPTURED_STATE = (
     "node_refs",
+    "annotations",
     "positions",
     "hidden_node_ids",
     "hidden_edge_ids",
@@ -709,6 +714,53 @@ _ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"
 AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
 
 
+def _refresh_annotation_ids(
+    state: Dict[str, Any], *, relink: bool = True
+) -> Dict[str, str]:
+    """Give every annotation a fresh id; returns source id to fresh id.
+    ``relink=False`` leaves references to annotations for the caller."""
+    ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
+
+    # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
+    # resolved by id alone, so any reference naming a copied annotation
+    # follows it; a node-typed one keeps the shared node id.
+    def remap_attachment(value):
+        if isinstance(value, dict):
+            if value.get("target_type") in (None, "annotation"):
+                target = value.get("target_id")
+                if isinstance(target, str) and target in ids:
+                    value["target_id"] = ids[target]
+            for child in value.values():
+                remap_attachment(child)
+        elif isinstance(value, list):
+            for child in value:
+                remap_attachment(child)
+
+    # Every copied annotation lands on a fresh id, so it is a new write as
+    # duplicate_annotation's is: a legacy non-embedded image URL or an
+    # unsafe reference target refuses the whole copy before anything
+    # is allocated.
+    for annotation in state["annotations"]:
+        error = image_annotation_error(annotation) or reference_annotation_error(
+            annotation, require_complete=True
+        )
+        if error:
+            raise OpError(error)
+    for annotation in state["annotations"]:
+        annotation["id"] = ids[annotation["id"]]
+        annotation["version"] = 1
+        annotation["field_versions"] = {}
+        annotation.pop("created_by", None)
+        annotation.pop("updated_by", None)
+        if relink:
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
+            remap_attachment(annotation)
+    return ids
+
+
 class SessionManager:
     """High-level façade over the session store, event bus, presence, selection
     claims and edit leases."""
@@ -979,44 +1031,7 @@ class SessionManager:
         state = copy.deepcopy(source.state)
         # Appearance receipts deduplicate the source's own op retries.
         state["shape_operation_ids"] = {}
-        ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
-
-        # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
-        # resolved by id alone, so any reference naming a copied annotation
-        # follows it; a node-typed one keeps the shared node id.
-        def remap_attachment(value):
-            if isinstance(value, dict):
-                if value.get("target_type") in (None, "annotation"):
-                    target = value.get("target_id")
-                    if isinstance(target, str) and target in ids:
-                        value["target_id"] = ids[target]
-                for child in value.values():
-                    remap_attachment(child)
-            elif isinstance(value, list):
-                for child in value:
-                    remap_attachment(child)
-
-        # Every copied annotation lands on a fresh id, so it is a new write as
-        # duplicate_annotation's is: a legacy non-embedded image URL or an
-        # unsafe reference target refuses the whole copy before anything
-        # is allocated.
-        for annotation in state["annotations"]:
-            error = image_annotation_error(annotation) or reference_annotation_error(
-                annotation, require_complete=True
-            )
-            if error:
-                raise OpError(error)
-        for annotation in state["annotations"]:
-            annotation["id"] = ids[annotation["id"]]
-            for key in ("startAnchor", "endAnchor"):
-                anchor = annotation.get(key)
-                if isinstance(anchor, str) and anchor in ids:
-                    annotation[key] = ids[anchor]
-            annotation["version"] = 1
-            annotation["field_versions"] = {}
-            annotation.pop("created_by", None)
-            annotation.pop("updated_by", None)
-            remap_attachment(annotation)
+        _refresh_annotation_ids(state)
         document["state"] = state
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
@@ -1088,12 +1103,15 @@ class SessionManager:
         expected_revision: int,
         *,
         authorize_capture: Callable[[Dict[str, Any]], List[str]],
+        relink_capture: Callable[[Dict[str, Any], Dict[str, str]], None],
         assign_access: Callable[[str], None],
         revoke_access: Callable[[str], None],
     ) -> Tuple[Session, List[str]]:
         """Capture a session's presentation at ``expected_revision`` into a
         new session named ``name``; returns it and the missing node ids
         ``authorize_capture`` reported for the captured state.
+        ``relink_capture`` points the copied annotations' links at their fresh
+        ids.
 
         Runs without yielding and refuses an in-flight state batch, so the
         checks, snapshot and publication see one revision. Access is assigned
@@ -1116,8 +1134,6 @@ class SessionManager:
             session_id
         ):
             raise CaptureRefused("staged_changes")
-        if source.state.get("annotations"):
-            raise CaptureRefused("invalid_presentation")
         self.store.check_capacity(self._max_sessions)
         state = _empty_state()
         state.update(
@@ -1125,6 +1141,41 @@ class SessionManager:
                 {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
             )
         )
+        annotations = state["annotations"]
+        if not isinstance(annotations, list):
+            raise CaptureRefused("invalid_presentation")
+        if len(annotations) > self.store._max_annotations:
+            raise OpBatchTooLarge()
+        try:
+            seen = set()
+            for annotation in annotations:
+                validated = _validate_annotation(annotation, require_id=True)
+                ann_id = validated["id"]
+                if not ann_id or ann_id in seen:
+                    raise OpError("invalid annotation id")
+                seen.add(ann_id)
+                members = annotation.get("member_node_ids", [])
+                if not isinstance(members, list) or any(
+                    not isinstance(member, str) for member in members
+                ):
+                    raise OpError("invalid group members")
+                if _validate_generic_content(validated["type"], annotation):
+                    raise OpError("invalid annotation content")
+                content = annotation.get("content")
+                if isinstance(content, dict) and validated["type"] != "reference":
+                    if _validate_generic_content(validated["type"], content):
+                        raise OpError("invalid annotation content")
+            metadata = {"annotations": annotations}
+            if sanitize_saved_view_metadata(metadata) != metadata:
+                raise OpError("unsafe annotation")
+            _check_op_image_sizes({"op": "nodes_replaced", "annotations": annotations})
+            if (
+                sum(_annotation_embedded_image_bytes(a) for a in annotations)
+                > DEFAULT_MAX_SESSION_IMAGE_BYTES
+            ):
+                raise OpBatchTooLarge()
+        except (OpError, TypeError, ValueError) as exc:
+            raise CaptureRefused("invalid_presentation") from exc
         # A removed node's revision outlives it; copying it would carry an id
         # the capture neither authorizes nor reports.
         on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}
@@ -1136,7 +1187,18 @@ class SessionManager:
         document = {"state": state, "name": name, "description": source.description}
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
+        # Authorize the original references before filtering group membership.
         missing = authorize_capture(state)
+        try:
+            ids = _refresh_annotation_ids(state, relink=False)
+        except OpError as exc:
+            raise CaptureRefused("invalid_presentation") from exc
+        relink_capture(state, ids)
+        for annotation in annotations:
+            annotation["updated_at"] = _now_iso()
+        # Fresh annotation ids and timestamps can grow the document: checked again.
+        if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
+            raise OpBatchTooLarge()
         staged = []
 
         def allocate(copy_id: str) -> None:

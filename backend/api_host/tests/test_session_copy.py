@@ -544,6 +544,244 @@ def test_save_view_captures_presentation_as_a_new_session(test_app):
     assert status == 200 and result["missing_node_ids"] == []
 
 
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_copies_annotations_and_groups(test_app, transport):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        node_refs=["node-1"],
+        annotations=[
+            {
+                "id": "note",
+                "type": "note",
+                "version": 5,
+                "field_versions": {"text": 5},
+                "updated_at": "2000-01-01T00:00:00+00:00",
+                "parentId": "group-a",
+            },
+            {"id": "group-a", "type": "group", "member_node_ids": ["node-1", "note"]},
+            {
+                "id": "line",
+                "type": "line",
+                "startAnchor": "note",
+                "attachment": {"target_type": "annotation", "target_id": "group-a"},
+                "start": {"target_id": "note"},
+                "endEndpoint": {"attachment": {"targetId": "group-a"}},
+            },
+        ],
+        shape_overrides={"group-a": {"shape": "box"}},
+    )
+    before = copy.deepcopy(source.to_dict())
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    saved = manager.get_session(result["session_id"])
+    note, group, line = saved.state["annotations"]
+    assert {note["id"], group["id"], line["id"]}.isdisjoint({"note", "group-a", "line"})
+    assert note["parentId"] == group["id"]
+    assert note["updated_at"] != "2000-01-01T00:00:00+00:00"
+    assert group["member_node_ids"] == ["node-1", note["id"]]
+    assert line["startAnchor"] == note["id"]
+    assert line["attachment"]["target_id"] == group["id"]
+    assert line["start"]["target_id"] == note["id"]
+    assert line["endEndpoint"]["attachment"]["targetId"] == group["id"]
+    assert saved.state["shape_overrides"] == {group["id"]: {"shape": "box"}}
+    assert all(
+        a["version"] == 1 and a["field_versions"] == {} for a in (note, group, line)
+    )
+    assert saved.seq == 0 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_reads_graph_ids_only_from_explicit_link_fields(test_app, transport):
+    """An id is an annotation wherever the source stores one under it, even
+    in a node-typed attachment; free-form payload names nothing, and legacy
+    group- canvas keys name no node."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    free_form = {"target_id": "free", "member_node_ids": ["free"], "parentId": "node-1"}
+    source.state.update(
+        node_refs=["node-1"],
+        positions={"node-1": {"x": 1, "y": 2}, "group-1": {"x": 0, "y": 0}},
+        shape_overrides={"node-1": {"shape": "box"}, "group-1": {"shape": "box"}},
+        annotations=[
+            {"id": "node-1", "type": "note", "data": free_form},
+            {"id": "g", "type": "group", "member_node_ids": ["node-1"]},
+            {
+                "id": "l",
+                "type": "line",
+                "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
+                "parentId": "group-1",
+            },
+            {
+                "id": "r",
+                "kind": "reference",
+                "target_kind": "resource",
+                "target": "gone",
+            },
+        ],
+    )
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == ["gone"]
+    state = manager.get_session(result["session_id"]).state
+    note, group, line, reference = state["annotations"]
+    assert state["node_refs"] == ["node-1"] and note["data"] == free_form
+    assert state["positions"].keys() == {"node-1", "group-1"}
+    assert state["shape_overrides"].keys() == {note["id"], "group-1"}
+    assert group["member_node_ids"] == [note["id"]]
+    assert line["start"]["attachment"]["target_id"] == note["id"]
+    assert reference["target"] == "gone"
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_enforces_annotation_limit(test_app, transport):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state["annotations"] = [{"id": "a", "type": "note"}]
+    before = copy.deepcopy(source.to_dict())
+    manager.store._max_annotations = 0
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (413, None)
+    assert result == {"success": False, "error": "session_too_large"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"id": "a", "type": "image", "image": {"url": "https://example.org/image.png"}},
+        {
+            "id": "a",
+            "type": "reference",
+            "target_kind": "url",
+            "target": "javascript:alert(1)",
+        },
+        {"id": "a", "type": "unknown"},
+        {"id": "a", "type": "line", "start": {"target_id": 1.5}},
+        {"id": "a", "type": "line", "start": {"target_id": 2**53}},
+        {"id": "a", "type": "line", "start": {"target_id": -(10**21)}},
+    ],
+)
+def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state["annotations"] = [annotation]
+    before = copy.deepcopy(source.to_dict())
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (422, None)
+    assert result == {"success": False, "error": "invalid_presentation"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"id": "a", "type": "reference", "target_kind": "resource", "target": "node-1"},
+        {"id": "a", "kind": "reference", "target_kind": "resource", "target": "node-1"},
+        {"id": "a", "type": "group", "member_node_ids": ["node-1"]},
+        {
+            "id": "a",
+            "type": "line",
+            "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
+        },
+        {"id": "a", "type": "line", "start": {"target_id": "node-1"}},
+        {"id": "a", "type": "line", "endEndpoint": {"attachment": {"nodeId": 7}}},
+        {"id": "a", "type": "text", "anchor": {"targetId": "node-1"}},
+    ],
+)
+def test_save_view_denies_inaccessible_annotation_targets(
+    test_app, transport, annotation
+):
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(annotations=[annotation])
+    before = copy.deepcopy(source.to_dict())
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=True,
+        graph_access=GraphAccessNarrowing(enabled=True, allow_local_graph=False)
+        if ctx.target == "save_session_view"
+        else GraphAccessNarrowing(),
+    )
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (403, None)
+    assert result == {"success": False, "error": "access_denied"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+    assert not hook.assign_copied_session_access.called
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_node_typed_link_to_an_annotation_is_not_a_graph_ref(
+    test_app, transport
+):
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        annotations=[
+            {"id": "a", "type": "note"},
+            {
+                "id": "l",
+                "type": "line",
+                "start": {"attachment": {"target_type": "node", "target_id": "a"}},
+            },
+        ]
+    )
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=True,
+        graph_access=GraphAccessNarrowing(enabled=True, allow_local_graph=False)
+        if ctx.target == "save_session_view"
+        else GraphAccessNarrowing(),
+    )
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    note, line = manager.get_session(result["session_id"]).state["annotations"]
+    assert line["start"]["attachment"]["target_id"] == note["id"] != "a"
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_drops_off_canvas_group_members_and_does_not_report_them(
+    test_app, transport
+):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        node_refs=["node-1"],
+        annotations=[
+            {
+                "id": "g",
+                "type": "group",
+                "member_node_ids": ["node-1", "node-2", "gone"],
+            }
+        ],
+    )
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    (group,) = manager.get_session(result["session_id"]).state["annotations"]
+    assert group["member_node_ids"] == ["node-1"]
+
+
 def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
     """FastMCP neither decodes nor type-checks the arguments: a JSON-looking
     name is saved verbatim, as REST saves it, and a non-string session id is
@@ -598,10 +836,8 @@ def test_save_view_rejects_invalid_raw_arguments(test_app, transport, body):
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-def test_save_view_refuses_stale_staged_or_annotated_sources(
-    test_app, monkeypatch, transport
-):
-    """A stale revision, staged changes, annotations, an oversized capture, a
+def test_save_view_refuses_stale_or_staged_sources(test_app, monkeypatch, transport):
+    """A stale revision, staged changes, an oversized capture, a
     full session store or a failing staged-layer store publish nothing; the
     current revision is withheld when the source read is denied."""
     manager = test_app.app.state.session_manager
@@ -630,12 +866,6 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     hook.evaluate.side_effect = None
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
 
-    source.state["annotations"] = [{"id": "a", "type": "text", "x": 0, "y": 0}]
-    assert attempt() == (
-        status_of(422),
-        {"success": False, "error": "invalid_presentation"},
-    )
-    source.state["annotations"] = []
     writes = manager.write_modes
     monkeypatch.setattr(writes, "choose", lambda mode: ("staged", "explicit"))
     monkeypatch.setattr(writes, "_store", Mock(load_layer=lambda sid: [{}]))
@@ -655,6 +885,10 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     )
     manager._max_sessions = 10
     source.description = "x" * 2000
+    source.state["node_refs"] = ["node-1"]
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=ctx.target != "save_session_view"
+    )
     monkeypatch.setattr(manager_module, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 2048)
     assert attempt() == (
         status_of(413),
@@ -670,6 +904,13 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     [
         ("create", {"node_refs": ["node-1"]}),
         ("narrowed", {"node_refs": ["node-1"]}),
+        (
+            "narrowed",
+            {
+                "positions": {"node-1": {"x": 4, "y": 8}},
+                "annotations": [{"id": "node-1", "type": "note"}],
+            },
+        ),
         ("narrowed", {"node_refs": ["gone"]}),
         ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
         ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
