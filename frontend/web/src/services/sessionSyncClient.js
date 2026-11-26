@@ -380,9 +380,12 @@ function libraryRevisionOf(event) {
     return typeof event.library_revision === 'number' ? event.library_revision : null;
   }
   const op = event.type === 'op' ? event.op : null;
-  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
   const saved = (selection) =>
     typeof selection?.ref === 'string' && selection.ref.startsWith('saved:');
+  if (op?.op === 'nodes_replaced') {
+    return Object.values(op.inserted_shape_overrides || {}).some(saved) ? null : undefined;
+  }
+  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
   return saved(op.selection) || saved(op.restore_selection) ? null : undefined;
 }
 
@@ -451,6 +454,8 @@ export function applyOpToMirror(mirrorState, op) {
       // A replace carries the layout it leaves: every member's position, the
       // hidden set and, for a loaded view, the annotations it changed or removed.
       if (replace) {
+        m.shape_overrides = { ...m.shape_overrides, ...op.inserted_shape_overrides };
+        m.shape_revisions = { ...m.shape_revisions, ...op.inserted_shape_revisions };
         for (const [id, pos] of Object.entries(op.positions || {})) m.positions[id] = roundPos(pos);
         if (Array.isArray(op.hidden_node_ids)) m.hidden_node_ids = [...op.hidden_node_ids];
         if (Array.isArray(op.annotations)) {

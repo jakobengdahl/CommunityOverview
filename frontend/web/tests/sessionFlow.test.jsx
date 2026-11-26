@@ -533,12 +533,16 @@ describe('Server-backed session lifecycle', () => {
             op: 'nodes_replaced',
             node_ids: ['node-b'],
             positions: { 'node-b': { x: 1, y: 2 } },
+            inserted_shape_overrides: { 'node-b': { builtin: true } },
+            inserted_shape_revisions: { 'node:node-b': 1 },
           },
         }),
       });
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     await waitFor(() => expect(seenAtRelease).toEqual([['node-b']]));
+    expect(canvasProps.shapeOverrides['node-b']).toEqual({ builtin: true });
+    expect(useGraphStore.getState().shapeRevisions['node:node-b']).toBe(1);
   });
 
   it('an add carrying view-layout keys applies none of them', async () => {

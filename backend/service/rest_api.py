@@ -1552,6 +1552,23 @@ def _register_session_endpoints(
             return {}
         return body if isinstance(body, dict) else {}
 
+    @router.post("/sessions/{session_id}/insert-template")
+    async def insert_template_route(session_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.insert_template(
+                service,
+                session_manager,
+                session_id,
+                body.get("template_id"),
+                body.get("mode", "reference"),
+                body.get("x"),
+                body.get("y"),
+                body.get("expected_revision"),
+                body.get("template_revision"),
+            )
+        return template_response(result)
+
     @router.post("/sessions/{session_id}/templates")
     async def create_template_route(session_id: str, http_request: Request):
         body = await template_body(http_request)

@@ -1709,7 +1709,21 @@ def test_appearance_writes_require_current_permission_and_capability(
         operation_id="appearance",
     )
     body = dict(client_id="first", appearance_version=1, ops=[op])
+    inserted = dict(
+        client_id="first",
+        ops=[
+            dict(
+                op="nodes_replaced",
+                node_ids=["a"],
+                inserted_shape_overrides={"a": {"builtin": True}},
+            )
+        ],
+    )
     monkeypatch.setenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE", "read-only")
+    assert (
+        test_app.post(url, json={**inserted, "appearance_version": 1}).status_code
+        == 403
+    )
     assert test_app.post(url, json=body).status_code == 403
     assert test_app.get(f"/api/sessions/{sid}").json()["seq"] == 0
     manager = test_app.app.state.session_manager
@@ -1731,6 +1745,8 @@ def test_appearance_writes_require_current_permission_and_capability(
     manager.get_session(sid).state["shape_overrides"].clear()
     monkeypatch.setattr(manager, "apply_ops", original_apply)
     monkeypatch.delenv("COMMUNITYOVERVIEW_AUTHORIZATION_MODE")
+    assert test_app.post(url, json=inserted).status_code == 409
+    assert manager.get_session(sid).seq == 0
     assert test_app.post(url, json={**body, "appearance_version": 2}).status_code == 409
     applied = test_app.post(url, json=body)
     assert applied.status_code == 200

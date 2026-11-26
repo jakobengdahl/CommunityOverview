@@ -32,6 +32,25 @@ _LARGEST_EXACT_IMAGE = DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES // 3 * 3
 
 
 class TestServerMembership:
+    @pytest.mark.parametrize("overrides", [None, {}, {"new": {"builtin": True}}])
+    async def test_replace_derives_inserted_shape_revisions(self, overrides):
+        mgr = _manager()
+        session = mgr.create_session()
+        op = {
+            "op": "nodes_replaced",
+            "node_ids": ["new"],
+            "inserted_shape_revisions": {"node:new": 999, "node:fake": 42},
+        }
+        if overrides is not None:
+            op["inserted_shape_overrides"] = overrides
+
+        applied = mgr.store.apply_state_op(session, op)
+
+        if overrides:
+            assert applied["inserted_shape_revisions"] == {"node:new": 1}
+        else:
+            assert "inserted_shape_revisions" not in applied
+
     @pytest.mark.parametrize(
         "node_count,exhausted", [(201, False), (501, False), (1, True)]
     )

@@ -686,6 +686,16 @@ function App() {
           // only for a replace does the mirror fold them (applyOpToMirror).
           const isReplace = op.op === 'nodes_replaced';
           if (isReplace && Array.isArray(op.hidden_node_ids)) setHiddenNodeIds(op.hidden_node_ids);
+          if (isReplace && op.inserted_shape_overrides) {
+            useGraphStore.setState((state) => ({
+              shapeOverrides: { ...state.shapeOverrides, ...op.inserted_shape_overrides },
+              shapeRevisions: Object.fromEntries(
+                Object.entries({ ...state.shapeRevisions, ...op.inserted_shape_revisions }).map(
+                  ([key, revision]) => [key, Math.max(revision, state.shapeRevisions[key] || 0)]
+                )
+              ),
+            }));
+          }
           const drawAnnotations = () => {
             if (!isReplace || !Array.isArray(op.annotations)) return;
             const removed = op.removed_annotation_ids || [];
