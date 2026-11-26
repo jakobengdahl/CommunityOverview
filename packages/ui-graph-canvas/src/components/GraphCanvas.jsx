@@ -1922,10 +1922,15 @@ function GraphCanvasInner({
   const enterFocusView = useCallback(
     (rootId) => {
       if (!rootId) return;
-      preFocusRef.current = { nodes: getFlowNodes(), edges };
+      preFocusRef.current = {
+        nodes: getFlowNodes(),
+        edges,
+        captureInputIds: new Set(inputNodes.map((node) => node.id)),
+        captureRemovedIds: new Set(),
+      };
       setFocusRootId(rootId);
     },
-    [getFlowNodes, edges]
+    [getFlowNodes, edges, inputNodes]
   );
 
   const exitFocusView = useCallback(() => setFocusRootId(null), []);
@@ -3489,6 +3494,21 @@ function GraphCanvasInner({
     }
   }, [screenToFlowPosition, setNodes, onCreateGroup]);
 
+  // A removed member may return with the same id but a new computed position.
+  // Keep the restoration snapshot intact, while excluding its old position
+  // from capture for the rest of this focus session. Use the full input rather
+  // than the focused or rendered subset so hiding and lazy rendering do not
+  // look like membership changes.
+  useEffect(() => {
+    const snapshot = activeFocusRootId && preFocusRef.current;
+    if (!snapshot) return;
+    const current = new Set(inputNodes.map((node) => node.id));
+    for (const id of snapshot.captureInputIds) {
+      if (!current.has(id)) snapshot.captureRemovedIds.add(id);
+    }
+    snapshot.captureInputIds = current;
+  }, [activeFocusRootId, inputNodes]);
+
   // Save view: includes node positions and visible edges from ReactFlow state.
   //
   // Refused outright while the focus view is active. Every persistence path in
@@ -3502,7 +3522,8 @@ function GraphCanvasInner({
     const read = () => {
       const live = getFlowNodes() || [];
       if (!activeFocusRootId || !preFocusRef.current) return live;
-      const before = preFocusRef.current.nodes;
+      const snapshot = preFocusRef.current;
+      const before = snapshot.nodes.filter((node) => !snapshot.captureRemovedIds.has(node.id));
       const known = new Set(before.map((node) => node.id));
       return [...before, ...live.filter((node) => !known.has(node.id))];
     };

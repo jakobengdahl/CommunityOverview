@@ -264,6 +264,30 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
       />
     );
 
+    // A member removed and re-added during focus is a new live instance, not
+    // the one whose coordinates were captured before focus.
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes.filter((node) => node.id !== 'node-2')}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    const returnedPosition = positionsById().get('node-2');
+    expect(returnedPosition).toBeDefined();
+    expect(returnedPosition).not.toEqual(before.get('node-2'));
+    expect(new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2'))
+      .toEqual(returnedPosition);
+
     // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
     // every node must land back where it was before focus.
     act(() => {
