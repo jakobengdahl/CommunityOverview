@@ -52,7 +52,6 @@ _REFUSALS = {
     LayoutBusy: "session_busy",
     OpBatchTooLarge: "session_too_large",
     SessionLimitReached: "too_many_sessions",
-    OSError: "storage_error",
 }
 
 
@@ -196,6 +195,11 @@ def save_session_view(
             return _refused(
                 next(code for kind, code in _REFUSALS.items() if isinstance(exc, kind))
             )
+        except Exception:
+            # Document and staged-layer stores raise their own types (OSError,
+            # LayerStoreError, database driver errors); none may escape as a 500.
+            logger.exception("Saving a session view failed in storage")
+            return _refused("storage_error")
     return {
         "success": True,
         "kind": "saved_session",

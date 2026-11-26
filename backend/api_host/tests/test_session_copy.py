@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from backend.core import session_manager as manager_module
+from backend.core.layer_store import LayerStoreError
 from backend.core.session_annotations import image_annotation_error
 from backend.core.write_modes import STAGED_UNSUPPORTED
 from backend.service.staging import HookFailed
@@ -600,9 +601,9 @@ def test_save_view_rejects_invalid_raw_arguments(test_app, transport, body):
 def test_save_view_refuses_stale_staged_or_annotated_sources(
     test_app, monkeypatch, transport
 ):
-    """A stale revision, staged changes, annotations, an oversized capture or
-    a full session store publish nothing; the current revision is withheld
-    when the source read is denied."""
+    """A stale revision, staged changes, annotations, an oversized capture, a
+    full session store or a failing staged-layer store publish nothing; the
+    current revision is withheld when the source read is denied."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     source.seq = 3
@@ -639,6 +640,13 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     monkeypatch.setattr(writes, "choose", lambda mode: ("staged", "explicit"))
     monkeypatch.setattr(writes, "_store", Mock(load_layer=lambda sid: [{}]))
     assert attempt() == (status_of(409), {"success": False, "error": "staged_changes"})
+    driver_error = type("OperationalError", (Exception,), {})
+    for error in (LayerStoreError, driver_error):
+        writes._store.load_layer = Mock(side_effect=error("db at /srv/x"))
+        assert attempt() == (
+            status_of(503),
+            {"success": False, "error": "storage_error"},
+        )
     monkeypatch.undo()
     manager._max_sessions = 1
     assert attempt() == (
