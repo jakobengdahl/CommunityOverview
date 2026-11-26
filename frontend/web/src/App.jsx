@@ -67,6 +67,7 @@ import {
 import { loadUrlSavedView } from './utils/urlSavedView';
 import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
 import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
+import { readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2256,10 +2257,8 @@ function App() {
   const captureNodesRef = useRef(null);
   const getCaptureState = useCallback(
     () => ({
-      baseline: syncForSession(syncRef.current, sessionIdRef.current)?.captureBaseline() || {
-        node_refs: [],
-        positions: {},
-      },
+      baseline: readyBaseline(syncForSession(syncRef.current, sessionIdRef.current)),
+      members: useGraphStore.getState().nodes.map((node) => node.id),
       nodes: captureNodesRef.current?.() || [],
     }),
     [syncRef]

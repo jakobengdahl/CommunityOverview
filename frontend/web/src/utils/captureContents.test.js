@@ -1,6 +1,6 @@
 // covers: frontend/web/src/utils/captureContents.js
 import { expect, it, vi } from 'vitest';
-import { buildCaptureContents, captureContents } from './captureContents';
+import { buildCaptureContents, captureContents, readyBaseline } from './captureContents';
 it('keeps baseline members and positions, filling only missing positions from the canvas', () => {
   const baseline = {
     node_refs: ['hidden', 'unresolved', 'computed', 'unplaced'],
@@ -12,6 +12,23 @@ it('keeps baseline members and positions, filling only missing positions from th
   expect(buildCaptureContents({ baseline, nodes })).toEqual({
     node_ids: baseline.node_refs,
     positions: { ...baseline.positions, computed: { x: 5, y: 6 } },
+  });
+});
+
+it.each([
+  ['no sync client', null],
+  ['a client whose stream has not delivered state', { _ready: false, captureBaseline: () => ({}) }],
+])('captures the store members with %s', (_label, sync) => {
+  const nodes = [{ id: 'a', position: { x: 1, y: 2 } }];
+  expect(
+    buildCaptureContents({ baseline: readyBaseline(sync), members: ['a', 'b'], nodes })
+  ).toEqual({ node_ids: ['a', 'b'], positions: { a: { x: 1, y: 2 } } });
+});
+it('captures the baseline, not the store, once the client is ready', () => {
+  const sync = { _ready: true, captureBaseline: () => ({ node_refs: [], positions: {} }) };
+  expect(buildCaptureContents({ baseline: readyBaseline(sync), members: ['a'] })).toEqual({
+    node_ids: [],
+    positions: {},
   });
 });
 

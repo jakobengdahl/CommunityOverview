@@ -1,6 +1,17 @@
-/** Build legacy SavedView metadata from one sync baseline and the current canvas. */
-export function buildCaptureContents({ baseline, nodes } = {}) {
-  const node_ids = [...(baseline?.node_refs || [])];
+/**
+ * The sync baseline to capture from, or null when there is none to trust: no
+ * client for the session, or one whose stream has not yet delivered state.
+ */
+export function readyBaseline(sync) {
+  return sync?._ready ? sync.captureBaseline() : null;
+}
+
+/**
+ * Build legacy SavedView metadata from one sync baseline and the current
+ * canvas. Without a baseline the store's members are captured, as before.
+ */
+export function buildCaptureContents({ baseline, members, nodes } = {}) {
+  const node_ids = [...(baseline ? baseline.node_refs || [] : members || [])];
   const stored = baseline?.positions || {};
   const computed = new Map((nodes || []).map((node) => [node.id, node.position]));
   const positions = {};
