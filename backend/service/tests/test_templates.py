@@ -62,7 +62,7 @@ def test_selection_edges_metadata_and_annotation_links(capture):
 
 
 def test_denials_and_missing_references(capture):
-    run, _, _, session = capture
+    run, service, _, session = capture
     with patch(
         "backend.service.templates.access.authorize_graph_access", return_value=True
     ):
@@ -71,6 +71,43 @@ def test_denials_and_missing_references(capture):
         assert run() == {"success": False, "error": "access_denied"}
     session.state["annotations"][0]["attachment"]["target_id"] = "missing"
     assert run()["success"]
+    service._storage.nodes["node-0"] = Node(id="node-0", type="Actor", name="Denied")
+    with patch(
+        "backend.service.templates.access.is_node_visible",
+        side_effect=lambda node, _: node.id != "node-0",
+    ):
+        assert run(node_ids=["node-0"]) == {"success": False, "error": "access_denied"}
+        session.state["annotations"][0]["content"] = {
+            "attachment": {"target_id": "node-0"}
+        }
+        assert run(node_ids=["a"], annotation_ids=["note"]) == {
+            "success": False, "error": "access_denied"
+        }
+        session.state["annotations"][0] = {
+            "id": "note", "type": "reference", "target_kind": "resource",
+            "content": {"target": "node-0"},
+        }
+        assert run(node_ids=["a"], annotation_ids=["note"]) == {
+            "success": False, "error": "access_denied"
+        }
+    assert run(node_ids=["missing", "group-old"])["document"]["nodes"] == []
+
+
+@pytest.mark.parametrize("alias", ["target_id", "targetId", "node_id", "nodeId"])
+@pytest.mark.parametrize("field", ["anchor", "attachment"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_annotation_link_aliases(capture, alias, field, nested):
+    run, _, _, session = capture
+    annotation = session.state["annotations"][0]
+    annotation.pop("attachment")
+    payload = annotation.setdefault("content", {}) if nested else annotation
+    payload[field] = {alias: "a"}
+    if field == "attachment":
+        payload[field]["target_id"] = "a"
+    doc = run(node_ids=["a"], annotation_ids=["note"])["document"]
+    captured = doc["annotation_document"]["annotations"][0]
+    payload = captured["content"] if nested else captured
+    assert payload[field][alias] == doc["nodes"][0]["key"]
 
 
 def test_staged_source_refused(capture):

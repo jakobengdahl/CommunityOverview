@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
 from backend.config.node_shapes import resolve_shape
-from backend.core.session_annotations import annotation_link_fields
+from backend.core.session_annotations import ATTACHMENT_ID_KEYS, annotation_link_fields
 from backend.core.session_manager import (
     CaptureRefused,
     LayoutBusy,
@@ -56,45 +56,63 @@ def _annotations(source, selected, node_keys):
     # Ask the same resolver as session save which links address graph nodes.
     linked = []
     for annotation in annotations:
-        linked.extend(
-            v
-            for _, _, v, kind in _annotation_links(annotation, all_ids)
-            if kind == "node" and not v.startswith(_LEGACY_GROUP_PREFIX)
-        )
-        resolved = {
-            (id(h), k): (v, kind)
-            for h, k, v, kind in _annotation_links(annotation, all_ids)
-        }
-        removals = []
-        for holder, key, _ in annotation_link_fields(annotation):
-            value = _link_id(
-                holder[key] if isinstance(holder, list) else holder.get(key)
-            )
-            if value is None:
+        for payload in (annotation, annotation.get("content")):
+            if not isinstance(payload, dict):
                 continue
-            link = resolved.get((id(holder), key))
-            target = (
-                node_keys.get(value)
-                if link and link[1] == "node"
-                else value
-                if link and value in ids
-                else None
+            # Content carries payload fields while the annotation carries its type.
+            content = annotation.get("content")
+            target_kind = annotation.get("target_kind")
+            if isinstance(content, dict):
+                target_kind = content.get("target_kind", target_kind)
+            resolved_payload = {
+                **payload,
+                "type": annotation.get("type"),
+                "kind": annotation.get("kind"),
+                "target_kind": target_kind,
+            }
+            linked.extend(
+                v
+                for _, _, v, kind in _annotation_links(resolved_payload, all_ids)
+                if kind == "node" and not v.startswith(_LEGACY_GROUP_PREFIX)
             )
-            if target is None:
-                removals.append((holder, key))
-            else:
-                holder[key] = target
-        for holder, key in reversed(removals):
-            if isinstance(holder, list):
-                del holder[key]
-            else:
-                holder.pop(key, None)
+            resolved = {
+                (id(h), k): (v, kind)
+                for h, k, v, kind in _annotation_links(resolved_payload, all_ids)
+            }
+            removals = []
+            for holder, key, _ in annotation_link_fields(resolved_payload):
+                value = _link_id(
+                    holder[key] if isinstance(holder, list) else holder.get(key)
+                )
+                if value is None:
+                    continue
+                link = resolved.get((id(holder), key))
+                if holder is resolved_payload:
+                    holder = payload
+                target = (
+                    node_keys.get(value)
+                    if link and link[1] == "node"
+                    else value
+                    if link and value in ids
+                    else None
+                )
+                if target is None:
+                    removals.append((holder, key))
+                else:
+                    holder[key] = target
+            for holder, key in reversed(removals):
+                if isinstance(holder, list):
+                    del holder[key]
+                else:
+                    holder.pop(key, None)
     for annotation in annotations:
         for payload in (annotation, annotation.get("content")):
             if isinstance(payload, dict):
                 for field in ("attachment", "anchor"):
                     value = payload.get(field)
-                    if isinstance(value, dict) and not value.get("target_id"):
+                    if isinstance(value, dict) and not any(
+                        value.get(key) for key in ATTACHMENT_ID_KEYS
+                    ):
                         payload.pop(field)
     return annotations, linked
 
@@ -153,7 +171,7 @@ def capture_template(
             requested = (
                 membership
                 if whole
-                else [i for i in (node_ids or []) if i in membership]
+                else (node_ids or [])
             )
             requested = list(
                 dict.fromkeys(
