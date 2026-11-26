@@ -65,7 +65,7 @@ The application is divided into four main areas:
 Click a node type icon in the left toolbar to open the creation dialog.
 
 ![Toolbar with node type icons](images/toolbar.png)
-*The left toolbar. Each icon represents a node type defined by the active profile. Domain types are listed first; system types (Agent, EventSubscription, Skill, SavedView, etc.) appear below a divider.*
+*The left toolbar. Each icon represents a node type defined by the active profile. Domain types are listed first; system types (Agent, EventSubscription, Skill, etc.) appear below a divider.*
 
 Fill in the node fields and click **Save**. The node appears in the canvas immediately.
 
@@ -599,11 +599,9 @@ match more than one session, so choose by ID. Collection assistants can use the
 session list when that tool is allowed. API clients can use `session_url` from
 session responses. If the public address is not configured, a link is unavailable.
 
-Older SavedView nodes remain available: double-click one in the graph, or search for
-it and click "Restore view" in its detail panel. Existing `?view=` links still
-open the legacy view by name; they are not converted to sessions. To return to a
-legacy view, use its retained `?view=` link or the graph reader. Legacy views
-were not imported into sessions, and changes to sessions do not update them.
+SavedView and VisualizationView nodes remain in the graph as data, but cannot be
+opened as views and `?view=` links no longer open them. They are not converted
+to sessions. See the [removal note](SESSION_SAVEDVIEW_COMPAT_CONTRACT.md#release-note-savedview-removal) for backup and recovery.
 
 ### Saving templates
 
@@ -787,7 +785,7 @@ Write operations go through the same validation as the UI — the node type must
 in the current profile's schema.
 
 You can also ask the assistant to create an Agent, EventSubscription, Skill,
-ActiveKnowledgeCollection, SavedView, or CollectionResponse. Dedicated tools
+ActiveKnowledgeCollection, or CollectionResponse. Dedicated tools
 validate their configuration and create the required links. An Agent is enabled
 by default and comes with its own subscription. A collection response names its
 collection by ID. These tools are available in ordinary graph chat; collection
@@ -1038,20 +1036,11 @@ by action (`action`, for example `annotation_deleted`), including prior annotati
 data and inverse operations when recorded. Reading the log does not undo actions.
 Node additions and removals are recorded, without undo, whenever the server
 applies them: MCP add/remove tools and every visualization push to a stored
-shared session — additive results, saved-view loads and replacements
-(`get_saved_view`), clears, and session auto-add agent additions. The server
+shared session — additive results, clears, and session auto-add agent additions.
+The server
 applies the push's membership change itself and every browser only renders it,
 so each actual change produces one record however many browsers are open; a
-load that replaces existing nodes, or a clear, is one record. The layout that
-comes with the change is applied with it, as one change: a loaded view's
-positions, hidden nodes, groups and annotations, and the place the server gives
-each node that arrives without a saved position. Every open browser shows that
-same layout, and none saves it back as its own change; only what you move,
-hide, group or annotate yourself is saved from your browser. If any part of a
-view cannot be applied, none of it is. Reloading a view brings back its
-annotations even if they were deleted since. A view loaded by an agent from an
-older saved view without the current annotation format leaves the session's
-annotations as they are. Repeated
+clear is one record. Every open browser shows the resulting state. Repeated
 additions or removals that change nothing produce no record. Nodes you add,
 remove or clear on your own canvas are sent to the server as the same kind of
 change and recorded as yours; your canvas shows the change once the server has
@@ -1276,8 +1265,7 @@ again, start a new session. Where the installation stages by default, the
 session the app opens with, and the one it moves you to after a session is
 deleted, is a staged session too (unless you are not allowed to stage; then
 it is direct, and says so). Opening a link to a session always joins that
-session as it is; any other link that opens something (a saved view, a node,
-a collection form) opens in a direct session.
+session as it is; any other link that opens something (a node or a collection form) opens in a direct session.
 
 **Seeing what is staged.** A staged session shows a dashed amber **Staged
 session** bar at the bottom of the canvas (at the top on a phone) with the
@@ -1433,13 +1421,11 @@ interface.
 | `create_event_subscription` | Create a subscription for a public HTTP(S) webhook |
 | `create_skill` | Create reusable instructions with content and when-to-use guidance |
 | `create_active_knowledge_collection` | Create a collection with a unique kiosk short name |
-| `create_saved_view` | Save explicit node IDs and positions without needing a browser |
 | `create_collection_response` | Store answers linked to a collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
 | `get_graph_stats` | Get summary statistics about the graph |
 | `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
-| `save_view` | Request browser capture; confirmation in the browser is required |
 | `save_session_view` | Save a session at a specified revision and return its link |
 | `get_capabilities` | Discover what the server supports |
 | `connect_to_visualization_session` | Check that a session ID resolves, and whether a client is connected to it |
@@ -1449,9 +1435,7 @@ interface.
 Each dedicated create tool takes a `config` object. For example,
 `create_skill(config={"name": "Review", "content": "Check consistency.",
 "when_to_use": "When reviewing graph changes"})` creates a usable Skill.
-For a headless saved view, pass `config={"name": "Overview", "node_ids": ["node-id"],
-"positions": {"node-id": {"x": 0, "y": 0}}}` to `create_saved_view`; omitted
-positions receive a default layout. These writes use the UI's create authorization
+These writes use the UI's create authorization
 path and respect a bound session's staged write mode. Their schemas describe the
 required fields; invalid configurations are rejected before any nodes are added.
 

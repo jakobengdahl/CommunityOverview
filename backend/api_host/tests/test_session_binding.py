@@ -1212,13 +1212,8 @@ def test_session_resolve_asks_the_hook_as_the_requesting_caller(client):
 
 
 def test_composing_tools_take_the_session_argument(client):
-    sid = _staged(client)
-    _add(client, {SESSION_ID_HEADER: sid}, node_id="staged-only")
     tools = client.app.state.tools_map
-    listed = tools["list_saved_views"](visualization_session_id=sid)
-    assert listed["success"] is True
-    unknown = tools["list_saved_views"](visualization_session_id=UNKNOWN)
-    assert unknown["error"] == "session_not_found"
+    assert "list_saved_views" not in tools
 
 
 def test_a_typed_interface_path_takes_the_header_only_on_get():

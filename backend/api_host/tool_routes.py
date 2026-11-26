@@ -36,8 +36,6 @@ SAFE_TOOLS = {
     "list_relationship_types",
     "get_schema",
     "get_presentation",
-    "list_saved_views",
-    "get_saved_view",
     # Visualization session tools — read-only, safe without auth
     "connect_to_visualization_session",
     "get_visualization_session_state",
@@ -70,6 +68,11 @@ def register_tool_routes(
             if not tool_name:
                 return JSONResponse({"error": "No tool_name provided"}, status_code=400)
 
+            if tool_name not in tools_map:
+                return JSONResponse(
+                    {"error": f"Tool {tool_name} not found"}, status_code=404
+                )
+
             # Security Check: Enforce authentication for unsafe tools.
             # auth_active is the canonical condition for whether the auth
             # middleware is active. Use it here so bearer-only deployments are
@@ -82,11 +85,6 @@ def register_tool_routes(
                         },
                         status_code=403,
                     )
-
-            if tool_name not in tools_map:
-                return JSONResponse(
-                    {"error": f"Tool {tool_name} not found"}, status_code=404
-                )
 
             func = tools_map[tool_name]
             with use_request_authorization(headers=request.headers):

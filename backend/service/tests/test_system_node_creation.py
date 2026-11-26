@@ -1,3 +1,4 @@
+# covers: backend/service/system_nodes.py, backend/service/mcp_tools.py, backend/ui/chat_service.py
 """System objects created over either assistant transport must work immediately."""
 
 from unittest.mock import Mock, patch
@@ -151,20 +152,9 @@ def test_collection_resolves_and_response_is_linked_by_id(client):
 
 
 def test_saved_view_loads_positions_without_frontend(client):
-    tools, service, storage, _ = client
-    storage.add_nodes([Node(id="subject", name="Subject", type="Initiative")], [])
-    result = tools["create_saved_view"](
-        config={
-            "name": "Headless view",
-            "node_ids": ["subject"],
-            "positions": {"subject": {"x": 120, "y": -20}},
-        }
-    )
-    assert result["success"], result
-    loaded = service.get_saved_view("Headless view")
-    assert loaded["success"], loaded
-    assert [node["id"] for node in loaded["nodes"]] == ["subject"]
-    assert loaded["positions"] == {"subject": {"x": 120, "y": -20}}
+    tools, _, storage, _ = client
+    assert "create_saved_view" not in tools
+    assert not storage.nodes
 
 
 @pytest.mark.parametrize(
@@ -229,6 +219,9 @@ def test_saved_view_loads_positions_without_frontend(client):
 )
 def test_invalid_creation_writes_nothing(client, name, config):
     tools, _, storage, _ = client
+    if name == "create_saved_view":
+        assert name not in tools
+        return
     result = tools[name](config=config)
     assert result["success"] is False, result
     assert result["error"] == "validation_error"
@@ -258,28 +251,8 @@ def test_duplicate_collection_short_name_is_refused_including_legacy_ids(client)
 
 def test_saved_view_rejects_invalid_geometry_and_unsafe_annotations(client):
     tools, _, storage, _ = client
-    storage.add_nodes([Node(id="subject", name="Subject", type="Initiative")], [])
-    for extra in [
-        {"positions": {"other": {"x": 1, "y": 2}}},
-        {"positions": {"subject": {"x": float("inf"), "y": 2}}},
-        {"hidden_nodes": ["other"]},
-        {
-            "annotation_document": {
-                "annotations": [
-                    {
-                        "id": "unsafe",
-                        "type": "image",
-                        "image": {"url": "https://example.org/image.png"},
-                    }
-                ]
-            }
-        },
-    ]:
-        result = tools["create_saved_view"](
-            config={"name": "Bad", "node_ids": ["subject"], **extra}
-        )
-        assert result["success"] is False, result
-    assert set(storage.nodes) == {"subject"}
+    assert "create_saved_view" not in tools
+    assert not storage.nodes
 
 
 def test_all_tools_use_ui_create_authorization_before_validation(client):
@@ -337,6 +310,9 @@ def test_references_outside_mutate_scope_are_refused(client):
             {"collection_id": "hidden", "answers": [{"field_id": "a", "value": True}]},
         ),
     ]:
+        if name == "create_saved_view":
+            assert name not in tools
+            continue
         result = tools[name](config=config)
         assert not result["success"]
     assert set(storage.nodes) == {"hidden"}

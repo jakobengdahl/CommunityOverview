@@ -206,17 +206,14 @@ def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
     """All three tools taking the parameter report it, not just ``search_graph``."""
     tools, _registry, _manager = wired
     session_id = _new_session(tools)
+    assert "get_saved_view" not in tools
 
-    tools["save_view"](name="A view")
     calls = {
         "search_graph": lambda: tools["search_graph"](
             query="Alpha", visualization_session_id=session_id
         ),
         "get_related_nodes": lambda: tools["get_related_nodes"](
             node_id="alpha", visualization_session_id=session_id
-        ),
-        "get_saved_view": lambda: tools["get_saved_view"](
-            name="A view", visualization_session_id=session_id
         ),
     }
     for tool_name, call in calls.items():
@@ -234,7 +231,6 @@ def test_a_caller_without_mutate_reads_but_never_pushes_into_the_session(
     tools, _registry, manager = wired
     session_id = _new_session(tools)
     tools["add_nodes_to_session"](session_id=session_id, node_ids=["beta"])
-    tools["save_view"](name="A view")
     before = manager.get_session(session_id)
     refs, seq = list(before.state["node_refs"]), before.seq
     subscription, _member = manager.connect(session_id, "client-1", "Tester")
@@ -246,9 +242,6 @@ def test_a_caller_without_mutate_reads_but_never_pushes_into_the_session(
             ),
             "get_related_nodes": lambda: tools["get_related_nodes"](
                 node_id="alpha", visualization_session_id=session_id
-            ),
-            "get_saved_view": lambda: tools["get_saved_view"](
-                name="A view", visualization_session_id=session_id
             ),
         }.items():
             result = call()
