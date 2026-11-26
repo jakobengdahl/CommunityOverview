@@ -3938,6 +3938,8 @@ function App() {
           const targetId = sessionId;
           const sync = ensureSyncConnected(targetId);
           await sync?.whenReady();
+          if (sessionIdRef.current !== targetId || syncRef.current !== sync)
+            throw new Error('Session is no longer available');
           await flushBeforeCapture();
           await new Promise((resolve) => requestSessionSnapshot(resolve));
           await sync?.flushPending();

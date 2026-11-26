@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../services/api';
 import { useI18n } from '../i18n';
 import useGraphStore from '../store/graphStore';
@@ -113,7 +113,7 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
  * node types (`nodeTypes`: `{ id, label }`), nodes and readable templates once
  * the debounced searches settle, never commands. A superseded search's result is discarded.
  */
-export function useCommandSuggestions(input, context, nodeTypes, activeKey = null) {
+export function useCommandSuggestions(input, context, nodeTypes) {
   const { t } = useI18n();
   const registry = useCommandRegistry();
   const registryVersion = useCommandRegistryVersion(registry);
@@ -121,7 +121,11 @@ export function useCommandSuggestions(input, context, nodeTypes, activeKey = nul
   const { mode, query } = parseCommandInput(input);
   const enabled = registry && context.view === 'interactive' && mode !== 'idle';
   // A fresh identity also prevents a previous visit to the same query from resurfacing.
-  const request = useMemo(() => (enabled ? {} : null), [enabled, mode, query, federationDepth]); // eslint-disable-line react-hooks/exhaustive-deps
+  const templateCache = useRef(NO_TEMPLATES);
+  const request = useMemo(
+    () => (enabled ? { templates: templateCache.current } : null),
+    [enabled, input, mode, query, federationDepth]
+  );
   const [search, setSearch] = useState({
     request: null,
     nodes: [],
@@ -132,19 +136,29 @@ export function useCommandSuggestions(input, context, nodeTypes, activeKey = nul
   useEffect(() => {
     if (!request) return undefined;
     let cancelled = false;
+    let displayed = mode === 'command';
     const timer = setTimeout(
       () => {
         api.listTemplates().then(
-          (result) =>
-            !cancelled && setTemplateSearch({ request, templates: result.templates || [] }),
-          () => !cancelled && setTemplateSearch({ request, templates: [] })
+          (result) => {
+            if (cancelled) return;
+            templateCache.current = result.templates || [];
+            if (!displayed) setTemplateSearch({ request, templates: templateCache.current });
+          },
+          () => {
+            if (cancelled) return;
+            templateCache.current = NO_TEMPLATES;
+            if (!displayed) setTemplateSearch({ request, templates: NO_TEMPLATES });
+          }
         );
         if (mode === 'plain') {
           searchVisibleNodes(query, { federationDepth }).then(
             (nodes) => {
+              displayed = true;
               if (!cancelled) setSearch({ request, nodes, failed: false });
             },
             () => {
+              displayed = true;
               if (!cancelled) setSearch({ request, nodes: [], failed: true });
             }
           );
@@ -158,7 +172,10 @@ export function useCommandSuggestions(input, context, nodeTypes, activeKey = nul
     };
   }, [request, mode, query, federationDepth]);
 
-  const templates = templateSearch.request === request ? templateSearch.templates : NO_TEMPLATES;
+  const templates =
+    templateSearch.request === request
+      ? templateSearch.templates
+      : request?.templates || NO_TEMPLATES;
   useEffect(() => {
     if (!registry || mode !== 'command' || !request) return undefined;
     const cleanups = templates.map((template) =>
@@ -216,14 +233,7 @@ export function useCommandSuggestions(input, context, nodeTypes, activeKey = nul
     template,
   }));
   const status = search.failed ? 'error' : 'ready';
-  let items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
-  // A late template response must not evict the highlighted existing result.
-  if (activeKey && !items.some((item) => `${item.kind}:${item.id}` === activeKey)) {
-    const existingItems = rankSuggestions([...nodeItems, ...typeItems], query, locale);
-    if (existingItems.some((item) => `${item.kind}:${item.id}` === activeKey)) {
-      items = existingItems;
-    }
-  }
+  const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
   return {
     mode,
     items,

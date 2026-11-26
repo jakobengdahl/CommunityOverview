@@ -159,7 +159,7 @@ describe('useCommandSuggestions', () => {
     expect(kiosk.result.current.items).toEqual([]);
   });
 
-  it('does not block nodes on templates, refreshes access on revisit, and registers insert commands', async () => {
+  it('caches late templates until input changes and ranks them normally', async () => {
     let resolveTemplates;
     api.searchGraph.mockResolvedValue({
       nodes: [
@@ -196,6 +196,14 @@ describe('useCommandSuggestions', () => {
     expect(ids(result.current.items)).toEqual([
       'node:n1',
       'nodeType:Goal',
+      ...Array.from({ length: 6 }, (_, i) => `node:weak${i}`),
+    ]);
+    api.listTemplates.mockImplementationOnce(() => new Promise(() => {}));
+    rerender({ input: 'goal ', activeKey: null });
+    await settle(NODE_QUERY_DEBOUNCE_MS);
+    expect(ids(result.current.items)).toEqual([
+      'node:n1',
+      'nodeType:Goal',
       'template:t1',
       ...Array.from({ length: 5 }, (_, i) => `node:weak${i}`),
     ]);
@@ -206,8 +214,9 @@ describe('useCommandSuggestions', () => {
     expect(ids(result.current.items)).not.toContain('template:t1');
 
     api.listTemplates.mockResolvedValueOnce({ templates: [{ template_id: 't1', name: 'Goal' }] });
-    rerender({ input: '/mall' });
+    rerender({ input: '/ma' });
     await settle(1);
+    rerender({ input: '/mall' });
     expect(ids(result.current.items)).toEqual(['command:template:insert:t1']);
     await act(async () => result.current.items[0].command.execute(context));
     expect(insert).toHaveBeenCalledWith(context, { template_id: 't1', name: 'Goal' });
@@ -219,8 +228,8 @@ describe('useCommandSuggestions', () => {
       'command:goal-command',
     ]);
     rerender({ input: '/template' });
-    expect(result.current.items).toEqual([]);
+    expect(ids(result.current.items)).toEqual(['command:template:insert:t1']);
     await settle(1);
-    expect(result.current.items).toEqual([]);
+    expect(ids(result.current.items)).toEqual(['command:template:insert:t1']);
   });
 });

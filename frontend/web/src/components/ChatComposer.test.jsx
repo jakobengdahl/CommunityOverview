@@ -120,7 +120,7 @@ describe('ChatComposer', () => {
     api.listTemplates.mockImplementationOnce(
       () => new Promise((resolve) => (resolveTemplates = resolve))
     );
-    const nodes = Array.from({ length: 7 }, (_, i) => ({
+    const nodes = Array.from({ length: 2 }, (_, i) => ({
       id: `n${i}`,
       name: `Goal ${i}`,
       type: 'Goal',
@@ -130,15 +130,24 @@ describe('ChatComposer', () => {
     type(input, '@goal');
     await settle();
     const original = options().map((option) => option.textContent);
-    expect(original).toHaveLength(8);
+    expect(original).toHaveLength(3);
     key(input, 'ArrowUp');
     const highlightedId = input.getAttribute('aria-activedescendant');
 
     await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
     expect(options().map((option) => option.textContent)).toEqual(original);
     expect(input).toHaveAttribute('aria-activedescendant', highlightedId);
+    api.listTemplates.mockImplementationOnce(() => new Promise(() => {}));
+    type(input, '@goal ');
+    await settle();
+    expect(options().map((option) => option.textContent)).toEqual([
+      'Goalcommand_box.kind_node_type',
+      'Goalcommand_box.kind_template',
+      ...nodes.map((node) => `${node.name}command_box.kind_node`),
+    ]);
+    key(input, 'ArrowUp');
     key(input, 'Enter');
-    expect(input).toHaveValue(`${formatNodeReference(nodes[6])} `);
+    expect(input).toHaveValue(`${formatNodeReference(nodes[1])} `);
     expect(onSend).not.toHaveBeenCalled();
   });
 
