@@ -8,6 +8,7 @@ import { useCommandRegistry, useCommandRegistryVersion } from './commandRegistry
 export const MAX_SUGGESTIONS = 8;
 export const NODE_QUERY_DEBOUNCE_MS = 150;
 const MIN_PLAIN_QUERY_CHARS = 2;
+const NO_TEMPLATES = [];
 
 const TIER_EXACT = 0;
 const TIER_PREFIX = 1;
@@ -15,8 +16,8 @@ const TIER_WORD_PREFIX = 2;
 const TIER_SUBSTRING = 3;
 const NO_MATCH = -1;
 
-// Nodes before node types within a tier. Commands are ranked in their own set.
-const KIND_ORDER = { node: 0, nodeType: 1, command: 0 };
+// Nodes, node types, then templates within a tier. Commands have their own set.
+const KIND_ORDER = { node: 0, nodeType: 1, template: 2, command: 0 };
 
 /**
  * Splits input into the command box's modes: `command` when the first
@@ -64,10 +65,10 @@ export function matchTier(label, aliases, query, locale) {
 
 /**
  * Ranks `{ kind, id, label, aliases? }` items for `query`: match tier, then
- * nodes before node types, then locale-aware label, then id. An empty query
+ * nodes before node types before templates, then locale-aware label, then id. An empty query
  * keeps every item in label/id order (bare `/`). No fuzzy match, no recency.
  */
-export function rankSuggestions(items, query, locale) {
+export function rankSuggestions(items, query, locale, limit = MAX_SUGGESTIONS) {
   const collator = new Intl.Collator(locale);
   return items
     .map((item) => ({
@@ -82,7 +83,7 @@ export function rankSuggestions(items, query, locale) {
         collator.compare(a.item.label, b.item.label) ||
         (a.item.id < b.item.id ? -1 : a.item.id > b.item.id ? 1 : 0)
     )
-    .slice(0, MAX_SUGGESTIONS)
+    .slice(0, limit)
     .map(({ item }) => item);
 }
 
@@ -92,7 +93,7 @@ export function commandSuggestion(command, t) {
     kind: 'command',
     id: command.id,
     label: t(command.labelKey, command.labelParams),
-    aliases: (command.aliasKeys || []).map((key) => t(key)),
+    aliases: [...(command.aliasKeys || []).map((key) => t(key)), ...(command.aliases || [])],
     command,
   };
 }
@@ -109,51 +110,127 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
 /**
  * Suggestions for the command box's current `input`. Slash mode offers the
  * registry's available commands only, filtered immediately; plain mode offers
- * node types (`nodeTypes`: `{ id, label }`) and nodes once the debounced graph
- * search settles, never commands. A superseded search's result is discarded.
+ * node types (`nodeTypes`: `{ id, label }`), nodes and readable templates once
+ * the debounced searches settle, never commands. A superseded search's result is discarded.
  */
-export function useCommandSuggestions(input, context, nodeTypes) {
+export function useCommandSuggestions(input, context, nodeTypes, active = true, visible = true) {
   const { t } = useI18n();
   const registry = useCommandRegistry();
   const registryVersion = useCommandRegistryVersion(registry);
   const federationDepth = useGraphStore((s) => s.federationDepth);
   const { mode, query } = parseCommandInput(input);
-  const searchQuery = registry && mode === 'plain' ? query : null;
-  const [search, setSearch] = useState({ query: null, scope: null, nodes: [], failed: false });
+  const enabled = registry && context.view === 'interactive' && mode !== 'idle' && active;
+  // A fresh identity also prevents a previous visit to the same query from resurfacing.
+  const request = useMemo(
+    () => (enabled ? {} : null),
+    [enabled, input, mode, query, federationDepth]
+  );
+  const templateRequest = useMemo(
+    () => (request ? { displayed: false } : null),
+    [request, visible]
+  );
+  const [search, setSearch] = useState({
+    request: null,
+    nodes: [],
+    failed: false,
+  });
+  const [templateSearch, setTemplateSearch] = useState({ request: null, templates: [] });
 
   useEffect(() => {
-    if (searchQuery === null) return undefined;
+    if (!templateRequest) return undefined;
     let cancelled = false;
-    const timer = setTimeout(async () => {
-      let nodes = [];
-      let failed = false;
-      try {
-        nodes = await searchVisibleNodes(searchQuery, { federationDepth });
-      } catch {
-        failed = true;
-      }
-      if (!cancelled) setSearch({ query: searchQuery, scope: federationDepth, nodes, failed });
+    const timer = setTimeout(
+      () => {
+        api.listTemplates().then(
+          (result) => {
+            if (cancelled) return;
+            if (!templateRequest.displayed)
+              setTemplateSearch({
+                request: templateRequest,
+                templates: result.templates || NO_TEMPLATES,
+              });
+          },
+          () => {
+            if (cancelled) return;
+            if (!templateRequest.displayed)
+              setTemplateSearch({ request: templateRequest, templates: NO_TEMPLATES });
+          }
+        );
+      },
+      mode === 'plain' ? NODE_QUERY_DEBOUNCE_MS : 0
+    );
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [templateRequest, mode]);
+
+  useEffect(() => {
+    if (!request || mode !== 'plain') return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchVisibleNodes(query, { federationDepth }).then(
+        (nodes) => {
+          if (!cancelled) setSearch({ request, nodes, failed: false });
+        },
+        () => {
+          if (!cancelled) setSearch({ request, nodes: [], failed: true });
+        }
+      );
     }, NODE_QUERY_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [searchQuery, federationDepth]);
+  }, [request, mode, query, federationDepth]);
+
+  const templates =
+    templateSearch.request === templateRequest ? templateSearch.templates : NO_TEMPLATES;
+  useEffect(() => {
+    if (!registry || mode !== 'command' || !request) return undefined;
+    const cleanups = templates.map((template) =>
+      registry.register({
+        id: `template:insert:${template.template_id}`,
+        labelKey: 'template.insert_command',
+        labelParams: { name: template.name },
+        aliases: ['template', 'mall', template.name],
+        isAvailable: (ctx) => ctx.view === 'interactive',
+        execute: (ctx) => {
+          const insert = registry.get('template:insert');
+          if (!insert) throw new Error('Template insertion unavailable');
+          return insert.execute(ctx, template);
+        },
+      })
+    );
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [registry, mode, request, templates]);
 
   const { locale } = context;
   const commandItems = useMemo(() => {
     if (!registry || mode !== 'command') return [];
-    const items = registry.list(context).map((command) => commandSuggestion(command, t));
-    return rankSuggestions(items, query, locale);
+    const items = registry
+      .list(context)
+      .filter(
+        (command) =>
+          !command.id.startsWith('template:insert:') ||
+          templates.some((template) => command.id === `template:insert:${template.template_id}`)
+      )
+      .map((command) => commandSuggestion(command, t));
+    const listAllTemplates = templates.length && ['mall', 'template'].includes(query.toLowerCase());
+    const limit = listAllTemplates ? Infinity : MAX_SUGGESTIONS;
+    return rankSuggestions(items, query, locale, limit);
     // registryVersion: a newly registered command must show without an edit.
-  }, [registry, registryVersion, mode, query, context, locale, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [registry, registryVersion, mode, query, context, locale, t, templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!registry || mode === 'idle') return { mode, items: [], status: 'idle' };
-  if (mode === 'command') return { mode, items: commandItems, status: 'ready' };
+  if (!request) return { mode, items: [], status: 'idle' };
+  if (mode === 'command') {
+    if (visible && commandItems.length) templateRequest.displayed = true;
+    return { mode, items: commandItems, status: 'ready' };
+  }
 
   // Node types wait for the same debounced search as nodes, so the list
   // appears once and never reorders when the nodes arrive.
-  const current = search.query === query && search.scope === federationDepth;
+  const current = search.request === request;
   if (!current) return { mode, items: [], status: 'loading' };
   const typeItems = (nodeTypes || []).map((type) => ({ kind: 'nodeType', ...type }));
   const nodeItems = search.nodes.map((node) => ({
@@ -162,6 +239,18 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     label: node.name,
     node,
   }));
+  const templateItems = templates.map((template) => ({
+    kind: 'template',
+    id: template.template_id,
+    label: template.name,
+    template,
+  }));
   const status = search.failed ? 'error' : 'ready';
-  return { mode, items: rankSuggestions([...nodeItems, ...typeItems], query, locale), status };
+  const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
+  if (visible && items.length) templateRequest.displayed = true;
+  return {
+    mode,
+    items,
+    status,
+  };
 }

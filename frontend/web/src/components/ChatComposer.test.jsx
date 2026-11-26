@@ -7,7 +7,7 @@ import { NODE_QUERY_DEBOUNCE_MS } from '../commands/commandSuggestions';
 import ChatComposer, { formatNodeReference } from './ChatComposer';
 
 const scope = vi.hoisted(() => ({ language: 'en', federationDepth: 1 }));
-vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
+vi.mock('../services/api', () => ({ searchGraph: vi.fn(), listTemplates: vi.fn() }));
 vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key, language: scope.language }) }));
 vi.mock('../store/graphStore', () => ({
   default: (selector) => selector({ federationDepth: scope.federationDepth, schema: null }),
@@ -63,6 +63,7 @@ describe('ChatComposer', () => {
     ['alpha', 'beta', 'gamma'].forEach((id) => registry.register(command(id)));
     onSend = vi.fn();
     api.searchGraph.mockReset().mockResolvedValue({ nodes: [goalNode] });
+    api.listTemplates.mockReset().mockResolvedValue({ templates: [] });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -112,6 +113,42 @@ describe('ChatComposer', () => {
       'betacommand_box.kind_command',
       'gammacommand_box.kind_command',
     ]);
+  });
+
+  it('keeps the highlighted item when a template response arrives late', async () => {
+    let resolveTemplates;
+    api.listTemplates.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveTemplates = resolve))
+    );
+    const nodes = Array.from({ length: 2 }, (_, i) => ({
+      id: `n${i}`,
+      name: `Goal ${i}`,
+      type: 'Goal',
+    }));
+    api.searchGraph.mockResolvedValue({ nodes });
+    const input = renderComposer();
+    type(input, '@goal');
+    await settle();
+    const original = options().map((option) => option.textContent);
+    expect(original).toHaveLength(3);
+    key(input, 'ArrowUp');
+    const highlightedId = input.getAttribute('aria-activedescendant');
+
+    await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
+    expect(options().map((option) => option.textContent)).toEqual(original);
+    expect(input).toHaveAttribute('aria-activedescendant', highlightedId);
+    api.listTemplates.mockResolvedValueOnce({ templates: [{ template_id: 't1', name: 'Goal' }] });
+    type(input, '@goal ');
+    await settle();
+    expect(options().map((option) => option.textContent)).toEqual([
+      'Goalcommand_box.kind_node_type',
+      'Goalcommand_box.kind_template',
+      ...nodes.map((node) => `${node.name}command_box.kind_node`),
+    ]);
+    key(input, 'ArrowUp');
+    key(input, 'Enter');
+    expect(input).toHaveValue(`${formatNodeReference(nodes[1])} `);
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('moves with arrows without wrapping, accepts the first item on Tab and keeps native keys otherwise', async () => {
@@ -235,11 +272,12 @@ describe('ChatComposer', () => {
 
     // An @ inside an inserted reference never becomes a trigger of its own.
     api.searchGraph.mockResolvedValueOnce({
-      nodes: [{ id: 'n2', name: 'Team @alpha', type: 'Goal' }],
+      nodes: [{ id: 'n2', name: 'Team\\Ops @alpha', type: 'Goal' }],
     });
     type(input, '@team');
     await settle();
     key(input, 'Tab');
+    expect(input).toHaveValue('[Team\\Ops alpha](node:n2) ');
     type(input, `${input.value}x`);
     await settle();
     expect(api.searchGraph).toHaveBeenLastCalledWith('team', expect.anything());
@@ -249,6 +287,18 @@ describe('ChatComposer', () => {
     await settle();
     key(input, 'Tab');
     expect(input).toHaveValue('Goal ');
+
+    for (const [name, label] of [
+      ['Plan\\', 'Plan'],
+      ['Plan\n\nNext', 'Plan Next'],
+      ['Plan\r\n\r\nNext', 'Plan Next'],
+    ]) {
+      api.listTemplates.mockResolvedValue({ templates: [{ template_id: '1234-5678', name }] });
+      type(input, 'use @plan');
+      await settle();
+      key(input, 'Tab');
+      expect(input).toHaveValue(`use [${label}](template:1234-5678) `);
+    }
     expect(input).toHaveFocus();
     expect(onSend).not.toHaveBeenCalled();
   });
