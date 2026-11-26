@@ -128,12 +128,38 @@ def test_missing_ref_denied_only_under_narrowing(capture, narrowed):
         assert [n["source_node_id"] for n in result["document"]["nodes"]] == ["a"]
 
 
-def test_bounds_use_geometry_when_position_is_none(capture):
+@pytest.mark.parametrize(
+    "geometry, bounds",
+    [
+        ({"x": 9, "y": 8}, {"x": 0, "y": 0, "width": 9, "height": 8}),
+        ({"w": 5, "h": 6}, {"x": 0, "y": 0, "width": 3, "height": 4}),
+    ],
+)
+def test_bounds_use_geometry_when_position_is_none(capture, geometry, bounds):
+    """Geometry stands in for a missing position; an absent coordinate is 0."""
     run, _, _, session = capture
     session.state["annotations"] = [
-        {"id": "box", "type": "label", "position": None, "geometry": {"x": 9, "y": 8}}
+        {"id": "box", "type": "label", "position": None, "geometry": geometry}
     ]
-    assert run()["document"]["bounds"] == {"x": 0, "y": 0, "width": 9, "height": 8}
+    assert run()["document"]["bounds"] == bounds
+
+
+@pytest.mark.parametrize("field", ["attachment", "member_node_ids"])
+def test_annotation_id_in_node_only_field_is_dropped(capture, field):
+    """An annotation id where the template allows only node keys is dropped."""
+    run, _, _, session = capture
+    link = (
+        {"target_id": "note", "target_type": "node"}
+        if field == "attachment"
+        else ["note", "a"]
+    )
+    session.state["annotations"].append({"id": "box", "type": "group", field: link})
+    doc = run()["document"]
+    box = doc["annotation_document"]["annotations"][1]
+    if field == "attachment":
+        assert "attachment" not in box
+    else:
+        assert box["member_node_ids"] == [doc["nodes"][0]["key"]]
 
 
 @pytest.mark.parametrize("target", ["b", "missing"])

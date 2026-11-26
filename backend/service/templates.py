@@ -126,7 +126,7 @@ def _annotations(source, selected, node_keys):
                 ):
                     containers[id(endpoint["attachment"])] = (endpoint, "attachment")
             removals = []
-            for holder, key, _ in annotation_link_fields(resolved_payload):
+            for holder, key, declared in annotation_link_fields(resolved_payload):
                 value = _link_id(
                     holder[key] if isinstance(holder, list) else holder.get(key)
                 )
@@ -135,11 +135,14 @@ def _annotations(source, selected, node_keys):
                 link = resolved.get((id(holder), key))
                 if holder is resolved_payload:
                     holder = payload
+                # The canvas resolves an id naming an annotation as one even
+                # in a node-only field; the template format cannot hold that.
+                node_only = isinstance(holder, list) or declared == "node"
                 target = (
                     node_keys.get(value)
                     if link and link[1] == "node"
                     else value
-                    if link and value in ids
+                    if link and value in ids and not node_only
                     else None
                 )
                 if target is None:
@@ -320,8 +323,10 @@ def capture_template(
                 for a in annotations
                 if isinstance(a, dict) and (a.get("position") or a.get("geometry"))
             ]
-            xs = [p["x"] for p in points]
-            ys = [p["y"] for p in points]
+            # Geometry is not validated on write; a resize-only update can
+            # store a size without a position, which the canvas reads as 0.
+            xs = [p.get("x", 0) for p in points]
+            ys = [p.get("y", 0) for p in points]
             bounds = {
                 "x": min(xs, default=0),
                 "y": min(ys, default=0),
