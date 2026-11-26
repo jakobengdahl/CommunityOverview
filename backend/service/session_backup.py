@@ -123,7 +123,10 @@ def create_backup(service, session_backend, write_modes):
                     ):
                         raise BackupRefused("unmerged staged changes")
                     state = raw.get("state")
-                    if not isinstance(state, dict) or state.keys() - _empty_state().keys():
+                    if (
+                        not isinstance(state, dict)
+                        or state.keys() - _empty_state().keys()
+                    ):
                         raise BackupRefused("invalid session state")
                     captured.append((session_id, copy.deepcopy(raw), mode))
         # Reference authorization can consult SessionStore and must not run

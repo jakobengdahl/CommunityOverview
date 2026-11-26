@@ -215,12 +215,16 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     session.state["annotations"] = [
         {"id": "local", "type": "text"},
         {
-            "id": "note", "type": "text",
+            "id": "note",
+            "type": "text",
             "attachment": {"target_type": "annotation", "target_id": "local"},
         },
     ]
     backend.save(session.to_dict())
-    assert create_backup(service, backend, WriteModes())["sessions"][0]["state"] == session.state
+    assert (
+        create_backup(service, backend, WriteModes())["sessions"][0]["state"]
+        == session.state
+    )
     for state in (
         {
             "annotations": [
