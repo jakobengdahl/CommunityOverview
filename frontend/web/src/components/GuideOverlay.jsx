@@ -3,7 +3,6 @@ import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import * as api from '../services/api';
 import { positionNewNodes } from '@community-graph/ui-graph-canvas';
-import { savedViewLayout } from '../utils/sessionAnnotations';
 import './GuideOverlay.css';
 
 const TOOLTIP_WIDTH = 340;
@@ -71,7 +70,6 @@ const ACTIONABLE_TYPES = [
   'update_node',
   'create_edge',
   'delete_edge',
-  'load_saved_view',
   'clear_visualization',
   'clear',
   'focus_node',
@@ -232,39 +230,6 @@ function GuideOverlay() {
           if (edgeId && !cancelled) {
             await api.deleteEdge(edgeId);
             if (!cancelled) useGraphStore.getState().removeEdge(edgeId);
-          }
-
-          // ── Saved view ───────────────────────────────────────────────────
-        } else if (action === 'load_saved_view') {
-          const nameOrId = currentStep.view_name || currentStep.node_id;
-          if (nameOrId && !cancelled) {
-            const result = await api.searchGraph(nameOrId, { nodeTypes: ['SavedView'], limit: 10 });
-            const viewNode = result.nodes?.find((n) => n.id === nameOrId || n.name === nameOrId);
-            if (!cancelled && viewNode) {
-              const nodeIds = viewNode.metadata?.node_ids || [];
-              if (nodeIds.length > 0) {
-                const details = await Promise.all(
-                  nodeIds.map((id) => api.getNodeDetails(id).catch(() => null))
-                );
-                const loadedNodes = details.filter((d) => d?.success).map((d) => d.node);
-                const savedEdges = viewNode.metadata?.edges || [];
-                if (!cancelled) {
-                  // A session stores the view's layout with the replace's one
-                  // record, so this browser clears and saves back nothing.
-                  const s = useGraphStore.getState();
-                  const sent = s.publishMembership(
-                    'nodes_replaced',
-                    loadedNodes.map((n) => n.id),
-                    {
-                      nodes: loadedNodes,
-                      edges: savedEdges,
-                      view: savedViewLayout(viewNode.metadata),
-                    }
-                  );
-                  if (!sent) s.clearVisualization({ keepNodes: true });
-                }
-              }
-            }
           }
 
           // ── Visualization control ─────────────────────────────────────────
