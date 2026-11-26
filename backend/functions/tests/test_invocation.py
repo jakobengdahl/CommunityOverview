@@ -609,7 +609,9 @@ def test_session_target_requires_version_four(host, version):
         service.replay_webhook("example", "existing", {"actor_id": "operator"})
     with pytest.raises(PermissionError):
         service.refuse(
-            "example", "invalid_manifest", actor_binding={"actor_id": "operator"},
+            "example",
+            "invalid_manifest",
+            actor_binding={"actor_id": "operator"},
             idempotency_key="existing",
         )
     assert invoke(service).result["error"]["code"] == "invalid_manifest"
