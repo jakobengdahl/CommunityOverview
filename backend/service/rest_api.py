@@ -138,6 +138,8 @@ class ShapeLibraryEditRequest(BaseModel):
     definition: Dict[str, Any]
     expected_revision: int
     expected_usage: int
+    expected_template_usage: int = 0
+    expected_template_usage_token: Optional[str] = None
 
 
 class SearchRequest(BaseModel):
@@ -1724,6 +1726,7 @@ def _register_session_endpoints(
                     "message": "The saved shape or its usage has changed.",
                     "revision": current["revision"] if current else None,
                     "usage": library.usage(key) if current else None,
+                    "template_usage": library.template_usage(key) if current else None,
                 },
             )
         except ValueError as exc:
@@ -1738,13 +1741,12 @@ def _register_session_endpoints(
 
     @router.get("/shape-library/{key}/usage")
     def get_shape_library_usage(key: str) -> Dict[str, Any]:
-        """How many persisted sessions, open or closed, reference the entry;
-        never which ones."""
+        """Count persisted sessions and live templates, without identifying them."""
         library = _library()
-        entry = library.snapshot()["entries"].get(key)
-        if entry is None:
+        usage = library.usage_snapshot(key)
+        if usage is None:
             raise HTTPException(status_code=404, detail="saved shape not found")
-        return {"revision": entry["revision"], "usage": library.usage(key)}
+        return usage
 
     @router.post("/shape-library", status_code=201)
     def create_shape_library_entry(
@@ -1774,6 +1776,8 @@ def _register_session_endpoints(
                 identity=identity,
                 expected_revision=request.expected_revision,
                 expected_usage=request.expected_usage,
+                expected_template_usage=request.expected_template_usage,
+                expected_template_usage_token=request.expected_template_usage_token,
             ),
         )
 
@@ -1783,6 +1787,8 @@ def _register_session_endpoints(
         http_request: Request,
         expected_revision: int = Query(...),
         expected_usage: int = Query(...),
+        expected_template_usage: int = Query(0),
+        expected_template_usage_token: Optional[str] = Query(None),
     ) -> Dict[str, Any]:
         """Tombstone the entry; references resolve to the built-in card."""
         return _library_write(
@@ -1794,6 +1800,8 @@ def _register_session_endpoints(
                 identity=identity,
                 expected_revision=expected_revision,
                 expected_usage=expected_usage,
+                expected_template_usage=expected_template_usage,
+                expected_template_usage_token=expected_template_usage_token,
             ),
         )
 
