@@ -115,6 +115,33 @@ describe('ChatComposer', () => {
     ]);
   });
 
+  it('keeps the highlighted item when a template response arrives late', async () => {
+    let resolveTemplates;
+    api.listTemplates.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveTemplates = resolve))
+    );
+    const nodes = Array.from({ length: 7 }, (_, i) => ({
+      id: `n${i}`,
+      name: `Goal ${i}`,
+      type: 'Goal',
+    }));
+    api.searchGraph.mockResolvedValue({ nodes });
+    const input = renderComposer();
+    type(input, '@goal');
+    await settle();
+    const original = options().map((option) => option.textContent);
+    expect(original).toHaveLength(8);
+    key(input, 'ArrowUp');
+    const highlightedId = input.getAttribute('aria-activedescendant');
+
+    await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
+    expect(options().map((option) => option.textContent)).toEqual(original);
+    expect(input).toHaveAttribute('aria-activedescendant', highlightedId);
+    key(input, 'Enter');
+    expect(input).toHaveValue(`${formatNodeReference(nodes[6])} `);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it('moves with arrows without wrapping, accepts the first item on Tab and keeps native keys otherwise', async () => {
     const sheetKeyDown = vi.fn();
     const input = renderComposer((composerElement) => (
