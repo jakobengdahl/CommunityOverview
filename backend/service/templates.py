@@ -253,12 +253,12 @@ def capture_template(
                 used.add(key)
                 keys[node_id] = key
             annotations, linked = _annotations(all_annotations, annotations, keys)
-            for i in set(requested + linked):
-                node = storage.get_node(i)
-                if node is not None and not access.is_node_visible(
-                    node, decision.graph_access
-                ):
-                    return {"success": False, "error": "access_denied"}
+            # As on the save path: under narrowing a missing ref is denied too.
+            refs = _hook_call(service.authorize_capture_refs)(
+                list(dict.fromkeys(requested + linked)), []
+            )
+            if not refs.get("success"):
+                return {"success": False, "error": "access_denied"}
             config = ConfigLoader().config
             shapes = {k: v.model_dump() for k, v in config.node_shapes.items()}
             types = {k: v.model_dump() for k, v in config.schema_.node_types.items()}
@@ -316,7 +316,7 @@ def capture_template(
                 )
             points = [n["position"] for n in captured]
             points += [
-                a.get("position", a.get("geometry"))
+                a.get("position") or a.get("geometry")
                 for a in annotations
                 if isinstance(a, dict) and (a.get("position") or a.get("geometry"))
             ]

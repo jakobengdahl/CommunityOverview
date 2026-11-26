@@ -7,6 +7,10 @@ import pytest
 from backend.core import Edge, GraphStorage, Node
 from backend.core.session_manager import CaptureRefused, SessionManager
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
+from backend.runtime.authorization import (
+    GraphAccessNarrowing,
+    GraphAuthorizationDecision,
+)
 from backend.service.service import GraphService
 from backend.service.templates import capture_template
 
@@ -103,6 +107,33 @@ def test_denials_and_missing_references(capture, denied_id):
             "error": "access_denied",
         }
     assert run(node_ids=["missing", "group-old"])["document"]["nodes"] == []
+
+
+@pytest.mark.parametrize("narrowed", [False, True])
+def test_missing_ref_denied_only_under_narrowing(capture, narrowed):
+    """A missing node ref is skipped, but denies the capture under narrowing."""
+    run, service, _, _ = capture
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing(enabled=narrowed)
+            )
+
+    service._authorization_hook = Hook()
+    result = run(node_ids=["a", "missing"])
+    if narrowed:
+        assert result == {"success": False, "error": "access_denied"}
+    else:
+        assert [n["source_node_id"] for n in result["document"]["nodes"]] == ["a"]
+
+
+def test_bounds_use_geometry_when_position_is_none(capture):
+    run, _, _, session = capture
+    session.state["annotations"] = [
+        {"id": "box", "type": "label", "position": None, "geometry": {"x": 9, "y": 8}}
+    ]
+    assert run()["document"]["bounds"] == {"x": 0, "y": 0, "width": 9, "height": 8}
 
 
 @pytest.mark.parametrize("target", ["b", "missing"])
