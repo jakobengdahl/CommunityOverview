@@ -1184,6 +1184,7 @@
     "tags": "Taggar (kommaseparerade)",
     "summary": "Ungefärlig förhandsvisning: {nodes} noder, {edges} kopplingar, {annotations} anteckningar. Exakta antal visas efter sparandet.",
     "loading": "Förbereder sessionen…",
+    "empty": "Det finns inget att spara ännu.",
     "saving": "Sparar…",
     "save_button": "Spara",
     "saved": "Mallen har sparats: {nodes} noder, {edges} kopplingar, {annotations} anteckningar",

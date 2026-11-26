@@ -1184,6 +1184,7 @@
     "tags": "Tags (comma-separated)",
     "summary": "Approximate preview: {nodes} nodes, {edges} connections, {annotations} annotations. Exact counts are shown after saving.",
     "loading": "Preparing session…",
+    "empty": "There is nothing to save yet.",
     "saving": "Saving…",
     "save_button": "Save",
     "saved": "Template saved: {nodes} nodes, {edges} connections, {annotations} annotations",

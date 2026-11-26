@@ -325,6 +325,7 @@ function App() {
   const remoteOpsChainRef = useRef(Promise.resolve());
   const setSessionId = useCallback((id) => {
     if (id !== sessionIdRef.current) {
+      setTemplateDialog(null);
       sessionGenerationRef.current += 1;
       appearancePendingRef.current = null;
       setAppearanceDialog(null);
@@ -4020,9 +4021,9 @@ function App() {
         id: node.id,
         annotation: CANVAS_ANNOTATION_TYPES.has(node.type),
       }));
-      setTemplateDialog({ sessionId, selected });
+      setTemplateDialog({ sessionId, selected, materialized: isSessionMaterialized() });
     },
-    [sessionId]
+    [sessionId, isSessionMaterialized]
   );
 
   // The command box's registry. Only this interactive view provides it; kiosk
@@ -4521,6 +4522,7 @@ function App() {
           {...templateDialog}
           schema={schema}
           prepare={async () => {
+            if (!templateDialog.materialized) return null;
             const epoch = useGraphStore.getState().sessionEpoch;
             const annotationPending = annotationSchedulerRef.current.clearPending();
             const canvasPending = autoSaveTimerRef.current != null;

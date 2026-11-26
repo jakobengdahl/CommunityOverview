@@ -65,6 +65,7 @@ export default function SaveTemplateDialog({
   const [description, setDescription] = useState('');
   const [tags, setTags] = useState('');
   const [source, setSource] = useState(null);
+  const [empty, setEmpty] = useState(false);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const prepareRef = useRef(prepare);
@@ -73,7 +74,10 @@ export default function SaveTemplateDialog({
     prepareRef
       .current()
       .then((value) => {
-        if (active) setSource(value);
+        if (active) {
+          setSource(value);
+          setEmpty(!value);
+        }
       })
       .catch((err) => {
         if (active) setError(errorCodes.has(err.code) ? err.code : 'other');
@@ -159,7 +163,11 @@ export default function SaveTemplateDialog({
             value={tags}
             onChange={(event) => setTags(event.target.value)}
           />
-          <p>{summary ? t('template.summary', summary) : !error && t('template.loading')}</p>
+          <p>
+            {summary
+              ? t('template.summary', summary)
+              : !error && t(empty ? 'template.empty' : 'template.loading')}
+          </p>
           {error && <p role="alert">{t(`template.errors.${error}`)}</p>}
         </div>
         <div className="input-dialog-actions">

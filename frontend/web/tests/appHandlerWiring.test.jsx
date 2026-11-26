@@ -393,6 +393,12 @@ describe('App handler wiring', () => {
 
   it('does not reconnect the old session when template preparation finishes after a switch', async () => {
     await renderApp();
+    act(() => canvas().onSaveView({ nodes: [] }));
+    await waitFor(() =>
+      expect(
+        FakeEventSource.instances.some((stream) => stream.url.includes('/api/sessions/'))
+      ).toBe(true)
+    );
     let releaseCapture;
     captured.captureBarrier = new Promise((resolve) => {
       releaseCapture = resolve;
@@ -424,6 +430,30 @@ describe('App handler wiring', () => {
       FakeEventSource.instances.filter((stream) => stream.url.includes('/api/sessions/')).at(-1)
     ).toBe(targetStream);
     expect(api.getSession).not.toHaveBeenCalledWith(oldSession, { resolve: true });
+  });
+
+  it('does not connect an unmaterialized session when opening and cancelling the template dialog', async () => {
+    await renderApp();
+    const connect = vi.spyOn(SessionSyncClient.prototype, 'connect');
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    await expect(captured.template.prepare()).resolves.toBeNull();
+    act(() => captured.template.onClose());
+    expect(connect).not.toHaveBeenCalled();
+    expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('closes the template dialog when the active session changes', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([NODE_A]));
+    expect(captured.template.selected).toEqual([{ id: 'a', annotation: false }]);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    act(() => captured.desktop.onSelectSession('8244-1742-3391-0057'));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe('8244-1742-3391-0057'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
