@@ -288,13 +288,17 @@ describe('ChatComposer', () => {
     key(input, 'Tab');
     expect(input).toHaveValue('Goal ');
 
-    api.listTemplates.mockResolvedValue({
-      templates: [{ template_id: '1234-5678', name: 'Plan\\' }],
-    });
-    type(input, 'use @plan');
-    await settle();
-    key(input, 'Tab');
-    expect(input).toHaveValue('use [Plan](template:1234-5678) ');
+    for (const [name, label] of [
+      ['Plan\\', 'Plan'],
+      ['Plan\n\nNext', 'Plan Next'],
+      ['Plan\r\n\r\nNext', 'Plan Next'],
+    ]) {
+      api.listTemplates.mockResolvedValue({ templates: [{ template_id: '1234-5678', name }] });
+      type(input, 'use @plan');
+      await settle();
+      key(input, 'Tab');
+      expect(input).toHaveValue(`use [${label}](template:1234-5678) `);
+    }
     expect(input).toHaveFocus();
     expect(onSend).not.toHaveBeenCalled();
   });
