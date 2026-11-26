@@ -1,8 +1,7 @@
 """Offline operator backup of the standalone session store.
 
-The caller must stop all writers to the graph and sessions before opening either
-store. File graph layers are process-local mirrors, so locking session files
-alone cannot provide a consistent view of a running deployment.
+The deployment must provide a layer snapshot that serializes with all staged
+writes and does not perform recovery or other writes.
 """
 
 import base64
@@ -52,8 +51,19 @@ def _assets(value, found):
             _assets(child, found)
 
 
+def _authorize(hook, *, target, session_id=None):
+    try:
+        denied = access.authorize_graph_access(
+            hook, action=GRAPH_ACTION_READ, target=target, session_id=session_id
+        )
+    except Exception:
+        raise BackupRefused("access denied") from None
+    if denied:
+        raise BackupRefused("access denied")
+
+
 def create_backup(service, session_backend, write_modes):
-    """Read every persisted session while the deployment is stopped.
+    """Read every persisted session under the deployment layer snapshot lock.
 
     The caller supplies its configured access hook and graph. Authorization is
     fail-closed for each session and every stored graph reference. No result is
@@ -61,66 +71,78 @@ def create_backup(service, session_backend, write_modes):
     """
     sessions = []
     assets = {}
-    with session_context.bind_session(None), session_backend.transaction():
-        if access.authorize_graph_access(
-            service.authorization_hook,
-            action=GRAPH_ACTION_READ,
-            target="backup_sessions",
-        ):
-            raise BackupRefused("access denied")
-        for session_id in sorted(session_backend.list_ids()):
-            if access.authorize_graph_access(
-                service.authorization_hook,
-                action=GRAPH_ACTION_READ,
-                target="get_visualization_session",
-                session_id=session_id,
-            ):
-                raise BackupRefused("access denied")
-            raw = session_backend.load(session_id)
-            if raw is None or raw.get("id") != session_id:
-                raise BackupRefused("invalid session record")
-            session = Session.from_dict(raw)
-            status = write_modes.staged_status(session_id)
-            if status == "retired" or write_modes.store_holds_unreadable_records():
-                raise BackupRefused("unreadable session mode")
-            mode = write_modes.mode_of(session_id)
-            if session.write_mode == "staged" and mode != "staged":
-                raise BackupRefused("unreadable session mode")
-            if mode == "staged" and write_modes.layer_store.load_layer(session_id):
-                raise BackupRefused("unmerged staged changes")
-            state = raw.get("state")
-            if not isinstance(state, dict) or state.keys() - _empty_state().keys():
-                raise BackupRefused("invalid session state")
-            node_ids = session_capture.captured_node_ids(state)
-            # Revisions can outlive membership, but still disclose node IDs.
-            node_ids.extend(
-                key[5:]
-                for key in state.get("shape_revisions", {})
-                if isinstance(key, str) and key.startswith("node:")
-            )
-            result = service.authorize_capture_refs(
-                list(dict.fromkeys(node_ids)), session_capture.captured_edge_ids(state)
-            )
-            if not result.get("success"):
-                raise BackupRefused("access denied")
-            _assets(state, assets)
-            sessions.append(
-                {
-                    "id": session.id,
-                    "name": session.name,
-                    "description": session.description,
-                    "revision": session.seq,
-                    "created_at": session.created_at,
-                    "updated_at": session.updated_at,
-                    "write_mode": mode,
-                    "write_mode_source": (
-                        "explicit"
-                        if mode != session.write_mode
-                        else session.write_mode_source
-                    ),
-                    "state": state,
-                }
-            )
+    with session_context.bind_session(None):
+        _authorize(service.authorization_hook, target="backup_sessions")
+        # A session transaction alone does not order staged writes. Only a
+        # deployment-provided snapshot that coordinates with every layer writer
+        # can supply this guarantee. The snapshot yields a read-only WriteModes.
+        snapshot = getattr(write_modes, "backup_snapshot", None)
+        if not callable(snapshot):
+            raise BackupRefused("layer snapshot unavailable")
+        with session_backend.transaction(), snapshot() as snapshot_modes:
+            for session_id in sorted(session_backend.list_ids()):
+                _authorize(
+                    service.authorization_hook,
+                    target="get_visualization_session",
+                    session_id=session_id,
+                )
+                raw = session_backend.load(session_id)
+                if raw is None or raw.get("id") != session_id:
+                    raise BackupRefused("invalid session record")
+                session = Session.from_dict(raw)
+                status = snapshot_modes.staged_status(session_id)
+                if (
+                    status == "retired"
+                    or snapshot_modes.store_holds_unreadable_records()
+                ):
+                    raise BackupRefused("unreadable session mode")
+                mode = snapshot_modes.mode_of(session_id)
+                if session.write_mode == "staged" and mode != "staged":
+                    raise BackupRefused("unreadable session mode")
+                if mode == "staged" and snapshot_modes.layer_store.load_layer(
+                    session_id
+                ):
+                    raise BackupRefused("unmerged staged changes")
+                state = raw.get("state")
+                if not isinstance(state, dict) or state.keys() - _empty_state().keys():
+                    raise BackupRefused("invalid session state")
+                node_ids = session_capture.captured_node_ids(
+                    state, include_legacy_groups=True
+                )
+                # Revisions can outlive membership, but still disclose node IDs.
+                node_ids.extend(
+                    key[5:]
+                    for key in state.get("shape_revisions", {})
+                    if isinstance(key, str) and key.startswith("node:")
+                )
+                try:
+                    result = service.authorize_capture_refs(
+                        list(dict.fromkeys(node_ids)),
+                        session_capture.captured_edge_ids(state),
+                        target="backup_sessions",
+                    )
+                except Exception:
+                    raise BackupRefused("access denied") from None
+                if not result.get("success"):
+                    raise BackupRefused("access denied")
+                _assets(state, assets)
+                sessions.append(
+                    {
+                        "id": session.id,
+                        "name": session.name,
+                        "description": session.description,
+                        "revision": session.seq,
+                        "created_at": session.created_at,
+                        "updated_at": session.updated_at,
+                        "write_mode": mode,
+                        "write_mode_source": (
+                            "explicit"
+                            if mode != session.write_mode
+                            else session.write_mode_source
+                        ),
+                        "state": state,
+                    }
+                )
     document = {
         "format_version": 1,
         "sessions": sessions,

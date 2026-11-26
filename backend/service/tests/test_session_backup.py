@@ -1,6 +1,7 @@
-# covers: backend/service/session_backup.py
+# covers: backend/service/session_backup.py, backend/service/session_capture.py, backend/service/views.py, backend/service/service.py, scripts/backup_sessions.py
 import base64
 import hashlib
+from contextlib import contextmanager
 
 import pytest
 
@@ -9,9 +10,15 @@ from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     Session,
 )
-from backend.core.write_modes import WriteModes
+from backend.core.write_modes import WriteModes as BaseWriteModes
 from backend.runtime.authorization import GraphAuthorizationDecision
 from backend.service.session_backup import BackupRefused, canonical_bytes, create_backup
+
+
+class WriteModes(BaseWriteModes):
+    @contextmanager
+    def backup_snapshot(self):
+        yield self
 
 
 class Hook:
@@ -28,7 +35,8 @@ class Service:
         self.refs_allowed = refs_allowed
         self.references = []
 
-    def authorize_capture_refs(self, nodes, edges):
+    def authorize_capture_refs(self, nodes, edges, *, target):
+        assert target == "backup_sessions"
         self.references.append((nodes, edges))
         return {"success": self.refs_allowed}
 
@@ -133,11 +141,17 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     storage.add_nodes(
         [
             Node(
+                id="group-secret",
+                type="Actor",
+                name="Private",
+                metadata={"origin_graph_id": "other"},
+            ),
+            Node(
                 id="secret",
                 type="Actor",
                 name="Private",
                 metadata={"origin_graph_id": "other"},
-            )
+            ),
         ],
         [],
     )
@@ -156,8 +170,10 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
             ]
         },
         {"shape_revisions": {"node:secret": 1}},
+        {"node_refs": ["group-secret"]},
+        {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
     ):
-        session.state.update(annotations=[], shape_revisions={})
+        session.state.update(annotations=[], shape_revisions={}, node_refs=[])
         session.state.update(state)
         backend.save(session.to_dict())
         with pytest.raises(BackupRefused):
@@ -178,3 +194,119 @@ def test_file_layer_is_checked_after_reopening(tmp_path):
     backend.save(Session("1234-5678").to_dict())
     with pytest.raises(BackupRefused):
         create_backup(Service(), backend, WriteModes(reopened))
+
+
+def test_backup_uses_its_own_reference_scope(tmp_path):
+    from backend.core import Node
+    from backend.core.storage import GraphStorage
+    from backend.runtime.authorization import GraphAccessNarrowing
+    from backend.service import GraphService
+
+    class TargetHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=context.target == "backup_sessions",
+                    allow_local_graph=False,
+                    include_graph_ids=("allowed",),
+                ),
+            )
+
+    storage = GraphStorage(str(tmp_path / "graph.json"))
+    storage.add_nodes(
+        [
+            Node(
+                id="secret",
+                type="Actor",
+                name="Private",
+                metadata={"origin_graph_id": "other"},
+            )
+        ],
+        [],
+    )
+    service = GraphService(storage, authorization_hook=TargetHook())
+    backend = InMemorySessionPersistenceBackend()
+    session = Session("1234-5678")
+    session.state["node_refs"] = ["secret"]
+    backend.save(session.to_dict())
+    assert service.authorize_capture_refs(["secret"], [])["success"]
+    with pytest.raises(BackupRefused, match="access denied"):
+        create_backup(service, backend, WriteModes())
+
+
+def test_backup_requires_coordinated_layer_snapshot(backend):
+    backend.save(Session("1234-5678").to_dict())
+    with pytest.raises(BackupRefused, match="layer snapshot unavailable"):
+        create_backup(Service(), backend, BaseWriteModes())
+
+
+def test_command_authorizes_before_opening_stores(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from scripts import backup_sessions
+
+    class Deny:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=False)
+
+    def forbidden(*args):
+        pytest.fail("stores opened before authorization")
+
+    integration = SimpleNamespace(authorization_hook=Deny, open_backup=forbidden)
+    monkeypatch.setattr(
+        backup_sessions.importlib, "import_module", lambda _: integration
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backup_sessions",
+            "--integration",
+            "deployment",
+            "--output",
+            str(tmp_path / "out"),
+        ],
+    )
+    with pytest.raises(BackupRefused, match="access denied"):
+        backup_sessions.main()
+    assert not (tmp_path / "out").exists()
+
+
+def test_layer_write_is_ordered_with_snapshot(backend):
+    import threading
+
+    entered = threading.Event()
+    attempted = threading.Event()
+    finished = threading.Event()
+    lock = threading.Lock()
+    layer = Layers()
+
+    class Coordinated(WriteModes):
+        @contextmanager
+        def backup_snapshot(self):
+            with lock:
+                entered.set()
+                assert attempted.wait(3)
+                yield self
+                assert not finished.is_set()
+
+    modes = Coordinated(layer)
+    backend.save(Session("1234-5678").to_dict())
+
+    def stage():
+        assert entered.wait(3)
+        attempted.set()
+        with lock:
+            layer.entries = [{"id": "change"}]
+        finished.set()
+
+    writer = threading.Thread(target=stage)
+    writer.start()
+    try:
+        assert len(create_backup(Service(), backend, modes)["sessions"]) == 1
+    finally:
+        writer.join(3)
+    assert finished.is_set()
+    with pytest.raises(BackupRefused, match="unmerged staged changes"):
+        create_backup(Service(), backend, modes)

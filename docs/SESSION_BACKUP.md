@@ -1,32 +1,34 @@
 # Session backup for operators
 
-Session data is separate from graph data. For a standalone deployment using the
-file graph and file session stores, stop the application and every other writer
-to both stores before taking either backup. Keep them stopped until both backups
-are complete. The graph file, its journal and layer sidecars belong to the graph
-store; use the deployment's graph backup procedure for those files. Keep the
-session backup and graph backup together, recording which artifacts belong to
-the same stopped deployment and backup time.
+Session data is separate from graph data. Back up the graph separately and
+retain both artifacts and their association, including deployment and backup
+time. Coordinate the graph backup with the session snapshot so they correspond.
 
-From the repository root, run as an operator with read access to the graph and
-session files and write access to the destination directory:
+The command requires a trusted deployment-specific Python integration module:
 
 ```sh
-python3 scripts/backup_sessions.py --graph /path/to/graph.json \
-  --sessions /path/to/sessions --output /path/to/session-backup.json \
-  --writers-stopped
+python3 scripts/backup_sessions.py --integration my_deployment.session_backup \
+  --output /path/to/session-backup.json
 ```
 
-The flag confirms that all writers are stopped; the command cannot detect live
-writers. It checks the standalone authorization mode for each session and its
-graph references. A deployment using a custom authorization hook or another
-storage backend needs an operator integration that supplies its configured
-`GraphService`, session backend and `WriteModes` to
-`backend.service.session_backup.create_backup` while all writers are stopped;
-the standalone command cannot load that deployment's access policy. The caller
-must run in the appropriate operator authorization context. Backups contain
-sensitive canvas data and IDs: restrict access to the artifact. The command
-creates a new file with owner-only permissions and refuses to overwrite a file.
+The module supplies `authorization_hook()` for the deployment's actual operator
+policy and `open_backup(hook)`, a context manager yielding `(service, sessions,
+modes)`. The service must use that hook. The command checks `backup_sessions`
+access before opening the stores and checks every session and reference again
+while creating the document. Run it in the operator's authorization context.
+
+The integration must use read-only graph and layer access, without merge recovery,
+and provide `modes.backup_snapshot()`, a context manager yielding a read-only
+`WriteModes`-compatible snapshot. It must serialize with all staged writes,
+mode changes and merges on every instance throughout the context. The session
+backend transaction is held across this snapshot. Observe the deployment's lock
+ordering to avoid deadlocks. If these guarantees cannot be provided, backup is
+unavailable; a claim that writers are stopped is not a substitute. The stock
+file graph backend does not supply this snapshot: its layer mirror is
+process-local and loading it may settle a pending merge. There is no built-in
+integration for it or for PostgreSQL yet. A deployment must implement and test
+one before running the command. Restrict access to the artifact; the command
+creates a new owner-only file and refuses to overwrite one.
 
 The command backs up all sessions in the directory or fails without producing an
 artifact. It refuses inaccessible references, unreadable staged-session records,

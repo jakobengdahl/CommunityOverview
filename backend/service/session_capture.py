@@ -103,7 +103,10 @@ def _link_id(value: Any) -> Optional[str]:
 
 
 def _annotation_links(
-    annotation: Dict[str, Any], annotation_ids: Collection[str]
+    annotation: Dict[str, Any],
+    annotation_ids: Collection[str],
+    *,
+    include_legacy_groups: bool = False,
 ) -> Iterator[Tuple[Any, Any, str, str]]:
     """``(holder, key, id, kind)`` for every id ``holder[key]`` an annotation
     links to, ``kind`` being ``"node"`` or ``"annotation"``.
@@ -126,13 +129,19 @@ def _annotation_links(
         resource = holder is annotation and key == "target"
         if not resource and value in annotation_ids:
             yield holder, key, value, "annotation"
-        elif declared is None and value.startswith(_LEGACY_GROUP_PREFIX):
+        elif (
+            declared is None
+            and value.startswith(_LEGACY_GROUP_PREFIX)
+            and not include_legacy_groups
+        ):
             continue
         elif declared != "annotation":
             yield holder, key, value, "node"
 
 
-def captured_node_ids(state: Dict[str, Any]) -> List[str]:
+def captured_node_ids(
+    state: Dict[str, Any], *, include_legacy_groups: bool = False
+) -> List[str]:
     """Every graph node id the captured canvas names, first use first.
 
     ``shape_revisions`` keys are not read: they outlive a node's removal from
@@ -150,13 +159,18 @@ def captured_node_ids(state: Dict[str, Any]) -> List[str]:
         )
     )
     canvas = [
-        i for i in ids if isinstance(i, str) and not i.startswith(_LEGACY_GROUP_PREFIX)
+        i
+        for i in ids
+        if isinstance(i, str)
+        and (include_legacy_groups or not i.startswith(_LEGACY_GROUP_PREFIX))
     ]
     linked = [
         value
         for annotation in state.get("annotations") or []
         if isinstance(annotation, dict)
-        for _, _, value, kind in _annotation_links(annotation, annotation_ids)
+        for _, _, value, kind in _annotation_links(
+            annotation, annotation_ids, include_legacy_groups=include_legacy_groups
+        )
         if kind == "node"
     ]
     return list(dict.fromkeys(canvas + linked))
