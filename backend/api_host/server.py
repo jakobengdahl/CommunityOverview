@@ -465,6 +465,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     session_manager.shape_library = ShapeLibrary(
         FileShapeLibraryPersistenceBackend(Path(sessions_dir) / "shape-library"),
         session_backend,
+        templates=session_manager.template_store,
         writes_enabled=True,
         writers=session_store,
         invalidate=session_manager.publish_library_invalidation,

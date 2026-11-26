@@ -471,7 +471,11 @@ def save_template(
         return _failure("access_denied")
     try:
         store = manager.template_store
-        with store._backend.transaction():
+        with (
+            manager.store._lock,
+            manager.store._backend.transaction(),
+            store._backend.transaction(),
+        ):
             for _ in range(100):
                 template_id = "-".join(
                     f"{secrets.randbelow(10000):04d}" for _ in range(4)
@@ -630,7 +634,11 @@ def update_template(
         return _failure("access_denied")
     try:
         store = manager.template_store
-        with store._backend.transaction():
+        with (
+            manager.store._lock,
+            manager.store._backend.transaction(),
+            store._backend.transaction(),
+        ):
             try:
                 doc = store.get(template_id)
             except TemplateError:
