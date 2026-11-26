@@ -825,9 +825,9 @@ def test_insert_requires_both_coordinates(capture):
         ),
         ("freehand", {"points": [{"x": 10, "y": 5}, {"x": 400, "y": -30}]}, (480, -30)),
         ("label", {}, (240, 0)),
-        ("vote_dot", {"geometry": {"w": 900, "h": 900}}, (104, 0)),
-        ("icon", {}, (112, 0)),
-        ("note", {}, (280, 0)),
+        ("vote_dot", {"geometry": {"w": 900, "h": 900}}, (980, 0)),
+        ("icon", {}, (240, 0)),
+        ("note", {}, (240, 0)),
     ],
 )
 def test_default_placement_uses_rendered_existing_and_template_bounds(
@@ -903,6 +903,54 @@ def test_default_placement_aligns_rotated_template_bounds(capture, coords, expec
     geometry = target.state["annotations"][0]["geometry"]
     assert geometry["x"] == pytest.approx(expected[0])
     assert geometry["y"] == pytest.approx(expected[1])
+
+
+@pytest.mark.parametrize(
+    "positions, annotations, expected",
+    [
+        ([(None, None)], [], (0, 0, 200, 100)),
+        ([({"x": 0, "y": 0}, {"base": "rectangle"})], [], (0, 0, 200, 120)),
+        ([({"x": 0, "y": 0}, {"base": "rectangle-flat"})], [], (0, 0, 240, 96)),
+        ([({"x": 0, "y": 0}, {"base": "triangle-up"})], [], (0, -28, 240, 180)),
+        ([], [{"type": "reference"}], (0, 0, 220, 72)),
+        ([], [{"type": "heatmap"}], (0, 0, 160, 160)),
+        ([], [{"type": "note"}], (0, 0, 160, 96)),
+        ([], [{"type": "line"}], (0, 0, 160, 0)),
+        (
+            [],
+            [{"type": "freehand", "points": [{"x": -3, "y": 5}, {"x": 4, "y": 8}]}],
+            (-3, 5, 4, 8),
+        ),
+    ],
+)
+def test_placement_size_table(positions, annotations, expected):
+    from backend.service.templates import _rendered_bounds
+
+    assert _rendered_bounds(positions, annotations) == expected
+
+
+def test_placement_line_delta_bounds():
+    from backend.service.templates import _rendered_bounds
+
+    assert _rendered_bounds(
+        [], [{"type": "line", "position": {"x": 10, "y": 20}, "dx": -30, "dy": 40}]
+    ) == (-20, 20, 10, 60)
+
+
+def test_placement_top_level_rotation_bounds():
+    from backend.service.templates import _rendered_bounds
+
+    bounds = _rendered_bounds(
+        [],
+        [
+            {
+                "type": "note",
+                "geometry": {"x": 10, "y": 20, "w": 100, "h": 40},
+                "rotation": 90,
+            }
+        ],
+    )
+    assert bounds == pytest.approx((40, -10, 80, 90))
 
 
 def test_insert_preserves_attachment_only_line_endpoint(capture):

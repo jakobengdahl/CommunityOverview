@@ -71,8 +71,7 @@ def _freehand_points(annotation):
 def _rendered_bounds(positions, annotations, *, legacy=False):
     """Canvas-space bounds, including fallback geometry and point-based marks."""
     boxes = []
-    # Dimensions mirror ui-graph-canvas's nodeShapeGeometry and include the
-    # label above triangles. A missing definition renders as the built-in card.
+    # Placement sizes are specified in docs/TEMPLATES_CONTRACT.md.
     bases = {
         "rectangle": (200, 120),
         "rectangle-flat": (240, 96),
@@ -97,14 +96,16 @@ def _rendered_bounds(positions, annotations, *, legacy=False):
             start = (
                 annotation.get("from")
                 or annotation.get("position")
-                or (annotation.get("geometry") if legacy else None)
+                or annotation.get("geometry")
                 or {}
             )
             end = annotation.get("to") or {
-                "x": start.get("x", 0) + (annotation.get("dx", 160) if legacy else 160),
-                "y": start.get("y", 0) + (annotation.get("dy", 0) if legacy else 0),
+                "x": start.get("x", 0) + annotation.get("dx", 160),
+                "y": start.get("y", 0) + annotation.get("dy", 0),
             }
             points.extend((start, end))
+        if annotation_type_of(annotation) == "freehand" and not points:
+            points = [annotation.get("position") or annotation.get("geometry") or {}]
         if points:
             boxes.extend(
                 (p.get("x", 0), p.get("y", 0), p.get("x", 0), p.get("y", 0))
@@ -132,17 +133,9 @@ def _rendered_bounds(positions, annotations, *, legacy=False):
         height = geometry.get(
             "h", geometry.get("height", size.get("h", size.get("height", default[1])))
         )
-        if not legacy and kind in {"icon", "vote_dot"}:
-            width, height = (32, 32) if kind == "icon" else (24, 24)
-        elif (
-            not legacy
-            and kind == "note"
-            and not any(key in size for key in ("w", "width", "h", "height"))
-        ):
-            width, height = 200, 140
         width, height = max(0, width), max(0, height)
-        rotation = geometry.get("rotation", 0)
-        if not legacy and kind in {"note", "label", "text", "shape", "icon", "image"}:
+        rotation = geometry.get("rotation", annotation.get("rotation", 0))
+        if not legacy:
             angle = math.radians(_placement_number(rotation) % 360)
             rotated_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
             rotated_height = abs(width * math.sin(angle)) + abs(
