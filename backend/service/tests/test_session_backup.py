@@ -108,7 +108,7 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
     assert stored["state"] == session.state
     assert stored["write_mode"] == "staged"
     assert "activity_log" not in stored
-    assert service.references == [(["a", "group-local", "old"], ["edge"])]
+    assert service.references == [(["a", "old", "group-local"], ["edge"])]
     assert backup["import_mappings"] == backup["import_reports"] == []
     expected_assets = [
         {"sha256": hashlib.sha256(data).hexdigest(), "data_url": data_url}
@@ -181,6 +181,45 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
         create_backup(service, backend, modes)
 
 
+def test_backup_skips_legacy_canvas_group_keys_but_authorizes_other_references(backend):
+    session = Session("1234-5678")
+    session.state.update(
+        node_refs=["group-local", "node"],
+        hidden_node_ids=["group-hidden"],
+        dimmed_node_ids=["group-dimmed"],
+        positions={"group-position": {"x": 1, "y": 1}},
+        shape_overrides={"group-shape": "circle"},
+        shape_revisions={"node:group-history": 1},
+        annotations=[
+            {"id": "ann", "member_node_ids": ["group-member"]},
+            {
+                "id": "note",
+                "type": "text",
+                "attachment": {"target_type": "node", "target_id": "group-explicit"},
+            },
+        ],
+    )
+    backend.save(session.to_dict())
+    service = Service()
+    create_backup(service, backend, WriteModes())
+    assert service.references == [
+        (["node", "group-explicit", "group-member", "group-history"], [])
+    ]
+    with pytest.raises(BackupRefused, match="^access denied$"):
+        create_backup(Service(refs_allowed=False), backend, WriteModes())
+
+
+def test_backup_hashes_case_insensitive_base64_asset_marker(backend):
+    session = Session("1234-5678")
+    url = "data:image/png;BaSe64,cGl4ZWxz"
+    session.state["annotations"] = [{"type": "image", "image": {"url": url}}]
+    backend.save(session.to_dict())
+    backup = create_backup(Service(), backend, WriteModes())
+    assert backup["assets"] == [
+        {"sha256": hashlib.sha256(b"pixels").hexdigest(), "data_url": url}
+    ]
+
+
 def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     from backend.core import Node
     from backend.core.session_manager import SessionManager
@@ -247,9 +286,6 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
             ]
         },
         {"shape_revisions": {"node:secret": 1}},
-        {"node_refs": ["group-secret"]},
-        {"positions": {"group-secret": {"x": 1, "y": 1}}},
-        {"shape_overrides": {"group-secret": "circle"}},
         {"shape_revisions": {"node:group-secret": 1}},
         {"annotations": [{"id": "group-secret", "member_node_ids": ["group-secret"]}]},
         {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},

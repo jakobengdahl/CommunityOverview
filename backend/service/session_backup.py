@@ -51,7 +51,7 @@ def _assets(state, found):
         try:
             header, encoded = value.split(",", 1)
             data = unquote_to_bytes(encoded)
-            if header.endswith(";base64"):
+            if header.lower().endswith(";base64"):
                 data = base64.b64decode(data, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise BackupRefused("invalid embedded asset") from exc
@@ -136,9 +136,7 @@ def create_backup(service, session_backend, write_modes):
             session = Session.from_dict(raw)
             state = raw["state"]
             try:
-                node_ids = session_capture.captured_node_ids(
-                    state, include_legacy_groups=True
-                )
+                node_ids = session_capture.captured_node_ids(state)
                 annotation_ids = session_capture._annotation_ids(state)
                 # Explicit node links can collide with an annotation ID.
                 for annotation in state.get("annotations") or []:
