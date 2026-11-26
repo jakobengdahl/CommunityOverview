@@ -76,7 +76,11 @@ def open_backup(hook):
             shutil.copyfile(source_journal, journal)
         if not graph.is_file():
             raise BackupRefused("snapshot unavailable")
-        shutil.copytree(source_sessions, root / "sessions")
+        try:
+            shutil.copytree(source_sessions, root / "sessions")
+        except (OSError, shutil.Error):
+            # Copy errors can contain session IDs before access is checked.
+            raise BackupRefused("snapshot unavailable") from None
         layer = SnapshotGraphBackend(graph, journal_path=journal, staged_sessions=True)
         for path in (layer.journal_path, layer.merge_log_path):
             if path.exists():

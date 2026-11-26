@@ -672,6 +672,23 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
     with integration.open_backup(NarrowHook()) as (service, backend, modes):
         with pytest.raises(BackupRefused, match="^access denied$"):
             create_backup(service, backend, modes)
+    # Copying happens before session authorization; even a traceback must not
+    # reveal a denied session ID through a filesystem or aggregated copy error.
+    import shutil
+    import traceback
+
+    secret_path = str(sessions / "1234-5678.json")
+    for error in (OSError(secret_path), shutil.Error([(secret_path, "dest", "denied")])):
+        with monkeypatch.context() as patch:
+
+            def fail_copy(*args, **kwargs):
+                raise error
+
+            patch.setattr(integration.shutil, "copytree", fail_copy)
+            with pytest.raises(BackupRefused, match="^snapshot unavailable$") as exc:
+                with integration.open_backup(Hook(denied=session.id)):
+                    pytest.fail("partial backup opened")
+            assert "1234-5678" not in "".join(traceback.format_exception(exc.value))
     original = layer.journal_path.read_bytes()
     for tail in (b"partial", b"malformed\n", b"{}\n"):
         layer.journal_path.write_bytes(original + tail)
