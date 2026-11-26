@@ -79,7 +79,8 @@ def test_denials_and_missing_references(capture, denied_id):
     ):
         if not denied_id.startswith("group-"):
             assert run(node_ids=[denied_id]) == {
-                "success": False, "error": "access_denied"
+                "success": False,
+                "error": "access_denied",
             }
         session.state["annotations"][0]["content"] = {
             "attachment": {"target_id": denied_id, "target_type": "node"}
@@ -113,7 +114,9 @@ def test_uncaptured_resource_reference_is_omitted(capture, target, nested):
         {"id": "note", "type": "label", "parentId": "ref"},
     ]
     doc = run(node_ids=["a"], annotation_ids=["ref", "note"])["document"]
-    assert doc["annotation_document"]["annotations"] == [{"id": "note", "type": "label"}]
+    assert doc["annotation_document"]["annotations"] == [
+        {"id": "note", "type": "label"}
+    ]
     if target == "b":
         doc = run(node_ids=["b"], annotation_ids=["ref"])["document"]
         captured = doc["annotation_document"]["annotations"][0]
