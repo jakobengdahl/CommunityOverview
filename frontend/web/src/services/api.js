@@ -1164,6 +1164,31 @@ export async function saveTemplate(sessionId, body) {
   });
 }
 
+export async function listTemplates() {
+  return apiFetch(`${API_BASE}/templates`);
+}
+
+export async function updateTemplate(templateId, body) {
+  return apiFetch(`${API_BASE}/templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteTemplate(templateId, revision) {
+  return apiFetch(
+    `${API_BASE}/templates/${encodeURIComponent(templateId)}?expected_revision=${encodeURIComponent(revision)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function insertTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/insert-template`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
 /** Capture a revision of a session as a new session. */
 export async function saveSessionView(sessionId, name, expectedRevision) {
   return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/save-view`, {
