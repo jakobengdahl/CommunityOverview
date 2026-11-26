@@ -570,7 +570,7 @@ def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
         }
     assert (
         templates.insert_template(
-            service, manager, target.id, tid, x=0, y=0, expected_revision=99
+            service, manager, target.id, tid, expected_revision=99
         )["error"]
         == "revision_conflict"
     )
@@ -688,10 +688,10 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
     )
     client = TestClient(app)
     url = f"/api/sessions/{target.id}/insert-template"
-    assert (
-        client.post(url, json={"template_id": doc["template_id"]}).json()["error"]
-        == "invalid_request"
-    )
+    default = client.post(url, json={"template_id": doc["template_id"]})
+    assert default.status_code == 200 and default.json()["added"] == ["a", "b"]
+    target = manager.create_session("another target")
+    url = f"/api/sessions/{target.id}/insert-template"
     conflict = client.post(
         url,
         json={
@@ -724,9 +724,9 @@ def test_insert_denial_and_persistence_failure_leave_session_unchanged(capture):
         "backend.service.templates.access.authorize_graph_access", return_value=True
     ):
         assert (
-            templates.insert_template(
-                service, manager, target.id, doc["template_id"], x=0, y=0
-            )["error"]
+            templates.insert_template(service, manager, target.id, doc["template_id"])[
+                "error"
+            ]
             == "access_denied"
         )
     with patch.object(manager.store, "persist", side_effect=OSError):
@@ -794,11 +794,109 @@ def test_insert_requires_both_coordinates(capture):
         "template"
     ]
     target = manager.create_session("target")
-    for coordinates in ({}, {"x": 1}, {"y": 2}):
+    for coordinates in ({"x": 1}, {"y": 2}):
         assert templates.insert_template(
             service, manager, target.id, doc["template_id"], **coordinates
         ) == {"success": False, "error": "invalid_request"}
     assert target.seq == 0
+    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
+        "success"
+    ]
+    assert target.state["positions"]["b"] == {"x": 0, "y": 0}
+
+
+@pytest.mark.parametrize(
+    "kind, payload, expected",
+    [
+        ("node", {}, (280, 0)),
+        (
+            "shape",
+            {"geometry": {"x": 10, "y": 20, "w": 100, "h": 40, "rotation": 90}},
+            (160, -10),
+        ),
+        ("line", {"from": {"x": -5, "y": 7}, "to": {"x": 300, "y": -20}}, (380, -20)),
+        (
+            "line",
+            {
+                "start": {"point": {"x": 5, "y": 7}},
+                "end": {"point": {"x": 300, "y": 20}},
+            },
+            (380, 7),
+        ),
+        ("freehand", {"points": [{"x": 10, "y": 5}, {"x": 400, "y": -30}]}, (480, -30)),
+        ("label", {}, (240, 0)),
+    ],
+)
+def test_default_placement_uses_rendered_existing_and_template_bounds(
+    capture, kind, payload, expected
+):
+    import copy
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state.update(
+        node_refs=[],
+        annotations=[
+            {
+                "id": "stroke",
+                "type": "freehand",
+                "position": {"x": 30, "y": 40},
+                "geometry": {"x": 30, "y": 40},
+                "points": [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
+            }
+        ],
+    )
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    if kind == "node":
+        target.state["node_refs"] = ["a"]
+    else:
+        target.state["annotations"] = [{"id": "existing", "type": kind, **payload}]
+    before = copy.deepcopy(target.state)
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"]
+    for key in ("node_refs", "positions"):
+        assert target.state[key] == before[key]
+    assert target.state["annotations"][:-1] == before["annotations"]
+    stroke = target.state["annotations"][-1]
+    x, y = expected
+    assert stroke["points"] == [
+        {"x": pytest.approx(x), "y": pytest.approx(y)},
+        {"x": pytest.approx(x + 2), "y": pytest.approx(y + 2)},
+    ]
+    assert stroke["position"] == {
+        "x": pytest.approx(x + 25),
+        "y": pytest.approx(y + 34),
+    }
+    assert stroke["geometry"] == stroke["position"]
+
+
+def test_default_placement_aligns_rotated_template_bounds(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state.update(
+        node_refs=[],
+        annotations=[
+            {
+                "id": "shape",
+                "type": "shape",
+                "geometry": {"x": 10, "y": 20, "w": 100, "h": 40, "rotation": 90},
+            }
+        ],
+    )
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
+        "success"
+    ]
+    geometry = target.state["annotations"][0]["geometry"]
+    assert geometry["x"] == pytest.approx(-30)
+    assert geometry["y"] == pytest.approx(30)
 
 
 def test_insert_preserves_attachment_only_line_endpoint(capture):

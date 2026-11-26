@@ -92,7 +92,11 @@ nodes to a session. Missing, archived, or inaccessible nodes are reported as
 unchanged. Graph edges between session nodes remain those in the graph.
 
 Supply both finite `x` and `y` coordinates to place the template bounds at an
-explicit origin; omitted or incomplete coordinates return `invalid_request`.
+explicit origin. When both are omitted, the rendered template bounds are placed
+80 model-space pixels to the right of the existing content, with their tops
+aligned. Existing members without stored positions count at (0, 0) with the
+built-in card size. In an empty session the template bounds' top-left is placed
+at (0, 0). Supplying only one coordinate returns `invalid_request`.
 Annotation IDs are minted fresh and links remapped; links to missing nodes are
 removed. Shape selections become per-node overrides, with `tombstoned` and `missing_shape` entries in the
 shape report for fallbacks. The result includes `added`, `annotation_id_map`,
