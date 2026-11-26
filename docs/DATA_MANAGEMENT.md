@@ -156,7 +156,7 @@ Node types fall into two categories:
 The default profile includes: Actor, Initiative, Capability, Resource, Legislation, Theme, Goal, Event, Data, Risk. Other profiles can define additional types (e.g., the SCB profile adds Dataset, Undersökning, Variabel, etc.).
 
 **System types** (foundational to the application):
-- **SavedView / VisualizationView** (gray) - Saved graph view snapshots
+- **SavedView / VisualizationView** - Legacy graph data types retained for compatibility; use sessions for saved views
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations
 - **Groups** - Visual grouping of nodes in the canvas

@@ -392,7 +392,7 @@ error or `too_large` requires the agent to change the request.
   collaborator's move, it writes coordinates into the canvas contents the viewer
   already has, and is resolved last-write-wins (D2) — the viewer's next undo is
   simply the next write. Only a wholesale replacement of the canvas contents (a
-  session switch, a saved view loaded over the current one, a clear) establishes a
+  session switch or a clear) establishes a
   new position baseline and discards that history.
 
 ## 13. Public/private boundary

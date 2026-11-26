@@ -23,10 +23,9 @@ Sessions already persist server-side and can be created and populated over MCP
 without a browser. Their references resolve to current graph data, not copies of
 nodes. They are mutable collaborative workspaces, not immutable snapshots. D13
 keeps sessions until explicit deletion and leaves convergence with SavedView open.
-SavedView and VisualizationView nodes instead store view metadata in the graph.
-Today `save_view(name)` only signals a browser to capture its current state; it
-does not itself save a view. Existing saved views can include positions, hidden
-nodes, groups and annotations, and their readers resolve referenced graph nodes.
+SavedView and VisualizationView nodes stored view metadata in the graph.
+At the time, `save_view(name)` only signaled a browser to capture its state.
+Saved views could include positions, hidden nodes, groups and annotations.
 
 ## Options
 
@@ -44,6 +43,9 @@ nodes, groups and annotations, and their readers resolve referenced graph nodes.
    still references live graph nodes.
 
 ## Decision
+
+The transition instructions below record the original decision. The subsequent
+removal was completed without migration; see the consequences below.
 
 Option 3 was accepted on 2026-11-25, with retiring SavedView as the first goal.
 Behavior changes still follow a detailed compatibility contract, written and
@@ -86,6 +88,13 @@ reviewed before the implementation slices.
 
 ## Boundaries and consequences
 
+SavedView functionality has been removed without migration or conversion to
+sessions. Existing nodes are not deleted; their system types and internal
+legacy readers remain for loading, validating, exporting and backing up graphs
+as ordinary data. Use `save_session_view` and session links instead. See the
+[release note](../SESSION_SAVEDVIEW_COMPAT_CONTRACT.md#release-note-savedview-removal)
+for backup and recovery.
+
 A session is a useful cluster only within the session store; this proposal does
 not make membership a graph property, add graph traversal edges, or make
 sessions searchable as graph nodes. Discovery and filtering by membership would
@@ -93,17 +102,14 @@ need explicit session APIs and authorization rules. Existing session limits,
 revision ordering and deletion semantics apply; long-lived copies consume
 session capacity under D13. Retention remains unchanged until separately decided.
 
-Capture and import must check authorization for the source, destination and
+Session capture must check authorization for the source, destination and
 referenced graph data, including narrowed access, without exposing inaccessible
-IDs through results or annotations. Validate and sanitize imported presentation
-metadata as existing view readers do. Access to a session is not by itself a
+IDs through results or annotations. Access to a session is not by itself a
 grant to read every referenced graph node. A capture must not copy a staged
 session's unmerged graph changes as if they were committed: initially reject a
 source with staged changes unless a separately approved contract defines how to
 copy its overlay and lifecycle safely. The session document's references and
 presentation state remain distinct from the staged layer described by ADR 0005.
 
-Before implementation, settle the exact atomic capture mechanism, annotation
-filtering, legacy conversion and export/restore formats, and failure behavior
-for limits and concurrent edits. These choices require a contract and tests;
-this note changes no runtime behavior or existing decision.
+Capture and backup behavior are specified in the compatibility contract and
+[session backup guide](../SESSION_BACKUP.md).

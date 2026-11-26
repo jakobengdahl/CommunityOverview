@@ -982,7 +982,7 @@ that read or only change what the user's own view shows:
 
 - `search_graph`, `get_related_nodes`, `find_similar_nodes`,
   `find_similar_nodes_batch`, `list_node_types`, `get_subtypes`,
-  `get_schema`, `get_presentation`, `list_saved_views`, `get_saved_view`;
+  `get_schema`, `get_presentation`;
 - the read-only tools of the Agents' `GRAPH` integration
   (`MCPLoader._get_graph_mcp_tools`): `get_node_details`,
   `get_graph_stats`, `get_capabilities`, `get_runtime_info`,
@@ -995,7 +995,7 @@ that read or only change what the user's own view shows:
   `clear_visualization`.
 
 Every other tool — every write (`add_nodes`, `update_node`, `delete_nodes`,
-`delete_edges`, `archive_*`, `unarchive_*`, `save_view`,
+`delete_edges`, `archive_*`, `unarchive_*`,
 `save_collection_response`, `add_node_attachment`,
 `delete_node_attachment`) and any tool added later — is refused with error
 `confirmation_required`. The server records a pending action: the exact

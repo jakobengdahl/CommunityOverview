@@ -170,7 +170,7 @@ All domain nodes support **subtypes** for finer sub-classification within each n
 
 These are integral to core application functionality:
 
-- **SavedView / VisualizationView** (gray) - Saved graph view snapshots
+- **SavedView / VisualizationView** - Legacy graph data types retained for compatibility; use sessions for saved views
 - **EventSubscription** (violet) - Webhook subscriptions for graph mutation events
 - **Agent** (pink) - AI agent configurations (runtime not implemented)
 - **Skill** (violet) - SKILL.md-compatible agent skill definitions stored in the graph; uses a specialized creation form
