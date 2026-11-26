@@ -2271,7 +2271,8 @@ function App() {
       const targetId = sessionIdRef.current;
       const epoch = useGraphStore.getState().sessionEpoch;
       return captureFlushQueue({
-        getSync: () => syncForSession(syncRef.current, targetId),
+        getSync: () => syncRef.current,
+        sessionId: targetId,
         isCurrent: () =>
           sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
         requestSnapshot: requestSessionSnapshot,

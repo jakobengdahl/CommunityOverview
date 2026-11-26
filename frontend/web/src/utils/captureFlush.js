@@ -19,6 +19,7 @@ function readHolds(getSync) {
 // the request or has begun since, and again until none begins while it is drawn.
 export function flushCanvasForCapture({
   getSync,
+  sessionId,
   isCurrent,
   requestSnapshot,
   onReady,
@@ -46,8 +47,13 @@ export function flushCanvasForCapture({
       }
     };
     const deadline = setTimeout(() => finish(new Error('Canvas capture timed out')), timeoutMs);
+    // No client at all (a session never connected) captures as before; only a
+    // client left over from another session must not be captured through.
     const unavailable = (sync) =>
-      !isCurrent() || !sync || (initialSync && sync !== initialSync) || sync._closed;
+      !isCurrent() ||
+      (sync && sessionId !== undefined && sync.sessionId !== sessionId) ||
+      (initialSync && sync !== initialSync) ||
+      sync?._closed;
     let snapshotNeeded = requested.active;
     let seenGeneration = requested.generation;
     const holdsSince = (sync) =>
