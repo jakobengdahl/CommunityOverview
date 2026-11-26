@@ -326,3 +326,68 @@ def test_directory_sync_failure_restores_previous_file(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         store.save(changed, 1)
     assert store.get(before["template_id"]) == before
+
+
+def test_profile_templates_are_merged_read_only_and_isolated(tmp_path):
+    import json
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    doc = document()
+    (profile / "one.json").write_text(json.dumps(doc))
+    backend = InMemorySessionPersistenceBackend()
+    store = TemplateStore(backend, profile)
+    mutable = document()
+    mutable["template_id"] = "4321-8765"
+    saved = store.save(mutable, 0)
+    assert {d["template_id"] for d in store.list()} == {doc["template_id"], "4321-8765"}
+    store.get(doc["template_id"])["name"] = "Changed"
+    assert store.get(doc["template_id"]) == doc
+    for action in (
+        lambda: store.save(doc, 0),
+        lambda: store.delete(doc["template_id"], 0),
+    ):
+        with pytest.raises(TemplateError):
+            action()
+    assert store.get("4321-8765") == saved
+    assert backend.load(doc["template_id"]) is None
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["duplicate", "mutable", "tombstone", "invalid", "json", "utf8", "nested"],
+)
+def test_profile_loading_rejects_invalid_documents_and_id_collisions(
+    tmp_path, problem, caplog
+):
+    import json
+
+    doc = document()
+    backend = InMemorySessionPersistenceBackend()
+    if problem in ("mutable", "tombstone"):
+        store = TemplateStore(backend)
+        saved = store.save(doc, 0)
+        if problem == "tombstone":
+            store.delete(doc["template_id"], saved["revision"])
+    if problem == "invalid":
+        doc["schema_version"] = 2
+    bad_file = tmp_path / "one.json"
+    if problem == "utf8":
+        bad_file.write_bytes(b"\xff")
+    elif problem == "nested":
+        bad_file.write_text("[" * (sys.getrecursionlimit() + 100))
+    else:
+        bad_file.write_text("{" if problem == "json" else json.dumps(doc))
+    if problem == "duplicate":
+        (tmp_path / "two.json").write_text(json.dumps(doc))
+    if problem in ("duplicate", "mutable", "tombstone"):
+        with pytest.raises(TemplateError, match="profile_id_collision"):
+            TemplateStore(backend, tmp_path)
+    else:
+        valid = document()
+        (tmp_path / "two.json").write_text(json.dumps(valid))
+        store = TemplateStore(backend, tmp_path)
+        assert store.list() == [valid]
+        assert store.get(valid["template_id"]) == valid
+        assert backend.list_ids() == []
+        assert str(bad_file) in caplog.text

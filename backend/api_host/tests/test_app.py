@@ -979,3 +979,35 @@ class TestStartupDiagnosticsLlmCheck:
             llm_check = response.json()["checks"]["llm"]
             assert llm_check["status"] == "no_key"
             assert llm_check["available"] is False
+
+
+def test_app_loads_templates_from_selected_profile(app_config, tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    (profile / "templates").mkdir(parents=True)
+    doc = {
+        "schema_version": 1,
+        "template_id": "1234-5678",
+        "name": "Profile",
+        "description": "",
+        "tags": [],
+        "revision": 0,
+        "created_by": "author",
+        "created_at": "2026-01-01",
+        "source_session_id": "source",
+        "source_session_revision": 0,
+        "nodes": [],
+        "edges": [],
+        "annotation_document": {"schema_version": 1, "annotations": []},
+        "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+        "thumbnail": None,
+    }
+    (profile / "templates" / "item.json").write_text(json.dumps(doc))
+    monkeypatch.setenv("SCHEMA_FILE", str(profile / "schema_config.json"))
+    app = create_app(app_config)
+    assert app.state.session_manager.template_store.get(doc["template_id"]) == doc
+    assert app.state.session_manager.template_store.is_profile(doc["template_id"])
+    app.state.session_store._backend.save(
+        {"id": doc["template_id"], "deleted": True, "revision": 1}
+    )
+    with pytest.raises(ValueError):
+        create_app(app_config)

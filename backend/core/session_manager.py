@@ -985,7 +985,7 @@ class SessionManager:
     # ---------------- session CRUD ----------------
 
     def _template_holds(self, session_id: str) -> bool:
-        return self.template_store._backend.load(session_id) is not None
+        return self.template_store.holds(session_id)
 
     @contextmanager
     def _creating_session(self):

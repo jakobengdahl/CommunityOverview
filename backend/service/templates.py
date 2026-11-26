@@ -528,6 +528,7 @@ ERROR_STATUS = {
     "session_seq_conflict": 409,
     "invalid_request": 400,
     "access_denied": 403,
+    "read_only": 403,
     "template_not_found": 404,
     "session_not_found": 404,
     "revision_conflict": 409,
@@ -622,7 +623,7 @@ def save_template(
                 # Templates authorize as sessions by id, so a template id
                 # must never name a session, live or retired.
                 if (
-                    store._backend.load(template_id) is None
+                    not store.holds(template_id)
                     and not manager.store.exists(template_id)
                     and manager.write_modes.staged_status(template_id) == "none"
                 ):
@@ -706,7 +707,11 @@ def list_templates(service, manager, query=None, tags=None, limit=None):
         return _failure("access_denied")
     try:
         docs = [
-            doc
+            (
+                {**doc, "source": "profile"}
+                if manager.template_store.is_profile(doc["template_id"])
+                else doc
+            )
             for doc in manager.template_store.list()
             if _authorize(
                 service,
@@ -738,7 +743,14 @@ def get_template(service, manager, template_id):
     try:
         doc = manager.template_store.get(template_id)
         return (
-            {"success": True, "template": doc}
+            {
+                "success": True,
+                "template": (
+                    {**doc, "source": "profile"}
+                    if manager.template_store.is_profile(template_id)
+                    else doc
+                ),
+            }
             if doc
             else _failure("template_not_found")
         )
@@ -785,6 +797,8 @@ def update_template(
                 return _failure("storage_error")
             if doc is None:
                 return _failure("template_not_found")
+            if store.is_profile(template_id):
+                return _failure("read_only")
             if doc["revision"] != expected_revision:
                 return _failure("revision_conflict", current_revision=doc["revision"])
             new_name = doc["name"] if name is None else name
@@ -862,6 +876,8 @@ def delete_template(service, manager, template_id, expected_revision):
     except TemplateError as exc:
         if exc.code == "not_found":
             return _failure("template_not_found")
+        if exc.code == "read_only":
+            return _failure("read_only")
         return _conflict(manager.template_store, template_id)
     except Exception:
         return _failure("storage_error")

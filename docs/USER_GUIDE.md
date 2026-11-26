@@ -615,6 +615,8 @@ actually saved. System nodes are excluded, and resource references whose target 
 outside the selection are omitted. Resolve any staged changes before saving. If the session changes while the dialog is open,
 close and reopen it to review the latest contents.
 
+Templates supplied by the active profile are available alongside saved templates. Profile templates are read-only.
+
 ### 2.7 Agents
 
 Agents are autonomous AI processes that listen to graph change events and react using
