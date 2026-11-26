@@ -118,9 +118,10 @@ def _annotation_links(
 
     Every field the canvas resolves is read: a resource reference's
     ``target``, each attachment form and id alias (see ``_attachments``), the
-    untyped canvas links and group members. An id counts as an annotation
-    only when the source stores an annotation under it and the field does
-    not declare it a node; an annotation-typed link to no stored annotation
+    untyped canvas links and group members. An id other than a resource
+    target counts as an annotation whenever the source stores an annotation
+    under it, whatever type an attachment declares: the canvas resolves
+    attachments by id alone. An annotation-typed link to no stored annotation
     is skipped, as is an untyped legacy ``group-`` canvas key. Raises
     CaptureRefused for a link value the canvas would not resolve as Python
     does.
@@ -144,7 +145,8 @@ def _annotation_links(
         value = _link_id(holder[key] if isinstance(holder, list) else holder.get(key))
         if value is None:
             continue
-        if declared in (None, "annotation") and value in annotation_ids:
+        resource = holder is annotation and key == "target"
+        if not resource and value in annotation_ids:
             yield holder, key, value, "annotation"
         elif declared is None and value.startswith(_LEGACY_GROUP_PREFIX):
             continue
@@ -346,6 +348,9 @@ def save_session_view(
             # LayerStoreError, database driver errors); none may escape as a 500.
             logger.exception("Saving a session view failed in storage")
             return _refused("storage_error")
+    # Report only the references the copy kept: relink_capture drops group
+    # members that are graph nodes off the captured canvas.
+    kept = set(captured_node_ids(session.state))
     return {
         "success": True,
         "kind": "saved_session",
@@ -354,5 +359,5 @@ def save_session_view(
         "session_id": session.id,
         "revision": session.seq,
         "session_url": build_session_url(session.id),
-        "missing_node_ids": missing,
+        "missing_node_ids": [i for i in missing if i in kept],
     }

@@ -595,9 +595,9 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
 def test_save_view_reads_graph_ids_only_from_explicit_link_fields(test_app, transport):
-    """An id is an annotation only where the source stores one under it and
-    the field does not declare a node; free-form payload names nothing, and
-    legacy group- canvas keys name no node."""
+    """An id is an annotation wherever the source stores one under it, even
+    in a node-typed attachment; free-form payload names nothing, and legacy
+    group- canvas keys name no node."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     free_form = {"target_id": "free", "member_node_ids": ["free"], "parentId": "node-1"}
@@ -632,7 +632,7 @@ def test_save_view_reads_graph_ids_only_from_explicit_link_fields(test_app, tran
     assert state["positions"].keys() == {"node-1", "group-1"}
     assert state["shape_overrides"].keys() == {note["id"], "group-1"}
     assert group["member_node_ids"] == [note["id"]]
-    assert line["start"]["attachment"]["target_id"] == "node-1"
+    assert line["start"]["attachment"]["target_id"] == note["id"]
     assert reference["target"] == "gone"
 
 
@@ -720,6 +720,64 @@ def test_save_view_denies_inaccessible_annotation_targets(
     assert result == {"success": False, "error": "access_denied"}
     assert manager.store.session_count() == 1 and source.to_dict() == before
     assert not hook.assign_copied_session_access.called
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_node_typed_link_to_an_annotation_is_not_a_graph_ref(
+    test_app, transport
+):
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        annotations=[
+            {"id": "a", "type": "note"},
+            {
+                "id": "l",
+                "type": "line",
+                "start": {"attachment": {"target_type": "node", "target_id": "a"}},
+            },
+        ]
+    )
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=True,
+        graph_access=GraphAccessNarrowing(enabled=True, allow_local_graph=False)
+        if ctx.target == "save_session_view"
+        else GraphAccessNarrowing(),
+    )
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    note, line = manager.get_session(result["session_id"]).state["annotations"]
+    assert line["start"]["attachment"]["target_id"] == note["id"] != "a"
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_drops_off_canvas_group_members_and_does_not_report_them(
+    test_app, transport
+):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        node_refs=["node-1"],
+        annotations=[
+            {
+                "id": "g",
+                "type": "group",
+                "member_node_ids": ["node-1", "node-2", "gone"],
+            }
+        ],
+    )
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    (group,) = manager.get_session(result["session_id"]).state["annotations"]
+    assert group["member_node_ids"] == ["node-1"]
 
 
 def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
@@ -825,6 +883,10 @@ def test_save_view_refuses_stale_or_staged_sources(test_app, monkeypatch, transp
     )
     manager._max_sessions = 10
     source.description = "x" * 2000
+    source.state["node_refs"] = ["node-1"]
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=ctx.target != "save_session_view"
+    )
     monkeypatch.setattr(manager_module, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 2048)
     assert attempt() == (
         status_of(413),
