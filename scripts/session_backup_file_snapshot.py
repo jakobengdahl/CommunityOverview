@@ -17,8 +17,9 @@ from backend.core.session_store import FileSessionPersistenceBackend, SessionSto
 from backend.core.storage import GraphStorage
 from backend.core.storage_backends import FileGraphPersistenceBackend
 from backend.core.write_modes import WriteModes
+from backend.runtime import session_context
 from backend.service import GraphService
-from backend.service.session_backup import BackupRefused
+from backend.service.session_backup import BackupRefused, _authorize
 
 
 def authorization_hook():
@@ -38,6 +39,13 @@ class SnapshotGraphBackend(FileGraphPersistenceBackend):
     def _cut_journal_to(self, length):
         # Recovery would authorize references against an incomplete graph.
         raise BackupRefused("incomplete snapshot journal")
+
+    def _load_layers_locked(self):
+        try:
+            return super()._load_layers_locked()
+        except Exception:
+            # GraphStorage logs load failures; never pass it layer contents.
+            raise BackupRefused("unreadable session mode") from None
 
 
 @contextmanager
@@ -95,8 +103,15 @@ def open_backup(hook):
             raise BackupRefused("unreadable session mode") from None
         if pending is not None or layer._merge_log_needs_repair:
             raise BackupRefused("unreadable session mode")
-        storage = GraphStorage(str(graph), persistence_backend=layer)
         sessions = FileSessionPersistenceBackend(root / "sessions")
+        # GraphStorage eagerly loads every staged layer, so authorize the
+        # complete session list before constructing it.
+        with session_context.bind_session(None):
+            for session_id in sorted(sessions.list_ids()):
+                _authorize(
+                    hook, target="get_visualization_session", session_id=session_id
+                )
+        storage = GraphStorage(str(graph), persistence_backend=layer)
         modes = SnapshotModes(layer)
         service = GraphService(storage, authorization_hook=hook)
         service.attach_sessions(

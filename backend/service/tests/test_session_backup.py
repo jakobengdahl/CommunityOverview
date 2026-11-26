@@ -638,6 +638,39 @@ def test_session_reference_requires_target_read_access(backend):
         create_backup(Service(denied="4321-8765"), backend, WriteModes())
 
 
+def test_file_snapshot_authorizes_before_loading_malformed_layer(
+    tmp_path, monkeypatch, caplog
+):
+    import traceback
+
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from scripts import session_backup_file_snapshot as integration
+
+    graph = tmp_path / "graph.json"
+    layer = FileGraphPersistenceBackend(graph, staged_sessions=True)
+    layer.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
+    session = Session("1234-5678", name="private session")
+    sessions = tmp_path / "sessions"
+    FileSessionPersistenceBackend(sessions).save(session.to_dict())
+    layer.layers_path.write_text(
+        '{"sessions":{"1234-5678":{"status":"private session","entries":[]}}}'
+    )
+    monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
+    monkeypatch.setenv("SESSION_BACKUP_SESSIONS", str(sessions))
+
+    for hook, error in (
+        (Hook(denied=session.id), "access denied"),
+        (Hook(denied="other"), "unreadable session mode"),
+    ):
+        caplog.clear()
+        with pytest.raises(BackupRefused, match=f"^{error}$") as exc:
+            with integration.open_backup(hook):
+                pytest.fail("partial backup opened")
+        output = caplog.text + "".join(traceback.format_exception(exc.value))
+        assert session.id not in output
+        assert session.name not in output
+
+
 @pytest.mark.parametrize("custom_journal", [False, True])
 def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
     from backend.core import Node
