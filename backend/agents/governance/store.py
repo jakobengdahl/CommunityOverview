@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Protocol, Sequence, Union, runtime_checkable
 
-from backend.core.actor_attribution import replace_attribution, validate_erasure
+from backend.core.actor_attribution import (
+    preflight_sqlite,
+    replace_attribution,
+    validate_erasure,
+)
 
 from .models import Proposal, ProposalStatus, utcnow
 
@@ -275,6 +279,11 @@ class SqliteProposalStore:
         # Overwrite freed pages so redacted or purged content does not linger.
         self._conn.execute("PRAGMA secure_delete=ON")
         self._migrate()
+
+    @staticmethod
+    def preflight(db_path: Union[str, Path]) -> bool:
+        """Erasure preflight: False if absent, raise unless a writable current store."""
+        return preflight_sqlite(db_path, "proposals", _SCHEMA_VERSION)
 
     def _migrate(self) -> None:
         with self._lock:

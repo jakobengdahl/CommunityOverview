@@ -3266,18 +3266,28 @@ class PostgresMergeRecords:
                 is not None
             )
 
+    def preflight(self) -> bool:
+        """Erasure preflight: False if absent, raise if erase_actor cannot run.
+
+        to_regclass needs no privilege on the table, so the erasure's UPDATE
+        is run and rolled back: it fails on a missing privilege, a read-only
+        server or a replica. The values matched are irrelevant to that.
+        """
+        if not self.exists():
+            return False
+        self._update("", "", dry_run=True)
+        return True
+
     def erase_actor(
         self, actor_id: str, replacement_token: str, *, dry_run: bool = False
     ) -> int:
-        """Return the rows changed; a dry run rolls the same UPDATE back.
-
-        The dry run is the CLI's pre-check: to_regclass needs no privilege on
-        the table, but the UPDATE fails on a missing privilege, a read-only
-        server or a replica before any other store has been touched.
-        """
+        """Return the rows changed; a dry run rolls the same UPDATE back."""
         validate_erasure(actor_id, replacement_token)
         if not self.exists():
             return 0
+        return self._update(actor_id, replacement_token, dry_run=dry_run)
+
+    def _update(self, actor_id: str, replacement_token: str, *, dry_run: bool) -> int:
         backend = self._backend
         with backend._pool.connection() as conn:
             with conn.transaction():
