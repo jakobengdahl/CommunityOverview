@@ -24,7 +24,10 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from backend.config.config_loader import build_session_url
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
+from backend.runtime.authorization import GRAPH_ACTION_READ
+from backend.service.access import authorize_graph_access
 from backend.llm.llm_providers import provider_max_tokens
 from backend.ui.chat_logic import ChatProcessor, run_on_event_loop
 from backend.service import GraphService
@@ -153,9 +156,37 @@ class ChatService:
             "save_view": self._graph_service.save_view,
             "get_saved_view": self._graph_service.get_saved_view,
             "list_saved_views": self._graph_service.list_saved_views,
+            "list_visualization_sessions": self._list_visualization_sessions,
             "get_schema": self._graph_service.get_schema,
             "get_presentation": self._graph_service.get_presentation,
         }
+
+    def _list_visualization_sessions(self) -> Dict[str, Any]:
+        denied = authorize_graph_access(
+            self._graph_service.authorization_hook,
+            action=GRAPH_ACTION_READ,
+            target="list_visualization_sessions",
+        )
+        if denied:
+            return denied
+        manager = self._graph_service.session_gate.session_manager
+        if manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        sessions = [
+            {
+                "session_id": meta["id"],
+                "name": meta.get("name"),
+                "session_url": build_session_url(meta["id"]),
+            }
+            for meta in manager.list_sessions()
+            if not authorize_graph_access(
+                self._graph_service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=meta["id"],
+            )
+        ]
+        return {"success": True, "sessions": sessions, "count": len(sessions)}
 
     def _search_graph_tool(
         self,

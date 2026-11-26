@@ -266,8 +266,8 @@ The user may refer to "visualization" or "view" in different ways. Always unders
 When user says "visualization", determine from context:
 - "Show me actors" -> modify current visualization (use add_nodes)
 - "Save this visualization" -> prefer save_session_view when available; otherwise request browser capture with save_view
-- "What visualizations exist?" -> list SavedView nodes (use list_saved_views)
-- "Load the AI view" -> load SavedView (use get_saved_view)
+- "What visualizations exist?" -> list sessions (use list_visualization_sessions)
+- "Load the AI view" -> list sessions and offer the matching server-provided links
 
 LANGUAGE HANDLING:
 - Respond in the same language the user is using (Swedish, English, etc.)
@@ -519,16 +519,12 @@ WORKFLOW FOR SAVING/LOADING SAVED VIEWS:
 1. User can save current visualization state as a named saved view
 2. Prefer save_session_view with the session ID and current revision when available.
 3. Otherwise save_view only requests browser capture. Never claim a save succeeded until the browser confirms it.
-4. To load a saved view, use get_saved_view() with the view name
-5. To list available saved views, use list_saved_views()
-6. Suggest existing saved views when relevant
+4. List saved sessions with list_visualization_sessions and give the user the returned session_url verbatim. If it is null, say the link is unavailable.
+5. Names may collide: offer the matching sessions for the user to choose by ID. Never resolve a legacy view name to a session.
+6. Use get_saved_view and list_saved_views only when explicitly requesting legacy graph views.
 
 VISUALIZATION DISPLAY BEHAVIOR:
-1. When the user asks to "show/load a saved view":
-   - Use get_saved_view(name) to load the saved view
-   - This will CLEAR current visualization and show ONLY the nodes from the saved view
-   - The SavedView node itself is NOT displayed - only its content nodes
-   - The frontend will automatically apply saved positions, groups, and hidden node states
+1. To open a saved session, offer its server-provided link; opening it selects the session by ID.
 
 2. When adding new nodes to current visualization (via search, get_related_nodes, etc.):
    - New nodes are ADDED to the current visualization (merged, not replaced)
@@ -548,7 +544,7 @@ VISUALIZATION DISPLAY BEHAVIOR:
        search_graph(query="AI", node_types=["Initiative"], action="replace_visualization")
 
 4. Important distinction:
-   - "Show/load saved view X" = REPLACE current visualization with saved view content
+   - "Show/load saved view X" = offer matching session links
    - "Visa/Show X" (without "saved view") = REPLACE current view with the results
      (action="replace_visualization")
    - "Add X" / "Show related nodes" = ADD to current visualization
@@ -578,8 +574,9 @@ TOOL USAGE GUIDELINES:
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
 - save_view: Request browser capture only; do not claim success without browser confirmation. Prefer save_session_view when available.
-- get_saved_view: For loading a saved view into the visualization
-- list_saved_views: For listing all available saved views in the database
+- get_saved_view: For explicitly requested legacy graph views
+- list_saved_views: For explicitly requested legacy graph views
+- list_visualization_sessions: For listing saved sessions and their links
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
 - mark_nodes: For applying visual color annotations to nodes currently in the visualization (session-only, does not change the database). Call with empty marks array to clear all marks.
@@ -1333,8 +1330,13 @@ class ChatProcessor:
                 },
             },
             {
+                "name": "list_visualization_sessions",
+                "description": "List sessions and their server-provided links. Names can collide; offer choices by ID.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
                 "name": "get_saved_view",
-                "description": "Load a saved view by name to display it in the visualization. Use when user wants to open/load/show a saved view.",
+                "description": "Load a legacy graph saved view by name when explicitly requested.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -1348,7 +1350,7 @@ class ChatProcessor:
             },
             {
                 "name": "list_saved_views",
-                "description": "List all saved views stored in the graph. Use this when user asks what saved views/visualizations exist in the database.",
+                "description": "List legacy saved views stored in the graph when explicitly requested.",
                 "input_schema": {"type": "object", "properties": {}},
             },
             {

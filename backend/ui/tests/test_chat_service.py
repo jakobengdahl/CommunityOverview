@@ -63,6 +63,46 @@ class TestChatServiceInit:
             assert tool in service._tools_map, f"Missing tool: {tool}"
 
 
+def test_session_listing_offers_server_links_for_duplicate_names(
+    graph_service, monkeypatch
+):
+    from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+    from backend.core.session_manager import SessionManager
+    from backend.core.session_store import (
+        InMemorySessionPersistenceBackend,
+        SessionStore,
+    )
+    from backend.ui import ChatService
+
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    graph_service.attach_sessions(manager)
+    monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "/app")
+    a = manager.create_session("Same")
+    b = manager.create_session("Same")
+    with patch("backend.ui.chat_logic.create_provider"):
+        result = ChatService(graph_service)._tools_map["list_visualization_sessions"]()
+    assert {item["session_id"]: item["session_url"] for item in result["sessions"]} == {
+        a.id: build_session_url(a.id),
+        b.id: build_session_url(b.id),
+    }
+    from backend.ui import chat_service as chat_module
+
+    original = chat_module.authorize_graph_access
+
+    def authorize(hook, **kwargs):
+        if kwargs.get("session_id") == b.id:
+            return {"message": "denied"}
+        return original(hook, **kwargs)
+
+    monkeypatch.setattr(chat_module, "authorize_graph_access", authorize)
+    with patch("backend.ui.chat_logic.create_provider"):
+        result = ChatService(graph_service)._tools_map["list_visualization_sessions"]()
+    assert result["count"] == 1
+    assert result["sessions"] == [
+        {"session_id": a.id, "name": "Same", "session_url": build_session_url(a.id)}
+    ]
+
+
 class TestChatServiceToolExecution:
     """Tests for ChatService tool execution via GraphService."""
 
