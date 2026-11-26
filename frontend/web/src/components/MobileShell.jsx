@@ -108,6 +108,7 @@ function MobileShell({
   onCreateAgent,
   onCreateSubscription,
   onSaveView,
+  flushBeforeCapture,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
@@ -382,7 +383,11 @@ function MobileShell({
           onClose={() => setChatPanelOpen(false)}
           title={t('mobile_nav.chat_panel_title')}
         >
-          <ChatPanel variant="sheet" collectionShortName={akcShortName || undefined} />
+          <ChatPanel
+            variant="sheet"
+            collectionShortName={akcShortName || undefined}
+            flushBeforeCapture={flushBeforeCapture}
+          />
         </BottomSheet>
       )}
     </>
