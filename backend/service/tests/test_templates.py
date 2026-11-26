@@ -563,31 +563,59 @@ def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
     tid = saved["template_id"]
     for x, y in ((10**400, 0), (0, -(10**400))):
         assert templates.insert_template(
-            service, manager, target.id, tid, x=x, y=y
+            service,
+            manager,
+            target.id,
+            tid,
+            x=x,
+            y=y,
+            mode="reference",
         ) == {
             "success": False,
             "error": "invalid_request",
         }
     assert (
         templates.insert_template(
-            service, manager, target.id, tid, expected_revision=99
+            service,
+            manager,
+            target.id,
+            tid,
+            x=0,
+            y=0,
+            expected_revision=99,
+            mode="reference",
         )["error"]
         == "revision_conflict"
     )
     assert (
         templates.insert_template(
-            service, manager, target.id, tid, x=0, y=0, template_revision=99
+            service,
+            manager,
+            target.id,
+            tid,
+            x=0,
+            y=0,
+            template_revision=99,
+            mode="reference",
         )["error"]
         == "revision_conflict"
     )
     assert (
         templates.insert_template(
-            service, manager, target.id, tid, x=0, y=0, mode="copy"
+            service, manager, target.id, tid, x=0, y=0, mode="other"
         )["error"]
-        == "unsupported_mode"
+        == "invalid_request"
     )
     assert target.state == before
-    result = templates.insert_template(service, manager, target.id, tid, x=100, y=200)
+    result = templates.insert_template(
+        service,
+        manager,
+        target.id,
+        tid,
+        x=100,
+        y=200,
+        mode="reference",
+    )
     assert result["success"] and result["added"] == ["b"]
     assert result["skipped"] == [{"node_id": "a", "reason": "already_present"}]
     assert target.state["positions"]["a"] == before["positions"]["a"]
@@ -624,7 +652,13 @@ def test_insert_skips_missing_and_remaps_links(capture, nested):
     del service._storage.nodes["a"]
     target = manager.create_session("target")
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=0, y=0
+        service,
+        manager,
+        target.id,
+        doc["template_id"],
+        x=0,
+        y=0,
+        mode="reference",
     )
     assert result["success"] and result["added"] == ["b"]
     assert result["skipped"] == [
@@ -651,7 +685,8 @@ def test_insert_skips_missing_and_remaps_links(capture, nested):
         (None, None, None, None),
     ],
 )
-def test_insert_resolves_captured_shapes(capture, entry, ref, expected, reason):
+@pytest.mark.parametrize("mode", ["reference", "copy"])
+def test_insert_resolves_captured_shapes(capture, entry, ref, expected, reason, mode):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -675,10 +710,19 @@ def test_insert_resolves_captured_shapes(capture, entry, ref, expected, reason):
     )
     target = manager.create_session("target")
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=0, y=0
+        service,
+        manager,
+        target.id,
+        doc["template_id"],
+        x=0,
+        y=0,
+        mode=mode,
     )
     assert result["success"]
-    assert target.state["shape_overrides"]["a"] == (expected or {"inline": definition})
+    node_id = result["node_id_map"][doc["nodes"][0]["key"]] if mode == "copy" else "a"
+    assert target.state["shape_overrides"][node_id] == (
+        expected or {"inline": definition}
+    )
     assert target.state["type_shapes"] == {}
     assert [item["reason"] for item in result["shapes"]] == ([reason] if reason else [])
 
@@ -701,7 +745,8 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
     client = TestClient(app)
     url = f"/api/sessions/{target.id}/insert-template"
     default = client.post(url, json={"template_id": doc["template_id"]})
-    assert default.status_code == 200 and default.json()["added"] == ["a", "b"]
+    assert default.status_code == 200
+    assert set(default.json()["added"]) == set(default.json()["node_id_map"].values())
     target = manager.create_session("another target")
     url = f"/api/sessions/{target.id}/insert-template"
     conflict = client.post(
@@ -717,9 +762,30 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
         conflict.status_code == 409 and conflict.json()["error"] == "revision_conflict"
     )
     result = client.post(
-        url, json={"template_id": doc["template_id"], "x": 20, "y": 30}
+        url,
+        json={"template_id": doc["template_id"], "x": 20, "y": 30, "mode": "reference"},
     )
     assert result.status_code == 200 and result.json()["added"] == ["a", "b"]
+    copy_target = manager.create_session("copy")
+    for error, status, expected in (
+        ("write_failed", 503, "storage_error"),
+        ("write_outcome_unknown", 503, "storage_error"),
+    ):
+        with patch.object(
+            service, "add_nodes", return_value={"success": False, "error": error}
+        ):
+            failed = client.post(
+                f"/api/sessions/{copy_target.id}/insert-template",
+                json={"template_id": doc["template_id"], "x": 20, "y": 30},
+            )
+        assert failed.status_code == status and failed.json()["error"] == expected
+        assert copy_target.seq == 0
+    result = client.post(
+        f"/api/sessions/{copy_target.id}/insert-template",
+        json={"template_id": doc["template_id"], "x": 20, "y": 30},
+    )
+    assert result.status_code == 200
+    assert len(result.json()["node_id_map"]) == 2
 
 
 def test_insert_denial_and_persistence_failure_leave_session_unchanged(capture):
@@ -736,15 +802,27 @@ def test_insert_denial_and_persistence_failure_leave_session_unchanged(capture):
         "backend.service.templates.access.authorize_graph_access", return_value=True
     ):
         assert (
-            templates.insert_template(service, manager, target.id, doc["template_id"])[
-                "error"
-            ]
+            templates.insert_template(
+                service,
+                manager,
+                target.id,
+                doc["template_id"],
+                x=0,
+                y=0,
+                mode="reference",
+            )["error"]
             == "access_denied"
         )
     with patch.object(manager.store, "persist", side_effect=OSError):
         assert (
             templates.insert_template(
-                service, manager, target.id, doc["template_id"], x=0, y=0
+                service,
+                manager,
+                target.id,
+                doc["template_id"],
+                x=0,
+                y=0,
+                mode="reference",
             )["error"]
             == "storage_error"
         )
@@ -781,7 +859,13 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
     ]
     target = manager.create_session("target")
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=100, y=200
+        service,
+        manager,
+        target.id,
+        doc["template_id"],
+        x=100,
+        y=200,
+        mode="reference",
     )
     assert result["success"]
     group, line, stroke = target.state["annotations"]
@@ -808,12 +892,17 @@ def test_insert_requires_both_coordinates(capture):
     target = manager.create_session("target")
     for coordinates in ({"x": 1}, {"y": 2}):
         assert templates.insert_template(
-            service, manager, target.id, doc["template_id"], **coordinates
+            service,
+            manager,
+            target.id,
+            doc["template_id"],
+            **coordinates,
+            mode="reference",
         ) == {"success": False, "error": "invalid_request"}
     assert target.seq == 0
-    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
-        "success"
-    ]
+    assert templates.insert_template(
+        service, manager, target.id, doc["template_id"], mode="reference"
+    )["success"]
     assert target.state["positions"]["b"] == {"x": 0, "y": 0}
 
 
@@ -870,7 +959,9 @@ def test_default_placement_uses_rendered_existing_and_template_bounds(
     else:
         target.state["annotations"] = [{"id": "existing", "type": kind, **payload}]
     before = copy.deepcopy(target.state)
-    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], mode="reference"
+    )
     assert result["success"]
     for key in ("node_refs", "positions"):
         assert target.state[key] == before[key]
@@ -933,9 +1024,9 @@ def test_default_insertion_with_missing_or_null_existing_rotation(capture, rotat
             "geometry": {"w": 100, "h": 40, **rotation},
         }
     ]
-    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
-        "success"
-    ]
+    assert templates.insert_template(
+        service, manager, target.id, doc["template_id"], mode="reference"
+    )["success"]
     assert target.state["positions"]["b"] == {"x": 180, "y": 0}
 
 
@@ -965,7 +1056,10 @@ def test_explicit_insertion_with_missing_or_null_template_rotation(capture, rota
     assert (geometry["x"], geometry["y"]) == (50, 60)
 
 
-def test_default_placement_uses_target_type_shape_for_null_template_shape(capture):
+@pytest.mark.parametrize("mode", ["reference", "copy"])
+def test_default_placement_uses_target_type_shape_for_null_template_shape(
+    capture, mode
+):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -987,10 +1081,12 @@ def test_default_placement_uses_target_type_shape_for_null_template_shape(captur
             }
         }
     }
-    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
-        "success"
-    ]
-    assert target.state["positions"]["a"] == {"x": 0, "y": 28}
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], mode=mode
+    )
+    assert result["success"]
+    node_id = result["node_id_map"][doc["nodes"][0]["key"]] if mode == "copy" else "a"
+    assert target.state["positions"][node_id] == {"x": 0, "y": 28}
 
 
 @pytest.mark.parametrize(
@@ -1057,7 +1153,13 @@ def test_insert_preserves_attachment_only_line_endpoint(capture):
     ]
     target = manager.create_session("target")
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=100, y=200
+        service,
+        manager,
+        target.id,
+        doc["template_id"],
+        x=100,
+        y=200,
+        mode="reference",
     )
     assert result["success"]
     assert target.state["annotations"][0]["start"] == {
@@ -1079,7 +1181,13 @@ def test_insert_rejects_overflow_without_writing(capture):
     target = manager.create_session("target")
     before = copy.deepcopy(target.state)
     result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=1e308, y=0
+        service,
+        manager,
+        target.id,
+        doc["template_id"],
+        x=1e308,
+        y=0,
+        mode="reference",
     )
     assert result == {"success": False, "error": "invalid_request"}
     assert target.state == before and target.seq == 0
@@ -1161,10 +1269,212 @@ def test_default_placement_ignores_skipped_source_elements(capture, skip):
         del service._storage.nodes["a"]
     else:
         target.state.update(node_refs=["a"], positions={"a": {"x": 0, "y": 0}})
-    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], mode="reference"
+    )
     assert result["success"]
     assert result["skipped"] == [{"node_id": "a", "reason": skip}]
     assert target.state["positions"]["b"] == {
         "x": 0 if skip == "missing" else 280,
         "y": 0,
     }
+
+
+def test_copy_default_placement_without_source_node(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state.update(
+        node_refs=["a"], positions={"a": {"x": 100, "y": 50}}, annotations=[]
+    )
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    del service._storage.nodes["a"]
+    target = manager.create_session("target")
+    target.state["annotations"] = [
+        {"id": "existing", "type": "shape", "geometry": {"w": 100, "h": 40}}
+    ]
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"]
+    node_id = result["node_id_map"][doc["nodes"][0]["key"]]
+    assert target.state["positions"][node_id] == {"x": 180, "y": 0}
+
+
+def test_copy_inserts_snapshots_and_edges_atomically(capture):
+    import copy
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    before = copy.deepcopy(target.state)
+    graph_before = set(service._storage.nodes)
+    service._storage.nodes["a"].name = "Changed after capture"
+    with patch.object(manager, "_apply_op_sync", side_effect=OSError):
+        assert (
+            templates.insert_template(
+                service, manager, target.id, doc["template_id"], x=10, y=20
+            )["error"]
+            == "storage_error"
+        )
+    assert target.state == before and target.seq == 0
+    assert set(service._storage.nodes) == graph_before
+    with patch(
+        "backend.config.config_loader.relationship_type_allows_node_types",
+        return_value={"allowed": False},
+    ):
+        assert not templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=10, y=20
+        )["success"]
+    assert target.state == before and target.seq == 0
+    assert set(service._storage.nodes) == graph_before
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=10, y=20
+    )
+    assert result["success"]
+    ids = result["node_id_map"]
+    assert set(ids) == {n["key"] for n in doc["nodes"]}
+    assert not set(ids.values()) & {"a", "b"}
+    copied = {i: service._storage.get_node(i).model_dump() for i in ids.values()}
+    edges = [
+        e.model_dump()
+        for e in service._storage.edges.values()
+        if e.source in ids.values()
+    ]
+    for node in doc["nodes"]:
+        actual = copied[ids[node["key"]]]
+        assert actual["name"] == node["snapshot"]["name"]
+        assert actual["metadata"]["template"] == {
+            "id": doc["template_id"],
+            "revision": doc["revision"],
+            "key": node["key"],
+        }
+    assert len(edges) == len(doc["edges"])
+    assert all(
+        e["source"] in ids.values() and e["target"] in ids.values() for e in edges
+    )
+    assert (
+        target.state["annotations"][0]["attachment"]["target_id"]
+        == ids[doc["nodes"][0]["key"]]
+    )
+
+
+def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
+    from backend.service import templates
+    from backend.runtime.authorization import GraphAuthorizationDecision
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    doc["nodes"][0]["snapshot"]["type"] = "UnknownType"
+    doc = manager.template_store.save(doc, doc["revision"])
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=0, y=0
+    )
+    assert result["error"] == "schema_mismatch" and result["types"] == ["UnknownType"]
+    doc["nodes"][0]["snapshot"]["type"] = "Actor"
+    doc = manager.template_store.save(doc, doc["revision"])
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=context.target != "add_nodes")
+
+    service._authorization_hook = Hook()
+    before = set(service._storage.nodes)
+    assert (
+        templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=0, y=0
+        )["error"]
+        == "access_denied"
+    )
+    assert set(service._storage.nodes) == before and target.seq == 0
+
+
+@pytest.mark.parametrize("mode", [None, "copy"])
+def test_copy_refuses_staged_target_without_writes(capture, tmp_path, mode):
+    import copy
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.write_modes import WriteModes
+    from backend.service import templates
+    from backend.service.rest_api import create_rest_router
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    backend = FileGraphPersistenceBackend(
+        tmp_path / "staged.json", staged_sessions=True
+    )
+    storage = GraphStorage(str(tmp_path / "staged.json"), persistence_backend=backend)
+    modes = WriteModes(storage.layer_store)
+    manager = SessionManager(
+        SessionStore(
+            InMemorySessionPersistenceBackend(), staged_status=modes.staged_status
+        ),
+        write_modes=modes,
+    )
+    doc["revision"] = 0
+    doc = manager.template_store.save(doc, 0)
+    service = GraphService(storage)
+    target = manager.create_session("target", "staged")
+    before = copy.deepcopy(target.state)
+    subscriber = manager.bus.subscribe(target.id)
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(service, session_manager=manager), prefix="/api"
+    )
+    with (
+        patch.object(service, "add_nodes") as add_nodes,
+        patch.object(manager, "_apply_op_sync") as apply,
+    ):
+        body = {"template_id": doc["template_id"], "x": 0, "y": 0}
+        if mode is not None:
+            body["mode"] = mode
+        response = TestClient(app).post(
+            f"/api/sessions/{target.id}/insert-template",
+            json=body,
+        )
+    assert response.status_code == 409
+    assert response.json()["error"] == "staged_target_not_supported"
+    add_nodes.assert_not_called()
+    apply.assert_not_called()
+    assert target.state == before and target.seq == 0
+    assert not storage.nodes and not storage.edges
+    assert storage.layer_store.load_layer(target.id) == []
+    assert subscriber.queue.empty()
+
+
+def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):
+    from backend.core.session_store import AnnotationLimitReached
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    with (
+        patch.object(manager, "_apply_op_sync", side_effect=AnnotationLimitReached),
+        patch.object(
+            service._storage, "delete_nodes", side_effect=OSError("undo failed")
+        ),
+    ):
+        result = templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=0, y=0
+        )
+    assert result["error"] == "annotations_limit"
+    assert "Template insertion rollback failed: delete created nodes" in caplog.text
+    assert "undo failed" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert all(
+        node_id not in caplog.text
+        for node_id in service._storage.nodes
+        if node_id not in {"a", "b"}
+    )
