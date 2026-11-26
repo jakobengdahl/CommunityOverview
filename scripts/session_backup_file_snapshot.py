@@ -46,8 +46,9 @@ def open_backup(hook):
     source_sessions = Path(os.environ["SESSION_BACKUP_SESSIONS"])
     custom_journal = os.environ.get("SESSION_BACKUP_GRAPH_JOURNAL")
     source_journal = (
-        Path(custom_journal) if custom_journal else
-        source_graph.with_name(source_graph.stem + ".journal.ndjson")
+        Path(custom_journal)
+        if custom_journal
+        else source_graph.with_name(source_graph.stem + ".journal.ndjson")
     )
     if (
         source_graph.suffix != ".json"

@@ -409,7 +409,9 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
 
     graph = tmp_path / "graph.json"
     journal = tmp_path / "custom" / "writes.ndjson" if custom_journal else None
-    layer = FileGraphPersistenceBackend(graph, journal_path=journal, staged_sessions=True)
+    layer = FileGraphPersistenceBackend(
+        graph, journal_path=journal, staged_sessions=True
+    )
     layer.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
     layer.record_staged("1234-5678")
     if custom_journal:
@@ -429,22 +431,31 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
     session = Session("1234-5678")
     session.state["node_refs"] = ["secret"]
     FileSessionPersistenceBackend(sessions).save(session.to_dict())
-    layer.upsert_node(Node(id="secret", type="Actor", name="Secret",
-                           metadata={"origin_graph_id": "other"}).to_dict())
+    layer.upsert_node(
+        Node(
+            id="secret",
+            type="Actor",
+            name="Secret",
+            metadata={"origin_graph_id": "other"},
+        ).to_dict()
+    )
 
     class NarrowHook:
         def evaluate(self, context):
             return GraphAuthorizationDecision(
-                allowed=True, graph_access=GraphAccessNarrowing(
-                    enabled=True, allow_local_graph=False, include_graph_ids=("allowed",)
-                )
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True,
+                    allow_local_graph=False,
+                    include_graph_ids=("allowed",),
+                ),
             )
 
     with integration.open_backup(NarrowHook()) as (service, backend, modes):
         with pytest.raises(BackupRefused, match="^access denied$"):
             create_backup(service, backend, modes)
     original = layer.journal_path.read_bytes()
-    for tail in (b"partial", b"malformed\n", b'{}\n'):
+    for tail in (b"partial", b"malformed\n", b"{}\n"):
         layer.journal_path.write_bytes(original + tail)
         with pytest.raises(BackupRefused, match="incomplete snapshot journal"):
             with integration.open_backup(Hook()):
