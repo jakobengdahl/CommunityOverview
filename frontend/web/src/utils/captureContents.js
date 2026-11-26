@@ -1,10 +1,12 @@
 /**
- * The sync baseline to capture from, or null when there is none to trust: no
- * client for the session, or one holding only a placeholder seeded before its
- * stream delivered state.
+ * The sync baseline to capture from, or null when the session has no client.
+ * A client holding only a placeholder fails the capture: its empty membership
+ * is not the session's.
  */
 export function readyBaseline(sync) {
-  return sync?.hasCaptureBaseline() ? sync.captureBaseline() : null;
+  if (!sync) return null;
+  if (!sync.hasCaptureBaseline()) throw new Error('Session state is not loaded yet');
+  return sync.captureBaseline();
 }
 
 /**

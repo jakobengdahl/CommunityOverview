@@ -895,9 +895,9 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
-    // Whether setBaseline() was given loaded state rather than the `{}`
-    // placeholder a not-yet-loaded session is seeded with.
-    this._baselineSeeded = false;
+    // Whether the baseline holds server state: setBaseline() was given loaded
+    // state, or a snapshot confirmed the seq a `{}` placeholder was seeded at.
+    this._baselineWritten = false;
     this._refusalProbed = false; // asked once why the stream never opened
     this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
@@ -1053,11 +1053,11 @@ export class SessionSyncClient {
   }
 
   /**
-   * Whether the baseline reflects server state: a load seeded it, or the
-   * stream has delivered once. A stream drop since then does not undo that.
+   * Whether the baseline reflects server state rather than a placeholder. A
+   * stream drop since then does not undo that.
    */
   hasCaptureBaseline() {
-    return this._hadSnapshot || this._baselineSeeded;
+    return this._baselineWritten;
   }
 
   /** The node ids the baseline holds hidden. */
@@ -1579,7 +1579,7 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
-    this._baselineSeeded = Object.keys(state || {}).length > 0;
+    this._baselineWritten = Object.keys(state || {}).length > 0;
     if (typeof seq === 'number') {
       this._loadedSeq = seq;
       this._membershipVersion = seq;
@@ -2340,6 +2340,8 @@ export class SessionSyncClient {
           // It may carry membership changes this client never saw as ops; a
           // read marked stale still keeps every current member.
           this._membershipVersion = data.seq;
+          // Nothing landed since the load: even a `{}` placeholder is current.
+          if (data.seq === this._loadedSeq) this._baselineWritten = true;
         }
         this._ready = true;
         this._resolveReadyWaiters();

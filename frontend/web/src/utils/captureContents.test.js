@@ -31,6 +31,7 @@ function client(seed, ...events) {
     opsUrl: '/ops',
     fetchImpl: vi.fn(),
     EventSourceImpl: FakeEventSource,
+    handlers: { onResync: vi.fn() },
   });
   if (seed) sync.setBaseline(...seed);
   sync.connect();
@@ -42,6 +43,7 @@ function client(seed, ...events) {
   return sync;
 }
 
+const placeholder = [{}, { seq: 0 }];
 const loaded = [{ node_refs: ['hidden'], positions: { hidden: { x: 7, y: 8 } } }, { seq: 4 }];
 const snapshot = { type: 'snapshot', seq: 4 };
 const store = { node_ids: ['a', 'b'], positions: { a: { x: 1, y: 2 } } };
@@ -49,8 +51,11 @@ const baseline = { node_ids: ['hidden'], positions: { hidden: { x: 7, y: 8 } } }
 
 it.each([
   ['no sync client', () => null, store],
-  ['a placeholder seeded before the stream delivered', () => client([{}, { seq: 0 }]), store],
-  ['an unseeded client before the stream delivered', () => client(null), store],
+  [
+    'a placeholder an empty session confirmed',
+    () => client(placeholder, { type: 'snapshot', seq: 0 }),
+    { node_ids: [], positions: {} },
+  ],
   ['a loaded baseline before the first snapshot', () => client(loaded), baseline],
   ['a loaded baseline once the client is ready', () => client(loaded, snapshot), baseline],
   ['a loaded baseline after the stream dropped', () => client(loaded, snapshot, 'drop'), baseline],
@@ -62,6 +67,25 @@ it.each([
   expect(
     buildCaptureContents({ baseline: readyBaseline(makeSync()), members: ['a', 'b'], nodes })
   ).toEqual(expected);
+});
+
+it.each([
+  ['a placeholder seeded before the stream delivered', () => client(placeholder)],
+  ['an unseeded client once the stream delivered', () => client(null, snapshot)],
+])('fails the capture from %s', (_label, makeSync) => {
+  expect(() => readyBaseline(makeSync())).toThrow();
+});
+
+it('captures a placeholder-seeded session only once its resync reload lands', async () => {
+  const sync = client(placeholder, { type: 'snapshot', seq: 3 });
+  expect(sync.handlers.onResync).toHaveBeenCalled();
+  const flush = (onReady) => new Promise((resolve) => resolve(onReady()));
+  const read = () => ({ baseline: readyBaseline(sync), members: ['local'] });
+  const saved = vi.fn();
+  await expect(captureContents(flush, read).then(saved)).rejects.toThrow();
+  expect(saved).not.toHaveBeenCalled();
+  sync.setBaseline({ node_refs: ['server'], positions: {} }, { seq: 3 });
+  expect(await captureContents(flush, read)).toEqual({ node_ids: ['server'], positions: {} });
 });
 
 it('reads after a successful flush and never reads after failure', async () => {
