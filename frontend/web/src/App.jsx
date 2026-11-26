@@ -2263,16 +2263,20 @@ function App() {
   );
 
   const [captureFlushQueue] = useState(createCaptureFlushQueue);
-  const flushBeforeCapture = useCallback(() => {
-    const targetId = sessionIdRef.current;
-    const epoch = useGraphStore.getState().sessionEpoch;
-    return captureFlushQueue({
-      getSync: () => syncRef.current,
-      isCurrent: () =>
-        sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
-      requestSnapshot: requestSessionSnapshot,
-    });
-  }, [captureFlushQueue, requestSessionSnapshot, syncRef]);
+  const flushBeforeCapture = useCallback(
+    (onReady) => {
+      const targetId = sessionIdRef.current;
+      const epoch = useGraphStore.getState().sessionEpoch;
+      return captureFlushQueue({
+        getSync: () => syncRef.current,
+        isCurrent: () =>
+          sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
+        requestSnapshot: requestSessionSnapshot,
+        onReady,
+      });
+    },
+    [captureFlushQueue, requestSessionSnapshot, syncRef]
+  );
 
   // Callback from GraphCanvas when the saveViewSignal round-trip completes.
   // Always persists the session snapshot; additionally opens the Save View

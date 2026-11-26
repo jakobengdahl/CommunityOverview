@@ -1,7 +1,6 @@
 // covers: frontend/web/src/utils/captureContents.js
 import { expect, it, vi } from 'vitest';
 import { buildCaptureContents, captureContents } from './captureContents';
-
 it('keeps baseline members and positions, filling only missing positions from the canvas', () => {
   const baseline = {
     node_refs: ['hidden', 'unresolved', 'computed', 'unplaced'],
@@ -18,10 +17,13 @@ it('keeps baseline members and positions, filling only missing positions from th
 
 it('reads after a successful flush and never reads after failure', async () => {
   let finish;
-  const read = vi.fn(() => ({ baseline: { node_refs: ['new'] } }));
-  const pending = captureContents(() => new Promise((resolve) => (finish = resolve)), read);
+  let member = 'new';
+  const read = vi.fn(() => ({ baseline: { node_refs: [member] } }));
+  const flush = (onReady) => new Promise((resolve) => (finish = () => resolve(onReady())));
+  const pending = captureContents(flush, read);
   expect(read).not.toHaveBeenCalled();
   finish();
+  member = 'later';
   expect(await pending).toEqual({ node_ids: ['new'], positions: {} });
   read.mockClear();
   await expect(captureContents(() => Promise.reject(new Error()), read)).rejects.toThrow();

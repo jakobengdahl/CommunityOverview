@@ -16,6 +16,6 @@ export function buildCaptureContents({ baseline, nodes } = {}) {
 
 /** Read both sources only after the existing capture flush has completed. */
 export async function captureContents(flushBeforeCapture, getCaptureState) {
-  await flushBeforeCapture?.();
-  return buildCaptureContents(getCaptureState?.());
+  if (!flushBeforeCapture) return buildCaptureContents(getCaptureState?.());
+  return flushBeforeCapture(() => buildCaptureContents(getCaptureState?.()));
 }

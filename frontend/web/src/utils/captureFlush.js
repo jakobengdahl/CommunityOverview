@@ -15,6 +15,7 @@ export function flushCanvasForCapture({
   getSync,
   isCurrent,
   requestSnapshot,
+  onReady,
   timeoutMs = 10000,
   requested = readHolds(getSync),
 }) {
@@ -30,7 +31,13 @@ export function flushCanvasForCapture({
       clearTimeout(pollTimer);
       cancelSnapshot();
       if (error) reject(error);
-      else resolve();
+      else {
+        try {
+          resolve(onReady?.());
+        } catch (cause) {
+          reject(cause);
+        }
+      }
     };
     const deadline = setTimeout(() => finish(new Error('Canvas capture timed out')), timeoutMs);
     const unavailable = (sync) =>

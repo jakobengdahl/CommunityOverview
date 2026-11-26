@@ -3499,7 +3499,13 @@ function GraphCanvasInner({
   // set from the snapshot.
   useEffect(() => {
     if (!captureNodesRef) return undefined;
-    const read = () => (activeFocusRootId ? preFocusRef.current?.nodes : getFlowNodes()) || [];
+    const read = () => {
+      const live = getFlowNodes() || [];
+      if (!activeFocusRootId || !preFocusRef.current) return live;
+      const before = preFocusRef.current.nodes;
+      const known = new Set(before.map((node) => node.id));
+      return [...before, ...live.filter((node) => !known.has(node.id))];
+    };
     captureNodesRef.current = read;
     return () => {
       if (captureNodesRef.current === read) captureNodesRef.current = null;

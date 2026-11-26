@@ -97,7 +97,14 @@ it('queues an unheld capture behind one in flight and skips the queue once it is
   h.draw();
   await Promise.all([first, second]);
   settled = false;
-  queue(h.options).then(() => (settled = true));
+  let ready = false;
+  queue({
+    ...h.options,
+    onReady: () => {
+      ready = true;
+    },
+  }).then(() => (settled = true));
+  expect(ready).toBe(true);
   await Promise.resolve();
   expect(settled).toBe(true);
   expect(h.sync.flushPending).toHaveBeenCalledTimes(1);
