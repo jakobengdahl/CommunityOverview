@@ -1105,6 +1105,12 @@ def insert_template(
                     new_id = secrets.token_hex(16)
                 occupied.add(new_id)
                 fresh[a["id"]] = new_id
+            for a in source:
+                content = a.get("content")
+                if isinstance(content, dict):
+                    for holder, key, value, kind in _annotation_links(content, fresh):
+                        if kind == "annotation":
+                            holder[key] = fresh[value]
             relink_capture(
                 {
                     "annotations": source,

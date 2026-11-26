@@ -636,7 +636,15 @@ def test_insert_skips_missing_and_remaps_links(capture, nested):
     payload = {"target_kind": "resource", "target": "a"}
     reference.update({"content": payload} if nested else payload)
     source.state["annotations"].extend(
-        [reference, {"id": "child", "type": "label", "parentId": "ref"}]
+        [
+            reference,
+            {
+                "id": "child",
+                "type": "label",
+                "parentId": "ref",
+                "content": {"startAnchor": "note"},
+            },
+        ]
     )
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
         "template"
@@ -660,6 +668,10 @@ def test_insert_skips_missing_and_remaps_links(capture, nested):
     assert "ref" not in result["annotation_id_map"]
     assert "attachment" not in target.state["annotations"][0]
     assert "parentId" not in target.state["annotations"][1]
+    assert (
+        target.state["annotations"][1]["content"]["startAnchor"]
+        == result["annotation_id_map"]["note"]
+    )
     assert target.state["positions"]["b"] == {"x": 0, "y": 0}
 
 
