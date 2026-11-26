@@ -265,7 +265,7 @@ The user may refer to "visualization" or "view" in different ways. Always unders
 
 When user says "visualization", determine from context:
 - "Show me actors" -> modify current visualization (use add_nodes)
-- "Save this visualization" -> prefer save_session_view when available; otherwise request browser capture with save_view
+- "Save this visualization" -> prefer save_session_view when available; use the session save operation
 - "What visualizations exist?" -> list sessions (use list_visualization_sessions)
 - "Load the AI view" -> list sessions and offer the matching server-provided links
 
@@ -515,16 +515,10 @@ Examples: just uploading a file without specific question
 
 IMPORTANT: Always respect the user's intent from their message. Don't automatically extract nodes unless explicitly requested or confirmed by the user.
 
-WORKFLOW FOR SAVING/LOADING SAVED VIEWS:
-1. User can save current visualization state as a named saved view
-2. Prefer save_session_view with the session ID and current revision when available.
-3. Otherwise save_view only requests browser capture. Never claim a save succeeded until the browser confirms it.
-4. List saved sessions with list_visualization_sessions and give the user the returned session_url verbatim. If it is null, say the link is unavailable.
-5. Names may collide: offer the matching sessions for the user to choose by ID. Never resolve a legacy view name to a session.
-6. Use get_saved_view and list_saved_views only when explicitly requesting legacy graph views.
-
 VISUALIZATION DISPLAY BEHAVIOR:
-1. To open a saved session, offer its server-provided link; opening it selects the session by ID.
+1. To open a saved session, offer its server-provided session_url verbatim; opening it
+   selects the session by ID. Never construct or alter the URL. If session_url is
+   null, tell the user that the session link is unavailable.
 
 2. When adding new nodes to current visualization (via search, get_related_nodes, etc.):
    - New nodes are ADDED to the current visualization (merged, not replaced)
@@ -564,18 +558,14 @@ TOOL USAGE GUIDELINES:
 - find_similar_nodes_batch: For checking MULTIPLE nodes at once - ALWAYS use this when extracting from documents
 - add_nodes: Only after user approval, with proper validation
 - create_agent, create_event_subscription, create_skill, create_active_knowledge_collection,
-  create_saved_view, create_collection_response: Use these dedicated tools for system
+  create_collection_response: Use these dedicated tools for system
   objects after user approval. Pass the type-specific fields inside config. create_agent
-  creates an enabled agent and its subscription together. create_saved_view persists
-  explicit node_ids and positions without a browser; save_view only requests browser capture.
+  creates an enabled agent and its subscription together.
 - update_node: For editing existing nodes (name, description, summary, tags)
 - delete_nodes: CAREFUL - max 10 nodes, requires confirmation=True
 - delete_edges: CAREFUL - max 50 edges, requires confirmation=True
 - list_node_types: When user asks about available types
 - get_graph_stats: For overview of graph size and composition
-- save_view: Request browser capture only; do not claim success without browser confirmation. Prefer save_session_view when available.
-- get_saved_view: For explicitly requested legacy graph views
-- list_saved_views: For explicitly requested legacy graph views
 - list_visualization_sessions: For listing saved sessions and their links
 - get_schema: For getting the complete schema configuration
 - get_presentation: For getting UI presentation settings
@@ -1316,41 +1306,8 @@ class ChatProcessor:
                 },
             },
             {
-                "name": "save_view",
-                "description": "Request browser capture of the current view. This does not save it; do not claim success without browser confirmation. Prefer save_session_view when available.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name for the saved view",
-                        }
-                    },
-                    "required": ["name"],
-                },
-            },
-            {
                 "name": "list_visualization_sessions",
                 "description": "List sessions and their server-provided links. Names can collide; offer choices by ID.",
-                "input_schema": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "get_saved_view",
-                "description": "Load a legacy graph saved view by name when explicitly requested.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the saved view to load",
-                        }
-                    },
-                    "required": ["name"],
-                },
-            },
-            {
-                "name": "list_saved_views",
-                "description": "List legacy saved views stored in the graph when explicitly requested.",
                 "input_schema": {"type": "object", "properties": {}},
             },
             {

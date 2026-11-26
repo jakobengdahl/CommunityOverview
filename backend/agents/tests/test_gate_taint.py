@@ -42,8 +42,6 @@ def test_taint_permitted_tools_are_explicit_and_classify_graph():
         "get_subtypes",
         "get_schema",
         "get_presentation",
-        "list_saved_views",
-        "get_saved_view",
         "get_node_details",
         "get_graph_stats",
         "get_capabilities",

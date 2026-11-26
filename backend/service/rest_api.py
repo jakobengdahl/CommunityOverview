@@ -506,12 +506,6 @@ class AdoptFederatedNodeRequest(BaseModel):
     )
 
 
-class SaveViewRequest(BaseModel):
-    """Request model for saving a view."""
-
-    name: str = Field(..., min_length=1, max_length=200, description="View name")
-
-
 class CreateSessionRequest(BaseModel):
     """Request model for creating a shared session."""
 
@@ -1320,31 +1314,6 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
     async def get_request_selection(request: Request) -> Dict[str, Any]:
         """Get the public graph/workspace selection summary derived from safe env/request inputs."""
         return service.get_request_graph_selection_info(headers=request.headers)
-
-
-def _register_views_endpoints(router: APIRouter, service: GraphService) -> None:
-    @router.post("/views/save")
-    async def save_view(request: SaveViewRequest) -> Dict[str, Any]:
-        """Signal intent to save the current view state."""
-        return service.save_view(request.name)
-
-    @router.get("/views/{name}")
-    async def get_saved_view(name: str, request: Request) -> Dict[str, Any]:
-        """Get a saved view by name and load its content."""
-        with use_request_authorization(headers=request.headers):
-            result = service.get_saved_view(name)
-        _raise_for_access_denied(result)
-        if not result.get("success", True):
-            raise HTTPException(status_code=404, detail=result.get("error"))
-        return result
-
-    @router.get("/views")
-    async def list_saved_views(request: Request) -> Dict[str, Any]:
-        """List all saved views."""
-        with use_request_authorization(headers=request.headers):
-            result = service.list_saved_views()
-        _raise_for_access_denied(result)
-        return result
 
 
 def _register_session_endpoints(
@@ -3199,7 +3168,6 @@ def create_rest_router(
     _register_edge_crud_endpoints(router, service)
     _register_history_endpoints(router, service)
     _register_metadata_endpoints(router, service)
-    _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
     _register_attachment_endpoints(router, service)
     _register_import_endpoints(router, service, import_job_store)

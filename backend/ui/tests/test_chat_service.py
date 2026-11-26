@@ -56,7 +56,7 @@ class TestChatServiceInit:
         expected_tools = (
             "search_graph get_node_details get_related_nodes find_similar_nodes "
             "find_similar_nodes_batch add_nodes update_node delete_nodes "
-            "list_node_types get_graph_stats save_view get_saved_view list_saved_views"
+            "list_node_types get_graph_stats"
         ).split()
 
         for tool in expected_tools:
@@ -80,7 +80,16 @@ def test_session_listing_offers_server_links_for_duplicate_names(
     a = manager.create_session("Same")
     b = manager.create_session("Same")
     with patch("backend.ui.chat_logic.create_provider"):
-        result = ChatService(graph_service)._tools_map["list_visualization_sessions"]()
+        service = ChatService(graph_service)
+        result = service._tools_map["list_visualization_sessions"]()
+    assert (
+        "offer its server-provided session_url verbatim"
+        in service._processor.system_prompt
+    )
+    assert (
+        "If session_url is\n   null, tell the user that the session link is unavailable"
+        in service._processor.system_prompt
+    )
     assert {item["session_id"]: item["session_url"] for item in result["sessions"]} == {
         a.id: build_session_url(a.id),
         b.id: build_session_url(b.id),
@@ -133,7 +142,6 @@ class TestChatServiceToolExecution:
         assert {
             "create_agent",
             "create_collection_response",
-            "create_saved_view",
         } <= offered
 
     def test_search_graph_tool_uses_graph_service(self, chat_service, sample_nodes):

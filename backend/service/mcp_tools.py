@@ -197,8 +197,6 @@ _COMPOSING_TOOLS = frozenset(
         "get_graph_stats",
         "get_subtypes",
         "audit_relationship_applicability",
-        "get_saved_view",
-        "list_saved_views",
         "show_graph_widget",
     }
 )
@@ -210,7 +208,7 @@ _SESSION_REFUSALS = frozenset(
     }
 )
 # The read tools whose `visualization_session_id` was a push target first.
-_PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view"})
+_PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes"})
 
 # Tools that take a session id as a plain argument and answer every refusal
 # with their own codes: the session is never reconciled with a bound one.
@@ -1800,78 +1798,6 @@ def register_mcp_tools(
             workspace_kind=workspace_kind,
             graph_id=graph_id,
         )
-
-    # ==================== Saved Views Tools ====================
-
-    @register_tool
-    def save_view(name: str) -> Dict[str, Any]:
-        """Request browser capture; this signal does not save a view.
-
-        Prefer save_session_view with the session ID and its current revision.
-        Do not claim a save succeeded until the browser confirms it.
-        """
-        return service.save_view(name)
-
-    @register_tool
-    def get_saved_view(
-        name: str,
-        visualization_session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Get a saved view by name and load its content for display.
-
-        This returns the actual nodes and edges that are part of the saved view,
-        NOT the SavedView node itself. The SavedView node is just metadata
-        storage - what the user wants to see is the content it references.
-
-        Note: "Saved view" = a snapshot of nodes/edges/positions saved in the graph.
-              "Current visualization" = what is currently displayed in the GUI.
-
-        Args:
-            name: Name of the saved view
-            visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded in that session's live canvas, if one is open. The
-                result then carries a ``visualization_delivery`` report saying
-                whether anything actually received it (``delivered``,
-                ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push that adds or replaces nodes
-                also writes them into the session's stored membership, but
-                whether a canvas showed it is only in this field — check it
-                rather than assuming the canvas changed. Undelivered is not
-                always discarded: a legacy registry entry with nothing draining
-                it keeps the command queued, and a browser that opens the
-                session later may still apply it.
-
-        Returns:
-            The nodes and edges to display in the visualization, with position
-            and hidden node data, and ``visualization_delivery`` when a session
-            id was given
-        """
-        result = service.get_saved_view(name)
-        _push(visualization_session_id, "get_saved_view", result)
-        return result
-
-    @register_tool
-    def list_saved_views(
-        visualization_session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        List all saved views.
-
-        Returns a list of all saved view snapshots stored in the graph.
-        These are NOT the current visualization - they are saved snapshots
-        that can be loaded to restore a specific graph view.
-
-        Args:
-            visualization_session_id: Optional. The session to read in; one
-                that does not exist is refused with session_not_found, and a
-                staged session is read as composed: the graph with the
-                session's staged changes applied.
-
-        Returns:
-            List of all SavedView nodes with their names and summaries
-        """
-        return service.list_saved_views()
 
     # ==================== Visualization Session Tools ====================
 
