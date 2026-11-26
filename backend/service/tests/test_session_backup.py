@@ -207,8 +207,14 @@ def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend
     assert service.references == [
         (
             [
-                "group-local", "node", "group-hidden", "group-dimmed",
-                "group-position", "group-shape", "group-member", "group-explicit",
+                "group-local",
+                "node",
+                "group-hidden",
+                "group-dimmed",
+                "group-position",
+                "group-shape",
+                "group-member",
+                "group-explicit",
                 "group-history",
             ],
             [],
