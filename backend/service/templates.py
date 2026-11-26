@@ -923,6 +923,15 @@ def insert_template(
                 return _failure("session_not_found")
             if expected_revision is not None and session.seq != expected_revision:
                 return _failure("revision_conflict", current_revision=session.seq)
+            if mode == "copy":
+                attached = service.session_gate.session_manager
+                if attached is not None and attached is not manager:
+                    return _failure("storage_error")
+                if attached is None:
+                    # Keep the shared service unchanged while routing this write
+                    # through the explicitly supplied manager's session gate.
+                    service = copy.copy(service)
+                    service.attach_sessions(manager)
             known = {}
             if mode == "reference":
                 ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))

@@ -980,8 +980,12 @@ def test_insert_freehand_translates_absolute_points_and_rendered_origin(capture)
     assert stroke["points"] == [{"x": 100, "y": 200}, {"x": 102, "y": 202}]
 
 
-@pytest.mark.parametrize("staged", [False, True])
-def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
+@pytest.mark.parametrize(
+    "staged,attached", [(False, False), (True, True), (True, False)]
+)
+def test_copy_inserts_snapshots_and_edges_atomically(
+    capture, tmp_path, staged, attached
+):
     import copy
     from backend.core.storage_backends import FileGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
@@ -1008,7 +1012,8 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
         doc["revision"] = 0
         doc = manager.template_store.save(doc, 0)
         service = GraphService(storage)
-        service.attach_sessions(manager)
+        if attached:
+            service.attach_sessions(manager)
     target = manager.create_session("target", "staged" if staged else "direct")
     before = copy.deepcopy(target.state)
     graph_before = set(service._storage.nodes)
@@ -1038,11 +1043,11 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
         assert service._storage.layer_store.load_layer(target.id) == []
     lifecycle_lock = service._storage.node_lifecycle_lock
     graph_lock = service._storage.write_lock
-    add_nodes = service.add_nodes
+    add_nodes = GraphService.add_nodes
 
-    def checked_add_nodes(*args, **kwargs):
+    def checked_add_nodes(instance, *args, **kwargs):
         assert service._storage.write_lock._is_owned()
-        return add_nodes(*args, **kwargs)
+        return add_nodes(instance, *args, **kwargs)
 
     class CheckedLock:
         def __enter__(self):
@@ -1068,12 +1073,14 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
     with (
         patch.object(service._storage, "node_lifecycle_lock", CheckedLock()),
         patch.object(service._storage, "_lock", CheckedGraphLock()),
-        patch.object(service, "add_nodes", side_effect=checked_add_nodes),
+        patch.object(GraphService, "add_nodes", new=checked_add_nodes),
     ):
         result = templates.insert_template(
             service, manager, target.id, doc["template_id"], x=10, y=20
         )
     assert result["success"]
+    if staged and not attached:
+        assert service.session_gate.session_manager is None
     ids = result["node_id_map"]
     assert set(ids) == {n["key"] for n in doc["nodes"]}
     assert not set(ids.values()) & {"a", "b"}
