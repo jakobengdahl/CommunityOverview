@@ -380,9 +380,12 @@ function libraryRevisionOf(event) {
     return typeof event.library_revision === 'number' ? event.library_revision : null;
   }
   const op = event.type === 'op' ? event.op : null;
-  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
   const saved = (selection) =>
     typeof selection?.ref === 'string' && selection.ref.startsWith('saved:');
+  if (op?.op === 'nodes_replaced') {
+    return Object.values(op.inserted_shape_overrides || {}).some(saved) ? null : undefined;
+  }
+  if (op?.op !== 'node_shape_set' && op?.op !== 'type_shape_set') return undefined;
   return saved(op.selection) || saved(op.restore_selection) ? null : undefined;
 }
 

@@ -475,7 +475,10 @@ describe('SessionSyncClient', () => {
     expect(client.membershipVersion).toBe(6);
   });
 
-  it('handles nothing after a library revision until its fetch settles, nor once closed', async () => {
+  it.each([
+    { op: 'type_shape_set', type: 'Actor', selection: { ref: 'saved:card' } },
+    { op: 'nodes_replaced', node_ids: ['n8'], inserted_shape_overrides: { n8: { ref: 'saved:card' } } },
+  ])('handles nothing after a library revision until its fetch settles, nor once closed: $op', async (shapeOp) => {
     let settle;
     const onLibraryRevision = vi.fn(() => new Promise((resolve) => (settle = resolve)));
     const onResync = vi.fn();
@@ -506,9 +509,10 @@ describe('SessionSyncClient', () => {
       type: 'op',
       seq: 8,
       client_id: 'client-other',
-      op: { op: 'type_shape_set', type: 'Actor', selection: { ref: 'saved:card' } },
+      op: shapeOp,
     });
     expect(onLibraryRevision).toHaveBeenLastCalledWith(null, '1234-5678');
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
     settle();
     await flush();
     es.emit({ type: 'library_invalidated', key: 'card', revision: 5 });
