@@ -938,6 +938,8 @@ export class SessionSyncClient {
     // Broadcasts still being drawn (holdLayoutSave), and the nodes this
     // browser's user moved since the last snapshot (noteUserMoved).
     this._renderHolds = 0;
+    // Bumped by every hold, so a hold that began and ended unseen still shows.
+    this._renderHoldGeneration = 0;
     this._localEditHolds = 0;
     this._localEditWaiters = [];
     this._savePendingRelease = false;
@@ -1577,6 +1579,7 @@ export class SessionSyncClient {
    */
   holdLayoutSave() {
     this._renderHolds += 1;
+    this._renderHoldGeneration += 1;
     let released = false;
     return () => {
       if (released) return;
