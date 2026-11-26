@@ -252,6 +252,7 @@ function App() {
   const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [templateDialog, setTemplateDialog] = useState(null);
+  const templateDialogIdRef = useRef(0);
   const templateSelectionRef = useRef([]);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -4021,7 +4022,7 @@ function App() {
         id: node.id,
         annotation: CANVAS_ANNOTATION_TYPES.has(node.type),
       }));
-      setTemplateDialog({ sessionId, selected });
+      setTemplateDialog({ sessionId, selected, id: ++templateDialogIdRef.current });
     },
     [sessionId]
   );
@@ -4518,7 +4519,7 @@ function App() {
       )}
       {templateDialog && (
         <SaveTemplateDialog
-          key={templateDialog.sessionId}
+          key={templateDialog.id}
           {...templateDialog}
           schema={schema}
           prepare={async () => {
@@ -4560,7 +4561,7 @@ function App() {
           }}
           onClose={() => setTemplateDialog(null)}
           onSaved={(counts) => {
-            setTemplateDialog(null);
+            setTemplateDialog((current) => (current === templateDialog ? null : current));
             showNotification('success', t('template.saved', counts));
           }}
         />

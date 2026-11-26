@@ -469,6 +469,31 @@ describe('App handler wiring', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('keeps a newly opened template dialog when an earlier save completes', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    const firstSave = captured.template.onSaved;
+    act(() => captured.template.onClose());
+    act(() => canvas().onSaveSelectionAsTemplate([NODE_A]));
+    act(() => firstSave({ nodes: 1, edges: 0, annotations: 0 }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(captured.template.selected).toEqual([{ id: 'a', annotation: false }]);
+
+    const secondSave = captured.template.onSaved;
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    act(() => secondSave({ nodes: 1, edges: 0, annotations: 0 }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(captured.template.sessionId).toBe(target);
+    act(() => captured.template.onSaved({ nodes: 0, edges: 0, annotations: 0 }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
     await renderApp();
     const previousViewport = { x: 100, y: 200, zoom: 2 };
