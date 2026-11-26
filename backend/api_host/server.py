@@ -458,8 +458,16 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     from backend.core.template_store import TemplateStore
 
     session_manager.template_store = TemplateStore(
-        FileSessionPersistenceBackend(Path(sessions_dir) / "templates")
+        FileSessionPersistenceBackend(Path(sessions_dir) / "templates"),
+        Path(resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]).parent
+        / "templates",
     )
+    for template_id in session_manager.template_store.profile_ids():
+        if (
+            session_backend.load(template_id) is not None
+            or write_modes.staged_status(template_id) != "none"
+        ):
+            raise ValueError("profile template ID collides with a session")
     # Writes need the identity the auth middleware authenticated (the REST
     # routes refuse without one); a commit invalidates the referencing sessions.
     session_manager.shape_library = ShapeLibrary(
