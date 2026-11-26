@@ -883,7 +883,9 @@ where they make a question easier to answer.
 Templates can also be inserted through the session API or MCP. By default,
 insertion creates new graph nodes from the saved snapshot; pass `mode=reference`
 to place the original nodes instead. Both require explicit canvas coordinates.
-In a staged session, copied nodes and connections stay staged until merged.
+Copy insertion into a staged session is not yet supported: it returns
+`staged_target_not_supported` (HTTP 409) without making changes. Reference
+insertion remains available in staged sessions.
 
 The session menu includes **Fullscreen canvas**, which hides application chrome
 while preserving the current canvas, selection, assistant, and drawer state.

@@ -1073,7 +1073,8 @@ def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
     assert set(service._storage.nodes) == before and target.seq == 0
 
 
-def test_copy_refuses_staged_target_without_writes(capture, tmp_path):
+@pytest.mark.parametrize("mode", [None, "copy"])
+def test_copy_refuses_staged_target_without_writes(capture, tmp_path, mode):
     import copy
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -1111,9 +1112,12 @@ def test_copy_refuses_staged_target_without_writes(capture, tmp_path):
         patch.object(service, "add_nodes") as add_nodes,
         patch.object(manager, "_apply_op_sync") as apply,
     ):
+        body = {"template_id": doc["template_id"], "x": 0, "y": 0}
+        if mode is not None:
+            body["mode"] = mode
         response = TestClient(app).post(
             f"/api/sessions/{target.id}/insert-template",
-            json={"template_id": doc["template_id"], "x": 0, "y": 0},
+            json=body,
         )
     assert response.status_code == 409
     assert response.json()["error"] == "staged_target_not_supported"
