@@ -9,6 +9,7 @@ import {
   distributeNodes,
   getLayoutedElements,
   applyLayout,
+  applyPartialLayout,
   getEdgeParams,
 } from '../src/utils/graphLayout';
 
@@ -772,4 +773,14 @@ describe('shared node shape geometry', () => {
     }
     expect(() => createNodeShapeGeometry('circle')).toThrow(RangeError);
   });
+});
+
+it('keeps previously unpositioned nodes in their original layout when positioned nodes are inserted', () => {
+  const existing = [{ id: 'a' }, { id: 'b' }];
+  const edges = [{ source: 'a', target: 'b' }];
+  const before = applyPartialLayout(existing, edges, new Set(), 'dagre');
+  const inserted = { id: 'c', position: { x: 900, y: 800 } };
+  const after = applyPartialLayout([...existing, inserted], edges, new Set(['c']), 'dagre');
+  expect(after.slice(0, 2)).toEqual(before);
+  expect(after[2]).toEqual(inserted);
 });

@@ -52,9 +52,9 @@ def _line_points(annotation):
         for field in ("start", "end", "startEndpoint", "endEndpoint"):
             endpoint = payload.get(field)
             if isinstance(endpoint, dict):
-                points.append(
-                    endpoint.get("point") or endpoint.get("position") or endpoint
-                )
+                point = endpoint.get("point") or endpoint.get("position") or endpoint
+                if isinstance(point, dict) and ("x" in point or "y" in point):
+                    points.append(point)
     return [p for p in points if isinstance(p, dict)]
 
 
@@ -859,8 +859,6 @@ def insert_template(
     from .session_capture import relink_capture
 
     def valid_coordinate(value):
-        if value is None:
-            return True
         if type(value) not in (int, float):
             return False
         try:
@@ -880,7 +878,6 @@ def insert_template(
             for v in (expected_revision, template_revision)
         )
         or not all(valid_coordinate(v) for v in (x, y))
-        or (x is None) != (y is None)
     ):
         return _failure("invalid_request")
     if mode != "reference":
@@ -955,28 +952,6 @@ def insert_template(
                 ((node["position"], source_definition(node)) for node in doc["nodes"]),
                 doc["annotation_document"]["annotations"],
             ) or (0, 0, 0, 0)
-            if x is None:
-                existing_positions = session.state.get("positions") or {}
-                existing_bounds = _rendered_bounds(
-                    (
-                        (
-                            existing_positions.get(node_id),
-                            _shape(graph_node, session.state, shape_config, saved)[
-                                "inline"
-                            ]
-                            if (graph_node := service._storage.get_node(node_id))
-                            else None,
-                        )
-                        for node_id in session.state.get("node_refs", [])
-                    ),
-                    session.state.get("annotations", []),
-                )
-                x = (
-                    _placement_number(existing_bounds[2] + 200)
-                    if existing_bounds
-                    else 0
-                )
-                y = 0
             dx = _placement_number(x - source_bounds[0])
             dy = _placement_number(y - source_bounds[1])
             config = config_data.node_shapes

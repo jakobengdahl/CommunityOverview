@@ -147,6 +147,20 @@ export function applyLayout(nodes, edges, layoutType = null) {
   }
 }
 
+// Preserve saved positions while laying out the nodes that have none.
+export function applyPartialLayout(nodes, edges, savedIds, layoutType = null) {
+  const unplaced = nodes.filter((node) => !savedIds.has(node.id));
+  if (!unplaced.length) return nodes;
+  const ids = new Set(unplaced.map((node) => node.id));
+  const layout = applyLayout(
+    unplaced,
+    edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+    layoutType
+  );
+  const byId = new Map(layout.map((node) => [node.id, node]));
+  return nodes.map((node) => byId.get(node.id) || node);
+}
+
 /**
  * Check if two nodes overlap
  * @param {Object} pos1 - Position {x, y} of first node
