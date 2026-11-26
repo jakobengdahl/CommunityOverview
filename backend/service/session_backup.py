@@ -70,6 +70,13 @@ def _authorize(hook, *, target, session_id=None, action=GRAPH_ACTION_READ):
         raise BackupRefused("access denied")
 
 
+def _load_session(session_backend, session_id):
+    try:
+        return session_backend.load(session_id)
+    except Exception:
+        raise BackupRefused("session_load_failed") from None
+
+
 def create_backup(service, session_backend, write_modes):
     """Read every persisted session under the deployment layer snapshot lock.
 
@@ -93,21 +100,22 @@ def create_backup(service, session_backend, write_modes):
         if not callable(snapshot):
             raise BackupRefused("layer snapshot unavailable")
         session_ids = sorted(session_backend.list_ids())
-        revisions = {}
         for session_id in session_ids:
             _authorize(
                 service.authorization_hook,
                 target="get_visualization_session",
                 session_id=session_id,
             )
-            raw = session_backend.load(session_id)
+        revisions = {}
+        for session_id in session_ids:
+            raw = _load_session(session_backend, session_id)
             revisions[session_id] = copy.deepcopy(raw)
         with session_backend.transaction():
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")
             with snapshot() as snapshot_modes:
                 for session_id in session_ids:
-                    raw = session_backend.load(session_id)
+                    raw = _load_session(session_backend, session_id)
                     if raw != revisions[session_id]:
                         raise BackupRefused("revision_conflict")
                     if raw is None or raw.get("id") != session_id:

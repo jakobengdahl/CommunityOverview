@@ -161,6 +161,25 @@ def test_denied_session_is_authorized_before_record_or_layer_checks(
         create_backup(Service(denied=session.id), backend, modes)
 
 
+def test_backup_authorizes_all_sessions_before_loading(backend, monkeypatch):
+    broken = Session("1234-5678", name="Private broken session")
+    unreadable = Session("1234-5679", name="Private unreadable session")
+    backend.save(broken.to_dict())
+    backend.save(unreadable.to_dict())
+
+    def fail_load(session_id):
+        raise OSError(f"cannot read {session_id}: {broken.name} {unreadable.name}")
+
+    monkeypatch.setattr(backend, "load", fail_load)
+    with pytest.raises(BackupRefused, match="^access denied$") as denied:
+        create_backup(Service(denied=unreadable.id), backend, WriteModes())
+    assert all(value not in str(denied.value) for value in (
+        broken.id, broken.name, unreadable.id, unreadable.name
+    ))
+    with pytest.raises(BackupRefused, match="^session_load_failed$"):
+        create_backup(Service(), backend, WriteModes())
+
+
 def test_backup_refuses_session_list_changes_before_reading_records(backend):
     first = Session("1234-5678")
     second = Session("1234-5679")
@@ -557,7 +576,7 @@ def test_authorization_runs_outside_session_transaction(backend):
     )
 
 
-def test_revision_change_during_authorization_is_refused(backend):
+def test_revision_change_during_authorization_is_captured(backend):
     session = Session("1234-5678", name="original")
     backend.save(session.to_dict())
     second = Session("1234-5679")
@@ -573,8 +592,8 @@ def test_revision_change_during_authorization_is_refused(backend):
 
     service = Service()
     service.authorization_hook = ChangingHook()
-    with pytest.raises(BackupRefused, match="revision_conflict"):
-        create_backup(service, backend, WriteModes())
+    backup = create_backup(service, backend, WriteModes())
+    assert backup["sessions"][0]["revision"] == session.seq + 1
 
 
 def test_session_authorization_hook_can_read_store(backend):
