@@ -17,6 +17,7 @@ from backend.core.session_store import (
     _validate_position,
     is_valid_session_id,
 )
+from backend.core.template_store import validate_template
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN
 from backend.service import session_capture, views
@@ -94,7 +95,17 @@ def _validate_state_values(state):
 
 
 def restore_backup(
-    service, backend, modes, document, *, max_sessions=10000, max_annotations=2000
+    service,
+    backend,
+    modes,
+    document,
+    *,
+    template_backend=None,
+    profile_template_ids=(),
+    max_sessions=10000,
+    max_annotations=2000,
+    max_templates=10000,
+    max_tombstones=10000,
 ):
     """Check limits, authorize references, then validate and restore to an isolated target."""
     with session_context.bind_session(None):
@@ -122,6 +133,23 @@ def restore_backup(
                     > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
                 ):
                     raise ValueError()
+            if document.get("format_version") == 2:
+                raw_templates = document["templates"]
+                raw_tombstones = document.get("template_tombstones", [])
+                if (
+                    not isinstance(raw_templates, list)
+                    or len(raw_templates) > max_templates
+                    or not isinstance(raw_tombstones, list)
+                    or len(raw_tombstones) > max_tombstones
+                ):
+                    raise ValueError()
+                for item in raw_templates:
+                    if (
+                        len(json.dumps(item).encode("utf-8"))
+                        > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
+                    ):
+                        raise ValueError()
+            # Preserve all existing session checks before authorizing templates.
             reports = []
             for item in sessions:
                 sid, state = item["id"], item["state"]
@@ -169,12 +197,25 @@ def restore_backup(
                         ),
                     }
                 )
+            if document.get("format_version") == 2:
+                for template in document["templates"]:
+                    _authorize(
+                        service.authorization_hook,
+                        target="get_visualization_session",
+                        session_id=template["template_id"],
+                    )
+                for tombstone in document.get("template_tombstones", []):
+                    _authorize(
+                        service.authorization_hook,
+                        target="get_visualization_session",
+                        session_id=tombstone["id"],
+                    )
         except Exception:
             raise RestoreRefused("access denied") from None
 
         try:
             if (
-                document.get("format_version") != 1
+                document.get("format_version") not in (1, 2)
                 or type(document.get("format_version")) is not int
             ):
                 raise RestoreRefused("unsupported version")
@@ -185,17 +226,57 @@ def restore_backup(
                 "sha256": hashlib.sha256(canonical_bytes(unsigned)).hexdigest(),
             }:
                 raise RestoreRefused("integrity failure")
-            if set(document) != {
+            expected_fields = {
                 "format_version",
                 "sessions",
                 "assets",
                 "import_mappings",
                 "import_reports",
                 "integrity",
-            }:
+            }
+            if document["format_version"] == 2:
+                expected_fields.add("templates")
+                if "template_tombstones" in document:
+                    expected_fields.add("template_tombstones")
+            if set(document) != expected_fields:
                 raise RestoreRefused("invalid format")
             if document["import_mappings"] != [] or document["import_reports"] != []:
                 raise RestoreRefused("unsupported mappings")
+            templates = []
+            tombstones = []
+            if document["format_version"] == 2:
+                if template_backend is None or not isinstance(
+                    document["templates"], list
+                ):
+                    raise RestoreRefused("invalid templates")
+                template_ids = set(
+                    profile_template_ids()
+                    if callable(profile_template_ids)
+                    else profile_template_ids
+                )
+                for item in document["templates"]:
+                    doc = validate_template(item)
+                    if doc["template_id"] in template_ids:
+                        raise RestoreRefused("template collision")
+                    template_ids.add(doc["template_id"])
+                    templates.append(doc)
+                raw_tombstones = document.get("template_tombstones", [])
+                if not isinstance(raw_tombstones, list):
+                    raise RestoreRefused("invalid templates")
+                for record in raw_tombstones:
+                    if (
+                        not isinstance(record, dict)
+                        or set(record) != {"id", "deleted", "revision"}
+                        or not is_valid_session_id(record["id"])
+                        or record["deleted"] is not True
+                        or type(record["revision"]) is not int
+                        or record["revision"] < 1
+                    ):
+                        raise RestoreRefused("invalid templates")
+                    if record["id"] in template_ids:
+                        raise RestoreRefused("template collision")
+                    template_ids.add(record["id"])
+                    tombstones.append(copy.deepcopy(record))
             assets, records, seen = {}, [], set()
             for item in sessions:
                 if set(item) != {
@@ -287,13 +368,34 @@ def restore_backup(
             raise RestoreRefused("invalid or unsafe backup") from None
         # The caller owns an isolated workspace and publishes it only after this
         # completes. Discarding that workspace is the rollback for every failure.
-        with backend.transaction():
-            if backend.list_ids() or any(
-                modes.staged_status(r["id"])
-                not in (("none", "active") if mode == "staged" else ("none",))
-                for r, mode in records
+        from contextlib import nullcontext
+
+        with (
+            backend.transaction(),
+            template_backend.transaction() if template_backend else nullcontext(),
+        ):
+            restored_template_ids = {doc["template_id"] for doc in templates} | {
+                record["id"] for record in tombstones
+            }
+            if restored_template_ids & seen or any(
+                modes.staged_status(template_id) != "none"
+                for template_id in restored_template_ids
+            ):
+                raise RestoreRefused("template collision")
+            if (
+                (template_backend is not None and template_backend.list_ids())
+                or backend.list_ids()
+                or any(
+                    modes.staged_status(r["id"])
+                    not in (("none", "active") if mode == "staged" else ("none",))
+                    for r, mode in records
+                )
             ):
                 raise RestoreRefused("target collision")
+            for record in tombstones:
+                template_backend.save(record)
+            for doc in templates:
+                template_backend.save({"id": doc["template_id"], "document": doc})
             for record, mode in records:
                 if mode == "staged":
                     modes.record_staged(record["id"])

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from backend.core.session_manager import SessionManager
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
+from backend.core.template_store import TemplateStore
 from backend.core.storage import GraphStorage
 from backend.core.storage_backends import FileGraphPersistenceBackend
 from backend.core.write_modes import WriteModes
@@ -52,6 +53,7 @@ class SnapshotGraphBackend(FileGraphPersistenceBackend):
 def open_backup(hook):
     source_graph = Path(os.environ["SESSION_BACKUP_GRAPH"])
     source_sessions = Path(os.environ["SESSION_BACKUP_SESSIONS"])
+    source_templates = Path(os.environ["SESSION_BACKUP_TEMPLATES"])
     custom_journal = os.environ.get("SESSION_BACKUP_GRAPH_JOURNAL")
     source_journal = (
         Path(custom_journal)
@@ -62,6 +64,7 @@ def open_backup(hook):
         source_graph.suffix != ".json"
         or not source_graph.is_file()
         or not source_sessions.is_dir()
+        or not source_templates.is_dir()
         or (custom_journal is not None and not source_journal.is_file())
     ):
         raise BackupRefused("snapshot unavailable")
@@ -86,6 +89,7 @@ def open_backup(hook):
             raise BackupRefused("snapshot unavailable")
         try:
             shutil.copytree(source_sessions, root / "sessions")
+            shutil.copytree(source_templates, root / "templates")
         except (OSError, shutil.Error):
             # Copy errors can contain session IDs before access is checked.
             raise BackupRefused("snapshot unavailable") from None
@@ -114,10 +118,13 @@ def open_backup(hook):
         storage = GraphStorage(str(graph), persistence_backend=layer)
         modes = SnapshotModes(layer)
         service = GraphService(storage, authorization_hook=hook)
-        service.attach_sessions(
-            SessionManager(
-                SessionStore(sessions, staged_status=modes.staged_status),
-                write_modes=modes,
-            )
+        manager = SessionManager(
+            SessionStore(sessions, staged_status=modes.staged_status),
+            write_modes=modes,
         )
+        manager.template_store = TemplateStore(
+            FileSessionPersistenceBackend(root / "templates")
+        )
+        service.attach_sessions(manager)
+        service.backup_template_backend = manager.template_store._backend
         yield service, sessions, modes

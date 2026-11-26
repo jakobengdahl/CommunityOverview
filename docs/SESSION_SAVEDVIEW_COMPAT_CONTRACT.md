@@ -104,6 +104,21 @@ Graph exports and session backups are separate artifacts. Follow the operator
 [backup and restore guide](SESSION_BACKUP.md), including its requirements for a
 coordinated graph backup and verification before relying on recovery.
 
+A versioned session backup is a JSON document with a format version, session IDs,
+names, descriptions, revisions, complete persistent session presentation state,
+write-mode metadata and import mappings/reports. Include all referenced embedded
+assets, with integrity checks; exclude transient presence, leases and activity.
+A backup must be a consistent authorized snapshot and must not expose inaccessible
+references or annotation targets. Reject a backup containing unmerged staged
+changes until a separate overlay backup contract exists. Graph data is backed up
+separately; the operator must preserve both artifacts and their association.
+Version 2 backups include authorized mutable templates and, when present, a
+`template_tombstones` list of deleted template records (ID, deletion flag and
+revision). The integrity hash covers both lists. Restore preserves tombstones
+and checks their IDs for collisions, so deleted IDs remain reserved. Profile
+templates are excluded from backups. Version 2 backups without tombstones and
+version 1 backups remain supported.
+
 ### Release note: SavedView removal
 
 SavedView and VisualizationView nodes are no longer read as views by any client or tool, and a `?view=` link no longer opens a view. There is no migration, and existing nodes are not deleted. Before upgrading, export the graph: a plain graph export keeps saved-view nodes as data. Also take a [session backup](SESSION_BACKUP.md) and retain it with the corresponding graph backup. To recover the original graph data, [import the graph export](DATA_MANAGEMENT.md#importing-a-graph); to recover sessions, [restore the session backup](SESSION_BACKUP.md#restore) with its paired graph backup. Integrations calling removed saved-view tools or endpoints must move to sessions, using `save_session_view` and server-provided session links.

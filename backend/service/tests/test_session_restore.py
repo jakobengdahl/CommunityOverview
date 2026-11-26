@@ -41,7 +41,13 @@ def backup():
     session = Session(id="1234-5678", name="Example", seq=7)
     session.state["node_refs"] = ["missing"]
     source.save(session.to_dict())
-    return create_backup(Service(), source, Modes())
+    document = create_backup(
+        Service(), source, Modes(), template_backend=InMemorySessionPersistenceBackend()
+    )
+    document["format_version"] = 1
+    del document["templates"]
+    sign(document)
+    return document
 
 
 def sign(document):
@@ -49,6 +55,42 @@ def sign(document):
     document["integrity"]["sha256"] = hashlib.sha256(
         canonical_bytes(unsigned)
     ).hexdigest()
+
+
+@pytest.mark.parametrize("limit", ["templates", "tombstones", "bytes"])
+def test_template_limits_precede_authorization_and_writes(limit, monkeypatch):
+    from backend.core.tests.test_template_store import document as template_document
+    from backend.service import session_restore
+
+    doc = template_document()
+    source = InMemorySessionPersistenceBackend()
+    source.save({"id": doc["template_id"], "document": doc})
+    source.save({"id": "9999-9999", "deleted": True, "revision": 1})
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    service = Service()
+    calls = []
+    evaluate = service.authorization_hook.evaluate
+    service.authorization_hook.evaluate = lambda context: (
+        calls.append(context),
+        evaluate(context),
+    )[1]
+    kwargs = {}
+    if limit == "bytes":
+        monkeypatch.setattr(session_restore, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 10)
+    else:
+        kwargs[f"max_{limit}"] = 0
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    with pytest.raises(RestoreRefused):
+        restore_backup(
+            service, sessions, Modes(), document, template_backend=templates, **kwargs
+        )
+    assert len(calls) == 1
+    assert not sessions.list_ids() and not templates.list_ids()
 
 
 def test_round_trip_into_separate_store_preserves_identity_and_missing_references():
@@ -368,3 +410,227 @@ def test_write_failure_discards_unpublished_workspace(tmp_path, monkeypatch):
             publish()
     assert not output.exists()
     assert not list(tmp_path.glob("session-restore-*"))
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "invalid",
+        "duplicate",
+        "profile",
+        "integrity",
+        "denied",
+        "tombstone_invalid",
+        "tombstone_profile",
+        "tombstone_duplicate",
+        "tombstone_denied",
+        "tombstone_integrity",
+    ],
+)
+def test_templates_restore_atomically_with_sessions(damage):
+    from backend.core.tests.test_template_store import document as template_document
+
+    service = Service()
+    source = InMemorySessionPersistenceBackend()
+    doc = template_document()
+    source.save({"id": doc["template_id"], "document": doc})
+    tombstone = {"id": "9999-9999", "deleted": True, "revision": 2}
+    source.save(tombstone)
+    document = create_backup(
+        service, InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    document["sessions"] = backup()["sessions"]
+    assert document["template_tombstones"] == [tombstone]
+    profiles = set()
+    if damage == "tombstone_invalid":
+        document["template_tombstones"][0]["revision"] = True
+    elif damage == "tombstone_profile":
+        profiles.add(tombstone["id"])
+    elif damage == "tombstone_duplicate":
+        document["template_tombstones"].append(copy.deepcopy(tombstone))
+    elif damage == "invalid":
+        document["templates"][0]["revision"] = -1
+    elif damage == "duplicate":
+        document["templates"].append(copy.deepcopy(doc))
+    elif damage == "profile":
+        profiles.add(doc["template_id"])
+    if damage == "tombstone_integrity":
+        document["template_tombstones"][0]["revision"] += 1
+    if damage not in ("integrity", "tombstone_integrity"):
+        sign(document)
+    if damage in ("denied", "tombstone_denied"):
+        original = service.authorization_hook.evaluate
+        service.authorization_hook.evaluate = lambda context: (
+            GraphAuthorizationDecision(allowed=False)
+            if context.session_id
+            == (tombstone["id"] if damage == "tombstone_denied" else doc["template_id"])
+            else original(context)
+        )
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    if damage:
+        with pytest.raises(RestoreRefused):
+            restore_backup(
+                service,
+                sessions,
+                Modes(),
+                document,
+                template_backend=templates,
+                profile_template_ids=profiles,
+            )
+        assert not sessions.list_ids() and not templates.list_ids()
+    else:
+        restore_backup(
+            service,
+            sessions,
+            Modes(),
+            document,
+            template_backend=templates,
+            profile_template_ids=profiles,
+        )
+        assert sessions.load("1234-5678") is not None
+        assert templates.load(doc["template_id"])["document"] == doc
+        assert templates.load(tombstone["id"]) == tombstone
+        from backend.core.template_store import TemplateError, TemplateStore
+
+        replacement = copy.deepcopy(doc)
+        replacement["template_id"] = tombstone["id"]
+        with pytest.raises(TemplateError, match="deleted"):
+            TemplateStore(templates).save(replacement, expected_revision=0)
+
+
+@pytest.mark.parametrize("kind", ["template", "tombstone"])
+@pytest.mark.parametrize("collision", ["restored", "active", "retired"])
+def test_template_ids_cannot_collide_with_session_namespace(kind, collision):
+    from backend.core.tests.test_template_store import document as template_document
+
+    doc = template_document()
+    template_id = doc["template_id"]
+    source = InMemorySessionPersistenceBackend()
+    source.save(
+        {"id": template_id, "document": doc}
+        if kind == "template"
+        else {"id": template_id, "deleted": True, "revision": 1}
+    )
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    if collision == "restored":
+        document["sessions"] = backup()["sessions"]
+        document["sessions"][0]["id"] = template_id
+        sign(document)
+
+    class CollisionModes(Modes):
+        def staged_status(self, session_id):
+            if session_id == template_id and collision != "restored":
+                return collision
+            return "none"
+
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    with pytest.raises(RestoreRefused, match="template collision"):
+        restore_backup(
+            Service(), sessions, CollisionModes(), document, template_backend=templates
+        )
+    assert not sessions.list_ids() and not templates.list_ids()
+
+
+def test_file_workspace_restores_templates_and_rejects_profile_collision(
+    tmp_path, monkeypatch
+):
+    import json
+    from backend.core.session_store import FileSessionPersistenceBackend
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.core.tests.test_template_store import document as template_document
+    from scripts.session_restore_file_snapshot import open_restore
+
+    graph = tmp_path / "graph.json"
+    FileGraphPersistenceBackend(graph, staged_sessions=True).save_graph_data(
+        {"nodes": [], "edges": [], "metadata": {}}
+    )
+    monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("SCHEMA_FILE", str(profile / "schema_config.json"))
+    doc = template_document()
+    source = InMemorySessionPersistenceBackend()
+    source.save({"id": doc["template_id"], "document": doc})
+    tombstone = {"id": "9999-9999", "deleted": True, "revision": 2}
+    source.save(tombstone)
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    profile_templates = profile / "templates"
+    profile_templates.mkdir()
+    (profile_templates / "example.json").write_text(json.dumps(doc))
+    output = tmp_path / "restored"
+    with open_restore(Hook(), output) as (service, sessions, modes, publish):
+        with pytest.raises(RestoreRefused):
+            restore_backup(
+                service,
+                sessions,
+                modes,
+                document,
+                template_backend=service.backup_template_backend,
+                profile_template_ids=service.backup_profile_template_ids,
+            )
+    assert not output.exists()
+    (profile_templates / "example.json").unlink()
+    with open_restore(Hook(), output) as (service, sessions, modes, publish):
+        restore_backup(
+            service,
+            sessions,
+            modes,
+            document,
+            template_backend=service.backup_template_backend,
+            profile_template_ids=service.backup_profile_template_ids,
+        )
+        publish()
+    restored = FileSessionPersistenceBackend(output / "sessions" / "templates")
+    assert restored.load(doc["template_id"])["document"] == doc
+    assert restored.load(tombstone["id"]) == tombstone
+
+
+def test_command_restores_version_one_with_legacy_integration(tmp_path, monkeypatch):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from scripts import restore_sessions
+
+    service = Service()
+    target = InMemorySessionPersistenceBackend()
+    published = []
+    source = tmp_path / "backup.json"
+    source.write_text(json.dumps(backup()))
+
+    @contextmanager
+    def open_restore(hook, output):
+        yield service, target, Modes(), lambda: published.append(True)
+
+    integration = SimpleNamespace(
+        authorization_hook=lambda: service.authorization_hook, open_restore=open_restore
+    )
+    monkeypatch.setattr(
+        restore_sessions.importlib, "import_module", lambda _: integration
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "restore_sessions",
+            "--integration",
+            "test",
+            "--input",
+            str(source),
+            "--output",
+            str(tmp_path / "out"),
+        ],
+    )
+    restore_sessions.main()
+    assert published == [True]
+    assert target.load("1234-5678") is not None
