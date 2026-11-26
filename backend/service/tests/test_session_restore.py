@@ -68,6 +68,111 @@ def test_round_trip_into_separate_store_preserves_identity_and_missing_reference
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("positions", {"missing": {"x": "bad", "y": [1]}}),
+        ("edge_intensity", "bad"),
+        ("edge_intensity", 2),
+        ("annotation_schema_version", 999),
+        (
+            "shape_overrides",
+            {"missing": {"inline": {"base": "unknown", "scale": 1e300}}},
+        ),
+        ("type_shapes", {"Actor": {"arbitrary": "object"}}),
+        ("shape_revisions", {"node:missing": "bad"}),
+        ("shape_operation_ids", {"receipt": "bad"}),
+    ],
+)
+def test_invalid_state_values_refuse_the_entire_restore(field, value):
+    document = backup()
+    document["sessions"][0]["state"][field] = value
+    sign(document)
+    target = InMemorySessionPersistenceBackend()
+    with pytest.raises(RestoreRefused):
+        restore_backup(Service(), target, Modes(), document)
+    assert target.list_ids() == []
+
+
+def test_staged_mirror_with_direct_effective_mode_is_refused():
+    document = backup()
+    document["sessions"][0]["write_mode_mirror"]["write_mode"] = "staged"
+    sign(document)
+    target = InMemorySessionPersistenceBackend()
+    with pytest.raises(RestoreRefused, match="invalid mode"):
+        restore_backup(Service(), target, Modes(), document)
+    assert target.list_ids() == []
+
+
+def test_limits_precede_reference_authorization_and_file_read(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from scripts import restore_sessions
+
+    service = Service()
+    calls = []
+    original_evaluate = service.authorization_hook.evaluate
+
+    def evaluate(context):
+        calls.append(context)
+        return original_evaluate(context)
+
+    service.authorization_hook.evaluate = evaluate
+    document = backup()
+    for kwargs in ({"max_sessions": 0}, {"max_annotations": 0}):
+        document["sessions"][0]["state"]["annotations"] = [{}]
+        calls.clear()
+        with pytest.raises(RestoreRefused):
+            restore_backup(
+                service,
+                InMemorySessionPersistenceBackend(),
+                Modes(),
+                document,
+                **kwargs,
+            )
+        assert len(calls) == 1  # Admin only; no session or reference checks.
+
+    from backend.service import session_restore
+
+    monkeypatch.setattr(session_restore, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 10)
+    calls.clear()
+    with pytest.raises(RestoreRefused):
+        restore_backup(service, InMemorySessionPersistenceBackend(), Modes(), document)
+    assert len(calls) == 1
+
+    source = tmp_path / "backup.json"
+    source.write_bytes(b"x" * 11)
+    monkeypatch.setattr(restore_sessions, "MAX_BACKUP_BYTES", 10)
+    parsed = []
+    monkeypatch.setattr(
+        restore_sessions.json, "loads", lambda data: parsed.append(data)
+    )
+    monkeypatch.setattr(
+        restore_sessions.importlib,
+        "import_module",
+        lambda _: SimpleNamespace(
+            authorization_hook=lambda: service.authorization_hook
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "restore_sessions",
+            "--integration",
+            "test",
+            "--input",
+            str(source),
+            "--output",
+            str(tmp_path / "out"),
+        ],
+    )
+    with pytest.raises(RestoreRefused):
+        restore_sessions.main()
+    assert not parsed
+
+
+@pytest.mark.parametrize(
     "damage",
     [
         "version",

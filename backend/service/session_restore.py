@@ -3,7 +3,9 @@
 import copy
 import hashlib
 import json
+import math
 
+from backend.config.node_shapes import ShapeSelection
 from backend.core.image_ingest import DEFAULT_MAX_SESSION_DOCUMENT_BYTES
 from backend.core.session_manager import OpBatchTooLarge, validate_captured_annotations
 from backend.core.session_store import (
@@ -11,6 +13,8 @@ from backend.core.session_store import (
     _empty_state,
     _require_ingested_image,
     _require_safe_reference_target,
+    _validate_intensity,
+    _validate_position,
     is_valid_session_id,
 )
 from backend.runtime import session_context
@@ -25,6 +29,9 @@ from backend.service.session_backup import (
 
 class RestoreRefused(Exception):
     """The backup could not be restored safely."""
+
+
+MAX_BACKUP_BYTES = 512 * 1024 * 1024
 
 
 def _validate_reference_fields(state):
@@ -48,10 +55,48 @@ def _validate_reference_fields(state):
             raise ValueError()
 
 
+def _validate_state_values(state):
+    for position in state["positions"].values():
+        validated = _validate_position(position)
+        if not all(math.isfinite(v) for v in validated.values()):
+            raise ValueError()
+    intensity = state["edge_intensity"]
+    if not math.isfinite(_validate_intensity(intensity)) or not 0 <= intensity <= 1:
+        raise ValueError()
+    if (
+        type(state["annotation_schema_version"]) is not int
+        or state["annotation_schema_version"] != 1
+    ):
+        raise ValueError()
+    for field in ("shape_overrides", "type_shapes"):
+        mapping = state[field]
+        if not isinstance(mapping, dict):
+            raise ValueError()
+        for key, selection in mapping.items():
+            if not isinstance(key, str) or not key or len(key) > 256:
+                raise ValueError()
+            ShapeSelection.model_validate(selection)
+    if any(type(v) is not int or v < 0 for v in state["shape_revisions"].values()):
+        raise ValueError()
+    receipts = state["shape_operation_ids"]
+    if not isinstance(receipts, dict):
+        raise ValueError()
+    for key, receipt in receipts.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(receipt, dict)
+            or set(receipt) != {"seq", "client_id"}
+            or type(receipt["seq"]) is not int
+            or receipt["seq"] < 0
+            or not isinstance(receipt["client_id"], (str, type(None)))
+        ):
+            raise ValueError()
+
+
 def restore_backup(
     service, backend, modes, document, *, max_sessions=10000, max_annotations=2000
 ):
-    """Authorize all references before validation or publishing to an isolated target."""
+    """Check limits, authorize references, then validate and restore to an isolated target."""
     with session_context.bind_session(None):
         try:
             _authorize(
@@ -62,6 +107,21 @@ def restore_backup(
             sessions = document["sessions"]
             if not isinstance(sessions, list):
                 raise ValueError()
+            if len(sessions) > max_sessions:
+                raise ValueError()
+            for item in sessions:
+                state = item["state"]
+                annotations = state.get("annotations", [])
+                if (
+                    not isinstance(annotations, list)
+                    or len(annotations) > max_annotations
+                ):
+                    raise ValueError()
+                if (
+                    len(json.dumps(item).encode("utf-8"))
+                    > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
+                ):
+                    raise ValueError()
             reports = []
             for item in sessions:
                 sid, state = item["id"], item["state"]
@@ -136,8 +196,6 @@ def restore_backup(
                 raise RestoreRefused("invalid format")
             if document["import_mappings"] != [] or document["import_reports"] != []:
                 raise RestoreRefused("unsupported mappings")
-            if len(sessions) > max_sessions:
-                raise RestoreRefused("session limit exceeded")
             assets, records, seen = {}, [], set()
             for item in sessions:
                 if set(item) != {
@@ -192,8 +250,14 @@ def restore_backup(
                     )
                 ):
                     raise RestoreRefused("invalid mode")
+                if (
+                    mirror.get("write_mode") == "staged"
+                    and item["write_mode"] != "staged"
+                ):
+                    raise RestoreRefused("invalid mode")
                 full_state = _empty_state()
                 full_state.update(state)
+                _validate_state_values(full_state)
                 validate_captured_annotations(full_state, max_annotations)
                 for annotation in full_state["annotations"]:
                     _require_ingested_image(annotation, None)
