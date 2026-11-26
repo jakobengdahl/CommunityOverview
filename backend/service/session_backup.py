@@ -95,13 +95,13 @@ def create_backup(service, session_backend, write_modes):
         session_ids = sorted(session_backend.list_ids())
         revisions = {}
         for session_id in session_ids:
-            raw = session_backend.load(session_id)
-            revisions[session_id] = copy.deepcopy(raw)
             _authorize(
                 service.authorization_hook,
                 target="get_visualization_session",
                 session_id=session_id,
             )
+            raw = session_backend.load(session_id)
+            revisions[session_id] = copy.deepcopy(raw)
         with session_backend.transaction():
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")

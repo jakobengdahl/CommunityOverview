@@ -142,7 +142,7 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
     assert integrity["sha256"] != hashlib.sha256(canonical_bytes(backup)).hexdigest()
 
 
-@pytest.mark.parametrize("problem", ["record", "staged"])
+@pytest.mark.parametrize("problem", ["record", "load_error", "staged"])
 def test_denied_session_is_authorized_before_record_or_layer_checks(
     backend, monkeypatch, problem
 ):
@@ -151,6 +151,12 @@ def test_denied_session_is_authorized_before_record_or_layer_checks(
     modes = WriteModes(Layers([{"id": "change"}]))
     if problem == "record":
         monkeypatch.setattr(backend, "load", lambda _: None)
+    if problem == "load_error":
+
+        def fail_load(session_id):
+            raise OSError(f"cannot read {session_id}")
+
+        monkeypatch.setattr(backend, "load", fail_load)
     with pytest.raises(BackupRefused, match="^access denied$"):
         create_backup(Service(denied=session.id), backend, modes)
 
@@ -221,10 +227,14 @@ def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend
     assert service.references == [
         (
             [
+                "group-local",
                 "node",
-                "group-explicit",
+                "group-hidden",
+                "group-dimmed",
+                "group-position",
                 "group-shape",
                 "group-member",
+                "group-explicit",
                 "group-history",
             ],
             [],
@@ -317,6 +327,10 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
         {"shape_revisions": {"node:secret": 1}},
         {"shape_revisions": {"node:group-secret": 1}},
         {"shape_overrides": {"group-secret": "circle"}},
+        {"node_refs": ["group-secret"]},
+        {"hidden_node_ids": ["group-secret"]},
+        {"dimmed_node_ids": ["group-secret"]},
+        {"positions": {"group-secret": {"x": 1, "y": 1}}},
         {"annotations": [{"id": "ann", "attachment": {"target_id": "group-secret"}}]},
         {"annotations": [{"id": "group-secret", "member_node_ids": ["group-secret"]}]},
         {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
@@ -546,10 +560,12 @@ def test_authorization_runs_outside_session_transaction(backend):
 def test_revision_change_during_authorization_is_refused(backend):
     session = Session("1234-5678", name="original")
     backend.save(session.to_dict())
+    second = Session("1234-5679")
+    backend.save(second.to_dict())
 
     class ChangingHook(Hook):
         def evaluate(self, context):
-            if context.session_id == session.id:
+            if context.session_id == second.id:
                 changed = backend.load(session.id)
                 changed["seq"] += 1
                 backend.save(changed)

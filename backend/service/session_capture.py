@@ -183,7 +183,7 @@ def backup_node_ids(state: Dict[str, Any]) -> List[str]:
     Ambiguous canvas ids can name both an annotation and a graph node. Only
     explicitly annotation-typed attachments to existing annotations are local.
     """
-    ids = captured_node_ids(state)
+    ids = captured_node_ids(state, include_legacy_groups=True)
     ids.extend(i for i in (state.get("shape_overrides") or {}) if isinstance(i, str))
     annotation_ids = _annotation_ids(state)
     for annotation in state.get("annotations") or []:
