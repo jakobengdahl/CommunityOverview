@@ -432,29 +432,32 @@ describe('App handler wiring', () => {
     expect(api.getSession).not.toHaveBeenCalledWith(oldSession, { resolve: true });
   });
 
-  it.each([false, true])('prepares a newly edited session for templates (edited: %s)', async (edited) => {
-    await renderApp();
-    if (!edited) act(() => store().clearVisualization());
-    const connect = vi.spyOn(SessionSyncClient.prototype, 'connect');
-    act(() => canvas().onSaveSelectionAsTemplate([]));
-    const preparation = captured.template.prepare();
-    await act(async () => {
-      await Promise.resolve();
-      await canvas().onSaveView({ nodes: [], edges: [] });
-    });
-    const source = await preparation;
-    if (edited) {
-      expect(source).toMatchObject({ id: canvas().sessionKey });
-      expect(connect).toHaveBeenCalled();
-      expect(api.getSession).toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
-    } else {
-      expect(source).toBeNull();
-      expect(connect).not.toHaveBeenCalled();
-      expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+  it.each([false, true])(
+    'prepares a newly edited session for templates (edited: %s)',
+    async (edited) => {
+      await renderApp();
+      if (!edited) act(() => store().clearVisualization());
+      const connect = vi.spyOn(SessionSyncClient.prototype, 'connect');
+      act(() => canvas().onSaveSelectionAsTemplate([]));
+      const preparation = captured.template.prepare();
+      await act(async () => {
+        await Promise.resolve();
+        await canvas().onSaveView({ nodes: [], edges: [] });
+      });
+      const source = await preparation;
+      if (edited) {
+        expect(source).toMatchObject({ id: canvas().sessionKey });
+        expect(connect).toHaveBeenCalled();
+        expect(api.getSession).toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+      } else {
+        expect(source).toBeNull();
+        expect(connect).not.toHaveBeenCalled();
+        expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+      }
+      act(() => captured.template.onClose());
+      expect(screen.queryByRole('dialog')).toBeNull();
     }
-    act(() => captured.template.onClose());
-    expect(screen.queryByRole('dialog')).toBeNull();
-  });
+  );
 
   it('closes the template dialog when the active session changes', async () => {
     await renderApp();
