@@ -554,6 +554,48 @@ def _attachment_error(value: Any, *, field: str) -> Optional[str]:
     return None
 
 
+# Attachment id and type aliases the canvas reader accepts (annotationModel.js
+# normalizeAttachment); every alias is listed, not only the one it would pick.
+ATTACHMENT_ID_KEYS = ("target_id", "targetId", "node_id", "nodeId")
+ATTACHMENT_TYPE_KEYS = ("target_type", "targetType")
+# Top-level fields the canvas resolves by id alone, as a node or an annotation.
+UNTYPED_LINK_KEYS = ("startAnchor", "endAnchor", "parentId", "parent_id", "parentNode")
+
+
+def annotation_link_fields(annotation: Dict[str, Any]) -> List[tuple]:
+    """``(holder, key, declared)`` for every field the canvas reader may
+    resolve to a node or annotation id, ``holder[key]`` being the raw value.
+
+    Covers a resource reference's ``target`` (declared ``"node"``), every id
+    alias of an ``attachment``, a text's ``anchor`` and a line endpoint
+    (``start``/``startEndpoint``, ``end``/``endEndpoint``) or its
+    ``attachment`` (declared as its first truthy type alias, else ``None``),
+    the untyped links, and each ``member_node_ids`` index (declared ``None``).
+    """
+    fields: List[tuple] = []
+    if (
+        annotation_type_of(annotation) == REFERENCE_TYPE
+        and annotation.get("target_kind") == "resource"
+    ):
+        fields.append((annotation, "target", "node"))
+    holders = [annotation.get("attachment"), annotation.get("anchor")]
+    for key in ("start", "startEndpoint", "end", "endEndpoint"):
+        endpoint = annotation.get(key)
+        if isinstance(endpoint, dict):
+            holders += [endpoint, endpoint.get("attachment")]
+    for holder in holders:
+        if isinstance(holder, dict):
+            declared = next(
+                (holder[k] for k in ATTACHMENT_TYPE_KEYS if holder.get(k)), None
+            )
+            fields.extend((holder, key, declared) for key in ATTACHMENT_ID_KEYS)
+    fields.extend((annotation, key, None) for key in UNTYPED_LINK_KEYS)
+    members = annotation.get("member_node_ids")
+    if isinstance(members, list):
+        fields.extend((members, i, None) for i in range(len(members)))
+    return fields
+
+
 def _line_endpoint_error(value: Any, *, field: str) -> Optional[str]:
     """Structural validation for a `line`'s `start`/`end` endpoint
     (docs/ANNOTATION_CONTRACT.md: "Line endpoints may attach to a node or to

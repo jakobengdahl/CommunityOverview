@@ -202,6 +202,10 @@ class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
 
 
+class AnnotationLimitReached(OpError):
+    """The session cannot hold any more annotations."""
+
+
 class AppearanceVersionRequired(OpError):
     """The writer has not declared support for appearance state."""
 
@@ -984,6 +988,8 @@ class SessionStore:
         on_allocate: Optional[Callable[[str], None]] = None,
         state: Optional[Dict[str, Any]] = None,
         description: Optional[str] = None,
+        prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
     ) -> "tuple[Session, bool]":
         """Check capacity and publish a new document under the store transaction."""
         if session_id is not None and not is_valid_session_id(session_id):
@@ -1005,10 +1011,18 @@ class SessionStore:
             )
             if on_allocate is not None:
                 on_allocate(session.id)
-            self._backend.save(session.to_dict())
+            try:
+                if prepare is not None:
+                    prepare(session)
+                self._backend.save(session.to_dict())
+            except BaseException:
+                self._rings.pop(session.id, None)
+                raise
             self._sessions[session.id] = session
-            self._rings[session.id] = deque(maxlen=self._ring_size)
+            self._rings.setdefault(session.id, deque(maxlen=self._ring_size))
             self._meta_cache = None
+            if on_publish is not None:
+                on_publish(session)
             return session, True
 
     def _check_capacity(self, max_sessions: Optional[int]) -> None:
@@ -1032,6 +1046,8 @@ class SessionStore:
         write_mode: str = "direct",
         write_mode_source: str = "inherited",
         on_allocate: Optional[Callable[[str], None]] = None,
+        prepare: Optional[Callable[[Session], None]] = None,
+        on_publish: Optional[Callable[[Session], None]] = None,
     ) -> "tuple[Session, bool]":
         return self.create_with_capacity(
             session_id=session_id,
@@ -1039,6 +1055,8 @@ class SessionStore:
             write_mode=write_mode,
             write_mode_source=write_mode_source,
             on_allocate=on_allocate,
+            prepare=prepare,
+            on_publish=on_publish,
         )
 
     def get(self, session_id: str) -> Optional[Session]:
@@ -1274,7 +1292,9 @@ class SessionStore:
                 if annotation["id"] in session._deleted_annotation_ids:
                     restored.append(annotation["id"])
             if len(annotations) > self._max_annotations:
-                raise OpError("annotation limit reached for this session")
+                raise AnnotationLimitReached(
+                    "annotation limit reached for this session"
+                )
             state["annotations"] = annotations
             tombstoned = [a for a in held if isinstance(a, str)]
 
@@ -1759,7 +1779,9 @@ class SessionStore:
                 }
             else:
                 if len(state["annotations"]) >= self._max_annotations:
-                    raise OpError("annotation limit reached for this session")
+                    raise AnnotationLimitReached(
+                        "annotation limit reached for this session"
+                    )
                 if not isinstance(annotation.get("id"), str):
                     annotation["id"] = secrets.token_hex(8)
                 annotation.setdefault("created_by", op.get("client_id"))

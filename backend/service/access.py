@@ -124,7 +124,11 @@ def authorize_graph_access(
 
 
 def assign_copied_session_access(
-    hook: GraphAuthorizationHook, *, source_session_id: str, copy_session_id: str
+    hook: GraphAuthorizationHook,
+    *,
+    source_session_id: str,
+    copy_session_id: str,
+    target: str = "copy_visualization_session",
 ) -> Optional[Dict[str, Any]]:
     """Hand a session copy's access to a hook that holds per-session roles
     (SessionCopyAccessHook); None when it agrees or has none to carry."""
@@ -133,7 +137,6 @@ def assign_copied_session_access(
     assign = getattr(hook, "assign_copied_session_access", None)
     if assign is None:
         return None
-    target = "copy_visualization_session"
     decision = assign(
         build_graph_authorization_context(
             action=GRAPH_ACTION_MUTATE, target=target, session_id=source_session_id
@@ -145,6 +148,26 @@ def assign_copied_session_access(
     return build_access_denied_result(
         action=GRAPH_ACTION_MUTATE, target=target, decision=decision
     )
+
+
+def revoke_copied_session_access(
+    hook: GraphAuthorizationHook,
+    *,
+    source_session_id: str,
+    copy_session_id: str,
+    target: str,
+) -> None:
+    """Drop every assignment a hook made for a copy whose save failed."""
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    revoke = getattr(hook, "revoke_copied_session_access", None)
+    if revoke is not None:
+        revoke(
+            build_graph_authorization_context(
+                action=GRAPH_ACTION_MUTATE, target=target, session_id=source_session_id
+            ),
+            copy_session_id=copy_session_id,
+        )
 
 
 # ---------------------------------------------------------------------------

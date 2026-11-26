@@ -17,6 +17,7 @@ from backend.core.session_manager import (
     SessionLimitReached,
     SessionManager,
     SessionNotFound,
+    OpBatchTooLarge,
 )
 from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
@@ -450,24 +451,37 @@ async def test_legacy_only_session_is_delivered_and_its_membership_applied_by_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refusal", [SessionLimitReached, SessionNotFound])
+@pytest.mark.parametrize(
+    "refusal,code",
+    [
+        (SessionLimitReached, "too_many_sessions"),
+        (OpBatchTooLarge, "session_too_large"),
+        (OSError, "storage_error"),
+        (SessionNotFound, None),
+    ],
+)
 async def test_a_push_the_server_cannot_store_reaches_no_browser(
-    tmp_path, monkeypatch, refusal
+    tmp_path, monkeypatch, refusal, code
 ):
     """When the server cannot store the session it would apply a push's
     membership to, no browser renders that push and it is not delivered."""
     tools, registry, manager = _wire(tmp_path)
 
-    def refuse(_session_id):
-        raise refusal()
+    def refuse(_session_id, **_kwargs):
+        raise refusal("private path and session id")
 
     monkeypatch.setattr(manager, "get_or_create", refuse)
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
-        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+        result = _search(tools, UNKNOWN_SESSION_ID)
+        delivery = result["visualization_delivery"]
 
         assert delivery["delivered"] is False
         assert delivery["status"] == "not_delivered"
-        assert set(delivery) == UNDELIVERED_KEYS
+        assert set(delivery) == UNDELIVERED_KEYS | ({"error_code"} if code else set())
+        if code:
+            assert result["success"] is False
+            assert result["error"] == delivery["error_code"] == code
+            assert "private path" not in str(result)
         await _settle(lambda: bool(received), turns=50)
         assert received == []
         assert manager.get_session(UNKNOWN_SESSION_ID) is None
@@ -479,6 +493,32 @@ async def test_a_push_the_server_cannot_store_reaches_no_browser(
         assert cleared["success"] is True
         assert await _settle(lambda: len(received) == 1)
         assert received[0]["result"]["action"] == "clear_visualization"
+        assert manager.get_session(UNKNOWN_SESSION_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_initial_push_over_annotation_limit_fails_without_publication(
+    tmp_path, monkeypatch
+):
+    tools, registry, manager = _wire(tmp_path)
+    manager.store._max_annotations = 0
+    materialize = manager.materialize_command
+
+    def with_annotations(session_id, command):
+        command["result"].update(
+            action="load_visualization",
+            annotation_document=[{"id": "note", "kind": "note"}],
+        )
+        return materialize(session_id, command)
+
+    monkeypatch.setattr(manager, "materialize_command", with_annotations)
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
+        result = _search(tools, UNKNOWN_SESSION_ID)
+        assert result["success"] is False
+        assert result["error"] == "session_too_large"
+        assert result["visualization_delivery"]["error_code"] == "session_too_large"
+        assert result["visualization_delivery"]["delivered"] is False
+        assert await _settle(lambda: bool(received), turns=50) is False
         assert manager.get_session(UNKNOWN_SESSION_ID) is None
 
 
@@ -994,7 +1034,7 @@ async def test_a_membership_push_the_hub_failed_to_apply_reaches_no_browser(tmp_
         assert delivery["status"] == "not_delivered"
         await _settle(lambda: bool(received), turns=50)
         assert received == []
-        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == []
+        assert manager.get_session(UNKNOWN_SESSION_ID).state["node_refs"] == ["alpha"]
 
 
 @pytest.mark.asyncio
@@ -1420,3 +1460,24 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
     # Guards the enumeration itself: a tightened precondition that silently
     # skipped every state would otherwise pass vacuously.
     assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"
+
+
+@pytest.mark.parametrize(
+    "tool,field",
+    [
+        ("rename_visualization_session", "name"),
+        ("describe_visualization_session", "description"),
+    ],
+)
+def test_implicit_metadata_creation_reports_storage_failure(
+    tmp_path, monkeypatch, tool, field
+):
+    tools, _, manager = _wire(tmp_path)
+
+    def fail(_document):
+        raise OSError()
+
+    monkeypatch.setattr(manager.store._backend, "save", fail)
+    result = tools[tool](session_id=UNKNOWN_SESSION_ID, **{field: "value"})
+    assert result["error"] == "storage_error"
+    assert manager.get_session(UNKNOWN_SESSION_ID) is None

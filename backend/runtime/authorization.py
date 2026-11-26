@@ -101,6 +101,11 @@ class SessionCopyAccessHook(Protocol):
     The hook gives the copy the source's assignments, each capped at the
     copier's own rights, and makes the copier its owner; a refusal creates
     nothing.
+
+    ``save_session_view`` assigns only after the copy is published (target
+    ``save_session_view``). If assignment fails, it calls the optional
+    ``revoke_copied_session_access`` with the same arguments, which must drop
+    every assignment made for the copy, and then removes the copy.
     """
 
     def assign_copied_session_access(
