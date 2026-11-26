@@ -1,3 +1,4 @@
+import AnnotationSaveTemplateControl from './AnnotationSaveTemplateControl';
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
@@ -318,6 +319,11 @@ function FreehandAnnotationNode({ id, data, selected }) {
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
             onKeyDown={handleMenuKeyDown}
           >
+            <AnnotationSaveTemplateControl
+              id={id}
+              type="freehand"
+              onClose={() => setContextMenu(null)}
+            />
             {locked ? (
               // The capability baseline's two actions for a locked object:
               // unlock, and duplicate — everything else stays out of reach

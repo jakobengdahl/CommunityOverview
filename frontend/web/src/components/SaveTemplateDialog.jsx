@@ -13,6 +13,7 @@ const errorCodes = new Set([
 ]);
 
 export function templateSummary(source, selected, schema) {
+  if (!schema?.node_types) return null;
   const whole = selected.length === 0;
   const chosenNodes = new Set(selected.filter((item) => !item.annotation).map((item) => item.id));
   const chosenAnnotations = new Set(
@@ -73,7 +74,7 @@ export default function SaveTemplateDialog({
 
   async function submit(event) {
     event.preventDefault();
-    if (!name.trim() || !source || saving) return;
+    if (!name.trim() || !summary || saving) return;
     setSaving(true);
     setError(null);
     const body = {
@@ -90,8 +91,13 @@ export default function SaveTemplateDialog({
       body.annotation_ids = selected.filter((item) => item.annotation).map((item) => item.id);
     }
     try {
-      await api.saveTemplate(sessionId, body);
-      onSaved();
+      const result = await api.saveTemplate(sessionId, body);
+      const template = result.template;
+      onSaved({
+        nodes: template.nodes.length,
+        edges: template.edges.length,
+        annotations: template.annotation_document.annotations.length,
+      });
     } catch (err) {
       setError(errorCodes.has(err.code) ? err.code : 'other');
       setSaving(false);
@@ -157,7 +163,7 @@ export default function SaveTemplateDialog({
           <button
             type="submit"
             className="input-dialog-button primary"
-            disabled={!name.trim() || !source || saving}
+            disabled={!name.trim() || !summary || saving}
           >
             {t(saving ? 'template.saving' : 'template.save_button')}
           </button>

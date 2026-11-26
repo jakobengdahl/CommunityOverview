@@ -602,9 +602,10 @@ Select nodes and annotations, then right-click the selection and choose **Save a
 Template…**. You can also choose **Save as Template…** from the command box; if
 nothing is selected, it saves the whole session. Enter a name, an optional
 description and comma-separated tags. The dialog summarizes the included nodes,
-connections between them and annotations before saving. System nodes are excluded,
-and resource references whose target is outside the selection are omitted. Resolve
-any staged changes before saving. If the session changes while the dialog is open,
+connections between them and annotations before saving. The counts are a preview;
+graph changes can occur independently, so the confirmation shows the counts
+actually saved. System nodes are excluded, and resource references whose target is
+outside the selection are omitted. Resolve any staged changes before saving. If the session changes while the dialog is open,
 close and reopen it to review the latest contents.
 
 ### 2.7 Agents

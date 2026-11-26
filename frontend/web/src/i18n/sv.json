@@ -1182,11 +1182,11 @@
     "name": "Namn (obligatoriskt)",
     "description": "Beskrivning",
     "tags": "Taggar (kommaseparerade)",
-    "summary": "Innehåller {nodes} noder, {edges} kopplingar, {annotations} anteckningar",
+    "summary": "Förhandsvisning: {nodes} noder, {edges} kopplingar, {annotations} anteckningar (kan ändras före sparandet)",
     "loading": "Förbereder sessionen…",
     "saving": "Sparar…",
     "save_button": "Spara",
-    "saved": "Mallen har sparats",
+    "saved": "Mallen har sparats: {nodes} noder, {edges} kopplingar, {annotations} anteckningar",
     "errors": {
       "access_denied": "Du har inte behörighet att spara mallen.",
       "staged_changes": "Hantera mellanlagrade ändringar innan du sparar en mall.",

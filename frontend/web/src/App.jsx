@@ -4533,9 +4533,9 @@ function App() {
             return source;
           }}
           onClose={() => setTemplateDialog(null)}
-          onSaved={() => {
+          onSaved={(counts) => {
             setTemplateDialog(null);
-            showNotification('success', t('template.saved'));
+            showNotification('success', t('template.saved', counts));
           }}
         />
       )}

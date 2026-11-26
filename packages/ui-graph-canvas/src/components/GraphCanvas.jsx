@@ -1220,6 +1220,14 @@ function GraphCanvasInner({
 
   const annotationContextValue = useMemo(
     () => ({
+      saveAsTemplate: onSaveSelectionAsTemplate
+        ? (id, type) => {
+            const selected = selectedNodesRef.current;
+            onSaveSelectionAsTemplate(
+              selected.some((node) => node.id === id) ? selected : [{ id, type }]
+            );
+          }
+        : null,
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
       notifyRenderFailure: reportAnnotationRenderError,
@@ -1240,6 +1248,7 @@ function GraphCanvasInner({
         requestClose: onCloseAnnotationEditSheet,
       },
       labels: {
+        saveAsTemplate: cml.saveAsTemplate,
         color: cml.annotationColor,
         fill: cml.annotationFill,
         border: cml.annotationBorder,
@@ -1324,6 +1333,8 @@ function GraphCanvasInner({
     }),
     [
       notifyAnnotationChange,
+      onSaveSelectionAsTemplate,
+      cml.saveAsTemplate,
       notifyRemoteLockedAttempt,
       beginEditing,
       endEditing,

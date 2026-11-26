@@ -35,6 +35,7 @@ const selection = [
 
 describe('saving templates', () => {
   it('summarizes the selected or whole session including only inner connections and retained annotations', () => {
+    expect(templateSummary(source, [], null)).toBeNull();
     expect(templateSummary(source, selection, schema)).toEqual({
       nodes: 1,
       edges: 0,
@@ -43,8 +44,30 @@ describe('saving templates', () => {
     expect(templateSummary(source, [], schema)).toEqual({ nodes: 2, edges: 1, annotations: 2 });
   });
 
+  it('waits for schema before displaying counts or enabling save', async () => {
+    const props = {
+      sessionId: 'session',
+      selected: [],
+      prepare: () => Promise.resolve(source),
+      onClose: vi.fn(),
+      onSaved: vi.fn(),
+    };
+    const { rerender } = render(<SaveTemplateDialog {...props} schema={null} />);
+    fireEvent.change(screen.getByLabelText('template.name'), { target: { value: 'Name' } });
+    await screen.findByText('template.loading');
+    expect(screen.getByRole('button', { name: 'template.save_button' }).disabled).toBe(true);
+    rerender(<SaveTemplateDialog {...props} schema={schema} />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'template.save_button' }).disabled).toBe(false)
+    );
+  });
+
   it.each([[selection], [[]]])('validates and sends the chosen scope once', async (selected) => {
-    api.saveTemplate.mockReset().mockResolvedValue({ success: true });
+    api.saveTemplate
+      .mockReset()
+      .mockResolvedValue({
+        template: { nodes: [{}], edges: [{}, {}], annotation_document: { annotations: [] } },
+      });
     const saved = vi.fn();
     render(
       <SaveTemplateDialog
@@ -67,7 +90,9 @@ describe('saving templates', () => {
     fireEvent.change(screen.getByLabelText('template.tags'), { target: { value: 'one, two' } });
     await waitFor(() => expect(button.disabled).toBe(false));
     fireEvent.click(button);
-    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(saved).toHaveBeenCalledExactlyOnceWith({ nodes: 1, edges: 2, annotations: 0 })
+    );
     const body = {
       name: 'Example',
       description: 'Description',

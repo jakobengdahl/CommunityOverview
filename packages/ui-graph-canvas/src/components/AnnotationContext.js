@@ -73,6 +73,7 @@ import { createContext } from 'react';
  * `referenceTargetProblem`).
  */
 export const AnnotationContext = createContext({
+  saveAsTemplate: null,
   notifyChange: () => {},
   notifyRemoteLockedAttempt: () => {},
   beginEditing: async (elementIds) => ({ granted: elementIds || [], denied: {} }),

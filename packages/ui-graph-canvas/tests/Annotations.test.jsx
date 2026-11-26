@@ -1,8 +1,11 @@
+// covers: packages/ui-graph-canvas/src/components/NoteNode.jsx, packages/ui-graph-canvas/src/components/LabelNode.jsx, packages/ui-graph-canvas/src/components/ArrowNode.jsx, packages/ui-graph-canvas/src/components/GenericAnnotationNode.jsx, packages/ui-graph-canvas/src/components/FreehandAnnotationNode.jsx, packages/ui-graph-canvas/src/components/AnnotationSaveTemplateControl.jsx
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import NoteNode from '../src/components/NoteNode';
 import LabelNode from '../src/components/LabelNode';
 import ArrowNode from '../src/components/ArrowNode';
+import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
+import FreehandAnnotationNode from '../src/components/FreehandAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
@@ -475,5 +478,33 @@ describe('remote edit-lease exclusivity (task-annotation-exclusive-edit-leases)'
     };
     const result = updater([remotelyLockedNode]);
     expect(result[0]).toBe(remotelyLockedNode);
+  });
+});
+
+describe('saving annotations as templates', () => {
+  it.each([
+    [NoteNode, 'note', '.graph-note-node', {}],
+    [LabelNode, 'label', '.graph-label-node', {}],
+    [ArrowNode, 'arrow', '.graph-arrow-node', {}],
+    [GenericAnnotationNode, 'text', '.graph-generic-annotation-node', { text: 'Text' }],
+    [FreehandAnnotationNode, 'freehand', '.graph-freehand-node', {}],
+  ])('offers the action for %s', (Component, type, selector, data) => {
+    const saveAsTemplate = vi.fn();
+    const { container } = render(
+      <AnnotationContext.Provider
+        value={{
+          labels: { ...labels, saveAsTemplate: 'Save as template' },
+          saveAsTemplate,
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt: vi.fn(),
+        }}
+      >
+        <Component id="a" type={type} data={data} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(container.querySelector(selector));
+    fireEvent.click(screen.getByText('Save as template'));
+    expect(saveAsTemplate).toHaveBeenCalledWith('a', type);
+    expect(screen.queryByText('Save as template')).toBeNull();
   });
 });

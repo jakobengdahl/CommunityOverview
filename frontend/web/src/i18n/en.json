@@ -1182,11 +1182,11 @@
     "name": "Name (required)",
     "description": "Description",
     "tags": "Tags (comma-separated)",
-    "summary": "Includes {nodes} nodes, {edges} connections, {annotations} annotations",
+    "summary": "Preview: {nodes} nodes, {edges} connections, {annotations} annotations (may change before saving)",
     "loading": "Preparing session…",
     "saving": "Saving…",
     "save_button": "Save",
-    "saved": "Template saved",
+    "saved": "Template saved: {nodes} nodes, {edges} connections, {annotations} annotations",
     "errors": {
       "access_denied": "You do not have access to save this template.",
       "staged_changes": "Resolve staged changes before saving a template.",
