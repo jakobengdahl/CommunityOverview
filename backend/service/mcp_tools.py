@@ -713,6 +713,34 @@ def register_mcp_tools(
                 tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
         else:
             mcp.tool()(wrapped)
+            from mcp.server.fastmcp import FastMCP
+
+            if func.__name__ in _RAW_SESSION_TOOLS and isinstance(mcp, FastMCP):
+                from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+
+                class RawArgumentMetadata(FuncMetadata):
+                    # The tool validates its own arguments, as REST does, so a
+                    # wrong type answers `invalid_request`, not a ToolError.
+                    async def call_fn_with_arg_validation(
+                        self,
+                        fn,
+                        fn_is_async,
+                        arguments_to_validate,
+                        arguments_to_pass_directly,
+                    ):
+                        fields = self.arg_model.model_fields
+                        arguments = {
+                            k: v
+                            for k, v in arguments_to_validate.items()
+                            if k in fields
+                        }
+                        arguments |= arguments_to_pass_directly or {}
+                        if fn_is_async:
+                            return await fn(**arguments)
+                        return fn(**arguments)
+
+                tool = mcp._tool_manager.get_tool(func.__name__)
+                tool.fn_metadata = RawArgumentMetadata(**tool.fn_metadata.__dict__)
         tools_map[func.__name__] = wrapped
         return wrapped
 
@@ -3365,8 +3393,8 @@ def register_mcp_tools(
 
     @register_tool
     def save_session_view(
-        # Plain ``str``: FastMCP JSON-decodes a string argument for any other
-        # annotation, so a name such as "null" would differ from REST.
+        # Schema only: FastMCP passes the raw arguments through unvalidated
+        # (``_RAW_SESSION_TOOLS``) and the tool validates them as REST does.
         session_id: str = None,  # type: ignore[assignment]
         name: str = None,  # type: ignore[assignment]
         expected_revision: Any = None,

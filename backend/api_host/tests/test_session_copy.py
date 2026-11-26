@@ -469,13 +469,19 @@ def test_update_storage_failure_is_storage_error(test_app, monkeypatch, operatio
 
 
 def save_view(test_app, session_id, body, transport):
-    """POST .../save-view or the MCP tool with the same raw arguments."""
+    """POST .../save-view, or the MCP tool through FastMCP's argument layer,
+    with the same raw arguments."""
+    import asyncio
+
     if transport == "rest":
         response = test_app.post(f"/api/sessions/{session_id}/save-view", json=body)
         return response.status_code, response.json()
-    result = test_app.app.state.tools_map["save_session_view"](
-        session_id=session_id, **body
+    _, structured = asyncio.run(
+        test_app.app.state.mcp.call_tool(
+            "save_session_view", {"session_id": session_id, **body}
+        )
     )
+    result = structured["result"]
     return 200 if result["success"] else None, result
 
 
@@ -537,23 +543,21 @@ def test_save_view_captures_presentation_as_a_new_session(test_app):
     assert status == 200 and result["missing_node_ids"] == []
 
 
-def test_save_view_mcp_arguments_keep_json_like_names_as_rest_does(test_app):
-    """Through FastMCP's argument layer a JSON-looking name is saved verbatim,
-    as REST saves it."""
-    import asyncio
-
+def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
+    """FastMCP neither decodes nor type-checks the arguments: a JSON-looking
+    name is saved verbatim, as REST saves it, and a non-string session id is
+    `invalid_request`, not a ToolError."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     for name in ("null", "[1]", '{"a": 1}'):
         body = {"name": name, "expected_revision": 0}
-        status, rest = save_view(test_app, source.id, body, "rest")
-        _, mcp = asyncio.run(
-            test_app.app.state.mcp.call_tool(
-                "save_session_view", {"session_id": source.id, **body}
-            )
-        )
-        saved = [manager.get_session(r["session_id"]) for r in (rest, mcp["result"])]
-        assert status == 200 and [s.name for s in saved] == [name, name]
+        results = [save_view(test_app, source.id, body, t) for t in ("rest", "mcp")]
+        saved = [manager.get_session(r["session_id"]) for _, r in results]
+        assert [s.name for s in saved] == [name, name]
+    _, result = save_view(
+        test_app, 123, {"name": "View", "expected_revision": 0}, "mcp"
+    )
+    assert (result["success"], result["error"]) == (False, "invalid_request")
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
@@ -563,6 +567,7 @@ def test_save_view_mcp_arguments_keep_json_like_names_as_rest_does(test_app):
         {"name": "n" * 201, "expected_revision": 0},
         {"name": " ", "expected_revision": 0},
         {"name": 5, "expected_revision": 0},
+        {"name": None, "expected_revision": 0},
         {"expected_revision": 0},
         {"name": "View", "expected_revision": "0"},
         {"name": "View", "expected_revision": -1},
