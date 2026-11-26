@@ -95,6 +95,8 @@ from . import layer_store
 
 logger = logging.getLogger(__name__)
 
+_deferred_staging = contextvars.ContextVar("deferred_staging", default=None)
+
 # AnnotationFieldConflict is raised by SessionStore.apply_state_op and
 # propagates through this module's write paths unchanged; callers import it
 # straight from session_store (`from backend.core.session_store import
@@ -1444,6 +1446,20 @@ class SessionManager:
             raise SessionSeqConflict(expected_session_seq, session.seq)
         return session.seq
 
+    @contextmanager
+    def defer_staged_events(self, session_id: str):
+        """Collect staged versions and notifications until the caller succeeds."""
+        pending = {"session_id": session_id, "entries": [], "events": []}
+        token = _deferred_staging.set(pending)
+        try:
+            yield pending
+        finally:
+            _deferred_staging.reset(token)
+
+    def publish_staged_events(self, pending: Dict[str, Any]) -> None:
+        for event in pending["events"]:
+            self.bus.publish(pending["session_id"], event)
+
     def stage_graph_change(
         self,
         session_id: str,
@@ -1457,8 +1473,7 @@ class SessionManager:
         the sequence number the op takes - and returns the op's payload:
         ``{"entries": [...], "removals": [...]}``. It is the commit point:
         if it raises, nothing changed. After it, the op is applied, persisted
-        and broadcast; a failure to persist the session document is logged
-        and does not undo a change the layer already holds.
+        and broadcast. A session persistence failure propagates to the caller.
 
         Synchronous like ``apply_layout``: refuses with ``LayoutBusy`` while
         an ``apply_ops`` batch holds the session's lock.
@@ -1477,6 +1492,17 @@ class SessionManager:
             if expected_session_seq is not None and expected_session_seq != session.seq:
                 raise SessionSeqConflict(expected_session_seq, session.seq)
             payload = commit(session.seq + 1)
+            versions = [
+                {
+                    "kind": e["kind"],
+                    "entity_id": e["entity_id"],
+                    "version": layer_store.entry_version(e),
+                }
+                for e in payload.get("entries", [])
+            ]
+            pending = _deferred_staging.get()
+            if pending is not None and pending["session_id"] == session_id:
+                pending["entries"].extend(versions)
             op = {
                 "op": "graph_change_staged",
                 # What changed, not the main-graph snapshot each entry keeps as
@@ -1491,23 +1517,18 @@ class SessionManager:
                 "client_id": GRAPH_STAGING_CLIENT_ID,
             }
             applied = self.store.apply_state_op(session, op, record_activity=False)
-            try:
-                self.store.persist(session)
-            except Exception:
-                logger.exception(
-                    "staged change in session %s landed; persisting its seq failed",
-                    session_id,
-                )
-        self.bus.publish(
-            session_id,
-            {
-                "type": "op",
-                "client_id": GRAPH_STAGING_CLIENT_ID,
-                "op": applied,
-                "seq": applied["seq"],
-            },
-        )
-        return applied
+            self.store.persist(session)
+        event = {
+            "type": "op",
+            "client_id": GRAPH_STAGING_CLIENT_ID,
+            "op": applied,
+            "seq": applied["seq"],
+        }
+        if pending is not None and pending["session_id"] == session_id:
+            pending["events"].append(event)
+        else:
+            self.bus.publish(session_id, event)
+        return {**applied, "entry_versions": versions}
 
     def check_layer_op(self, session_id: str) -> None:
         """Refuse a discard or merge up front, as a staging op is refused:
@@ -3183,6 +3204,7 @@ class SessionManager:
         record_activity: bool = True,
         trusted_replay: bool = False,
         enforce_session_budgets: bool = False,
+        before_broadcast: Optional[Callable[[], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Apply, persist and broadcast one state op on the calling thread.
 
@@ -3245,6 +3267,8 @@ class SessionManager:
         if applied is None:
             return None
 
+        if before_broadcast is not None:
+            before_broadcast()
         self.bus.publish(
             session_id,
             {

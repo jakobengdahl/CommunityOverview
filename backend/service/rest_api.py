@@ -1561,11 +1561,12 @@ def _register_session_endpoints(
                 session_manager,
                 session_id,
                 body.get("template_id"),
-                body.get("mode", "reference"),
+                body.get("mode", "copy"),
                 body.get("x"),
                 body.get("y"),
                 body.get("expected_revision"),
                 body.get("template_revision"),
+                body.get("expected_session_seq"),
             )
         return template_response(result)
 
