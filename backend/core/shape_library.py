@@ -189,13 +189,16 @@ class ShapeLibrary:
                 record = backend.load(template_id)
                 if record is not None:
                     revision = (
-                        record["revision"] if record.get("deleted")
+                        record["revision"]
+                        if record.get("deleted")
                         else record["document"]["revision"]
                     )
                     versions.append((template_id, revision))
         if not versions:
             return None
-        return hashlib.sha256(json.dumps(versions, ensure_ascii=True).encode()).hexdigest()
+        return hashlib.sha256(
+            json.dumps(versions, ensure_ascii=True).encode()
+        ).hexdigest()
 
     def usage_snapshot(self, key):
         template_lock = (
