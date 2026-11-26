@@ -459,7 +459,13 @@ def save_template(
                 template_id = "-".join(
                     f"{secrets.randbelow(10000):04d}" for _ in range(4)
                 )
-                if store._backend.load(template_id) is None:
+                # Templates authorize as sessions by id, so a template id
+                # must never name a session, live or retired.
+                if (
+                    store._backend.load(template_id) is None
+                    and not manager.store.exists(template_id)
+                    and manager.write_modes.staged_status(template_id) == "none"
+                ):
                     break
             else:
                 return _failure("storage_error")
@@ -482,7 +488,31 @@ def save_template(
                 if result["error"] == "invalid_document":
                     result["error"] = "invalid_presentation"
                 return result
-            return {"success": True, "template": store.save(result["document"], 0)}
+            hook = service.authorization_hook
+            try:
+                with session_context.bind_session(None):
+                    denied = access.assign_copied_session_access(
+                        hook,
+                        source_session_id=session_id,
+                        copy_session_id=template_id,
+                        target="save_template",
+                    )
+            except Exception:
+                denied = True
+            if denied:
+                return _failure("access_denied")
+            try:
+                saved = store.save(result["document"], 0)
+            except Exception:
+                with session_context.bind_session(None):
+                    access.revoke_copied_session_access(
+                        hook,
+                        source_session_id=session_id,
+                        copy_session_id=template_id,
+                        target="save_template",
+                    )
+                raise
+            return {"success": True, "template": saved}
     except Exception:
         return _failure("storage_error")
 
@@ -573,7 +603,11 @@ def update_template(
     try:
         store = manager.template_store
         with store._backend.transaction():
-            doc = store.get(template_id)
+            try:
+                doc = store.get(template_id)
+            except TemplateError:
+                # An unreadable stored document, as get_template answers it.
+                return _failure("storage_error")
             if doc is None:
                 return _failure("template_not_found")
             if doc["revision"] != expected_revision:

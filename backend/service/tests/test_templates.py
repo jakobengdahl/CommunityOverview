@@ -429,3 +429,51 @@ def test_collection_authorization_ignores_bound_session(capture):
     assert ("create_visualization_session", "") in seen
     assert ("list_visualization_sessions", "") in seen
     assert ("get_visualization_session", saved["template"]["template_id"]) in seen
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_save_assigns_creator_access_to_a_fresh_non_session_id(capture, allowed):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    assigned = []
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=True)
+
+        def assign_copied_session_access(self, context, *, copy_session_id):
+            assigned.append((context.target, context.session_id, copy_session_id))
+            return GraphAuthorizationDecision(allowed=allowed)
+
+    service._authorization_hook = Hook()
+    # The first candidate is the session's own id and must be skipped.
+    parts = iter([int(p) for p in session.id.split("-")] + [1111, 2222, 3333, 4444])
+    with patch("secrets.randbelow", side_effect=lambda _: next(parts)):
+        saved = templates.save_template(
+            service, manager, session.id, "Example", session.seq
+        )
+    assert assigned == [("save_template", session.id, "1111-2222-3333-4444")]
+    assert saved["success"] is allowed
+    if not allowed:
+        assert saved["error"] == "access_denied"
+    assert templates.list_templates(service, manager)["count"] == int(allowed)
+
+
+def test_unreadable_stored_template_is_a_storage_error(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    record = manager.template_store._backend.load(doc["template_id"])
+    record["document"]["nodes"] = "broken"
+    manager.template_store._backend.save(record)
+    for result in (
+        templates.get_template(service, manager, doc["template_id"]),
+        templates.update_template(
+            service, manager, doc["template_id"], doc["revision"], name="New"
+        ),
+    ):
+        assert result == {"success": False, "error": "storage_error"}
