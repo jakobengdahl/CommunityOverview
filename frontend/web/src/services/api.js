@@ -602,7 +602,7 @@ export async function createSavedShape(key, name, definition) {
 }
 
 /** Edit the reviewed revision of a saved shape; a stale review is a 409. */
-export async function updateSavedShape(key, name, definition, revision, usage) {
+export async function updateSavedShape(key, name, definition, revision, usage, templateUsage) {
   return apiFetch(savedShapeUrl(key), {
     method: 'PUT',
     body: JSON.stringify({
@@ -610,13 +610,18 @@ export async function updateSavedShape(key, name, definition, revision, usage) {
       definition,
       expected_revision: revision,
       expected_usage: usage,
+      expected_template_usage: templateUsage,
     }),
   });
 }
 
 /** Delete (tombstone) a saved shape; its users fall back to the built-in card. */
-export async function deleteSavedShape(key, revision, usage) {
-  const query = new URLSearchParams({ expected_revision: revision, expected_usage: usage });
+export async function deleteSavedShape(key, revision, usage, templateUsage) {
+  const query = new URLSearchParams({
+    expected_revision: revision,
+    expected_usage: usage,
+    expected_template_usage: templateUsage,
+  });
   return apiFetch(`${savedShapeUrl(key)}?${query}`, { method: 'DELETE' });
 }
 

@@ -237,6 +237,19 @@ requires review. Deletion is a tombstone transaction, so no cross-session bulk
 rewrite is necessary. Maintain a reverse reference index, rebuilt from persisted
 sessions after recovery. Count references in node and type selections.
 
+## Templates
+
+Capture records each node's effective shape as a reference and an inline copy
+when applicable. Insertion resolves a known reference to its current definition;
+an unknown reference uses the inline copy, while a tombstoned saved shape uses
+the built-in card. Inline-only and built-in selections retain their own meaning.
+See [the template contract](../TEMPLATES_CONTRACT.md#shape-resolution).
+
+The reverse index is rebuilt from persisted sessions and live template documents.
+It counts each session and each template once per saved shape, separately, and
+excludes deleted templates. Edit and delete review both counts; a changed count
+requires a new review. Deleting a shape leaves templates unchanged.
+
 ## Editor flow
 
 Open “Node appearance” for the selected entity, above the canvas. Show the node

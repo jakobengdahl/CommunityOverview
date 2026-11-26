@@ -24,6 +24,7 @@ import logging
 import os
 import tempfile
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -137,6 +138,7 @@ class ShapeLibrary:
         backend: ShapeLibraryPersistenceBackend,
         sessions: SessionPersistenceBackend,
         *,
+        templates=None,
         writes_enabled=False,
         writers=None,
         invalidate=None,
@@ -144,6 +146,7 @@ class ShapeLibrary:
     ):
         self.backend = backend
         self.sessions = sessions
+        self.templates = templates
         self.writes_enabled = writes_enabled
         # ``authorize(identity, action, entry)``; False refuses the write.
         self.authorize = authorize
@@ -169,15 +172,30 @@ class ShapeLibrary:
     def usage(self, key):
         return len(self.references().get(key, ()))
 
-    def references(self):
-        """Rebuild the reverse index (key to session ids) from persisted sessions."""
+    def template_usage(self, key):
+        return len(self.template_references().get(key, ()))
+
+    def template_references(self):
         index = {}
-        for sid in self.sessions.list_ids():
-            session = self.sessions.load(sid)
-            if not session:
-                continue
-            for ref in _saved_refs(session.get("state", {})):
-                index.setdefault(ref, set()).add(sid)
+        if self.templates is not None:
+            for document in self.templates.list():
+                for node in document["nodes"]:
+                    selection = node.get("shape") or {}
+                    ref = selection.get("ref")
+                    if isinstance(ref, str) and ref.startswith("saved:"):
+                        index.setdefault(ref[6:], set()).add(document["template_id"])
+        return index
+
+    def references(self):
+        """Rebuild the reverse index of persisted session references."""
+        index = {}
+        with self.sessions.transaction():
+            for sid in self.sessions.list_ids():
+                session = self.sessions.load(sid)
+                if not session:
+                    continue
+                for ref in _saved_refs(session.get("state", {})):
+                    index.setdefault(ref, set()).add(sid)
         return index
 
     def put(
@@ -189,6 +207,7 @@ class ShapeLibrary:
         identity,
         expected_revision=None,
         expected_usage=None,
+        expected_template_usage=0,
         session: Session | None = None,
         apply=None,
     ):
@@ -201,6 +220,7 @@ class ShapeLibrary:
             identity,
             expected_revision,
             expected_usage,
+            expected_template_usage,
             name=name,
             definition=definition,
             session=session,
@@ -214,6 +234,7 @@ class ShapeLibrary:
         identity,
         expected_revision,
         expected_usage,
+        expected_template_usage=0,
         session: Session | None = None,
         apply=None,
     ):
@@ -222,6 +243,7 @@ class ShapeLibrary:
             identity,
             expected_revision,
             expected_usage,
+            expected_template_usage,
             delete=True,
             session=session,
             apply=apply,
@@ -233,6 +255,7 @@ class ShapeLibrary:
         identity,
         expected_revision,
         expected_usage,
+        expected_template_usage,
         *,
         name=None,
         definition=None,
@@ -270,7 +293,9 @@ class ShapeLibrary:
             if not self.authorize(identity, action, copy.deepcopy(entry)):
                 raise LibraryForbidden()
             if entry is not None and (
-                expected_usage is None or expected_usage != self.usage(key)
+                expected_usage is None
+                or expected_usage != self.usage(key)
+                or expected_template_usage != self.template_usage(key)
             ):
                 raise LibraryConflict()
             now = datetime.now(timezone.utc).isoformat()
@@ -293,9 +318,11 @@ class ShapeLibrary:
                 staged["session"] = snapshot
             return copy.deepcopy(result)
 
-        # Sessions first, then the library, on every path: usage() inside
-        # change() takes the session lock, so the reverse order could deadlock.
-        with self.sessions.transaction():
+        # Sessions, templates, then library: hold both stores through the check.
+        template_lock = (
+            self.templates._backend.transaction() if self.templates else nullcontext()
+        )
+        with self.sessions.transaction(), template_lock:
             # A live writer's rollback would erase the adopted state; the
             # marker is only taken under this transaction, so the check holds.
             if (

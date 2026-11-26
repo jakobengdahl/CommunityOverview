@@ -770,6 +770,7 @@ describe('NodeAppearanceDialog', () => {
       usage: vi.fn(async (key) => ({
         revision: key === 'other' ? 1 : library.usage.mock.calls.length < 4 ? 3 : 5,
         usage: 4,
+        template_usage: 2,
       })),
       update: vi
         .fn()
@@ -822,16 +823,16 @@ describe('NodeAppearanceDialog', () => {
     await click('node_appearance.edit_saved');
     await click('node_appearance.confirm_edit');
     const edited = { ...EXAMPLE_SHAPE, scale: 3 };
-    expect(library.update.mock.calls.map((call) => call.slice(0, 5))).toEqual([
-      ['card', 'Card', edited, 3, 4],
-      ['card', 'Card', edited, 3, 4],
+    expect(library.update.mock.calls.map((call) => call.slice(0, 6))).toEqual([
+      ['card', 'Card', edited, 3, 4, 2],
+      ['card', 'Card', edited, 3, 4, 2],
     ]);
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply).toHaveBeenLastCalledWith('node', { ref: 'saved:card' });
     await click('node_appearance.delete_saved');
     expect(screen.getByText('node_appearance.delete_warning')).toBeTruthy();
     await click('node_appearance.confirm_delete');
-    expect(library.remove).toHaveBeenCalledWith('card', 5, 4);
+    expect(library.remove).toHaveBeenCalledWith('card', 5, 4, 2);
     // The deleted reference previews as the built-in card.
     expect(document.querySelector('.graph-custom-node')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'node_appearance.delete_saved' })).toBeNull();
@@ -844,7 +845,7 @@ describe('NodeAppearanceDialog', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'node_appearance.apply' }));
     await click('node_appearance.delete_saved');
     await click('node_appearance.confirm_delete');
-    expect(library.remove).toHaveBeenLastCalledWith('other', 1, 4);
+    expect(library.remove).toHaveBeenLastCalledWith('other', 1, 4, 2);
     fireEvent.click(screen.getByRole('button', { name: 'node_appearance.apply' }));
     expect(apply).toHaveBeenLastCalledWith('node', {
       inline: { ...DEFAULT_SHAPE, placement: 'bottom-right' },
@@ -893,7 +894,7 @@ describe('NodeAppearanceDialog', () => {
       await click('node_appearance.review_latest');
       await click('node_appearance.edit_saved');
       await click('node_appearance.confirm_edit');
-      expect(library.update).toHaveBeenCalledWith('card', 'Card', { ...latest, scale: 3 }, 4, 2);
+      expect(library.update).toHaveBeenCalledWith('card', 'Card', { ...latest, scale: 3 }, 4, 2, 0);
     }
   );
   it('reviews a picked entry deleted elsewhere onto the built-in card, not the original entry', async () => {

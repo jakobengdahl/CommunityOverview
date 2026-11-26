@@ -744,7 +744,7 @@ def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
     assert created.status_code == 201 and "owner" not in created.json()
     assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
     usage = client.get("/shape-library/card/usage")
-    assert usage.json() == {"revision": 1, "usage": 2}
+    assert usage.json() == {"revision": 1, "usage": 2, "template_usage": 0}
     edit = {"name": "Flat", "definition": {**DEFINITION, "base": "rectangle-flat"}}
     stale = client.put(
         "/shape-library/card",
@@ -858,3 +858,57 @@ def test_a_replaced_policy_governs_every_library_route(tmp_path, monkeypatch):
         ("user:bob", "delete", "user:alice"),
         ("user:alice", "delete", "user:alice"),
     ]
+
+
+def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path):
+    from backend.core.template_store import TemplateStore
+    from backend.core.tests.test_template_store import document
+
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    templates = TemplateStore(FileSessionPersistenceBackend(tmp_path / "templates"))
+    backend = FileShapeLibraryPersistenceBackend(tmp_path / "library")
+    library = ShapeLibrary(backend, sessions, templates=templates, writes_enabled=True)
+    entry = library.put("card", "Card", DEFINITION, identity="owner")
+    doc = templates.save(document(), 0)
+    restarted = ShapeLibrary(
+        backend,
+        sessions,
+        templates=TemplateStore(FileSessionPersistenceBackend(tmp_path / "templates")),
+        writes_enabled=True,
+    )
+    assert restarted.usage("card") == 0
+    assert restarted.template_usage("card") == 1
+    with pytest.raises(LibraryConflict):
+        restarted.delete(
+            "card",
+            identity="owner",
+            expected_revision=entry["revision"],
+            expected_usage=0,
+        )
+    doc["nodes"][0]["shape"]["ref"] = None
+    doc = templates.save(doc, doc["revision"])
+    with pytest.raises(LibraryConflict):
+        restarted.put(
+            "card",
+            "Card",
+            DEFINITION,
+            identity="owner",
+            expected_revision=entry["revision"],
+            expected_usage=0,
+            expected_template_usage=1,
+        )
+    doc["nodes"][0]["shape"]["ref"] = "saved:card"
+    doc = templates.save(doc, doc["revision"])
+    before = (tmp_path / "templates" / (doc["template_id"] + ".json")).read_bytes()
+    restarted.delete(
+        "card",
+        identity="owner",
+        expected_revision=entry["revision"],
+        expected_usage=0,
+        expected_template_usage=1,
+    )
+    assert (
+        tmp_path / "templates" / (doc["template_id"] + ".json")
+    ).read_bytes() == before
+    templates.delete(doc["template_id"], doc["revision"])
+    assert restarted.template_usage("card") == 0
