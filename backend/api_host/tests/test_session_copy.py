@@ -544,6 +544,130 @@ def test_save_view_captures_presentation_as_a_new_session(test_app):
     assert status == 200 and result["missing_node_ids"] == []
 
 
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_copies_annotations_and_groups(test_app, transport):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(
+        node_refs=["node-1"],
+        annotations=[
+            {
+                "id": "note",
+                "type": "note",
+                "version": 5,
+                "field_versions": {"text": 5},
+                "parentId": "group-a",
+            },
+            {"id": "group-a", "type": "group", "member_node_ids": ["node-1", "note"]},
+            {
+                "id": "line",
+                "type": "line",
+                "startAnchor": "note",
+                "attachment": {"target_type": "annotation", "target_id": "group-a"},
+            },
+        ],
+        shape_overrides={"group-a": {"shape": "box"}},
+    )
+    before = copy.deepcopy(source.to_dict())
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == []
+    saved = manager.get_session(result["session_id"])
+    note, group, line = saved.state["annotations"]
+    assert {note["id"], group["id"], line["id"]}.isdisjoint({"note", "group-a", "line"})
+    assert note["parentId"] == group["id"]
+    assert group["member_node_ids"] == ["node-1", note["id"]]
+    assert line["startAnchor"] == note["id"]
+    assert line["attachment"]["target_id"] == group["id"]
+    assert saved.state["shape_overrides"] == {group["id"]: {"shape": "box"}}
+    assert all(
+        a["version"] == 1 and a["field_versions"] == {} for a in (note, group, line)
+    )
+    assert saved.seq == 0 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_enforces_annotation_limit(test_app, transport):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state["annotations"] = [{"id": "a", "type": "note"}]
+    before = copy.deepcopy(source.to_dict())
+    manager.store._max_annotations = 0
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (413, None)
+    assert result == {"success": False, "error": "session_too_large"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"id": "a", "type": "image", "image": {"url": "https://example.org/image.png"}},
+        {
+            "id": "a",
+            "type": "reference",
+            "target_kind": "url",
+            "target": "javascript:alert(1)",
+        },
+        {"id": "a", "type": "unknown"},
+    ],
+)
+def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state["annotations"] = [annotation]
+    before = copy.deepcopy(source.to_dict())
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (422, None)
+    assert result == {"success": False, "error": "invalid_presentation"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"id": "a", "type": "reference", "target_kind": "resource", "target": "node-1"},
+        {"id": "a", "type": "group", "member_node_ids": ["node-1"]},
+        {
+            "id": "a",
+            "type": "line",
+            "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
+        },
+    ],
+)
+def test_save_view_denies_inaccessible_annotation_targets(
+    test_app, transport, annotation
+):
+    from backend.runtime.authorization import GraphAccessNarrowing
+
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    source.state.update(annotations=[annotation])
+    before = copy.deepcopy(source.to_dict())
+    hook = Mock()
+    hook.evaluate.side_effect = lambda ctx: GraphAuthorizationDecision(
+        allowed=True,
+        graph_access=GraphAccessNarrowing(enabled=True, allow_local_graph=False)
+        if ctx.target == "save_session_view"
+        else GraphAccessNarrowing(),
+    )
+    test_app.app.state.graph_service._authorization_hook = hook
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status in (403, None)
+    assert result == {"success": False, "error": "access_denied"}
+    assert manager.store.session_count() == 1 and source.to_dict() == before
+    assert not hook.assign_copied_session_access.called
+
+
 def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
     """FastMCP neither decodes nor type-checks the arguments: a JSON-looking
     name is saved verbatim, as REST saves it, and a non-string session id is
@@ -598,10 +722,8 @@ def test_save_view_rejects_invalid_raw_arguments(test_app, transport, body):
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
-def test_save_view_refuses_stale_staged_or_annotated_sources(
-    test_app, monkeypatch, transport
-):
-    """A stale revision, staged changes, annotations, an oversized capture, a
+def test_save_view_refuses_stale_or_staged_sources(test_app, monkeypatch, transport):
+    """A stale revision, staged changes, an oversized capture, a
     full session store or a failing staged-layer store publish nothing; the
     current revision is withheld when the source read is denied."""
     manager = test_app.app.state.session_manager
@@ -630,12 +752,6 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     hook.evaluate.side_effect = None
     hook.evaluate.return_value = GraphAuthorizationDecision(allowed=True)
 
-    source.state["annotations"] = [{"id": "a", "type": "text", "x": 0, "y": 0}]
-    assert attempt() == (
-        status_of(422),
-        {"success": False, "error": "invalid_presentation"},
-    )
-    source.state["annotations"] = []
     writes = manager.write_modes
     monkeypatch.setattr(writes, "choose", lambda mode: ("staged", "explicit"))
     monkeypatch.setattr(writes, "_store", Mock(load_layer=lambda sid: [{}]))
