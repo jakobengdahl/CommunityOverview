@@ -3,6 +3,7 @@
 import copy
 import logging
 import math
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -508,6 +509,7 @@ def capture_template(
 ERROR_STATUS = {
     "unsupported_mode": 400,
     "schema_mismatch": 422,
+    "layer_full": 422,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -899,9 +901,10 @@ def insert_template(
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
-        # Hold both stores through the check and publication so neither revision
-        # can change between validation and the session write.
+        # Graph writes take the lifecycle lock before the session store lock.
+        # Hold both stores through validation and publication.
         with (
+            service._storage.node_lifecycle_lock if mode == "copy" else nullcontext(),
             manager.template_store._backend.transaction(),
             manager.store._lock,
             manager.store._backend.transaction(),
@@ -1183,7 +1186,7 @@ def insert_template(
                             try:
                                 action()
                             except Exception:
-                                logger.exception(
+                                logger.error(
                                     "Template insertion rollback failed: %s", name
                                 )
 
@@ -1252,7 +1255,7 @@ def insert_template(
                             for i in reversed(range(0, len(ids), 10)):
                                 batch = ids[i : i + 10]
                                 undo(
-                                    f"delete created nodes {batch}",
+                                    "delete created nodes",
                                     lambda: delete_batch(batch),
                                 )
                         raise

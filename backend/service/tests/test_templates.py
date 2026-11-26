@@ -754,7 +754,11 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
     )
     assert result.status_code == 200 and result.json()["added"] == ["a", "b"]
     copy_target = manager.create_session("copy")
-    for error in ("write_failed", "write_outcome_unknown"):
+    for error, status, expected in (
+        ("write_failed", 503, "storage_error"),
+        ("write_outcome_unknown", 503, "storage_error"),
+        ("layer_full", 422, "layer_full"),
+    ):
         with patch.object(
             service, "add_nodes", return_value={"success": False, "error": error}
         ):
@@ -762,7 +766,7 @@ def test_insert_rest_matches_service_and_maps_errors(capture):
                 f"/api/sessions/{copy_target.id}/insert-template",
                 json={"template_id": doc["template_id"], "x": 20, "y": 30},
             )
-        assert failed.status_code == 503 and failed.json()["error"] == "storage_error"
+        assert failed.status_code == status and failed.json()["error"] == expected
         assert copy_target.seq == 0
     result = client.post(
         f"/api/sessions/{copy_target.id}/insert-template",
@@ -1032,9 +1036,21 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
     assert set(service._storage.nodes) == graph_before
     if staged:
         assert service._storage.layer_store.load_layer(target.id) == []
-    result = templates.insert_template(
-        service, manager, target.id, doc["template_id"], x=10, y=20
-    )
+    lifecycle_lock = service._storage.node_lifecycle_lock
+
+    class CheckedLock:
+        def __enter__(self):
+            if not lifecycle_lock._is_owned():
+                assert not manager.store._lock._is_owned()
+            return lifecycle_lock.__enter__()
+
+        def __exit__(self, *args):
+            return lifecycle_lock.__exit__(*args)
+
+    with patch.object(service._storage, "node_lifecycle_lock", CheckedLock()):
+        result = templates.insert_template(
+            service, manager, target.id, doc["template_id"], x=10, y=20
+        )
     assert result["success"]
     ids = result["node_id_map"]
     assert set(ids) == {n["key"] for n in doc["nodes"]}
@@ -1178,4 +1194,10 @@ def test_copy_logs_failed_undo_and_returns_original_error(capture, caplog):
         )
     assert result["error"] == "annotations_limit"
     assert "Template insertion rollback failed: delete created nodes" in caplog.text
-    assert "undo failed" in caplog.text
+    assert "undo failed" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert all(
+        node_id not in caplog.text
+        for node_id in service._storage.nodes
+        if node_id not in {"a", "b"}
+    )
