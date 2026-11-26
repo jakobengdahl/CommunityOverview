@@ -5,8 +5,8 @@ outside the graph, alongside sessions. Its visibility follows the session scope
 in open core. It is not a live session or a graph node. A template carries both
 source node IDs for a future reference insertion and snapshots for a future copy
 insertion; copy will be the default. Reading a template does not require the
-source session or nodes to exist. Capture, reference insertion, authorization and transport are implemented;
-copy insertion and the UI follow later.
+source session or nodes to exist. Capture, reference and copy insertion, authorization and transport are implemented;
+the UI follows later.
 
 ## JSON document
 
@@ -98,4 +98,22 @@ removed. Shape selections become per-node overrides, with `tombstoned` and `miss
 shape report for fallbacks. The result includes `added`, `annotation_id_map`,
 `skipped`, `shapes`, and the session `revision`. Optional `expected_revision`
 and `template_revision` reject stale writes atomically with `revision_conflict`.
-Only `reference` mode is available; `copy` returns `unsupported_mode`.
+Pass `mode: "reference"` to select this behavior.
+
+
+## Copy insertion
+
+Copy is the default for `insert_template` and the session insert-template route.
+It creates fresh nodes from the stored snapshots and edges only between those
+new nodes. Names and snapshot fields are preserved, including duplicate names.
+Each new node has `metadata.template` containing the template `id`, `revision`,
+and local `key`; this is provenance, not a live link. Source nodes need not
+exist. The result includes `node_id_map` from template keys to new node IDs,
+as well as the annotation map, shape report and session revision.
+
+The caller needs template read and session write access, and graph creation
+access. In a staged session all creations stay in its staged layer until merged.
+A missing target node type returns `schema_mismatch` with `types`; a refused
+edge, stale revision, or failed write rejects the insertion as a whole. Copy
+uses the same explicit coordinates, annotation remapping and per-node shape
+resolution as reference insertion.

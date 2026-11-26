@@ -3495,13 +3495,13 @@ def register_mcp_tools(
     def insert_template(
         session_id: str,
         template_id: str,
-        mode: str = "reference",
+        mode: str = "copy",
         x: Any = None,
         y: Any = None,
         expected_revision: Any = None,
         template_revision: Any = None,
     ) -> Dict[str, Any]:
-        """Insert a template's source nodes into a session."""
+        """Insert a template into a session."""
         return templates.insert_template(
             service,
             session_manager,

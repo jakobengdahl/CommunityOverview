@@ -540,9 +540,14 @@ def test_template_tools_share_crud_surface(crud_tools):
     doc = saved["template"]
     tid = doc["template_id"]
     target = manager.create_session("target")
-    assert tools["insert_template"](session_id=target.id, template_id=tid, x=0, y=0)[
-        "success"
-    ]
+    assert tools["insert_template"](
+        session_id=target.id, template_id=tid, x=0, y=0, mode="reference"
+    )["success"]
+    copy_target = manager.create_session("copy")
+    copied = tools["insert_template"](
+        session_id=copy_target.id, template_id=tid, x=0, y=0
+    )
+    assert copied["success"] and copied["node_id_map"] == {}
     assert tools["list_templates"]()["templates"] == [doc]
     assert tools["get_template"](template_id=tid)["template"] == doc
     changed = tools["update_template"](

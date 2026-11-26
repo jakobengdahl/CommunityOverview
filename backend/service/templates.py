@@ -507,6 +507,7 @@ def capture_template(
 # The session authorization seam also governs templates in open core.
 ERROR_STATUS = {
     "unsupported_mode": 400,
+    "schema_mismatch": 422,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -848,18 +849,22 @@ def delete_template(service, manager, template_id, expected_revision):
         return _failure("storage_error")
 
 
+class _CopyRefused(Exception):
+    pass
+
+
 def insert_template(
     service,
     manager,
     session_id,
     template_id,
-    mode="reference",
+    mode="copy",
     x=None,
     y=None,
     expected_revision=None,
     template_revision=None,
 ):
-    """Insert a template's existing nodes and presentation in one session write."""
+    """Insert a template snapshot or its source nodes into a session."""
     import math
     import secrets
     from backend.runtime.authorization import GRAPH_ACTION_MUTATE
@@ -889,8 +894,8 @@ def insert_template(
         or not all(valid_coordinate(v) for v in (x, y))
     ):
         return _failure("invalid_request")
-    if mode != "reference":
-        return _failure("unsupported_mode" if mode == "copy" else "invalid_request")
+    if mode not in ("reference", "copy"):
+        return _failure("invalid_request")
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
@@ -914,19 +919,42 @@ def insert_template(
                 return _failure("session_not_found")
             if expected_revision is not None and session.seq != expected_revision:
                 return _failure("revision_conflict", current_revision=session.seq)
-            ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))
-            with service.reading_in(session_id):
-                resolved = service.resolve_session_node_semantics(
-                    ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
-                )
-            if not resolved.get("success"):
-                return _failure("access_denied")
-            known = resolved.get("nodes") or {}
+            known = {}
+            if mode == "reference":
+                ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))
+                with service.reading_in(session_id):
+                    resolved = service.resolve_session_node_semantics(
+                        ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+                    )
+                if not resolved.get("success"):
+                    return _failure("access_denied")
+                known = resolved.get("nodes") or {}
             present = set(session.state.get("node_refs", []))
             added, skipped, keys = [], [], {}
             positions, overrides = {}, {}
             hidden = list(session.state.get("hidden_node_ids", []))
             config_data = ConfigLoader().config
+            if mode == "copy":
+                from backend.core import Node
+
+                missing = sorted(
+                    {n["snapshot"]["type"] for n in doc["nodes"]}
+                    - set(config_data.schema_.node_types)
+                )
+                if missing:
+                    return _failure("schema_mismatch", types=missing)
+                copies = []
+                for node in doc["nodes"]:
+                    snapshot = copy.deepcopy(node["snapshot"])
+                    snapshot["metadata"]["template"] = {
+                        "id": template_id,
+                        "revision": doc["revision"],
+                        "key": node["key"],
+                    }
+                    copies.append(Node(**snapshot))
+                copy_ids = {
+                    node["key"]: new.id for node, new in zip(doc["nodes"], copies)
+                }
             shape_config = {
                 "types": {
                     k: v.model_dump() for k, v in config_data.schema_.node_types.items()
@@ -966,15 +994,18 @@ def insert_template(
             config = config_data.node_shapes
             shape_report = []
             for node in doc["nodes"]:
-                node_id = node["source_node_id"]
-                graph_node = service._storage.get_node(node_id)
-                if (
-                    node_id not in known
-                    or graph_node is None
-                    or getattr(graph_node, "archived", False)
-                ):
-                    skipped.append({"node_id": node_id, "reason": "missing"})
-                    continue
+                node_id = (
+                    copy_ids[node["key"]] if mode == "copy" else node["source_node_id"]
+                )
+                if mode == "reference":
+                    graph_node = service._storage.get_node(node_id)
+                    if (
+                        node_id not in known
+                        or graph_node is None
+                        or getattr(graph_node, "archived", False)
+                    ):
+                        skipped.append({"node_id": node_id, "reason": "missing"})
+                        continue
                 keys[node["key"]] = node_id
                 if node_id in present:
                     skipped.append({"node_id": node_id, "reason": "already_present"})
@@ -1085,17 +1116,117 @@ def insert_template(
                 "inserted_shape_overrides": overrides,
             }
             _check_op_image_sizes(op)
-            manager._apply_op_sync(
-                session, session_id, "mcp-agent", op, enforce_session_budgets=True
-            )
+            if mode == "copy":
+                edges = [
+                    {
+                        "source": copy_ids[e["source"]],
+                        "target": copy_ids[e["target"]],
+                        "type": e["type"],
+                        "label": e["label"],
+                    }
+                    for e in doc["edges"]
+                ]
+                # Staging emits a session op of its own; save its state so a
+                # later presentation failure can restore the whole insertion.
+                saved_session = copy.deepcopy(session.__dict__)
+                ring = manager.store.ring(session_id)
+                saved_ring = list(ring) if ring is not None else None
+                staged = service.session_gate.is_staged(session_id)
+                from backend.runtime.session_context import bind_session
+
+                with service._storage.node_lifecycle_lock:
+                    existing = set(service._storage.nodes)
+                    layer = manager.write_modes.layer_store if staged else None
+                    existing_layer = (
+                        {
+                            (e["kind"], e["entity_id"])
+                            for e in layer.load_layer(session_id)
+                        }
+                        if staged
+                        else set()
+                    )
+                    try:
+                        with bind_session(
+                            session_id if service.session_gate.session_manager else None
+                        ):
+                            created = service.add_nodes(
+                                [n.model_dump() for n in copies],
+                                edges,
+                                expect_absent=True,
+                                allow_federated_endpoints=False,
+                            )
+                        if not created.get("success"):
+                            raise _CopyRefused(
+                                created.get("error_code")
+                                or (
+                                    created.get("error")
+                                    if created.get("error") in ERROR_STATUS
+                                    else "invalid_request"
+                                )
+                            )
+                        manager._apply_op_sync(
+                            session,
+                            session_id,
+                            "mcp-agent",
+                            op,
+                            enforce_session_budgets=True,
+                        )
+                    except Exception:
+                        if staged:
+                            from backend.core.layer_store import entry_version
+
+                            new_ids = set(copy_ids.values())
+                            entries = [
+                                e
+                                for e in layer.load_layer(session_id)
+                                if (e["kind"], e["entity_id"]) not in existing_layer
+                                and (
+                                    (e["kind"] == "node" and e["entity_id"] in new_ids)
+                                    or (
+                                        e["kind"] == "edge"
+                                        and e.get("staged", {}).get("source") in new_ids
+                                    )
+                                )
+                            ]
+                            if entries:
+                                layer.discard(
+                                    session_id,
+                                    [(e["kind"], e["entity_id"]) for e in entries],
+                                    expected={
+                                        (e["kind"], e["entity_id"]): entry_version(e)
+                                        for e in entries
+                                    },
+                                )
+                                session.__dict__.clear()
+                                session.__dict__.update(saved_session)
+                                manager.store.restore_ring(session_id, saved_ring)
+                                manager.store.persist(session)
+                        elif not staged:
+                            ids = [
+                                node_id
+                                for node_id in copy_ids.values()
+                                if node_id not in existing
+                            ]
+                            for i in range(0, len(ids), 10):
+                                service._storage.delete_nodes(
+                                    ids[i : i + 10], confirmed=True
+                                )
+                        raise
+            else:
+                manager._apply_op_sync(
+                    session, session_id, "mcp-agent", op, enforce_session_budgets=True
+                )
             return {
                 "success": True,
                 "added": added,
+                **({"node_id_map": copy_ids} if mode == "copy" else {}),
                 "annotation_id_map": fresh,
                 "skipped": skipped,
                 "shapes": shape_report,
                 "revision": session.seq,
             }
+    except _CopyRefused as exc:
+        return _failure(exc.args[0])
     except (_InvalidPlacement, OverflowError):
         return _failure("invalid_request")
     except AnnotationLimitReached:

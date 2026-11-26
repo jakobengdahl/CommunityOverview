@@ -880,6 +880,11 @@ where they make a question easier to answer.
 
 ## 5. Session menu and settings
 
+Templates can also be inserted through the session API or MCP. By default,
+insertion creates new graph nodes from the saved snapshot; pass `mode=reference`
+to place the original nodes instead. Both require explicit canvas coordinates.
+In a staged session, copied nodes and connections stay staged until merged.
+
 The session menu includes **Fullscreen canvas**, which hides application chrome
 while preserving the current canvas, selection, assistant, and drawer state.
 Use the subtle return button or Escape to leave it. The shortcut is
