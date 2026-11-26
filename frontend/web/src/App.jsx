@@ -1391,6 +1391,7 @@ function App() {
     editingEdge,
     deleteDialog,
     saveViewDialog,
+    templateDialog,
     showSubscriptionDialog,
     showAgentDialog,
     showAgentRunsDialog,
@@ -4536,6 +4537,11 @@ function App() {
               prepare: async () => {
                 await flushBeforeCapture(() => buildCaptureContents(getCaptureState()));
                 await new Promise((resolve) => requestSessionSnapshot(resolve));
+                if (
+                  sessionIdRef.current !== templateDialog.sessionId ||
+                  useGraphStore.getState().sessionEpoch !== epoch
+                )
+                  throw new Error();
                 const sync = ensureSyncConnected(templateDialog.sessionId);
                 if (
                   !sync ||

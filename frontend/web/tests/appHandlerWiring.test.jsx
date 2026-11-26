@@ -14,7 +14,27 @@ const captured = vi.hoisted(() => ({
   dialogs: null,
   desktop: null,
   syncHandlersRef: null,
+  template: null,
+  captureBarrier: null,
 }));
+
+vi.mock('../src/components/SaveTemplateDialog', () => ({
+  default: function SaveTemplateDialogStub(props) {
+    captured.template = props;
+    return <div role="dialog" />;
+  },
+}));
+
+vi.mock('../src/utils/captureFlush', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    createCaptureFlushQueue: () => {
+      const queue = actual.createCaptureFlushQueue();
+      return (options) => captured.captureBarrier || queue(options);
+    },
+  };
+});
 
 vi.mock('../src/hooks/useSyncConnection', async (importOriginal) => {
   const actual = await importOriginal();
@@ -188,6 +208,8 @@ describe('App handler wiring', () => {
     captured.dialogs = null;
     captured.desktop = null;
     captured.syncHandlersRef = null;
+    captured.template = null;
+    captured.captureBarrier = null;
     startupStats = null;
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -355,6 +377,53 @@ describe('App handler wiring', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(nodeIds()).toEqual(['a', 'b']);
     expect(screen.getByTestId('graph-canvas-stub').parentElement.hasAttribute('inert')).toBe(false);
+  });
+
+  it('guards double Escape while the template dialog is open and releases it on close', async () => {
+    await renderApp();
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual(['a', 'b']);
+    act(() => captured.template.onClose());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(nodeIds()).toEqual([]);
+  });
+
+  it('does not reconnect the old session when template preparation finishes after a switch', async () => {
+    await renderApp();
+    let releaseCapture;
+    captured.captureBarrier = new Promise((resolve) => {
+      releaseCapture = resolve;
+    });
+    const oldSession = canvas().sessionKey;
+    act(() => canvas().onSaveSelectionAsTemplate([]));
+    const preparation = captured.template.prepare();
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    const targetStream = FakeEventSource.instances
+      .filter((stream) => stream.url.includes(target))
+      .at(-1);
+    const close = vi.spyOn(targetStream, 'close');
+    await act(async () => {
+      releaseCapture();
+      await Promise.resolve();
+    });
+    const rejected = expect(preparation).rejects.toThrow();
+    await act(async () => {
+      await canvas().onSaveView({ nodes: [], edges: [] });
+      await rejected;
+    });
+    expect(close).not.toHaveBeenCalled();
+    expect(
+      FakeEventSource.instances.filter((stream) => stream.url.includes('/api/sessions/')).at(-1)
+    ).toBe(targetStream);
+    expect(api.getSession).not.toHaveBeenCalledWith(oldSession, { resolve: true });
   });
 
   it('routes a viewport summon through the sync handlers to the canvas and Return notice', async () => {
