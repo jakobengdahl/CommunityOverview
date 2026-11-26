@@ -1,3 +1,4 @@
+# covers: backend/service/rest_api.py, backend/service/mcp_tools.py, backend/service/service.py
 """
 Integration tests comparing REST API vs MCP tool operations.
 
@@ -233,31 +234,11 @@ class TestRestVsMcpParity:
         assert len(dual_envs["mcp_storage"].edges) == 2
 
     def test_step5_save_view(self, dual_envs):
-        """Step 5: Test save_view signal via both interfaces."""
-        # First create some nodes to include in the view
-        nodes = [
-            {"id": "view-node1", "type": "Actor", "name": "View Node 1"},
-            {"id": "view-node2", "type": "Initiative", "name": "View Node 2"},
-        ]
-        edges = [{"source": "view-node1", "target": "view-node2", "type": "BELONGS_TO"}]
-
-        dual_envs["rest_client"].post(
-            "/api/nodes", json={"nodes": nodes, "edges": edges}
-        )
-        dual_envs["mcp_tools"]["add_nodes"](nodes=nodes, edges=edges)
-
-        # Save view via REST
-        rest_result = dual_envs["rest_client"].post(
-            "/api/views/save", json={"name": "Test View REST"}
-        )
-        assert rest_result.status_code == 200
-
-        # Save view via MCP
-        mcp_result = dual_envs["mcp_tools"]["save_view"](name="Test View MCP")
-
-        # Both should return an action signal (save_view is a signal, not actual storage)
-        assert rest_result.json()["action"] == "save_view"
-        assert mcp_result["action"] == "save_view"
+        client = dual_envs["rest_client"]
+        assert client.post("/api/views/save", json={"name": "View"}).status_code == 404
+        assert client.get("/api/views").status_code == 404
+        assert client.get("/api/views/View").status_code == 404
+        assert "save_view" not in dual_envs["mcp_tools"]
 
     def test_step6_delete_nodes(self, dual_envs):
         """Step 6: Delete nodes via both interfaces."""

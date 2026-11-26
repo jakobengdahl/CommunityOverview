@@ -1,3 +1,4 @@
+# covers: backend/api_host/tool_routes.py, backend/service/mcp_tools.py, backend/core/session_manager.py
 """
 Tests for the legacy MCP visualization-push channel and the MCP session tools.
 
@@ -566,20 +567,15 @@ class TestVisualizationSessionIdPush:
     ):
         session_id = "6666-7777"
         open_browser(session_id)
-
         response = test_app.post(
             "/execute_tool",
             json={
                 "tool_name": "get_saved_view",
-                "arguments": {
-                    "name": "nonexistent-view",
-                    "visualization_session_id": session_id,
-                },
+                "arguments": {"name": "view", "visualization_session_id": session_id},
             },
         )
-        assert response.status_code == 200
-
-        registry = test_app.app.state.session_registry
-        cmd = registry._sessions[session_id]["queue"].get_nowait()
-        assert cmd["type"] == "tool_result"
-        assert cmd["tool"] == "get_saved_view"
+        assert response.status_code == 403
+        assert "get_saved_view" not in test_app.app.state.tools_map
+        assert test_app.app.state.session_registry._sessions[session_id][
+            "queue"
+        ].empty()

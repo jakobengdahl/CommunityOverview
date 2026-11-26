@@ -1405,9 +1405,6 @@ class GraphService:
 
     # ==================== Saved Views ====================
 
-    def save_view(self, name: str) -> Dict[str, Any]:
-        return views.save_view(name)
-
     def resolve_session_nodes(self, node_ids: List[str]) -> Dict[str, Any]:
         return self._read(
             "resolve_session_nodes",

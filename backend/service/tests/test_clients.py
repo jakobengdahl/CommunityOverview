@@ -1,3 +1,4 @@
+# covers: backend/service/rest_api.py, backend/service/mcp_tools.py, backend/service/service.py
 """
 Client simulation tests for graph_services.
 
@@ -642,12 +643,13 @@ class TestMCPClient:
         assert "BELONGS_TO" in types
 
     def test_mcp_save_view(self, mcp_tools):
-        """Test MCP save_view tool."""
         tools_map, _ = mcp_tools
-        result = tools_map["save_view"](name="MCP Test View")
-
-        assert result["action"] == "save_view"
-        assert result["name"] == "MCP Test View"
+        assert {
+            "save_view",
+            "get_saved_view",
+            "list_saved_views",
+            "create_saved_view",
+        }.isdisjoint(tools_map)
 
     def test_mcp_tools_registered(self, mcp_tools):
         """Verify all expected tools are registered."""
@@ -669,9 +671,6 @@ class TestMCPClient:
             "get_config_context",
             "list_node_types",
             "list_relationship_types",
-            "save_view",
-            "get_saved_view",
-            "list_saved_views",
         ]
 
         for tool_name in expected_tools:

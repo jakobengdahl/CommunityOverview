@@ -1,3 +1,4 @@
+# covers: backend/service/system_nodes.py, backend/service/service.py, backend/service/import_service.py, backend/service/views.py, backend/core/storage.py
 """Mutation policy covers every activation boundary, including linked batches."""
 
 from unittest.mock import Mock
@@ -132,7 +133,11 @@ def test_dedicated_tools_reject_whole_linked_batch(world, staged, tool, config):
     world.events.clear()
     hook = deny(world.storage)
     with bind_session(sid):
-        result = make_system_create_tools(world.service)[tool](config)
+        tools = make_system_create_tools(world.service)
+        if tool == "create_saved_view":
+            assert tool not in tools
+            return
+        result = tools[tool](config)
     assert not result["success"]
     assert result["error"] == "resource_blocked"
     assert world.main() == before

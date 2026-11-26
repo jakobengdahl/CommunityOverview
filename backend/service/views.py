@@ -93,15 +93,6 @@ def _annotation_document_to_legacy_metadata(
     return {"groups": groups, "annotations": annotations, "parentIds": parent_ids}
 
 
-def save_view(name: str) -> Dict[str, Any]:
-    """Signal the frontend to capture and save the current visualization state."""
-    return {
-        "action": "save_view",
-        "name": name,
-        "message": f"Ready to save view '{name}'. Client will capture current visualization state.",
-    }
-
-
 def resolve_session_nodes(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",

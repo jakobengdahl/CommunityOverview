@@ -56,7 +56,7 @@ class TestChatServiceInit:
         expected_tools = (
             "search_graph get_node_details get_related_nodes find_similar_nodes "
             "find_similar_nodes_batch add_nodes update_node delete_nodes "
-            "list_node_types get_graph_stats save_view get_saved_view list_saved_views"
+            "list_node_types get_graph_stats"
         ).split()
 
         for tool in expected_tools:
@@ -133,7 +133,6 @@ class TestChatServiceToolExecution:
         assert {
             "create_agent",
             "create_collection_response",
-            "create_saved_view",
         } <= offered
 
     def test_search_graph_tool_uses_graph_service(self, chat_service, sample_nodes):

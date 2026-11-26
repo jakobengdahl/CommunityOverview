@@ -36,8 +36,6 @@ SAFE_TOOLS = {
     "list_relationship_types",
     "get_schema",
     "get_presentation",
-    "list_saved_views",
-    "get_saved_view",
     # Visualization session tools — read-only, safe without auth
     "connect_to_visualization_session",
     "get_visualization_session_state",

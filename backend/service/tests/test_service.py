@@ -485,13 +485,12 @@ class TestGraphServiceStatistics:
 class TestGraphServiceSavedViews:
     """Tests for saved view operations."""
 
-    def test_save_view_returns_signal(self, empty_service: GraphService):
-        """Test that save_view returns a signal for the frontend."""
-        result = empty_service.save_view("My View")
-
-        assert result["action"] == "save_view"
-        assert result["name"] == "My View"
-        assert "message" in result
+    def test_save_view_returns_signal(self, service_with_view: GraphService):
+        assert not hasattr(service_with_view, "save_view")
+        assert any(
+            node["type"] == "SavedView"
+            for node in service_with_view.export_graph()["nodes"]
+        )
 
     def test_get_saved_view(self, service_with_view: GraphService):
         """Test loading a saved view."""

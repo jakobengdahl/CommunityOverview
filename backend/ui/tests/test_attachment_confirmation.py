@@ -59,8 +59,8 @@ def call(name, **arguments):
 def test_permitted_tools_are_exactly_reviewed():
     assert ATTACHMENT_TAINT_PERMITTED_TOOLS == set(
         "search_graph get_related_nodes find_similar_nodes find_similar_nodes_batch "
-        "list_node_types get_subtypes get_schema get_presentation list_saved_views "
-        "get_saved_view get_node_details get_graph_stats get_capabilities "
+        "list_node_types get_subtypes get_schema get_presentation "
+        "get_node_details get_graph_stats get_capabilities "
         "get_runtime_info get_tenant_context get_config_context get_request_actor "
         "get_request_scope get_request_selection list_node_attachments "
         "read_node_attachment search_node_attachments propose_new_node present_form "

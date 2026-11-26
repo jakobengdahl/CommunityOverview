@@ -60,8 +60,6 @@ ATTACHMENT_TAINT_PERMITTED_TOOLS = frozenset(
         "get_subtypes",
         "get_schema",
         "get_presentation",
-        "list_saved_views",
-        "get_saved_view",
         "get_node_details",
         "get_graph_stats",
         "get_capabilities",
