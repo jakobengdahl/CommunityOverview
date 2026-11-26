@@ -951,6 +951,33 @@ def test_templates_are_authorized_validated_and_integrity_protected(backend):
         create_backup(Service(), backend, WriteModes(), template_backend=templates)
 
 
+@pytest.mark.parametrize("denial", ["source", "refs", "exception"])
+def test_template_source_references_are_authorized(denial):
+    from backend.core.tests.test_template_store import document
+
+    doc = document()
+    templates = InMemorySessionPersistenceBackend()
+    templates.save({"id": doc["template_id"], "document": doc})
+    service = Service(denied=doc["source_session_id"] if denial == "source" else None)
+    if denial == "refs":
+        service.refs_allowed = False
+    if denial == "exception":
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("authorization failed")
+
+        service.authorize_capture_refs = fail
+    with pytest.raises(BackupRefused, match="access denied"):
+        create_backup(
+            service,
+            InMemorySessionPersistenceBackend(),
+            WriteModes(),
+            template_backend=templates,
+        )
+    if denial == "refs":
+        assert service.references == [(["original"], ["e"])]
+
+
 @pytest.mark.parametrize("omit", [True, False])
 def test_backup_refuses_missing_template_backend(backend, omit):
     kwargs = {} if omit else {"template_backend": None}

@@ -16,7 +16,7 @@ from backend.core.session_store import Session, _empty_state, is_valid_session_i
 from backend.core.template_store import validate_template
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
-from backend.service import access, session_capture
+from backend.service import access, session_capture, views
 
 
 class BackupRefused(Exception):
@@ -209,6 +209,37 @@ def create_backup(service, session_backend, write_modes, *, template_backend=Non
                         raise BackupRefused("invalid template record") from None
         # Reference authorization can consult SessionStore and must not run
         # under either persistence lock. The collected records are detached.
+        for doc in templates:
+            try:
+                source_id = doc["source_session_id"]
+                _authorize(
+                    service.authorization_hook,
+                    target="get_visualization_session",
+                    session_id=source_id,
+                )
+                with session_context.bind_session(source_id):
+                    nodes = list(
+                        dict.fromkeys(n["source_node_id"] for n in doc["nodes"])
+                    )
+                    edges = list(
+                        dict.fromkeys(e["source_edge_id"] for e in doc["edges"])
+                    )
+                    if hasattr(service, "_storage"):
+                        result = views.authorize_capture_refs(
+                            service._storage,
+                            service.authorization_hook,
+                            nodes,
+                            edges,
+                            target="backup_sessions",
+                        )
+                    else:
+                        result = service.authorize_capture_refs(
+                            nodes, edges, target="backup_sessions"
+                        )
+                if not result.get("success"):
+                    raise ValueError()
+            except Exception:
+                raise BackupRefused("access denied") from None
         for session_id, raw, mode in captured:
             session = Session.from_dict(raw)
             state = raw["state"]

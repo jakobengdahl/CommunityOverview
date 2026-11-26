@@ -57,6 +57,42 @@ def sign(document):
     ).hexdigest()
 
 
+@pytest.mark.parametrize("limit", ["templates", "tombstones", "bytes"])
+def test_template_limits_precede_authorization_and_writes(limit, monkeypatch):
+    from backend.core.tests.test_template_store import document as template_document
+    from backend.service import session_restore
+
+    doc = template_document()
+    source = InMemorySessionPersistenceBackend()
+    source.save({"id": doc["template_id"], "document": doc})
+    source.save({"id": "9999-9999", "deleted": True, "revision": 1})
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    service = Service()
+    calls = []
+    evaluate = service.authorization_hook.evaluate
+    service.authorization_hook.evaluate = lambda context: (
+        calls.append(context),
+        evaluate(context),
+    )[1]
+    kwargs = {}
+    if limit == "bytes":
+        monkeypatch.setattr(session_restore, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 10)
+    else:
+        kwargs[f"max_{limit}"] = 0
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    with pytest.raises(RestoreRefused):
+        restore_backup(
+            service, sessions, Modes(), document, template_backend=templates, **kwargs
+        )
+    assert len(calls) == 1
+    assert not sessions.list_ids() and not templates.list_ids()
+
+
 def test_round_trip_into_separate_store_preserves_identity_and_missing_references():
     document = backup()
     target = InMemorySessionPersistenceBackend()

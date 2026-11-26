@@ -104,6 +104,8 @@ def restore_backup(
     profile_template_ids=(),
     max_sessions=10000,
     max_annotations=2000,
+    max_templates=10000,
+    max_tombstones=10000,
 ):
     """Check limits, authorize references, then validate and restore to an isolated target."""
     with session_context.bind_session(None):
@@ -131,6 +133,22 @@ def restore_backup(
                     > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
                 ):
                     raise ValueError()
+            if document.get("format_version") == 2:
+                raw_templates = document["templates"]
+                raw_tombstones = document.get("template_tombstones", [])
+                if (
+                    not isinstance(raw_templates, list)
+                    or len(raw_templates) > max_templates
+                    or not isinstance(raw_tombstones, list)
+                    or len(raw_tombstones) > max_tombstones
+                ):
+                    raise ValueError()
+                for item in raw_templates:
+                    if (
+                        len(json.dumps(item).encode("utf-8"))
+                        > DEFAULT_MAX_SESSION_DOCUMENT_BYTES
+                    ):
+                        raise ValueError()
             # Preserve all existing session checks before authorizing templates.
             reports = []
             for item in sessions:
