@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 
+from backend.core.session_annotations import annotation_type_of
 from backend.core.session_store import Session, _empty_state
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
@@ -35,7 +36,10 @@ def _assets(state, found):
     # Keep the original data URL in the state; the asset table makes each
     # embedded payload independently verifiable without rewriting the canvas.
     for annotation in state.get("annotations", []):
-        if not isinstance(annotation, dict) or annotation.get("type") != "image":
+        if (
+            not isinstance(annotation, dict)
+            or annotation_type_of(annotation) != "image"
+        ):
             continue
         image = annotation.get("image")
         if not isinstance(image, dict):
@@ -87,8 +91,18 @@ def create_backup(service, session_backend, write_modes):
         snapshot = getattr(write_modes, "backup_snapshot", None)
         if not callable(snapshot):
             raise BackupRefused("layer snapshot unavailable")
+        with session_backend.transaction():
+            session_ids = sorted(session_backend.list_ids())
+        for session_id in session_ids:
+            _authorize(
+                service.authorization_hook,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
         with session_backend.transaction(), snapshot() as snapshot_modes:
-            for session_id in sorted(session_backend.list_ids()):
+            if sorted(session_backend.list_ids()) != session_ids:
+                raise BackupRefused("session list changed during backup")
+            for session_id in session_ids:
                 raw = session_backend.load(session_id)
                 if raw is None or raw.get("id") != session_id:
                     raise BackupRefused("invalid session record")
@@ -110,14 +124,9 @@ def create_backup(service, session_backend, write_modes):
                 if not isinstance(state, dict) or state.keys() - _empty_state().keys():
                     raise BackupRefused("invalid session state")
                 captured.append((session_id, copy.deepcopy(raw), mode))
-        # Authorization can consult SessionStore and must not run under either
-        # persistence lock. The collected records are detached from the stores.
+        # Reference authorization can consult SessionStore and must not run
+        # under either persistence lock. The collected records are detached.
         for session_id, raw, mode in captured:
-            _authorize(
-                service.authorization_hook,
-                target="get_visualization_session",
-                session_id=session_id,
-            )
             session = Session.from_dict(raw)
             state = raw["state"]
             try:

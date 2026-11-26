@@ -59,16 +59,19 @@ def backend(request, tmp_path):
     return InMemorySessionPersistenceBackend()
 
 
-def test_backup_keeps_persistent_state_and_checks_integrity(backend):
+def test_backup_keeps_persistent_state_and_checks_integrity(backend, monkeypatch):
     session = Session("1234-5678", name="Map", description="Details", seq=7)
     payload = b"pixels"
     url = "data:image/webp;base64," + base64.b64encode(payload).decode()
+    legacy_payload = b"legacy pixels"
+    legacy_url = "data:image/png;base64," + base64.b64encode(legacy_payload).decode()
     session.state.update(
         node_refs=["a"],
         positions={"a": {"x": 2, "y": 3}},
         hidden_edge_ids=["edge"],
         annotations=[
             {"id": "image", "type": "image", "image": {"url": url}},
+            {"id": "legacy-image", "kind": "image", "image": {"url": legacy_url}},
             {"id": "note", "type": "text", "text": "data:image/ ordinary text"},
             {"id": "note2", "type": "text", "text": "data:image/png;base64,YQ=="},
         ],
@@ -77,8 +80,14 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
     )
     session.activity_log = [{"actor": "private"}]
     backend.save(session.to_dict())
+
+    def unexpected_save(*args, **kwargs):
+        pytest.fail("backup saved a session")
+
+    monkeypatch.setattr(backend, "save", unexpected_save)
     service = Service()
     backup = create_backup(service, backend, WriteModes(Layers()))
+    assert backup["format_version"] == 1
     stored = backup["sessions"][0]
     assert (
         stored["id"],
@@ -91,8 +100,13 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
     assert "activity_log" not in stored
     assert service.references == [(["a", "group-local", "old"], ["edge"])]
     assert backup["import_mappings"] == backup["import_reports"] == []
-    digest = hashlib.sha256(payload).hexdigest()
-    assert backup["assets"] == [{"sha256": digest, "data_url": url}]
+    expected_assets = [
+        {"sha256": hashlib.sha256(data).hexdigest(), "data_url": data_url}
+        for data, data_url in ((payload, url), (legacy_payload, legacy_url))
+    ]
+    assert backup["assets"] == sorted(
+        expected_assets, key=lambda asset: asset["sha256"]
+    )
     integrity = backup.pop("integrity")
     assert integrity == {
         "algorithm": "sha256",
@@ -100,6 +114,36 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
     }
     stored["state"]["positions"]["a"]["x"] = 4
     assert integrity["sha256"] != hashlib.sha256(canonical_bytes(backup)).hexdigest()
+
+
+@pytest.mark.parametrize("problem", ["record", "staged"])
+def test_denied_session_is_authorized_before_record_or_layer_checks(
+    backend, monkeypatch, problem
+):
+    session = Session("1234-5678")
+    backend.save(session.to_dict())
+    modes = WriteModes(Layers([{"id": "change"}]))
+    if problem == "record":
+        monkeypatch.setattr(backend, "load", lambda _: None)
+    with pytest.raises(BackupRefused, match="^access denied$"):
+        create_backup(Service(denied=session.id), backend, modes)
+
+
+def test_backup_refuses_session_list_changes_before_reading_records(backend):
+    first = Session("1234-5678")
+    second = Session("1234-5679")
+    backend.save(first.to_dict())
+
+    class ChangingHook(Hook):
+        def evaluate(self, context):
+            if context.session_id == first.id:
+                backend.save(second.to_dict())
+            return GraphAuthorizationDecision(allowed=True)
+
+    service = Service()
+    service.authorization_hook = ChangingHook()
+    with pytest.raises(BackupRefused, match="session list changed"):
+        create_backup(service, backend, WriteModes())
 
 
 @pytest.mark.parametrize(
