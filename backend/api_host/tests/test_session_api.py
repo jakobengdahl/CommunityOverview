@@ -62,17 +62,30 @@ class TestSessionCrud:
 
         monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "/app")
         original = access.authorize_graph_access
+
         def authorize(hook, **kwargs):
-            if kwargs.get("target") == "get_visualization_session" and kwargs.get("session_id") == b:
+            if (
+                kwargs.get("target") == "get_visualization_session"
+                and kwargs.get("session_id") == b
+            ):
                 return {"message": "denied"}
             return original(hook, **kwargs)
+
         monkeypatch.setattr(access, "authorize_graph_access", authorize)
         listed = test_app.get("/api/sessions").json()["sessions"]
         assert a in {item["id"] for item in listed}
         assert b not in {item["id"] for item in listed}
-        assert test_app.get(f"/api/sessions/{a}").json()["session_url"] == f"/app?session={a}"
+        assert (
+            test_app.get(f"/api/sessions/{a}").json()["session_url"]
+            == f"/app?session={a}"
+        )
         assert test_app.get(f"/api/sessions/{b}").json()["session_url"] is None
-        assert test_app.patch(f"/api/sessions/{b}", json={"name": "b"}).json()["session_url"] is None
+        assert (
+            test_app.patch(f"/api/sessions/{b}", json={"name": "b"}).json()[
+                "session_url"
+            ]
+            is None
+        )
 
     def test_rename(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]

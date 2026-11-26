@@ -86,16 +86,21 @@ def test_session_listing_offers_server_links_for_duplicate_names(
         b.id: build_session_url(b.id),
     }
     from backend.ui import chat_service as chat_module
+
     original = chat_module.authorize_graph_access
+
     def authorize(hook, **kwargs):
         if kwargs.get("session_id") == b.id:
             return {"message": "denied"}
         return original(hook, **kwargs)
+
     monkeypatch.setattr(chat_module, "authorize_graph_access", authorize)
     with patch("backend.ui.chat_logic.create_provider"):
         result = ChatService(graph_service)._tools_map["list_visualization_sessions"]()
     assert result["count"] == 1
-    assert result["sessions"] == [{"session_id": a.id, "name": "Same", "session_url": build_session_url(a.id)}]
+    assert result["sessions"] == [
+        {"session_id": a.id, "name": "Same", "session_url": build_session_url(a.id)}
+    ]
 
 
 class TestChatServiceToolExecution:
