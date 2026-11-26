@@ -66,7 +66,8 @@ import {
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
 import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
-import { createCaptureFlushQueue } from './utils/captureFlush';
+import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
+import { readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2253,17 +2254,32 @@ function App() {
     };
   }, []);
 
+  const captureNodesRef = useRef(null);
+  const getCaptureState = useCallback(
+    () => ({
+      baseline: readyBaseline(syncForSession(syncRef.current, sessionIdRef.current)),
+      members: useGraphStore.getState().nodes.map((node) => node.id),
+      nodes: captureNodesRef.current?.() || [],
+    }),
+    [syncRef]
+  );
+
   const [captureFlushQueue] = useState(createCaptureFlushQueue);
-  const flushBeforeCapture = useCallback(() => {
-    const targetId = sessionIdRef.current;
-    const epoch = useGraphStore.getState().sessionEpoch;
-    return captureFlushQueue({
-      getSync: () => syncRef.current,
-      isCurrent: () =>
-        sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
-      requestSnapshot: requestSessionSnapshot,
-    });
-  }, [captureFlushQueue, requestSessionSnapshot, syncRef]);
+  const flushBeforeCapture = useCallback(
+    (onReady) => {
+      const targetId = sessionIdRef.current;
+      const epoch = useGraphStore.getState().sessionEpoch;
+      return captureFlushQueue({
+        getSync: () => syncRef.current,
+        sessionId: targetId,
+        isCurrent: () =>
+          sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
+        requestSnapshot: requestSessionSnapshot,
+        onReady,
+      });
+    },
+    [captureFlushQueue, requestSessionSnapshot, syncRef]
+  );
 
   // Callback from GraphCanvas when the saveViewSignal round-trip completes.
   // Always persists the session snapshot; additionally opens the Save View
@@ -4047,6 +4063,7 @@ function App() {
 
   const shellProps = {
     flushBeforeCapture,
+    getCaptureState,
     sessionId,
     onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
@@ -4112,6 +4129,7 @@ function App() {
           onCreateGroup={handleCreateGroup}
           onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
+          captureNodesRef={captureNodesRef}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
           onReferenceOpen={handleReferenceOpen}

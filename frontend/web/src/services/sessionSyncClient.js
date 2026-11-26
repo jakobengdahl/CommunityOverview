@@ -895,6 +895,10 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    // Whether the baseline holds server state: setBaseline() was given loaded
+    // or seq-less state, or a snapshot confirmed the seq a `{}` placeholder
+    // was seeded at.
+    this._baselineWritten = false;
     this._refusalProbed = false; // asked once why the stream never opened
     this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
@@ -1039,6 +1043,22 @@ export class SessionSyncClient {
   baselinePosition(nodeId) {
     const p = this._baseline.positions[nodeId];
     return p ? { x: p.x, y: p.y } : null;
+  }
+
+  /** Membership and positions as held by the sync baseline at this instant. */
+  captureBaseline() {
+    return {
+      node_refs: [...this._baseline.node_refs],
+      positions: { ...this._baseline.positions },
+    };
+  }
+
+  /**
+   * Whether the baseline reflects server state rather than a placeholder. A
+   * stream drop since then does not undo that.
+   */
+  hasCaptureBaseline() {
+    return this._baselineWritten;
   }
 
   /** The node ids the baseline holds hidden. */
@@ -1560,6 +1580,9 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
+    // Only a `{}` seeded at a seq is a placeholder awaiting its snapshot; an
+    // empty state without one is a load that found no session server-side.
+    this._baselineWritten = Object.keys(state || {}).length > 0 || typeof seq !== 'number';
     if (typeof seq === 'number') {
       this._loadedSeq = seq;
       this._membershipVersion = seq;
@@ -2320,6 +2343,8 @@ export class SessionSyncClient {
           // It may carry membership changes this client never saw as ops; a
           // read marked stale still keeps every current member.
           this._membershipVersion = data.seq;
+          // Nothing landed since the load: even a `{}` placeholder is current.
+          if (data.seq === this._loadedSeq) this._baselineWritten = true;
         }
         this._ready = true;
         this._resolveReadyWaiters();

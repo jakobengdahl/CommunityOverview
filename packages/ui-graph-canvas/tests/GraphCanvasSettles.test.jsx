@@ -214,7 +214,15 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
   });
 
   it('moves the root to the focus centre and back to its pre-focus position, with an unchanged node count', () => {
-    render(<GraphCanvas nodes={triangleNodes} edges={triangleEdges} compactMode="on" />);
+    const captureNodesRef = { current: null };
+    const { rerender } = render(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
     const before = positionsById();
     expect(before.size).toBe(3);
     expect(before.get('node-1')).not.toEqual({ x: 0, y: 0 });
@@ -230,6 +238,57 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
     for (const id of ['node-2', 'node-3']) {
       expect(focused.get(id)).not.toEqual(before.get(id));
     }
+
+    // Members rendered after focus began are available to capture too, while
+    // existing members retain their pre-focus coordinates.
+    const added = { id: 'node-4', name: 'Node 4', type: 'Actor' };
+    const addedEdge = { id: 'edge-4', source: 'node-1', target: 'node-4', type: 'RELATES_TO' };
+    rerender(
+      <GraphCanvas
+        nodes={[...triangleNodes, added]}
+        edges={[...triangleEdges, addedEdge]}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    const captured = new Map(captureNodesRef.current().map((node) => [node.id, node.position]));
+    expect(captured.get('node-1')).toEqual(before.get('node-1'));
+    expect(captured.get('node-4')).toEqual(positionsById().get('node-4'));
+    expect(captured.get('node-4')).toBeDefined();
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+
+    // A member removed and re-added during focus gets a fresh ego-ring
+    // position, but leaving focus restores its pre-focus one (asserted below),
+    // so capture must report the pre-focus position too.
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes.filter((node) => node.id !== 'node-2')}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    rerender(
+      <GraphCanvas
+        nodes={triangleNodes}
+        edges={triangleEdges}
+        compactMode="on"
+        captureNodesRef={captureNodesRef}
+      />
+    );
+    const returnedPosition = positionsById().get('node-2');
+    expect(returnedPosition).toBeDefined();
+    expect(returnedPosition).not.toEqual(before.get('node-2'));
+    expect(
+      new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2')
+    ).toEqual(before.get('node-2'));
 
     // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
     // every node must land back where it was before focus.

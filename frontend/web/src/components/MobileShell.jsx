@@ -109,6 +109,7 @@ function MobileShell({
   onCreateSubscription,
   onSaveView,
   flushBeforeCapture,
+  getCaptureState,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
@@ -387,6 +388,7 @@ function MobileShell({
             variant="sheet"
             collectionShortName={akcShortName || undefined}
             flushBeforeCapture={flushBeforeCapture}
+            getCaptureState={getCaptureState}
           />
         </BottomSheet>
       )}
