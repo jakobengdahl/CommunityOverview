@@ -1180,6 +1180,7 @@
     "command_failed": "Kunde inte köra {label}. Din text finns kvar."
   },
   "template": {
+    "insert_command": "Infoga mall: {name}",
     "save": "Spara som mall…",
     "command_description": "Spara markeringen eller hela sessionen som en mall",
     "name": "Namn (obligatoriskt)",

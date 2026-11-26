@@ -1180,6 +1180,7 @@
     "command_failed": "Could not run {label}. Your text is kept."
   },
   "template": {
+    "insert_command": "Insert template: {name}",
     "save": "Save as template…",
     "command_description": "Save the selection or whole session as a template",
     "name": "Name (required)",

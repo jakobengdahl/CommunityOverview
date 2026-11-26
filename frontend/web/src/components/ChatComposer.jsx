@@ -27,6 +27,7 @@ const KIND_LABEL_KEYS = {
  */
 function formatReference(kind, id, displayName) {
   const name = String(displayName ?? id)
+    .replace(/\\/g, '')
     .replace(/[[\]]/g, '')
     .replace(/(?<=\s)@+/g, '');
   return `[${name}](${kind}:${id})`;

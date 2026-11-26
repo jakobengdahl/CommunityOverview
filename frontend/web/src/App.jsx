@@ -3929,6 +3929,35 @@ function App() {
   // The command box's registry. Only this interactive view provides it; kiosk
   // views render outside App and so register nothing.
   const [commandRegistry] = useState(createCommandRegistry);
+  useEffect(
+    () =>
+      commandRegistry.register({
+        id: 'template:insert',
+        isAvailable: () => false,
+        execute: async (_context, template) => {
+          const targetId = sessionId;
+          const sync = ensureSyncConnected(targetId);
+          await sync?.whenReady();
+          await flushBeforeCapture();
+          await new Promise((resolve) => requestSessionSnapshot(resolve));
+          await sync?.flushPending();
+          if (sessionIdRef.current !== targetId || syncRef.current !== sync)
+            throw new Error('Session is no longer available');
+          await api.insertTemplate(targetId, { template_id: template.template_id });
+          if (sessionIdRef.current === targetId && syncRef.current === sync)
+            await resyncFromServer(targetId);
+        },
+      }),
+    [
+      commandRegistry,
+      sessionId,
+      ensureSyncConnected,
+      flushBeforeCapture,
+      requestSessionSnapshot,
+      syncRef,
+      resyncFromServer,
+    ]
+  );
   const appCommands = useMemo(
     () =>
       buildAppCommands(

@@ -252,7 +252,7 @@ describe('ChatComposer', () => {
     expect(input).toHaveValue('Goal ');
 
     api.listTemplates.mockResolvedValue({
-      templates: [{ template_id: '1234-5678', name: 'Plan' }],
+      templates: [{ template_id: '1234-5678', name: 'Plan\\' }],
     });
     type(input, 'use @plan');
     await settle();
