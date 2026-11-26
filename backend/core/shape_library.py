@@ -177,10 +177,25 @@ class ShapeLibrary:
         return len(self.template_references().get(key, ()))
 
     def template_usage_token(self, key):
-        refs = sorted(self.template_references().get(key, ()))
-        if not refs:
+        # Include non-referencing documents and tombstones as well: a
+        # template can gain and lose this reference between two reads. Its
+        # monotonically increasing persisted revision exposes that history.
+        if self.templates is None:
             return None
-        return hashlib.sha256(json.dumps(refs, ensure_ascii=True).encode()).hexdigest()
+        backend = self.templates._backend
+        with backend.transaction():
+            versions = []
+            for template_id in sorted(backend.list_ids()):
+                record = backend.load(template_id)
+                if record is not None:
+                    revision = (
+                        record["revision"] if record.get("deleted")
+                        else record["document"]["revision"]
+                    )
+                    versions.append((template_id, revision))
+        if not versions:
+            return None
+        return hashlib.sha256(json.dumps(versions, ensure_ascii=True).encode()).hexdigest()
 
     def usage_snapshot(self, key):
         template_lock = (

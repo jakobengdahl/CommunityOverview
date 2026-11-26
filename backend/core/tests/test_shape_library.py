@@ -905,6 +905,41 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path, action):
             expected_usage=0,
             expected_template_usage=1,
         )
+    # An existing non-user and a newly created template can each start and
+    # stop using the shape while the reviewed count remains zero.
+    for transient in (False, True):
+        reviewed = restarted.usage_snapshot("card")
+        if transient:
+            changed = document()
+            changed["template_id"] = "1111-2222-3333-4444"
+            changed = templates.save(changed, 0)
+            templates.delete(changed["template_id"], changed["revision"])
+        else:
+            doc["nodes"][0]["shape"]["ref"] = "saved:card"
+            doc = templates.save(doc, doc["revision"])
+            doc["nodes"][0]["shape"]["ref"] = None
+            doc = templates.save(doc, doc["revision"])
+        restarted = ShapeLibrary(
+            backend,
+            sessions,
+            templates=TemplateStore(
+                FileSessionPersistenceBackend(tmp_path / "templates")
+            ),
+            writes_enabled=True,
+        )
+        assert restarted.template_usage("card") == reviewed["template_usage"] == 0
+        options = dict(
+            identity="owner",
+            expected_revision=reviewed["revision"],
+            expected_usage=reviewed["usage"],
+            expected_template_usage=reviewed["template_usage"],
+            expected_template_usage_token=reviewed["template_usage_token"],
+        )
+        with pytest.raises(LibraryConflict):
+            if action == "delete":
+                restarted.delete("card", **options)
+            else:
+                restarted.put("card", "Card", DEFINITION, **options)
     other = document()
     other["template_id"] = "9876-5432-9876-5432"
     other = templates.save(other, 0)
