@@ -221,14 +221,10 @@ def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend
     assert service.references == [
         (
             [
-                "group-local",
                 "node",
-                "group-hidden",
-                "group-dimmed",
-                "group-position",
+                "group-explicit",
                 "group-shape",
                 "group-member",
-                "group-explicit",
                 "group-history",
             ],
             [],
@@ -314,12 +310,12 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
                 }
             ]
         },
+        {
+            "shape_overrides": {"secret": "circle"},
+            "annotations": [{"id": "secret", "type": "text"}],
+        },
         {"shape_revisions": {"node:secret": 1}},
         {"shape_revisions": {"node:group-secret": 1}},
-        {"node_refs": ["group-secret"]},
-        {"hidden_node_ids": ["group-secret"]},
-        {"dimmed_node_ids": ["group-secret"]},
-        {"positions": {"group-secret": {"x": 1, "y": 1}}},
         {"shape_overrides": {"group-secret": "circle"}},
         {"annotations": [{"id": "ann", "attachment": {"target_id": "group-secret"}}]},
         {"annotations": [{"id": "group-secret", "member_node_ids": ["group-secret"]}]},
@@ -547,40 +543,63 @@ def test_authorization_runs_outside_session_transaction(backend):
     )
 
 
-def test_replacement_waits_for_authorized_snapshot(backend):
-    import threading
+def test_revision_change_during_authorization_is_refused(backend):
+    session = Session("1234-5678", name="original")
+    backend.save(session.to_dict())
 
-    original = Session("1234-5678", name="original")
-    replacement = Session(original.id, name="replacement")
-    backend.save(original.to_dict())
-    entered, attempted, finished = (threading.Event() for _ in range(3))
-
-    class CoordinatedHook(Hook):
+    class ChangingHook(Hook):
         def evaluate(self, context):
-            if context.session_id == original.id:
-                entered.set()
-                assert attempted.wait(3)
-                assert not finished.wait(0.1)
+            if context.session_id == session.id:
+                changed = backend.load(session.id)
+                changed["seq"] += 1
+                backend.save(changed)
             return GraphAuthorizationDecision(allowed=True)
 
-    def replace():
-        assert entered.wait(3)
-        attempted.set()
-        with backend.transaction():
-            backend.delete(original.id)
-            backend.save(replacement.to_dict())
-        finished.set()
-
-    writer = threading.Thread(target=replace)
-    writer.start()
     service = Service()
-    service.authorization_hook = CoordinatedHook()
-    try:
-        backup = create_backup(service, backend, WriteModes())
-        assert backup["sessions"][0]["name"] == "original"
-    finally:
-        writer.join(3)
-    assert finished.is_set()
+    service.authorization_hook = ChangingHook()
+    with pytest.raises(BackupRefused, match="revision_conflict"):
+        create_backup(service, backend, WriteModes())
+
+
+def test_session_authorization_hook_can_read_store(backend):
+    import threading
+
+    session = Session("1234-5678")
+    backend.save(session.to_dict())
+
+    class ReadingHook(Hook):
+        def evaluate(self, context):
+            if context.session_id:
+                done = threading.Event()
+
+                def read():
+                    backend.load(session.id)
+                    done.set()
+
+                thread = threading.Thread(target=read, daemon=True)
+                thread.start()
+                assert done.wait(2), "authorization ran inside store transaction"
+                thread.join()
+            return GraphAuthorizationDecision(allowed=True)
+
+    service = Service()
+    service.authorization_hook = ReadingHook()
+    assert len(create_backup(service, backend, WriteModes())["sessions"]) == 1
+
+
+def test_session_reference_requires_target_read_access(backend):
+    session = Session("1234-5678")
+    session.state["annotations"] = [
+        {
+            "id": "ref",
+            "type": "reference",
+            "target_kind": "session",
+            "target": "4321-8765",
+        }
+    ]
+    backend.save(session.to_dict())
+    with pytest.raises(BackupRefused, match="access denied"):
+        create_backup(Service(denied="4321-8765"), backend, WriteModes())
 
 
 @pytest.mark.parametrize("custom_journal", [False, True])

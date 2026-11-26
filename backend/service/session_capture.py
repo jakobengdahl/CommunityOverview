@@ -13,6 +13,7 @@ from backend.core.session_annotations import (
     ATTACHMENT_ID_KEYS,
     ATTACHMENT_TYPE_KEYS,
     annotation_link_fields,
+    annotation_type_of,
 )
 from backend.core.session_manager import (
     CaptureRefused,
@@ -174,6 +175,53 @@ def captured_node_ids(
         if kind == "node"
     ]
     return list(dict.fromkeys(canvas + linked))
+
+
+def backup_node_ids(state: Dict[str, Any]) -> List[str]:
+    """Collect stored references conservatively, including stale shape history.
+
+    Ambiguous canvas ids can name both an annotation and a graph node. Only
+    explicitly annotation-typed attachments to existing annotations are local.
+    """
+    ids = captured_node_ids(state)
+    ids.extend(i for i in (state.get("shape_overrides") or {}) if isinstance(i, str))
+    annotation_ids = _annotation_ids(state)
+    for annotation in state.get("annotations") or []:
+        if not isinstance(annotation, dict):
+            continue
+        members = annotation.get("member_node_ids")
+        for holder, key, declared in annotation_link_fields(annotation):
+            value = _link_id(
+                holder[key] if isinstance(holder, list) else holder.get(key)
+            )
+            if value is not None and (
+                declared != "annotation"
+                or value not in annotation_ids
+                or holder is members
+            ):
+                ids.append(value)
+    ids.extend(
+        key[5:]
+        for key in (state.get("shape_revisions") or {})
+        if isinstance(key, str) and key.startswith("node:")
+    )
+    return list(dict.fromkeys(ids))
+
+
+def captured_session_ids(state: Dict[str, Any]) -> List[str]:
+    """Session targets named by reference annotations."""
+    ids: Dict[str, None] = {}
+    for annotation in state.get("annotations") or []:
+        if (
+            isinstance(annotation, dict)
+            and annotation_type_of(annotation) == "reference"
+            and annotation.get("target_kind") == "session"
+        ):
+            target = annotation.get("target")
+            if not isinstance(target, str) or not target:
+                raise CaptureRefused("invalid_presentation")
+            ids[target] = None
+    return list(ids)
 
 
 def _relink_nested(value: Any, fresh_ids: Dict[str, str]) -> None:

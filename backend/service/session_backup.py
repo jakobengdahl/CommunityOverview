@@ -11,7 +11,7 @@ import hashlib
 import json
 from urllib.parse import unquote_to_bytes
 
-from backend.core.session_annotations import annotation_link_fields, annotation_type_of
+from backend.core.session_annotations import annotation_type_of
 from backend.core.session_store import Session, _empty_state
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
@@ -92,21 +92,24 @@ def create_backup(service, session_backend, write_modes):
         snapshot = getattr(write_modes, "backup_snapshot", None)
         if not callable(snapshot):
             raise BackupRefused("layer snapshot unavailable")
-        # Keep authorization and capture in one transaction so the authorized
-        # session cannot be replaced before its record is read.
+        session_ids = sorted(session_backend.list_ids())
+        revisions = {}
+        for session_id in session_ids:
+            raw = session_backend.load(session_id)
+            revisions[session_id] = copy.deepcopy(raw)
+            _authorize(
+                service.authorization_hook,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
         with session_backend.transaction():
-            session_ids = sorted(session_backend.list_ids())
-            for session_id in session_ids:
-                _authorize(
-                    service.authorization_hook,
-                    target="get_visualization_session",
-                    session_id=session_id,
-                )
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")
             with snapshot() as snapshot_modes:
                 for session_id in session_ids:
                     raw = session_backend.load(session_id)
+                    if raw != revisions[session_id]:
+                        raise BackupRefused("revision_conflict")
                     if raw is None or raw.get("id") != session_id:
                         raise BackupRefused("invalid session record")
                     session = Session.from_dict(raw)
@@ -136,39 +139,13 @@ def create_backup(service, session_backend, write_modes):
             session = Session.from_dict(raw)
             state = raw["state"]
             try:
-                # A legacy group-shaped ID can also name a real graph node.
-                node_ids = session_capture.captured_node_ids(
-                    state, include_legacy_groups=True
-                )
-                annotation_ids = session_capture._annotation_ids(state)
-                # Explicit node links can collide with an annotation ID.
-                for annotation in state.get("annotations") or []:
-                    if not isinstance(annotation, dict):
-                        continue
-                    for holder, key, declared in annotation_link_fields(annotation):
-                        value = session_capture._link_id(
-                            holder[key] if isinstance(holder, list) else holder.get(key)
-                        )
-                        if declared == "node" and value in annotation_ids:
-                            node_ids.append(value)
-                # Group members are node IDs even when an annotation has the
-                # same ID; capture's canvas link resolution can classify them
-                # as annotations instead.
-                for annotation in state.get("annotations") or []:
-                    if not isinstance(annotation, dict):
-                        continue
-                    members = annotation.get("member_node_ids")
-                    if isinstance(members, list):
-                        node_ids.extend(
-                            node_id
-                            for member in members
-                            if (node_id := session_capture._link_id(member)) is not None
-                        )
-                node_ids.extend(
-                    key[5:]
-                    for key in state.get("shape_revisions", {})
-                    if isinstance(key, str) and key.startswith("node:")
-                )
+                node_ids = session_capture.backup_node_ids(state)
+                for target_id in session_capture.captured_session_ids(state):
+                    _authorize(
+                        service.authorization_hook,
+                        target="get_visualization_session",
+                        session_id=target_id,
+                    )
                 with session_context.bind_session(session_id):
                     result = service.authorize_capture_refs(
                         list(dict.fromkeys(node_ids)),
