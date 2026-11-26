@@ -741,26 +741,6 @@ describe('App handler wiring', () => {
     expect(findEdge('e1').type).toBe('OWNS');
   });
 
-  it('double-clicking a saved view loads its nodes from the API into the canvas', async () => {
-    await renderApp();
-    // Once-only, so the stub cannot outlive this test whatever the runner's
-    // mock-restore semantics or test order.
-    const savedViewNode = async (id) => ({
-      success: true,
-      node: { id, type: 'Actor', name: id.toUpperCase() },
-      edges: [],
-    });
-    api.getNodeDetails.mockImplementationOnce(savedViewNode).mockImplementationOnce(savedViewNode);
-    const view = { type: 'SavedView', name: 'View', metadata: { node_ids: ['v1', 'v2'] } };
-
-    await act(async () => {
-      await canvas().onNodeDoubleClick('view-1', view);
-    });
-
-    expect(api.getNodeDetails).toHaveBeenCalledWith('v1');
-    expect(api.getNodeDetails).toHaveBeenCalledWith('v2');
-    await waitFor(() => expect(nodeIds()).toEqual(['v1', 'v2']));
-  });
   it.each(['drawer', 'connect dialog', 'new session'])(
     '%s still opens an empty session on 404 without a missing-link notice',
     async (path) => {

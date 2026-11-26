@@ -212,6 +212,7 @@ function App() {
 
   const urlGuideStartedRef = useRef(false);
   const urlFocusNodeLoadedRef = useRef(false);
+  const urlSessionBootstrapRef = useRef(null);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const lastEscapeRef = useRef(0);
@@ -1474,6 +1475,7 @@ function App() {
     const scope = captureCanvasScope();
     let expired = false;
     let timer;
+    let settleBootstrapWait;
     if (sessionStore.isValidSessionId(urlSession)) {
       markModeUnknown(urlSession);
       sessionStore.touchSession(urlSession);
@@ -1501,9 +1503,10 @@ function App() {
       });
       // Bound the wait even if fetch never settles. Invalidate the load itself
       // too, so a late reply cannot undo later canvas changes.
-      Promise.race([
+      urlSessionBootstrapRef.current = Promise.race([
         load,
         new Promise((resolve) => {
+          settleBootstrapWait = resolve;
           timer = setTimeout(() => {
             expired = true;
             resolve();
@@ -1517,6 +1520,7 @@ function App() {
     return () => {
       expired = true;
       clearTimeout(timer);
+      settleBootstrapWait?.();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1647,8 +1651,11 @@ function App() {
     urlFocusNodeLoadedRef.current = true;
     const searchContext = params.get('q');
     const fromGraph = params.get('from_graph');
+    const startingSession = sessionIdRef.current;
     (async () => {
       try {
+        await urlSessionBootstrapRef.current;
+        if (sessionIdRef.current !== startingSession) return;
         const result = await api.getNodeDetails(focusId);
         if (!result?.success || !result.node) {
           showNotification('info', t('federation.teleport_focus_not_found'));
