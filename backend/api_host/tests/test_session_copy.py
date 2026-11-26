@@ -546,7 +546,19 @@ def test_save_view_captures_presentation_as_a_new_session(test_app):
 def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
     """FastMCP neither decodes nor type-checks the arguments: a JSON-looking
     name is saved verbatim, as REST saves it, and a non-string session id is
-    `invalid_request`, not a ToolError."""
+    `invalid_request`, not a ToolError. The schema still requires all three."""
+    import asyncio
+
+    (tool,) = [
+        t
+        for t in asyncio.run(test_app.app.state.mcp.list_tools())
+        if t.name == "save_session_view"
+    ]
+    assert set(tool.inputSchema["required"]) == {
+        "session_id",
+        "name",
+        "expected_revision",
+    }
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     for name in ("null", "[1]", '{"a": 1}'):
@@ -588,8 +600,9 @@ def test_save_view_rejects_invalid_raw_arguments(test_app, transport, body):
 def test_save_view_refuses_stale_staged_or_annotated_sources(
     test_app, monkeypatch, transport
 ):
-    """A stale revision, staged changes or annotations publish nothing; the
-    current revision is withheld when the source read is denied."""
+    """A stale revision, staged changes, annotations, an oversized capture or
+    a full session store publish nothing; the current revision is withheld
+    when the source read is denied."""
     manager = test_app.app.state.session_manager
     source = manager.create_session()
     source.seq = 3
@@ -626,6 +639,19 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
     monkeypatch.setattr(writes, "choose", lambda mode: ("staged", "explicit"))
     monkeypatch.setattr(writes, "_store", Mock(load_layer=lambda sid: [{}]))
     assert attempt() == (status_of(409), {"success": False, "error": "staged_changes"})
+    monkeypatch.undo()
+    manager._max_sessions = 1
+    assert attempt() == (
+        status_of(503),
+        {"success": False, "error": "too_many_sessions"},
+    )
+    manager._max_sessions = 10
+    source.description = "x" * 2000
+    monkeypatch.setattr(manager_module, "DEFAULT_MAX_SESSION_DOCUMENT_BYTES", 2048)
+    assert attempt() == (
+        status_of(413),
+        {"success": False, "error": "session_too_large"},
+    )
     assert manager.store.session_count() == 1
     assert not hook.assign_copied_session_access.called
 
@@ -639,7 +665,7 @@ def test_save_view_refuses_stale_staged_or_annotated_sources(
         ("narrowed", {"node_refs": ["gone"]}),
         ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
         ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
-        ("removed", {"shape_revisions": {"node:node-1": 1}}),
+        ("removed", {"shape_revisions": {"node:node-1": 1, "type:Actor": 2}}),
         ("hook_raises", {}),
     ],
 )
@@ -649,7 +675,7 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
     """A denied destination create, a node or edge ref the caller cannot read
     (or, under narrowing, cannot be shown missing), or a raising hook is one
     generic access_denied. A node only left in shape_revisions is off the
-    canvas: neither checked nor reported missing."""
+    canvas: neither checked, reported missing nor copied."""
     from backend.runtime.authorization import GraphAccessNarrowing
 
     manager = test_app.app.state.session_manager
@@ -676,6 +702,8 @@ def test_save_view_denial_publishes_nothing_and_discloses_nothing(
     )
     if refusal == "removed":
         assert status == 200 and result["missing_node_ids"] == []
+        saved = manager.get_session(result["session_id"])
+        assert saved.state["shape_revisions"] == {"type:Actor": 2}
         return
     assert status in (403, None)
     assert result == {"success": False, "error": "access_denied"}

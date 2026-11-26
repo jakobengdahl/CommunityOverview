@@ -741,6 +741,17 @@ def register_mcp_tools(
 
                 tool = mcp._tool_manager.get_tool(func.__name__)
                 tool.fn_metadata = RawArgumentMetadata(**tool.fn_metadata.__dict__)
+                # The Python defaults only let a missing argument reach the
+                # tool's own validation; the advertised schema requires all.
+                properties = {
+                    k: {f: v for f, v in prop.items() if f != "default"}
+                    for k, prop in tool.parameters["properties"].items()
+                }
+                tool.parameters = {
+                    **tool.parameters,
+                    "properties": properties,
+                    "required": list(properties),
+                }
         tools_map[func.__name__] = wrapped
         return wrapped
 
@@ -3393,8 +3404,9 @@ def register_mcp_tools(
 
     @register_tool
     def save_session_view(
-        # Schema only: FastMCP passes the raw arguments through unvalidated
-        # (``_RAW_SESSION_TOOLS``) and the tool validates them as REST does.
+        # Schema only, all required: FastMCP passes the raw arguments through
+        # unvalidated (``_RAW_SESSION_TOOLS``) and the tool validates them as
+        # REST does.
         session_id: str = None,  # type: ignore[assignment]
         name: str = None,  # type: ignore[assignment]
         expected_revision: Any = None,

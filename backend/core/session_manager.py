@@ -1125,6 +1125,14 @@ class SessionManager:
                 {k: source.state[k] for k in _CAPTURED_STATE if k in source.state}
             )
         )
+        # A removed node's revision outlives it; copying it would carry an id
+        # the capture neither authorizes nor reports.
+        on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}
+        state["shape_revisions"] = {
+            k: v
+            for k, v in state["shape_revisions"].items()
+            if k.startswith("type:") or k in on_canvas
+        }
         document = {"state": state, "name": name, "description": source.description}
         if len(json.dumps(document)) > DEFAULT_MAX_SESSION_DOCUMENT_BYTES - 1024:
             raise OpBatchTooLarge()
