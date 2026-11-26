@@ -16,7 +16,7 @@ from backend.core.session_manager import (
     RevisionConflict,
     SessionNotFound,
 )
-from backend.core.session_store import is_valid_session_id
+from backend.core.session_store import _DEFAULT_MAX_ANNOTATIONS, is_valid_session_id
 from backend.core.template_store import (
     ALLOWED_METADATA,
     TemplateError,
@@ -106,6 +106,19 @@ def _annotations(source, selected, node_keys):
                 (id(h), k): (v, kind)
                 for h, k, v, kind in _annotation_links(resolved_payload, all_ids)
             }
+            # The attachment dicts a link can sit in, by identity, with the
+            # dict and key holding each; endpoint dicts are not containers,
+            # their point stays valid once a link is dropped.
+            containers = {}
+            for field in ("attachment", "anchor"):
+                if isinstance(payload.get(field), dict):
+                    containers[id(payload[field])] = (payload, field)
+            for field in ("start", "startEndpoint", "end", "endEndpoint"):
+                endpoint = payload.get(field)
+                if isinstance(endpoint, dict) and isinstance(
+                    endpoint.get("attachment"), dict
+                ):
+                    containers[id(endpoint["attachment"])] = (endpoint, "attachment")
             removals = []
             for holder, key, _ in annotation_link_fields(resolved_payload):
                 value = _link_id(
@@ -132,15 +145,11 @@ def _annotations(source, selected, node_keys):
                     del holder[key]
                 else:
                     holder.pop(key, None)
-    for annotation in annotations:
-        for payload in (annotation, annotation.get("content")):
-            if isinstance(payload, dict):
-                for field in ("attachment", "anchor"):
-                    value = payload.get(field)
-                    if isinstance(value, dict) and not any(
-                        value.get(key) for key in ATTACHMENT_ID_KEYS
-                    ):
-                        payload.pop(field)
+            # An attachment left without an id is invalid; drop it whole.
+            for holder, _ in removals:
+                parent = containers.get(id(holder))
+                if parent and not any(holder.get(k) for k in ATTACHMENT_ID_KEYS):
+                    parent[0].pop(parent[1], None)
     return annotations, linked
 
 
@@ -212,6 +221,9 @@ def capture_template(
                     if isinstance(a, dict) and a.get("id") in (annotation_ids or [])
                 ]
             )
+            # Before filtering, so omitted references cannot bypass the limit.
+            if len(annotations) > _DEFAULT_MAX_ANNOTATIONS:
+                return {"success": False, "error": "annotations_limit"}
             storage = service._storage
             decision = access.evaluate_graph_access(
                 service.authorization_hook,

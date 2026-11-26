@@ -125,6 +125,24 @@ def test_uncaptured_resource_reference_is_omitted(capture, target, nested):
         )
 
 
+@pytest.mark.parametrize("endpoint", ["start", "endEndpoint"])
+def test_dropped_line_endpoint_attachment_is_removed(capture, endpoint):
+    run, _, _, session = capture
+    point = {"x": 1, "y": 2}
+    session.state["annotations"] = [
+        {
+            "id": "line",
+            "type": "line",
+            endpoint: {
+                "point": point,
+                "attachment": {"target_id": "b", "target_type": "node"},
+            },
+        }
+    ]
+    doc = run(node_ids=["a"], annotation_ids=["line"])["document"]
+    assert doc["annotation_document"]["annotations"][0][endpoint] == {"point": point}
+
+
 @pytest.mark.parametrize("alias", ["target_id", "targetId", "node_id", "nodeId"])
 @pytest.mark.parametrize("field", ["anchor", "attachment"])
 @pytest.mark.parametrize("nested", [False, True])
@@ -181,16 +199,31 @@ def test_shape_selection_and_tombstone(capture):
 
 @pytest.mark.parametrize(
     "field, limit, code",
-    [("node_refs", 501, "nodes_limit"), ("annotations", 2001, "annotations_limit")],
+    [
+        ("node_refs", 501, "nodes_limit"),
+        ("annotations", 2001, "annotations_limit"),
+        ("references", 2001, "annotations_limit"),
+    ],
 )
 def test_limits_fail_without_truncation(capture, field, limit, code):
+    """A limit counts the selection, before uncaptured references are omitted."""
     run, service, _, session = capture
     if field == "node_refs":
         for i in range(limit):
             service._storage.nodes[str(i)] = Node(id=str(i), type="Actor", name="N")
         session.state[field] = [str(i) for i in range(limit)]
-    else:
+    elif field == "annotations":
         session.state[field] = [{"id": str(i), "type": "label"} for i in range(limit)]
+    else:
+        session.state["annotations"] = [
+            {
+                "id": str(i),
+                "type": "reference",
+                "target_kind": "resource",
+                "target": "x",
+            }
+            for i in range(limit)
+        ]
     assert run() == {"success": False, "error": code}
 
 
