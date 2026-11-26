@@ -1105,8 +1105,8 @@
     "save_copy": "Save copy",
     "copy_name": "{name} copy",
     "delete_saved": "Delete saved shape",
-    "edit_warning": "This saved shape is used in {count} sessions, including closed ones. Updating it changes them all.",
-    "delete_warning": "This saved shape is used in {count} sessions, including closed ones. After deletion they show the built-in card.",
+    "edit_warning": "This saved shape is used in {count} sessions and {templates} templates, including closed sessions. Updating it changes the sessions and affects future template insertions.",
+    "delete_warning": "This saved shape is used in {count} sessions and {templates} templates, including closed sessions. After deletion they use the built-in card.",
     "confirm_edit": "Update saved shape",
     "confirm_delete": "Delete and use the built-in card",
     "back": "Back",
@@ -1175,5 +1175,27 @@
     "results": "{count} suggestions",
     "search_failed": "Node search failed; only node types are suggested",
     "command_failed": "Could not run {label}. Your text is kept."
+  },
+  "template": {
+    "save": "Save as template…",
+    "command_description": "Save the selection or whole session as a template",
+    "name": "Name (required)",
+    "description": "Description",
+    "tags": "Tags (comma-separated)",
+    "summary": "Approximate preview: {nodes} nodes, {edges} connections, {annotations} annotations. Exact counts are shown after saving.",
+    "loading": "Preparing session…",
+    "empty": "There is nothing to save yet.",
+    "saving": "Saving…",
+    "save_button": "Save",
+    "saved": "Template saved: {nodes} nodes, {edges} connections, {annotations} annotations",
+    "errors": {
+      "access_denied": "You do not have access to save this template.",
+      "staged_changes": "Resolve staged changes before saving a template.",
+      "nodes_limit": "The template has too many nodes.",
+      "edges_limit": "The template has too many connections.",
+      "annotations_limit": "The template has too many annotations.",
+      "other": "Could not save the template. Please try again.",
+      "revision_conflict": "The session changed. Close and reopen this dialog to review it again."
+    }
   }
 }

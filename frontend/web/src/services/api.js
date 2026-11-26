@@ -602,7 +602,15 @@ export async function createSavedShape(key, name, definition) {
 }
 
 /** Edit the reviewed revision of a saved shape; a stale review is a 409. */
-export async function updateSavedShape(key, name, definition, revision, usage) {
+export async function updateSavedShape(
+  key,
+  name,
+  definition,
+  revision,
+  usage,
+  templateUsage,
+  templateUsageToken
+) {
   return apiFetch(savedShapeUrl(key), {
     method: 'PUT',
     body: JSON.stringify({
@@ -610,13 +618,20 @@ export async function updateSavedShape(key, name, definition, revision, usage) {
       definition,
       expected_revision: revision,
       expected_usage: usage,
+      expected_template_usage: templateUsage,
+      expected_template_usage_token: templateUsageToken,
     }),
   });
 }
 
 /** Delete (tombstone) a saved shape; its users fall back to the built-in card. */
-export async function deleteSavedShape(key, revision, usage) {
-  const query = new URLSearchParams({ expected_revision: revision, expected_usage: usage });
+export async function deleteSavedShape(key, revision, usage, templateUsage, templateUsageToken) {
+  const query = new URLSearchParams({
+    expected_revision: revision,
+    expected_usage: usage,
+    expected_template_usage: templateUsage,
+  });
+  if (templateUsageToken != null) query.set('expected_template_usage_token', templateUsageToken);
   return apiFetch(`${savedShapeUrl(key)}?${query}`, { method: 'DELETE' });
 }
 
@@ -1141,6 +1156,38 @@ export function setDisplayName(name) {
 }
 
 const SESSIONS_BASE = () => `${API_BASE}/sessions`;
+
+export async function saveTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/templates`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listTemplates() {
+  return apiFetch(`${API_BASE}/templates`);
+}
+
+export async function updateTemplate(templateId, body) {
+  return apiFetch(`${API_BASE}/templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteTemplate(templateId, revision) {
+  return apiFetch(
+    `${API_BASE}/templates/${encodeURIComponent(templateId)}?expected_revision=${encodeURIComponent(revision)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function insertTemplate(sessionId, body) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/insert-template`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
 
 /** Capture a revision of a session as a new session. */
 export async function saveSessionView(sessionId, name, expectedRevision) {

@@ -291,7 +291,9 @@ describe('applyOpToMirror', () => {
     };
     const m = applyOpToMirror(m0, {
       op: 'nodes_replaced',
-      node_ids: ['a'],
+      node_ids: ['a', 'b'],
+      inserted_shape_overrides: { b: { builtin: true } },
+      inserted_shape_revisions: { 'node:b': 1 },
       annotations: [{ id: 'edited', kind: 'note', text: 'new' }],
       removed_annotation_ids: ['dropped'],
     });
@@ -299,6 +301,8 @@ describe('applyOpToMirror', () => {
       kept: 'k',
       edited: 'new',
     });
+    expect(m.shape_overrides.b).toEqual({ builtin: true });
+    expect(m.shape_revisions['node:b']).toBe(1);
   });
 
   it('upserts and deletes annotations and updates group membership', () => {
@@ -471,52 +475,63 @@ describe('SessionSyncClient', () => {
     expect(client.membershipVersion).toBe(6);
   });
 
-  it('handles nothing after a library revision until its fetch settles, nor once closed', async () => {
-    let settle;
-    const onLibraryRevision = vi.fn(() => new Promise((resolve) => (settle = resolve)));
-    const onResync = vi.fn();
-    const onRemoteOps = vi.fn();
-    const { client, fetchImpl } = makeClient({
-      handlers: { onLibraryRevision, onResync, onRemoteOps },
-    });
-    client.connect();
-    const es = FakeEventSource.instances[0];
-    const added = (seq) => ({
-      type: 'op',
-      seq,
-      client_id: 'client-other',
-      op: { op: 'nodes_added', node_ids: [`n${seq}`] },
-    });
-    es.emit({ type: 'catch_up', seq: 6, ops: [added(6).op], library_revision: 4 });
-    es.emit(added(7));
-    expect(onLibraryRevision).toHaveBeenLastCalledWith(4, '1234-5678');
-    expect(onResync).not.toHaveBeenCalled();
-    expect(onRemoteOps).not.toHaveBeenCalled();
-    settle();
-    await flush();
-    expect(onResync).toHaveBeenCalledTimes(1);
-    expect(onRemoteOps).toHaveBeenCalledTimes(1);
-    // An op adding a saved reference fetches the current library first: the
-    // entry may have changed while this session did not reference it.
-    es.emit({
-      type: 'op',
-      seq: 8,
-      client_id: 'client-other',
-      op: { op: 'type_shape_set', type: 'Actor', selection: { ref: 'saved:card' } },
-    });
-    expect(onLibraryRevision).toHaveBeenLastCalledWith(null, '1234-5678');
-    settle();
-    await flush();
-    es.emit({ type: 'library_invalidated', key: 'card', revision: 5 });
-    es.emit(added(9));
-    expect(onLibraryRevision).toHaveBeenLastCalledWith(5, '1234-5678');
-    client.close();
-    settle();
-    await flush();
-    expect(onRemoteOps).toHaveBeenCalledTimes(2);
-    expect(onLibraryRevision).toHaveBeenCalledTimes(3);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
+  it.each([
+    { op: 'type_shape_set', type: 'Actor', selection: { ref: 'saved:card' } },
+    {
+      op: 'nodes_replaced',
+      node_ids: ['n8'],
+      inserted_shape_overrides: { n8: { ref: 'saved:card' } },
+    },
+  ])(
+    'handles nothing after a library revision until its fetch settles, nor once closed: $op',
+    async (shapeOp) => {
+      let settle;
+      const onLibraryRevision = vi.fn(() => new Promise((resolve) => (settle = resolve)));
+      const onResync = vi.fn();
+      const onRemoteOps = vi.fn();
+      const { client, fetchImpl } = makeClient({
+        handlers: { onLibraryRevision, onResync, onRemoteOps },
+      });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      const added = (seq) => ({
+        type: 'op',
+        seq,
+        client_id: 'client-other',
+        op: { op: 'nodes_added', node_ids: [`n${seq}`] },
+      });
+      es.emit({ type: 'catch_up', seq: 6, ops: [added(6).op], library_revision: 4 });
+      es.emit(added(7));
+      expect(onLibraryRevision).toHaveBeenLastCalledWith(4, '1234-5678');
+      expect(onResync).not.toHaveBeenCalled();
+      expect(onRemoteOps).not.toHaveBeenCalled();
+      settle();
+      await flush();
+      expect(onResync).toHaveBeenCalledTimes(1);
+      expect(onRemoteOps).toHaveBeenCalledTimes(1);
+      // An op adding a saved reference fetches the current library first: the
+      // entry may have changed while this session did not reference it.
+      es.emit({
+        type: 'op',
+        seq: 8,
+        client_id: 'client-other',
+        op: shapeOp,
+      });
+      expect(onLibraryRevision).toHaveBeenLastCalledWith(null, '1234-5678');
+      expect(onRemoteOps).toHaveBeenCalledTimes(1);
+      settle();
+      await flush();
+      es.emit({ type: 'library_invalidated', key: 'card', revision: 5 });
+      es.emit(added(9));
+      expect(onLibraryRevision).toHaveBeenLastCalledWith(5, '1234-5678');
+      client.close();
+      settle();
+      await flush();
+      expect(onRemoteOps).toHaveBeenCalledTimes(2);
+      expect(onLibraryRevision).toHaveBeenCalledTimes(3);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  );
 
   // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
   // only adopts its seq, so ops that landed between the host's initial load

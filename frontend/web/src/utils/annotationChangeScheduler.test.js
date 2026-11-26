@@ -69,7 +69,8 @@ describe('createAnnotationChangeScheduler (accepted operation timing)', () => {
       debounceMs: 300,
     });
     schedule('text');
-    clearPending();
+    expect(clearPending()).toBe(true);
+    expect(clearPending()).toBe(false);
     vi.advanceTimersByTime(1000);
     expect(publish).not.toHaveBeenCalled();
   });
