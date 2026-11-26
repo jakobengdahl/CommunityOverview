@@ -9,6 +9,7 @@ import logging
 from typing import Any, Callable, Dict, List
 
 from backend.config.config_loader import build_session_url
+from backend.core.session_annotations import annotation_type_of
 from backend.core.session_manager import (
     CaptureRefused,
     LayoutBusy,
@@ -74,38 +75,33 @@ def captured_node_ids(state: Dict[str, Any]) -> List[str]:
         ids.update(dict.fromkeys(state.get(key) or []))
     annotations = state.get("annotations") or []
     annotation_ids = {a.get("id") for a in annotations if isinstance(a, dict)}
-    for key in ("positions", "shape_overrides"):
-        ids.update(
-            dict.fromkeys(
-                i
-                for i in (state.get(key) or {})
-                if i not in annotation_ids and not i.startswith("group-")
-            )
+    # Positions always name graph nodes; unlike shape overrides, their keys
+    # are copied verbatim even when they collide with an annotation id.
+    ids.update(dict.fromkeys(state.get("positions") or {}))
+    ids.update(
+        dict.fromkeys(
+            i for i in (state.get("shape_overrides") or {}) if i not in annotation_ids
         )
-
-    annotation_targets: set[str] = set()
+    )
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             if (
-                value.get("type") == "reference"
+                annotation_type_of(value) == "reference"
                 and value.get("target_kind") == "resource"
             ):
                 target = value.get("target")
                 if isinstance(target, str):
                     ids[target] = None
-                    annotation_targets.add(target)
             target = value.get("target_id")
             if isinstance(target, str) and (
                 value.get("target_type") == "node" or target not in annotation_ids
             ):
                 ids[target] = None
-                annotation_targets.add(target)
             for key, child in value.items():
                 if key == "member_node_ids" and isinstance(child, list):
                     graph_members = [i for i in child if i not in annotation_ids]
                     ids.update(dict.fromkeys(graph_members))
-                    annotation_targets.update(graph_members)
                 elif (
                     key
                     in (
@@ -119,7 +115,6 @@ def captured_node_ids(state: Dict[str, Any]) -> List[str]:
                     and child not in annotation_ids
                 ):
                     ids[child] = None
-                    annotation_targets.add(child)
                 else:
                     visit(child)
         elif isinstance(value, list):
@@ -127,16 +122,7 @@ def captured_node_ids(state: Dict[str, Any]) -> List[str]:
                 visit(child)
 
     visit(annotations)
-    return [
-        i
-        for i in ids
-        if isinstance(i, str)
-        and (
-            not i.startswith("group-")
-            or i in (state.get("node_refs") or [])
-            or i in annotation_targets
-        )
-    ]
+    return [i for i in ids if isinstance(i, str)]
 
 
 def captured_edge_ids(state: Dict[str, Any]) -> List[str]:

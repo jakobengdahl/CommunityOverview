@@ -78,6 +78,7 @@ from .session_store import (
     SessionLimitReached as SessionLimitReached,
     SessionStore,
     _empty_state,
+    _now_iso,
     _validate_annotation,
     is_valid_session_id,
 )
@@ -1181,6 +1182,8 @@ class SessionManager:
             ids = _refresh_annotation_ids(state)
         except OpError as exc:
             raise CaptureRefused("invalid_presentation") from exc
+        for annotation in annotations:
+            annotation["updated_at"] = _now_iso()
 
         def remap_links(value):
             if isinstance(value, dict):

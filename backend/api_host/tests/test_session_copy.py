@@ -556,6 +556,7 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
                 "type": "note",
                 "version": 5,
                 "field_versions": {"text": 5},
+                "updated_at": "2000-01-01T00:00:00+00:00",
                 "parentId": "group-a",
             },
             {"id": "group-a", "type": "group", "member_node_ids": ["node-1", "note"]},
@@ -577,6 +578,7 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
     note, group, line = saved.state["annotations"]
     assert {note["id"], group["id"], line["id"]}.isdisjoint({"note", "group-a", "line"})
     assert note["parentId"] == group["id"]
+    assert note["updated_at"] != "2000-01-01T00:00:00+00:00"
     assert group["member_node_ids"] == ["node-1", note["id"]]
     assert line["startAnchor"] == note["id"]
     assert line["attachment"]["target_id"] == group["id"]
@@ -634,6 +636,7 @@ def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
     "annotation",
     [
         {"id": "a", "type": "reference", "target_kind": "resource", "target": "node-1"},
+        {"id": "a", "kind": "reference", "target_kind": "resource", "target": "node-1"},
         {"id": "a", "type": "group", "member_node_ids": ["node-1"]},
         {
             "id": "a",
@@ -786,6 +789,13 @@ def test_save_view_refuses_stale_or_staged_sources(test_app, monkeypatch, transp
     [
         ("create", {"node_refs": ["node-1"]}),
         ("narrowed", {"node_refs": ["node-1"]}),
+        (
+            "narrowed",
+            {
+                "positions": {"node-1": {"x": 4, "y": 8}},
+                "annotations": [{"id": "node-1", "type": "note"}],
+            },
+        ),
         ("narrowed", {"node_refs": ["gone"]}),
         ("narrowed", {"hidden_edge_ids": ["edge-1"]}),
         ("narrowed", {"dimmed_edge_ids": ["edge-1"]}),
