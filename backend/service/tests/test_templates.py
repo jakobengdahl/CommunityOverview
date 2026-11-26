@@ -927,7 +927,7 @@ def test_default_insertion_with_missing_or_null_existing_rotation(capture, rotat
     assert target.state["positions"]["b"] == {"x": 180, "y": 0}
 
 
-@pytest.mark.parametrize("rotation", [{}, {"rotation": None}])
+@pytest.mark.parametrize("rotation", [{}, {"rotation": None}, {"rotation": "old"}])
 def test_explicit_insertion_with_missing_or_null_template_rotation(capture, rotation):
     from backend.service import templates
 
@@ -951,6 +951,34 @@ def test_explicit_insertion_with_missing_or_null_template_rotation(capture, rota
     )["success"]
     geometry = target.state["annotations"][0]["geometry"]
     assert (geometry["x"], geometry["y"]) == (50, 60)
+
+
+def test_default_placement_uses_target_type_shape_for_null_template_shape(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state.update(node_refs=["a"], annotations=[])
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    doc["nodes"][0]["shape"] = None
+    doc = manager.template_store.save(doc, doc["revision"])
+    target = manager.create_session("target")
+    target.state["type_shapes"] = {
+        "Actor": {
+            "inline": {
+                "version": 1,
+                "base": "triangle-up",
+                "scale": 1.0,
+                "placement": "centre",
+                "areas": {"first": "name", "second": None, "third": None},
+            }
+        }
+    }
+    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
+        "success"
+    ]
+    assert target.state["positions"]["a"] == {"x": 0, "y": 28}
 
 
 @pytest.mark.parametrize(

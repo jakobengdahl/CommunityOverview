@@ -1075,7 +1075,17 @@ def insert_template(
             if default_placement:
                 source_bounds = _rendered_bounds(
                     (
-                        (node["position"], source_definition(node))
+                        (
+                            node["position"],
+                            _shape(
+                                service._storage.get_node(node["source_node_id"]),
+                                session.state,
+                                shape_config,
+                                saved,
+                            )["inline"]
+                            if node["shape"] is None
+                            else source_definition(node),
+                        )
                         for node in doc["nodes"]
                         if node["source_node_id"] in added
                     ),
@@ -1133,7 +1143,11 @@ def insert_template(
                         seen.add(id(p))
                         p["x"] = _placement_number(p.get("x", 0) + dx)
                         p["y"] = _placement_number(p.get("y", 0) + dy)
-            _rendered_bounds(((p, None) for p in positions.values()), annotations)
+            _rendered_bounds(
+                ((p, None) for p in positions.values()),
+                annotations,
+                legacy=not default_placement,
+            )
             op = {
                 "op": "nodes_replaced",
                 "client_id": "mcp-agent",

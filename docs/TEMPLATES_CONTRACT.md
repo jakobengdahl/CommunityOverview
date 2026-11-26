@@ -112,6 +112,8 @@ annotation dimensions override the annotation defaults. Node shape sizes and
 the triangle label allowance scale with the shape definition. Rotation uses
 the axis-aligned bounding box around the box rotated about its center; a
 geometry rotation takes precedence over a top-level rotation.
+An inserted node with no template shape uses the target session's effective
+node or type shape (including configured type defaults) for its bounds.
 
 | Element | Default width × height (model pixels) | Bounds rule |
 | --- | --- | --- |
