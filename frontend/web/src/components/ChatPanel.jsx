@@ -19,7 +19,6 @@ import CommandBoxHint from './CommandBoxHint';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
-import { captureContents } from '../utils/captureContents';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -204,21 +203,9 @@ function ChatPanel({
       );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
-      const { node_ids, positions } = await captureContents(flushBeforeCapture, getCaptureState);
-      const viewName = toolResult.name;
-      const viewNode = {
-        name: viewName,
-        type: 'SavedView',
-        description: t('notifications.saved_view_description', { name: viewName }),
-        summary: t('notifications.saved_view_summary', { count: node_ids.length }),
-        metadata: { node_ids, positions },
-        communities: [],
-      };
-      try {
-        await api.addNodes([viewNode], []);
-      } catch (err) {
-        console.error('[ChatPanel] Failed to save view:', err);
-      }
+      window.dispatchEvent(
+        new CustomEvent('request-save-view', { detail: { name: toolResult.name } })
+      );
     } else if (
       toolResult.action === 'clear_visualization' ||
       toolResult.action === 'load_visualization' ||

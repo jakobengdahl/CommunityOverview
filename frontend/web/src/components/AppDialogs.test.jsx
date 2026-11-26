@@ -225,7 +225,7 @@ describe('AppDialogs registry', () => {
     // Save View
     const saveView = makeDialogs({ saveViewDialog: { viewData: {} } });
     const r1 = renderDialogs(saveView);
-    expect(screen.getByTestId('input').getAttribute('data-title')).toBe('Save View');
+    expect(screen.getByTestId('input').getAttribute('data-title')).toBe('save_view.title');
     fireEvent.click(screen.getByText('confirm'));
     expect(r1.handlers.onConfirmSaveView).toHaveBeenCalledWith('typed');
     r1.unmount();

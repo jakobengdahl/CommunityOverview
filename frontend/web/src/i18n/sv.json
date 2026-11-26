@@ -117,6 +117,7 @@
     "pending_action_dismiss": "Avfärda",
     "pending_action_dismissed": "Avfärdad. Inget kördes.",
     "pending_action_done": "Klart.",
+    "pending_action_capture_requested": "Sparande begärt. Bekräfta i webbläsaren för att spara vyn.",
     "pending_action_running": "Körs…",
     "pending_action_unknown": "Bekräftelsen gäller inte längre. Skicka begäran igen.",
     "pending_action_denied": "Du får inte bekräfta den här åtgärden.",
@@ -1117,6 +1118,24 @@
     "review_latest": "Granska senaste versionen",
     "library_forbidden": "Du måste vara inloggad för att spara former.",
     "library_failed": "Formbiblioteket kunde inte ändras. Ditt utkast finns kvar; försök igen."
+  },
+  "save_view": {
+    "title": "Spara vy",
+    "name": "Vyns namn",
+    "placeholder": "Ange ett namn för vyn",
+    "saved": "Vyn har sparats.",
+    "open_link": "Öppna session",
+    "failed": "Kunde inte spara vyn.",
+    "invalid_request": "Ange ett giltigt namn.",
+    "access_denied": "Du har inte behörighet att spara vyn.",
+    "session_not_found": "Sessionen kunde inte hittas.",
+    "revision_conflict": "Sessionen har ändrats. Granska den och försök igen.",
+    "session_busy": "Sessionen är upptagen. Försök igen.",
+    "staged_changes": "Slå ihop eller kasta bort väntande ändringar innan du sparar.",
+    "invalid_presentation": "Sessionen innehåller ogiltiga visningsdata.",
+    "session_too_large": "Sessionen är för stor för att sparas.",
+    "too_many_sessions": "Sessionsgränsen har nåtts.",
+    "storage_error": "Sessionen kunde inte lagras."
   },
   "commands": {
     "create_node": "Skapa {type}",
