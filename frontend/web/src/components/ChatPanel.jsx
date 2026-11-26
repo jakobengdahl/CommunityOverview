@@ -56,7 +56,7 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel({ collectionShortName, variant = 'floating' }) {
+function ChatPanel({ collectionShortName, variant = 'floating', flushBeforeCapture }) {
   const isSheet = variant === 'sheet';
   const {
     chatMessages,
@@ -198,6 +198,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
       );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
+      await flushBeforeCapture?.();
       const viewName = toolResult.name;
       const currentNodes = useGraphStore.getState().nodes;
       const viewNode = {
