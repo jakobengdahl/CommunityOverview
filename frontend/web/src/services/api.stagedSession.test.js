@@ -129,6 +129,38 @@ describe('staged-session binding in api.js', () => {
     expect(JSON.parse(calls[0].options.body)).toEqual(body);
   });
 
+  it('routes template management and explicit placement to the template endpoints', async () => {
+    const calls = mockFetch();
+    const update = { expected_revision: 3, name: 'Renamed' };
+    const insertion = {
+      template_id: 'template',
+      template_revision: 3,
+      mode: 'reference',
+      x: 4,
+      y: 5,
+    };
+    await api.listTemplates();
+    await api.updateTemplate('template', update);
+    await api.deleteTemplate('template', 3);
+    await api.insertTemplate('session', insertion);
+    expect(
+      calls.map(({ url, options }) => [
+        new URL(url, 'http://localhost').pathname,
+        options.method || 'GET',
+      ])
+    ).toEqual([
+      ['/api/templates', 'GET'],
+      ['/api/templates/template', 'PATCH'],
+      ['/api/templates/template', 'DELETE'],
+      ['/api/sessions/session/insert-template', 'POST'],
+    ]);
+    expect(new URL(calls[2].url, 'http://localhost').searchParams.get('expected_revision')).toBe(
+      '3'
+    );
+    expect(JSON.parse(calls[1].options.body)).toEqual(update);
+    expect(JSON.parse(calls[3].options.body)).toEqual(insertion);
+  });
+
   it('captures the specified revision as a session', async () => {
     const calls = mockFetch(200, { success: true, kind: 'saved_session', session_url: '/session' });
     const result = await api.saveSessionView('1111-2222', 'Overview', 7);
