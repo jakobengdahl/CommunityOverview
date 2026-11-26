@@ -1085,6 +1085,7 @@ def build_session_url(session_id: str) -> Optional[str]:
         return None
     parts = urlsplit(base)
     query = dict(parse_qsl(parts.query))
+    query.pop("view", None)
     query["session"] = session_id
     # Preserve any base path; ensure a "/" path when the base is a bare origin so
     # the result is "https://host/?session=<id>" rather than "https://host?...".

@@ -179,6 +179,12 @@ class ChatService:
                 "session_url": build_session_url(meta["id"]),
             }
             for meta in manager.list_sessions()
+            if not authorize_graph_access(
+                self._graph_service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=meta["id"],
+            )
         ]
         return {"success": True, "sessions": sessions, "count": len(sessions)}
 

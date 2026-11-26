@@ -1377,7 +1377,7 @@ def _register_session_endpoints(
     )
     from backend.core.layer_store import LayerFull, LayerNotEmpty, StagedSessionRetired
     from backend.core.write_modes import WRITE_MODE_STAGED, WriteModeRefused
-    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE, GRAPH_ACTION_READ
 
     from . import access
 
@@ -1425,13 +1425,26 @@ def _register_session_endpoints(
         except RateLimited:
             raise HTTPException(status_code=429, detail="rate limit exceeded")
 
+    def _can_read_session(http_request: Request, session_id: str) -> bool:
+        with use_request_authorization(headers=http_request.headers):
+            return not access.authorize_graph_access(
+                service.authorization_hook,
+                action=GRAPH_ACTION_READ,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
+
     def _session_payload(
         session, *, resolve: bool, manager, http_request: Optional[Request] = None
     ) -> Dict[str, Any]:
         from backend.config.config_loader import build_session_url
 
         payload = manager.describe(session)
-        payload["session_url"] = build_session_url(session.id)
+        payload["session_url"] = (
+            build_session_url(session.id)
+            if _can_read_session(http_request, session.id)
+            else None
+        )
         payload["roster"] = manager.roster(session.id)
         if resolve:
             authorization = (
@@ -1471,7 +1484,9 @@ def _register_session_endpoints(
             raise HTTPException(status_code=503, detail="too many sessions")
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
-        return _session_payload(session, resolve=False, manager=session_manager)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
 
     @router.post("/sessions/{session_id}/copy")
     async def copy_session(
@@ -1538,7 +1553,9 @@ def _register_session_endpoints(
             raise HTTPException(status_code=400, detail=str(exc))
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
-        return _session_payload(session, resolve=False, manager=session_manager)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
 
     def template_response(result):
         return JSONResponse(
@@ -1810,13 +1827,14 @@ def _register_session_endpoints(
         )
 
     @router.get("/sessions")
-    async def list_sessions() -> Dict[str, Any]:
+    async def list_sessions(http_request: Request) -> Dict[str, Any]:
         from backend.config.config_loader import build_session_url
 
         return {
             "sessions": [
                 {**meta, "session_url": build_session_url(meta["id"])}
                 for meta in session_manager.list_sessions()
+                if _can_read_session(http_request, meta["id"])
             ]
         }
 
@@ -1865,7 +1883,12 @@ def _register_session_endpoints(
                 session = session_manager.get_session(session_id)
                 if session is None:
                     raise HTTPException(status_code=404, detail="session not found")
-                return _session_payload(session, resolve=False, manager=session_manager)
+                return _session_payload(
+                    session,
+                    resolve=False,
+                    manager=session_manager,
+                    http_request=http_request,
+                )
         try:
             # get-or-create (R7): a rename for an id that only exists in the
             # browser's URL/recents (never saved server-side) must materialise
@@ -1890,7 +1913,9 @@ def _register_session_endpoints(
         session = session_manager.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        return _session_payload(session, resolve=False, manager=session_manager)
+        return _session_payload(
+            session, resolve=False, manager=session_manager, http_request=http_request
+        )
 
     @router.delete("/sessions/{session_id}")
     async def delete_session(
