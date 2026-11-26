@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
 from backend.config.node_shapes import resolve_shape
-from backend.core.session_annotations import ATTACHMENT_ID_KEYS, annotation_link_fields
+from backend.core.session_annotations import (
+    ATTACHMENT_ID_KEYS,
+    annotation_link_fields,
+    annotation_type_of,
+)
 from backend.core.session_manager import (
     CaptureRefused,
     LayoutBusy,
@@ -52,29 +56,52 @@ def _shape(node, state, config, saved):
 def _annotations(source, selected, node_keys):
     annotations = copy.deepcopy(selected)
     all_ids = {a.get("id") for a in source if isinstance(a, dict)}
-    ids = {a.get("id") for a in annotations if isinstance(a, dict)}
-    # Ask the same resolver as session save which links address graph nodes.
+    # Resolve and authorize links even on references whose targets cannot be
+    # represented in the template. A reference without its resource target
+    # is invalid, so omit that annotation and links to it from the document.
     linked = []
+    kept = []
     for annotation in annotations:
-        for payload in (annotation, annotation.get("content")):
+        content = annotation.get("content")
+        merged = {**annotation, **(content if isinstance(content, dict) else {})}
+        for payload in (annotation, content):
+            if isinstance(payload, dict):
+                resolved_payload = {
+                    **payload,
+                    "type": annotation.get("type"),
+                    "kind": annotation.get("kind"),
+                    "target_kind": merged.get("target_kind"),
+                }
+                linked.extend(
+                    v
+                    for _, _, v, kind in _annotation_links(resolved_payload, all_ids)
+                    if kind == "node"
+                )
+        target = merged.get("target")
+        if (
+            annotation_type_of(annotation) == "reference"
+            and merged.get("target_kind") == "resource"
+            and target
+            and _link_id(target) not in node_keys
+        ):
+            continue
+        kept.append(annotation)
+    annotations = kept
+    ids = {a.get("id") for a in annotations if isinstance(a, dict)}
+    for annotation in annotations:
+        content = annotation.get("content")
+        target_kind = annotation.get("target_kind")
+        if isinstance(content, dict):
+            target_kind = content.get("target_kind", target_kind)
+        for payload in (annotation, content):
             if not isinstance(payload, dict):
                 continue
-            # Content carries payload fields while the annotation carries its type.
-            content = annotation.get("content")
-            target_kind = annotation.get("target_kind")
-            if isinstance(content, dict):
-                target_kind = content.get("target_kind", target_kind)
             resolved_payload = {
                 **payload,
                 "type": annotation.get("type"),
                 "kind": annotation.get("kind"),
                 "target_kind": target_kind,
             }
-            linked.extend(
-                v
-                for _, _, v, kind in _annotation_links(resolved_payload, all_ids)
-                if kind == "node" and not v.startswith(_LEGACY_GROUP_PREFIX)
-            )
             resolved = {
                 (id(h), k): (v, kind)
                 for h, k, v, kind in _annotation_links(resolved_payload, all_ids)
