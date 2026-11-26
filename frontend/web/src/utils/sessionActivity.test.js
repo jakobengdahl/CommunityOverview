@@ -55,14 +55,6 @@ describe('describeActivity', () => {
     const r = record({ op: 'annotation_created', after: { type: 'not_a_real_type' } });
     expect(describeActivity(r).params.type).toBe('history.annotation_type.unknown');
   });
-
-  // Driven off the canvas package's own type list rather than a hand-copied
-  // one, so adding an annotation kind without an activity string fails here
-  // instead of silently reading as "an annotation" in the session panel. That
-  // is exactly what happened to `reference`: every other kind had a key, the
-  // new one fell through to `unknown`, and nothing noticed because the
-  // spot-checks above only name four kinds. A key-parity test cannot catch it
-  // either — a key absent from BOTH locales is consistent.
   it.each(ANNOTATION_TYPES)('names the %s kind rather than falling back to unknown', (type) => {
     const r = record({ op: 'annotation_created', after: { type } });
     expect(describeActivity(r).params.type).toBe(`history.annotation_type.${type}`);
@@ -74,123 +66,49 @@ describe('describeActivity', () => {
   });
 
   describe('annotation_updated classification', () => {
-    it('reads a shape-subtype change as "shape" even when geometry also moved', () => {
+    it.each([
+      [
+        { type: 'shape', shape: 'rectangle', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
+        { type: 'shape', shape: 'ellipse', geometry: { x: 5, y: 5, w: 10, h: 10, rotation: 0 } },
+        'shape',
+      ],
+      [
+        { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
+        { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 15 } },
+        'rotated',
+      ],
+      [
+        { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
+        { type: 'note', geometry: { x: 0, y: 0, w: 40, h: 10, rotation: 0 } },
+        'resized',
+      ],
+      [
+        { type: 'note', position: { x: 0, y: 0 } },
+        { type: 'note', position: { x: 50, y: 0 } },
+        'moved',
+      ],
+      [
+        { type: 'note', style: { color: 'blue' } },
+        { type: 'note', style: { color: 'red' } },
+        'style',
+      ],
+      [{ type: 'note', text: 'old' }, { type: 'note', text: 'new' }, 'text'],
+      [{ type: 'note', locked: false }, { type: 'note', locked: true }, 'locked'],
+      [{ type: 'note', locked: true }, { type: 'note', locked: false }, 'unlocked'],
+      [{ type: 'label' }, { type: 'label', attachment: { target_id: 'node-1' } }, 'attached'],
+      [{ type: 'label', attachment: { target_id: 'node-1' } }, { type: 'label' }, 'detached'],
+      [{ type: 'note' }, { type: 'note', some_future_field: 'x' }, 'generic'],
+    ])('classifies an annotation update from %j to %j as %s', (before, after, expected) => {
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'shape-1' },
-        before: {
-          type: 'shape',
-          shape: 'rectangle',
-          geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 },
-        },
-        after: {
-          type: 'shape',
-          shape: 'ellipse',
-          geometry: { x: 5, y: 5, w: 10, h: 10, rotation: 0 },
-        },
+        affected: { kind: 'annotation', id: before.type === 'shape' ? 'shape-1' : 'a1' },
+        before,
+        after,
       });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_shape');
-    });
-
-    it('reads a rotation-only geometry change as "rotated"', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
-        after: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 15 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_rotated');
-    });
-
-    it('reads a size change as "resized"', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
-        after: { type: 'note', geometry: { x: 0, y: 0, w: 40, h: 10, rotation: 0 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_resized');
-    });
-
-    it('reads a plain position change as "moved"', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', position: { x: 0, y: 0 } },
-        after: { type: 'note', position: { x: 50, y: 0 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
-    });
-
-    it('reads a style-only change as "style"', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', style: { color: 'blue' } },
-        after: { type: 'note', style: { color: 'red' } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-    });
-
-    it('reads a text field change as "text"', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', text: 'old' },
-        after: { type: 'note', text: 'new' },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
-    });
-
-    it('reads a locked flip as "locked" / "unlocked"', () => {
-      const locking = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', locked: false },
-        after: { type: 'note', locked: true },
-      });
-      expect(describeActivity(locking).key).toBe('history.desc.annotation_updated_locked');
-
-      const unlocking = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note', locked: true },
-        after: { type: 'note', locked: false },
-      });
-      expect(describeActivity(unlocking).key).toBe('history.desc.annotation_updated_unlocked');
-    });
-
-    it('reads an attachment field change as "attached" / "detached"', () => {
-      const attaching = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'label' },
-        after: { type: 'label', attachment: { target_id: 'node-1' } },
-      });
-      expect(describeActivity(attaching).key).toBe('history.desc.annotation_updated_attached');
-
-      const detaching = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'label', attachment: { target_id: 'node-1' } },
-        after: { type: 'label' },
-      });
-      expect(describeActivity(detaching).key).toBe('history.desc.annotation_updated_detached');
-    });
-
-    it('falls back to "generic" for an unrecognised field set', () => {
-      const r = record({
-        op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'a1' },
-        before: { type: 'note' },
-        after: { type: 'note', some_future_field: 'x' },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
     it('falls back to "generic" rather than guessing when there is no before snapshot', () => {
-      // A record persisted before PR #627, which still carries
-      // `affected.fields`: even a key set naming `locked` is not read as one.
       const r = record({
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'a1', fields: ['locked', 'z', 'geometry'] },
@@ -200,26 +118,8 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
     });
   });
-
-  // The regression suite for the defect these records are shaped after: the
-  // browser's computeOps (services/sessionSyncClient.js) puts the WHOLE
-  // annotation in every annotation_updated op, so `affected.fields` — which
-  // session_store.py filled with the incoming payload's key set until PR #627
-  // — is the annotation's entire key set no matter what the user actually
-  // did. Records persisted before that still carry it. Every
-  // annotation carries `locked` and `z` as mandatory envelope fields
-  // (createAnnotation), so a classifier reading `fields` as a change set
-  // announced "Unlocked" for a note/label/icon that had merely been moved or
-  // relayered, and "Changed the shape of" for every edit of a shape.
-  //
-  // These feed the browser's shape, built through the real createAnnotation
-  // so the payload is the one the canvas actually ships.
   describe('annotation_updated classification, browser-shaped full payloads', () => {
     function browserEdit(base, changes) {
-      // What the store recorded for a browser-originated edit before PR #627:
-      // `before` is the stored annotation, `after` is the whole incoming
-      // annotation merged over it, and `fields` is that payload's entire key
-      // set. Kept in that legacy shape so old persisted records stay covered.
       const incoming = createAnnotation({ ...base, ...changes });
       const before = { ...createAnnotation(base), updated_at: '2026-08-26T09:00:00Z' };
       return record({
@@ -229,18 +129,6 @@ describe('describeActivity', () => {
         after: { ...before, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
       });
     }
-
-    // `z: 0` is explicit on every fixture, not left to `createAnnotation`'s
-    // own default: these fixtures model an already-stored annotation's
-    // *current* z at the moment of the edit under test, which is a property
-    // of that annotation's history, not of what kind it is. Leaving it
-    // implicit would make the `before` snapshot pick up
-    // `defaultAnnotationZ('shape')` (-1, task-annotation-render-direct-
-    // manipulation's semantic default layers) for the `shape` case only,
-    // silently changing what "before" means between kinds and making the
-    // send-to-back case below (`z: -1`) a no-op for `shape` alone — the
-    // "before" and "after" z would both already be -1, so `changed.has('z')`
-    // would be false and the assertion would test nothing.
     const KINDS = [
       { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 }, z: 0 },
       { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 }, z: 0 },
@@ -248,69 +136,41 @@ describe('describeActivity', () => {
       { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 }, z: 0 },
     ];
 
-    it.each(KINDS)('classifies a bring-to-front on $type as "raised", not "unlocked"', (base) => {
-      expect(describeActivity(browserEdit(base, { z: 5 })).key).toBe(
-        'history.desc.annotation_updated_raised'
-      );
-    });
-
-    it.each(KINDS)('classifies a send-to-back on $type as "lowered", not "unlocked"', (base) => {
-      expect(describeActivity(browserEdit(base, { z: -1 })).key).toBe(
-        'history.desc.annotation_updated_lowered'
-      );
-    });
-
-    it.each(KINDS)('classifies a plain move of $type as "moved", not "unlocked"', (base) => {
-      expect(describeActivity(browserEdit(base, { position: { x: 300, y: 200 } })).key).toBe(
-        'history.desc.annotation_updated_moved'
-      );
-    });
-
-    it.each(KINDS)('classifies a recolour of $type as "style", not "unlocked"', (base) => {
-      expect(describeActivity(browserEdit(base, { color: 'crimson' })).key).toBe(
-        'history.desc.annotation_updated_style'
-      );
-    });
-
-    it.each(KINDS)('still reports a genuine lock and unlock of $type as itself', (base) => {
-      expect(describeActivity(browserEdit(base, { locked: true })).key).toBe(
-        'history.desc.annotation_updated_locked'
-      );
-      const locked = { ...base, locked: true };
-      expect(describeActivity(browserEdit(locked, { locked: false })).key).toBe(
-        'history.desc.annotation_updated_unlocked'
-      );
-    });
-
-    it('reads a resize as "resized" and a rotation as "rotated" through a full payload', () => {
-      const base = KINDS[0];
-      expect(describeActivity(browserEdit(base, { size: { w: 400, h: 300 } })).key).toBe(
-        'history.desc.annotation_updated_resized'
-      );
-      expect(describeActivity(browserEdit(base, { rotation: 30 })).key).toBe(
-        'history.desc.annotation_updated_rotated'
-      );
-    });
-
-    it('reads a text edit through a full payload as "text"', () => {
-      expect(describeActivity(browserEdit(KINDS[0], { text: 'rewritten' })).key).toBe(
-        'history.desc.annotation_updated_text'
-      );
-    });
-
-    it('reports a re-sent but unchanged annotation as "generic", not as an unlock', () => {
-      // computeOps only emits an op when something differs, but a retried
-      // batch or an undo replay can re-apply an identical payload.
-      expect(describeActivity(browserEdit(KINDS[0], {})).key).toBe(
-        'history.desc.annotation_updated_generic'
+    it.each([
+      ...KINDS.flatMap((base) => [
+        { name: `${base.type} raised`, base, changes: { z: 5 }, expected: 'raised' },
+        { name: `${base.type} lowered`, base, changes: { z: -1 }, expected: 'lowered' },
+        {
+          name: `${base.type} moved`,
+          base,
+          changes: { position: { x: 300, y: 200 } },
+          expected: 'moved',
+        },
+        { name: `${base.type} recoloured`, base, changes: { color: 'crimson' }, expected: 'style' },
+        { name: `${base.type} locked`, base, changes: { locked: true }, expected: 'locked' },
+        {
+          name: `${base.type} unlocked`,
+          base: { ...base, locked: true },
+          changes: { locked: false },
+          expected: 'unlocked',
+        },
+      ]),
+      {
+        name: 'resized',
+        base: KINDS[0],
+        changes: { size: { w: 400, h: 300 } },
+        expected: 'resized',
+      },
+      { name: 'rotated', base: KINDS[0], changes: { rotation: 30 }, expected: 'rotated' },
+      { name: 'text edited', base: KINDS[0], changes: { text: 'rewritten' }, expected: 'text' },
+      { name: 'unchanged', base: KINDS[0], changes: {}, expected: 'generic' },
+    ])('classifies a full payload: $name', ({ base, changes, expected }) => {
+      expect(describeActivity(browserEdit(base, changes)).key).toBe(
+        `history.desc.annotation_updated_${expected}`
       );
     });
 
     it('does not read the browser materialising envelope defaults as a change', () => {
-      // The first browser touch of an agent-created annotation spells out the
-      // envelope fields the agent left off (`z`, `locked`, `text`). Counting
-      // those as changes is the same false-unlock defect by another route, so
-      // the move is what gets reported.
       const r = record({
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'a1' },
@@ -320,21 +180,7 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
   });
-
-  // The suite above builds `before` with createAnnotation too, so both sides
-  // are already browser-normalised — which models a browser-created
-  // annotation edited by the browser, the case that was never broken. The
-  // producer divergence that caused the original defect lives in the other
-  // pairing: a SERVER-stored `before` (backend/core/session_annotations.py's
-  // build_annotation — no materialised defaults, `w`/`h` at 0, `content`
-  // merged verbatim) against a browser-normalised `after`. These drive the
-  // real overlay translators over server-shaped annotations, which is what
-  // the classifier actually sees the first time a user touches anything an
-  // agent created.
   describe('annotation_updated classification, server-created annotations', () => {
-    // build_annotation's output shape, hand-written so the test states the
-    // contract rather than importing it across the language boundary:
-    // required x/y, w/h/rotation defaulted to 0, `content` merged verbatim.
     function serverAnnotation(type, { x = 10, y = 20, ...content } = {}) {
       return {
         type,
@@ -347,9 +193,6 @@ describe('describeActivity', () => {
         ...content,
       };
     }
-
-    // The round trip a user's drag actually takes: load through the overlay
-    // translators, move it, write it back, over the wire as JSON.
     function browserMove(stored, dx = 250) {
       const overlays = annotationsToOverlays([stored]);
       const moved = overlays.map((o) => ({
@@ -384,8 +227,6 @@ describe('describeActivity', () => {
     });
 
     it('does not read the browser normalising a free-text shape name as a shape change', () => {
-      // "Process Arrow" comes back as "process_arrow" purely from
-      // normalizeShapeName; the server stores content.shape verbatim.
       const r = browserMove(serverAnnotation('shape', { shape: 'Process Arrow' }));
       expect(r.before.shape).toBe('Process Arrow');
       expect(r.after.shape).toBe('process_arrow');
@@ -393,11 +234,6 @@ describe('describeActivity', () => {
     });
 
     it('no longer materializes a default size on an unsized label (smallfix-browser-clobbers-unsized-annotation-geometry)', () => {
-      // label/line/freehand used to carry no size through the overlay
-      // translators, so normalizeGeometry filled 160x96 over the server's 0
-      // on the very first browser touch. The translators now carry
-      // geometry.w/h through unconditionally (including an explicit 0), so
-      // this write-back changes nothing about the size.
       const r = browserMove(serverAnnotation('label', { text: 'hi' }));
       expect(r.before.geometry.w).toBe(0);
       expect(r.after.geometry.w).toBe(0);
@@ -434,10 +270,6 @@ describe('describeActivity', () => {
           }),
       },
     ])('does not read the browser rebuilding $name as a move', ({ ann }) => {
-      // This translator derives position from endpoint content, so an
-      // untouched round trip rewrites position without the user having
-      // dragged anything. Nothing else changed either, so there is nothing
-      // to report.
       const stored = ann();
       const r = browserMove(stored, 0);
       expect(r.before.position).not.toEqual(r.after.position);
@@ -478,16 +310,12 @@ describe('describeActivity', () => {
           }),
       },
     ])('still reads a genuine drag of a $name as a move', ({ ann }) => {
-      // A real drag shifts the derived content too, which is what separates it
-      // from the rewrite above.
       expect(describeActivity(browserMove(ann(), 250)).key).toBe(
         'history.desc.annotation_updated_moved'
       );
     });
 
     it('still reports a genuine resize of an annotation the server left unsized', () => {
-      // The materialised-default guard must key on the default itself, not on
-      // "either side is 0", or a first-touch resize disappears.
       const before = serverAnnotation('label', { text: 'hi' });
       const after = {
         ...before,
@@ -499,8 +327,6 @@ describe('describeActivity', () => {
     });
 
     it('still reports an agent resizing a dimension down to zero', () => {
-      // build_annotation_patch accepts w=0; only MCP can reach this, since the
-      // canvas resizer has a minimum.
       const before = serverAnnotation('shape');
       before.geometry = { x: 10, y: 20, w: 800, h: 400, rotation: 0 };
       const after = { ...before, geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } };
@@ -510,10 +336,6 @@ describe('describeActivity', () => {
     });
 
     it('reads a move onto and off the origin as a move', () => {
-      // Pins the asymmetry the geometry branch rests on: `x`/`y` are compared
-      // plainly while `w`/`h` are guarded, so a coordinate of 0 stays a real
-      // position. Collapsing the two onto one rule would pass every other test
-      // here while silently dropping these.
       const at = (x, y) => ({
         type: 'note',
         geometry: { x, y, w: 160, h: 96, rotation: 0 },
@@ -530,11 +352,6 @@ describe('describeActivity', () => {
     });
 
     it('does not claim a resize when only the style changed on an unsized label', () => {
-      // A recolour of an agent-created label whose geometry the browser never
-      // touches (smallfix-browser-clobbers-unsized-annotation-geometry: the
-      // translators now carry the server's w/h=0 through faithfully instead
-      // of materializing 160x96) must report as the recolour it is, not a
-      // resize.
       const before = serverAnnotation('label', { text: 'hi' });
       const after = {
         ...before,
@@ -546,12 +363,6 @@ describe('describeActivity', () => {
     });
 
     it('now reports a genuine resize to exactly 160x96 on a previously-unsized label', () => {
-      // Before the geometry fix, the browser's own no-op write-back produced
-      // 160x96 for an unsized label, so this exact transition was
-      // indistinguishable from that artifact and had to be suppressed (the
-      // test above, before this fix, asserted the opposite of this). Now
-      // that the write-back carries the server's real 0 through, this is a
-      // real, reportable resize.
       const before = serverAnnotation('label', { text: 'hi' });
       const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
@@ -559,20 +370,7 @@ describe('describeActivity', () => {
       );
     });
   });
-
-  // Groups are the kind two rounds of per-field fixes never reached, because
-  // they are not overlays: `useSharedSession` mirrors them through
-  // annotationsToGroups/groupsToAnnotations. That pair used to carry neither
-  // `z` nor `locked` nor rotation, so the browser's write-back of an
-  // agent-created group dropped all three and renaming a locked group
-  // announced "Unlocked" — the literal string this whole change exists to
-  // eliminate. PR #483 made it carry `locked` and `z`, and this module
-  // followed for free: it reports whatever the round trip preserves, so the
-  // assertions below now pin that lock, layer, and rotation survive where they
-  // once pinned the clobber. `label` is still defaulted, so it keeps the
-  // asymmetry.
   describe('annotation_updated classification, groups', () => {
-    // build_group_annotation's output shape (backend/core/session_annotations.py).
     function serverGroup({ x = 10, y = 20, w = 320, h = 200, ...rest } = {}) {
       const { color, ...fields } = rest;
       return {
@@ -590,8 +388,6 @@ describe('describeActivity', () => {
         ...fields,
       };
     }
-
-    // The round trip a group edit actually takes.
     function groupEdit(stored, mutate = (g) => g) {
       const { groups, parentIds } = annotationsToGroups([stored]);
       const edited = groups.map((g) => mutate({ ...g }));
@@ -605,12 +401,6 @@ describe('describeActivity', () => {
     }
 
     it('does not report renaming a LOCKED group as an unlock', () => {
-      // The case this whole change exists for. It used to report "Unlocked",
-      // because the group translators dropped `locked` and the write-back
-      // therefore always said false. PR #483 made them carry it, so the flag
-      // now survives the round trip and the rename reads as a rename either
-      // way — the assertion below pins that the lock is preserved, where it
-      // once pinned the clobber.
       const r = groupEdit(serverGroup({ label: 'Team', locked: true }), (g) => ({
         ...g,
         label: 'Team B',
@@ -633,7 +423,6 @@ describe('describeActivity', () => {
     });
 
     it('does not report renaming a group carrying a z as a layer change', () => {
-      // `z` survives the round trip too (PR #483), so a rename is a rename.
       const r = groupEdit(serverGroup({ label: 'Team', z: 4 }), (g) => ({ ...g, label: 'B' }));
       expect(r.before.z).toBe(4);
       expect(r.after.z).toBe(4);
@@ -646,12 +435,6 @@ describe('describeActivity', () => {
       { edit: 'raising', field: 'z', from: 0, to: 5, expected: 'raised' },
       { edit: 'lowering to zero', field: 'z', from: 5, to: 0, expected: 'lowered' },
     ])('reports an agent $edit a group in both directions', (c) => {
-      // Once the translators carry a field, the write-back states the real
-      // value rather than a default, so the asymmetry disappears for it —
-      // "Unlocked" and "Lowered" can now be reported truly for a group. The
-      // classifier needed no change for this: it reads whatever the round trip
-      // preserves, so an upstream translator fix improves it for free. Pinned
-      // in both directions so a regression in either is caught here.
       const at = (v) => serverGroup({ [c.field]: v });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
@@ -660,23 +443,11 @@ describe('describeActivity', () => {
     });
 
     it('under-reports naming an unlabelled group literally "Group"', () => {
-      // The other half of the asymmetry, by a different route: the pair does
-      // not drop `label`, it substitutes `'Group'` for an empty one, which
-      // states a value the user never set just the same. Deliberate, but not
-      // for the reason it is tempting to write down: a drag is safe either
-      // way, because geometry is read before `label` and reports itself. What
-      // this prevents is a write-back of an unlabelled group in which nothing
-      // higher-priority changed reading as a rename the user never made.
-      //
-      // Note this is now the only thing guarding the `'Group'` substitution —
-      // sessionAnnotations' own tests do not pin it — so removing it would
-      // let that default change silently.
       const at = (v) => serverGroup({ label: v });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Group') }))
           .key
       ).toBe('history.desc.annotation_updated_generic');
-      // Any other name is a real rename, in both directions.
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Team') }))
           .key
@@ -688,9 +459,6 @@ describe('describeActivity', () => {
     });
 
     it('reports rotating and unrotating a group once the translators preserve rotation', () => {
-      // Group translators now carry `locked`, `z`, and `rotation`, so this
-      // reports rotation changes in both directions instead of treating an
-      // unrotate as a no-op browser write-back.
       const at = (v) => serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(0), after: at(45) })).key
@@ -701,8 +469,6 @@ describe('describeActivity', () => {
     });
 
     it('does not report renaming a rotated group as a rotation change', () => {
-      // Rotation is preserved, so a rename of a rotated group must still not
-      // surface as a rotation change.
       const rotated = serverGroup({ label: 'Team' });
       rotated.geometry = { ...rotated.geometry, rotation: 45 };
       expect(describeActivity(groupEdit(rotated, (g) => ({ ...g, label: 'B' }))).key).toBe(
@@ -710,9 +476,6 @@ describe('describeActivity', () => {
       );
     });
   });
-
-  // Round 3's remaining findings: every one is a producer rewriting a field
-  // the user never touched, on a path the per-field guards did not cover.
   describe('annotation_updated classification, other producer rewrites', () => {
     function serverAnn(type, content = {}) {
       return {
@@ -740,8 +503,6 @@ describe('describeActivity', () => {
     it.each(['text', 'label', 'icon'])(
       'does not report an attachment gaining target_type on a dragged %s as "attached"',
       (type) => {
-        // normalizeAttachment fills target_type:'node'; the backend makes it
-        // optional, so an agent may legally omit it.
         const stored = serverAnn(type, { attachment: { target_id: 'n2' }, text: 'hi' });
         const r = browserRoundTrip(stored, (o) => ({
           ...o,
@@ -752,8 +513,6 @@ describe('describeActivity', () => {
     );
 
     it('does not report normalising freehand point metadata as a move', () => {
-      // normalizeFreehandPoint clamps pressure and drops unknown keys; the
-      // backend stores points verbatim.
       const stored = serverAnn('freehand', {
         points: [
           { x: 120, y: 340, pressure: 5 },
@@ -776,17 +535,12 @@ describe('describeActivity', () => {
     });
 
     it('reports a text edit as text even when the write-back drops a style key', () => {
-      // The translators carry a fixed style key list, so style.opacity is
-      // dropped on the way out. That must not outrank what the user did.
       const stored = serverAnn('text', { text: 'before', style: { color: 'red', opacity: 0.5 } });
       const r = browserRoundTrip(stored, (o) => ({ ...o, text: 'after' }));
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
 
     it('still reports an agent resizing a kind whose overlay carries its size', () => {
-      // A shape's overlay preserves w/h, so 0 -> 160x96 there can only be an
-      // agent resize. A guard keyed on the value rather than the round trip
-      // swallowed exactly this.
       const before = serverAnn('shape');
       const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
@@ -796,17 +550,6 @@ describe('describeActivity', () => {
   });
 
   describe('cost of classifying an image record', () => {
-    // Reconstructing the write-back runs the annotation through
-    // createAnnotation, which deep-clones an image's payload through JSON —
-    // and that payload is an embedded data URI of up to 2 MB. Done twice per
-    // record from SessionActivityList's render body, on a drawer holding up
-    // to 500 records that re-renders on every node change, it cost 1838 ms of
-    // synchronous main-thread time for 100 records against 1 ms before.
-    //
-    // Guarded structurally rather than on the clock: a wall-clock bound tight
-    // enough to catch the regression is close enough to the honest cost to go
-    // flaky on a slow runner. `toJSON` is called if and only if something
-    // JSON-serialises the payload, which is exactly the regression.
     function imagePayload(counter) {
       const payload = { url: `data:image/webp;base64,${'A'.repeat(64 * 1024)}` };
       Object.defineProperty(payload, 'toJSON', {
@@ -853,8 +596,6 @@ describe('describeActivity', () => {
     });
 
     it('does not re-run the write-back when the same record is classified again', () => {
-      // SessionActivityList calls describeActivity from its render body, so
-      // without the memo every re-render pays the full reconstruction.
       let typeReads = 0;
       const before = {
         id: 'memo-1',
@@ -886,15 +627,6 @@ describe('describeActivity', () => {
     });
 
     it('classifies the same whether or not the payload also changed', () => {
-      // The invariant that makes holding `image` out of the write-back safe:
-      // the payload never perturbs how the rest of the annotation is read.
-      //
-      // Deliberately not asserted as "a swap still registers as a change" —
-      // that reads as a guard but cannot fail, because no branch keys on
-      // `image` and the change set is only asked whether it holds a named
-      // field, so whether `image` is in it is unobservable. Removing the
-      // image comparison outright leaves such an assertion passing. This one
-      // fails if the payload ever starts influencing the outcome.
       const counter = { serialised: 0 };
       const samePayload = describeActivity(imageRecord(counter)).key;
       const swappedPayload = describeActivity(
@@ -906,9 +638,6 @@ describe('describeActivity', () => {
     });
 
     it('reports a payload-only change as a plain update', () => {
-      // Documented behaviour rather than a guard: there is no `image` kind to
-      // report, so a swap with nothing else changed has no more specific
-      // description available.
       const swapOnly = record({
         op: 'annotation_updated',
         before: { type: 'image', image: { url: 'data:image/webp;base64,AAAA' } },
@@ -919,8 +648,6 @@ describe('describeActivity', () => {
   });
 
   describe('label/line style keys beyond the ones the canvas controls', () => {
-    // smallfix-label-overlay-drops-nonvisual-style-keys: the translators now
-    // carry every style key, where builds before it dropped all but these.
     const label = {
       id: 'l1',
       type: 'label',
@@ -968,38 +695,29 @@ describe('describeActivity', () => {
       expect(describeActivity(lineRestyle).key).toBe('history.desc.annotation_updated_style');
     });
 
-    it("does not report an older build's dropped keys as a restyle", () => {
-      // What a pre-fix build wrote for a text edit: the extra key gone.
-      const olderText = record({
-        op: 'annotation_updated',
+    const labelWithExtraWidth = { ...label, style: { ...label.style, width: 2 } };
+    const lineWithFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
+    it.each([
+      {
+        name: 'older text edit with dropped key',
         before: label,
         after: { ...label, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
-      });
-      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
-      const olderArrowhead = record({
-        op: 'annotation_updated',
+        expected: 'text',
+      },
+      {
+        name: 'older arrowhead edit with dropped key',
         before: line,
         after: { ...line, endArrow: false, style: { color: 'red', opacity: 0.5 } },
-      });
-      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
-    });
-
-    it('still reports a restyle an older build wrote', () => {
-      const r = record({
-        op: 'annotation_updated',
+        expected: 'generic',
+      },
+      {
+        name: 'older restyle',
         before: label,
         after: { ...label, style: { color: 'blue', fontSize: 18, opacity: 0.5 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-    });
-
-    it('reports a style key drop on a kind outside label/line as a restyle', () => {
-      // Only the label/line translators changed between builds; whatever
-      // note/shape drop is the same in every build and already shows in
-      // `browserWriteBack`, so a style narrowed to {color, opacity} there is
-      // a real edit.
-      for (const type of ['note', 'shape']) {
-        const stored = {
+        expected: 'style',
+      },
+      ...['note', 'shape'].map((type) => {
+        const before = {
           id: 's1',
           type,
           position: { x: 0, y: 0 },
@@ -1007,53 +725,40 @@ describe('describeActivity', () => {
           locked: false,
           style: { color: 'red', opacity: 0.5, dash: 'dotted' },
         };
-        const r = record({
-          op: 'annotation_updated',
-          before: stored,
-          after: { ...stored, style: { color: 'red', opacity: 0.5 } },
-        });
-        expect(describeActivity(r).key, type).toBe('history.desc.annotation_updated_style');
-      }
-    });
-
-    it('reports a label that also lost a named key as a restyle', () => {
-      // An older build kept fontSize, so its write-back never drops it.
-      const r = record({
-        op: 'annotation_updated',
+        return {
+          name: `${type} style key drop`,
+          before,
+          after: { ...before, style: { color: 'red', opacity: 0.5 } },
+          expected: 'style',
+        };
+      }),
+      {
+        name: 'label named key drop',
         before: label,
         after: { ...label, style: { color: 'red', opacity: 0.5 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-    });
-
-    it('reports a change to an uncontrolled style key alone as a restyle', () => {
-      const r = record({
-        op: 'annotation_updated',
+        expected: 'style',
+      },
+      {
+        name: 'uncontrolled key change',
         before: label,
         after: { ...label, style: { ...label.style, dash: 'dashed' } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-    });
-
-    it('reports a partial drop of uncontrolled style keys as a restyle', () => {
-      // An older build dropped every key beyond the named ones, never some.
-      const twoExtra = { ...label, style: { ...label.style, width: 2 } };
-      const r = record({
-        op: 'annotation_updated',
-        before: twoExtra,
-        after: { ...twoExtra, style: label.style },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
-    });
-
-    it("treats a line's fontSize as a key older builds dropped", () => {
-      const withFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
-      const r = record({
-        op: 'annotation_updated',
-        before: withFontSize,
-        after: { ...withFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
-      });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+        expected: 'style',
+      },
+      {
+        name: 'partial uncontrolled key drop',
+        before: labelWithExtraWidth,
+        after: { ...labelWithExtraWidth, style: label.style },
+        expected: 'style',
+      },
+      {
+        name: 'line fontSize drop',
+        before: lineWithFontSize,
+        after: { ...lineWithFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+        expected: 'generic',
+      },
+    ])('classifies style changes: $name', ({ before, after, expected }) => {
+      const r = record({ op: 'annotation_updated', before, after });
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
     it("recognises an older build's drop on records that carry only type", () => {
@@ -1086,9 +791,6 @@ describe('describeActivity', () => {
 
   describe('shape spelling', () => {
     it('does not report an agent respelling a shape it already is as a shape change', () => {
-      // The server stores content.shape verbatim, so an agent may write
-      // "Rectangle" over a `rectangle`. Normalising only the before-side
-      // caught the browser's rewrite but not this one.
       for (const [before, after] of [
         ['rectangle', 'Rectangle'],
         ['process_arrow', 'Process Arrow'],
@@ -1115,19 +817,11 @@ describe('describeActivity', () => {
           })
         ).key;
       expect(change('circle', 'triangle')).toBe('history.desc.annotation_updated_shape');
-      // normalizeShapeName keeps an unrecognised name verbatim, so this is a
-      // real change rather than a spelling of the same thing.
       expect(change('rectangle', 'blob')).toBe('history.desc.annotation_updated_shape');
     });
   });
 
   describe('an annotation kind this build cannot read', () => {
-    // The activity log keeps 7 days, so it outlives a deploy that drops a
-    // kind. `browserWriteBack` cannot reconstruct a write-back for a kind the
-    // translators cannot parse, and diffing such a record raw reproduces the
-    // exact defect this module exists to remove — the records the OLDER
-    // build's browser wrote are whole-annotation rewrites, so every field the
-    // new build would normalise reads as a user edit.
     const stored = {
       id: 's1',
       type: 'sticker',
@@ -1139,8 +833,6 @@ describe('describeActivity', () => {
     };
 
     it('never claims an unlock for a whole-annotation rewrite it cannot verify', () => {
-      // What an older build's browser wrote: everything shipped, the envelope
-      // fields landing on the values that build normalised them to.
       const wholeWrite = {
         ...stored,
         locked: false,
@@ -1154,9 +846,6 @@ describe('describeActivity', () => {
     });
 
     it('reports a plain update for a sparse agent patch too, rather than guessing', () => {
-      // The safe direction of the trade: naming the field here would require
-      // trusting a raw diff, which is what mislabels the case above. An
-      // unreadable kind gets an honest "something changed" either way.
       const patched = { ...stored, text: 'bye' };
       expect(
         describeActivity(record({ op: 'annotation_updated', before: stored, after: patched })).key
@@ -1175,9 +864,6 @@ describe('describeActivity', () => {
     });
 
     it('logs the skipped annotation without an image field it never had', () => {
-      // browserWriteBack holds `image` out of its round trip; doing that by
-      // spreading `image: undefined` put a phantom key on the object the
-      // skipped-annotation warning prints.
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         describeActivity(
@@ -1205,10 +891,6 @@ describe('describeActivity', () => {
   });
 
   describe('sameValue equivalences', () => {
-    // classifyAnnotationUpdate's whole correctness rests on this table, and
-    // nothing else pins it: a later edit here changes what the activity log
-    // asserts, so it gets its own test rather than only being reached through
-    // geometry/style.
     it('treats every unset spelling as one value', () => {
       const unset = [undefined, null, false, '', 0, {}, []];
       for (const a of unset) {
@@ -1322,8 +1004,6 @@ describe('describeActivity', () => {
 
   describe('annotation_updated classification, browser-shaped full payloads (continued)', () => {
     it('reports an agent-only sparse patch from the same before/after diff', () => {
-      // The MCP path sends a sparse patch, but the store still snapshots the
-      // whole annotation either side, so the diff serves both producers.
       const before = createAnnotation({ id: 'n1', type: 'note', text: 'before' });
       const r = record({
         op: 'annotation_updated',
@@ -1344,51 +1024,22 @@ describe('describeActivity', () => {
       key: 'history.desc.node_moved',
       params: { name: 'Acme Corp' },
     });
-    // Falls back to the raw id when the node cannot be resolved (e.g. no
-    // longer on the canvas).
     expect(describeActivity(r).params.name).toBe('node-42');
   });
 
-  it('describes layout_applied / nodes_hidden / nodes_shown by affected count', () => {
-    expect(
-      describeActivity(
-        record({ op: 'layout_applied', affected: { kind: 'layout', node_ids: ['a', 'b', 'c'] } })
-      )
-    ).toEqual({ key: 'history.desc.layout_applied', params: { count: 3 } });
-
-    expect(
-      describeActivity(
-        record({ op: 'nodes_hidden', affected: { kind: 'node_visibility', ids: ['a', 'b'] } })
-      )
-    ).toEqual({ key: 'history.desc.nodes_hidden', params: { count: 2 } });
-
-    expect(
-      describeActivity(
-        record({ op: 'nodes_shown', affected: { kind: 'node_visibility', ids: ['a'] } })
-      )
-    ).toEqual({ key: 'history.desc.nodes_shown', params: { count: 1 } });
-  });
-
-  it('describes nodes_dimmed / nodes_undimmed / edges_dimmed / edges_undimmed by affected count', () => {
-    expect(
-      describeActivity(
-        record({ op: 'nodes_dimmed', affected: { kind: 'node_dim', ids: ['a', 'b'] } })
-      )
-    ).toEqual({ key: 'history.desc.nodes_dimmed', params: { count: 2 } });
-
-    expect(
-      describeActivity(record({ op: 'nodes_undimmed', affected: { kind: 'node_dim', ids: ['a'] } }))
-    ).toEqual({ key: 'history.desc.nodes_undimmed', params: { count: 1 } });
-
-    expect(
-      describeActivity(record({ op: 'edges_dimmed', affected: { kind: 'edge_dim', ids: ['e1'] } }))
-    ).toEqual({ key: 'history.desc.edges_dimmed', params: { count: 1 } });
-
-    expect(
-      describeActivity(
-        record({ op: 'edges_undimmed', affected: { kind: 'edge_dim', ids: ['e1', 'e2'] } })
-      )
-    ).toEqual({ key: 'history.desc.edges_undimmed', params: { count: 2 } });
+  it.each([
+    ['layout_applied', { kind: 'layout', node_ids: ['a', 'b', 'c'] }, 3],
+    ['nodes_hidden', { kind: 'node_visibility', ids: ['a', 'b'] }, 2],
+    ['nodes_shown', { kind: 'node_visibility', ids: ['a'] }, 1],
+    ['nodes_dimmed', { kind: 'node_dim', ids: ['a', 'b'] }, 2],
+    ['nodes_undimmed', { kind: 'node_dim', ids: ['a'] }, 1],
+    ['edges_dimmed', { kind: 'edge_dim', ids: ['e1'] }, 1],
+    ['edges_undimmed', { kind: 'edge_dim', ids: ['e1', 'e2'] }, 2],
+  ])('describes %s by affected count', (op, affected, count) => {
+    expect(describeActivity(record({ op, affected }))).toEqual({
+      key: `history.desc.${op}`,
+      params: { count },
+    });
   });
 
   it('describes edge_intensity_set without needing an id or count', () => {
@@ -1456,8 +1107,6 @@ describe('classifyUndoError', () => {
   });
 
   it('maps the LeaseConflict 409 to claimed (retryable), not to conflict', () => {
-    // Verbatim str(LeaseConflict) from backend/core/session_manager.py; the
-    // ids vary, so the classifier matches the invariant middle of the string.
     expect(
       classifyUndoError({
         status: 409,
@@ -1483,8 +1132,6 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 409, message: 'action could not be reverted' })).toBe(
       'conflict'
     );
-    // A future wording change to the busy message would fall through here —
-    // still a safe, true "conflict" description of a 409, not a crash.
     expect(classifyUndoError({ status: 409, message: 'something else entirely' })).toBe('conflict');
   });
 
@@ -1496,19 +1143,10 @@ describe('classifyUndoError', () => {
 });
 
 describe('describeActivity × i18n', () => {
-  // ActivityDrawer.jsx renders describeActivity's key straight through t(),
-  // so a classification with no key shows the user the key name. Driven
-  // through the classifier for the same reason the undo-reason pairing below
-  // is: a kind that changes spelling is caught here, not in the UI.
   const cases = [
     { before: { type: 'note', shape: 'rectangle' }, after: { type: 'note', shape: 'ellipse' } },
     { before: { type: 'note', locked: false }, after: { type: 'note', locked: true } },
     { before: { type: 'note', locked: true }, after: { type: 'note', locked: false } },
-    // `label`, not `note`: only label/text/icon carry an attachment
-    // through the overlay translators (`vote_dot` used to be a fourth —
-    // task-annotation-vote-dot-simplify retired it), so a note is never
-    // attached or detached and using one here would assert a transition
-    // that cannot happen.
     { before: { type: 'label' }, after: { type: 'label', attachment: { target_id: 'n1' } } },
     { before: { type: 'label', attachment: { target_id: 'n1' } }, after: { type: 'label' } },
     {
@@ -1536,8 +1174,6 @@ describe('describeActivity × i18n', () => {
   it('has an en and sv message for every annotation_updated kind these inputs classify to', () => {
     const keys = cases.map((c) => describeActivity(record({ op: 'annotation_updated', ...c })).key);
     const unique = [...new Set(keys)];
-    // Every case must reach a kind of its own; two collapsing onto one means
-    // a branch was lost.
     expect(unique).toHaveLength(cases.length);
     for (const key of unique) {
       const name = key.replace('history.desc.', '');
@@ -1548,14 +1184,6 @@ describe('describeActivity × i18n', () => {
 });
 
 describe('classifyUndoError × i18n', () => {
-  // ActivityDrawer.jsx renders `history.session_undo_${reason}` straight from
-  // the classifier's return value, so a reason with no key shows the user the
-  // key name. Driven through the classifier rather than hardcoding the reason
-  // strings, so a reason that changes spelling is caught here and not in the
-  // UI. It does not police the classifier's *shape*: a new branch added here
-  // without a matching input below is not caught — the toHaveLength guard
-  // catches two inputs collapsing onto one reason, which is the branch
-  // deletion this pairs with, not a branch addition.
   const errors = [
     { status: 429 },
     { status: 404, message: 'no undoable action' },
