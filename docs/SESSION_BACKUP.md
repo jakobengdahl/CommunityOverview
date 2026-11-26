@@ -58,13 +58,15 @@ embedded assets and mutable templates. Profile templates are configuration and a
 included; retain the corresponding profile configuration separately. Graph data is not included.
 
 Format version 2 adds a validated `templates` array to the integrity-protected document.
-Version 1 remains supported on restore and contains no templates. Both versions store embedded image data URLs in the presentation state and
-in a deduplicated asset table. Each asset's SHA-256 is over its decoded bytes.
+Version 1 remains supported on restore and contains no templates. Both versions store embedded image annotation data URLs in the presentation state and
+in a deduplicated asset table, including legacy URLs with non-image media types.
+Each annotation retains its original URL and header even when its payload shares an
+asset with another annotation. Each asset's SHA-256 is over its decoded bytes.
 Each session's `write_mode` and `write_mode_source` describe its effective mode;
 `write_mode_mirror` preserves the original fields present in the session record,
 which can differ from the authoritative staged-session record.
 The document `integrity.sha256` is over UTF-8 JSON of the entire document with
-`integrity` omitted, sorted keys, no whitespace, unescaped Unicode, and no
+`integrity` omitted, keys sorted by Unicode code point, no whitespace, unescaped Unicode, and no
 non-finite numbers. These hashes detect accidental corruption; they do not
 provide authentication. Retain both artifacts securely; a graph-only backup cannot recover sessions.
 
@@ -97,7 +99,9 @@ Restore checks document and asset hashes, template documents and profile ID coll
 IDs, revisions, annotation safety and
 the normal session and image limits before publication. Version 1 supports up
 to 10,000 sessions and 2,000 annotations per session, subject also to the
-normal document and image size limits. The whole backup must fit in memory and
+normal document and image size limits. Legacy image URLs that do not meet the
+current image safety rules are backed up but cannot be restored until corrected.
+The whole backup must fit in memory and
 the copied graph and restored data must fit on disk. Nonempty import mapping or
 report tables are refused: version 1 backup currently writes empty tables.
 The file integration reads profile templates from the `templates` directory beside the
