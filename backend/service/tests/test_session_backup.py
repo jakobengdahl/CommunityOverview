@@ -594,7 +594,9 @@ def test_revision_change_during_authorization_is_captured(backend, revoke):
                 backend.save(changed)
                 self.changed = True
             return GraphAuthorizationDecision(
-                allowed=not (revoke and context.session_id == session.id and self.changed)
+                allowed=not (
+                    revoke and context.session_id == session.id and self.changed
+                )
             )
 
     service = Service()
