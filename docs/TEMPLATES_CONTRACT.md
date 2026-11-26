@@ -61,8 +61,8 @@ On future insertion, resolve a valid reference to its current definition and
 use the inline copy when the reference is unknown. A tombstoned saved shape
 instead resolves to the built-in card; it does not resurrect the inline copy.
 An inline-only selection uses its copy and a builtin selection uses the card.
-The shape library reverse index must count template references as well as other
-uses; that integration belongs to a later slice.
+The shape library reverse index counts template references separately from session
+uses.
 
 ## Persistence and profile templates
 

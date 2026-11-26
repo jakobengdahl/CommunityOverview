@@ -41,6 +41,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -946,8 +947,15 @@ class SessionManager:
     def _template_holds(self, session_id: str) -> bool:
         return self.template_store._backend.load(session_id) is not None
 
+    @contextmanager
     def _creating_session(self):
-        return self.template_store._backend.transaction()
+        # Match template mutations and shape writes: sessions before templates.
+        with (
+            self.store._lock,
+            self.store._backend.transaction(),
+            self.template_store._backend.transaction(),
+        ):
+            yield
 
     def create_session(
         self, name: Optional[str] = None, write_mode: Optional[str] = None

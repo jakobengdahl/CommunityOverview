@@ -95,7 +95,7 @@ before applying again. The light and dark preview options do not change the page
 then **Apply** to use it; saving and applying are separate steps, so a failed Apply keeps
 both the saved shape and your draft for another try. Pick a saved shape on the **Shape**
 tab to use it. Saved shapes are shared and live: after a warning with the number of
-sessions that use it, **Edit saved shape** changes it everywhere, while **Save copy**
+sessions and templates that use it, **Edit saved shape** changes it everywhere, while **Save copy**
 makes an independent one. **Delete saved shape** returns every user of it to the
 built-in card. If someone else changed or deleted the shape since your draft started from
 it, the dialog says so and keeps your draft: choose **Review latest version** to continue

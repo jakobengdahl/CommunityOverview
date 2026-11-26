@@ -396,11 +396,16 @@ export default function NodeAppearanceDialog({
     if (action === 'edit') started.definition = structuredClone(shown);
     setLibraryBusy(true);
     try {
-      const { revision, usage } = await library.usage(savedKey);
+      const {
+        revision,
+        usage,
+        template_usage: templateUsage = 0,
+        template_usage_token: templateUsageToken = null,
+      } = await library.usage(savedKey);
       if (revision !== pinned.revision) libraryFailed({ status: 409 });
       else {
         setLibraryStatus(null);
-        setReview({ ...started, revision, usage });
+        setReview({ ...started, revision, usage, templateUsage, templateUsageToken });
       }
     } catch (error) {
       libraryFailed(error?.status === 404 ? { status: 409 } : error);
@@ -409,10 +414,11 @@ export default function NodeAppearanceDialog({
     }
   }
   async function confirmReview() {
-    const { action, key, name, definition, revision, usage } = review;
+    const { action, key, name, definition, revision, usage, templateUsage, templateUsageToken } =
+      review;
     if (action === 'delete') {
       const entry = await libraryWrite(
-        () => library.remove(key, revision, usage),
+        () => library.remove(key, revision, usage, templateUsage, templateUsageToken),
         'library_deleted'
       );
       // Its users, this draft included, now show the built-in card; the
@@ -424,7 +430,8 @@ export default function NodeAppearanceDialog({
       return;
     }
     const entry = await libraryWrite(
-      () => library.update(key, name, definition, revision, usage),
+      () =>
+        library.update(key, name, definition, revision, usage, templateUsage, templateUsageToken),
       'library_updated'
     );
     if (entry) {
@@ -764,6 +771,7 @@ export default function NodeAppearanceDialog({
                         <p>
                           {t(`node_appearance.${review.action}_warning`, {
                             count: review.usage,
+                            templates: review.templateUsage,
                           })}
                         </p>
                         <button disabled={libraryBusy || conflict} onClick={confirmReview}>
