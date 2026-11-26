@@ -4,36 +4,44 @@ Session data is separate from graph data. Back up the graph separately and
 retain both artifacts and their association, including deployment and backup
 time. Coordinate the graph backup with the session snapshot so they correspond.
 
-The command requires a trusted deployment-specific Python integration module:
+For the file graph backend, use the supplied offline snapshot integration.
+Stop all application instances and all other writers, then take one coordinated,
+immutable filesystem snapshot containing the session directory and graph file
+with its journal, layers and merge sidecars. Keep this snapshot private and
+unchanged throughout the command. The command reads only this snapshot, never a
+live store. Retain the corresponding graph snapshot as the graph backup. A
+snapshot taken while any writer is active is not supported.
+
+Provide a trusted Python module with `authorization_hook()` returning the
+same operator policy used by the deployment. Run in the operator's authorization
+context, with that module on `PYTHONPATH`:
 
 ```sh
-python3 scripts/backup_sessions.py --integration my_deployment.session_backup \
-  --output /path/to/session-backup.json
+export SESSION_BACKUP_AUTH_MODULE=my_deployment.backup_auth
+export SESSION_BACKUP_GRAPH=/snapshot/graph.json
+export SESSION_BACKUP_SESSIONS=/snapshot/sessions
+python3 scripts/backup_sessions.py --integration scripts.session_backup_file_snapshot \
+  --output /secure/session-backup.json
 ```
 
-The module supplies `authorization_hook()` for the deployment's actual operator
-policy and `open_backup(hook)`, a context manager yielding `(service, sessions,
-modes)`. The service must use that hook. The command checks `backup_sessions` admin authorization
-(the default hook denies it) before opening the stores and checks every session and reference again
-while creating the document. Run it in the operator's authorization context.
+The command checks `backup_sessions` admin authorization before opening stores,
+and checks every session and reference before producing a document. The default
+hook denies admin access. The integration makes private working copies, and
+refuses a pending merge; resolve such a merge through the normal application
+workflow before taking a fresh offline snapshot. Restrict artifact access: the
+command creates a new owner-only file and refuses to overwrite one.
 
-The integration must use read-only graph and layer access, without merge recovery,
-and provide `modes.backup_snapshot()`, a context manager yielding a read-only
-`WriteModes`-compatible snapshot. It must serialize with all staged writes,
-mode changes and merges on every instance throughout the context. The session
-backend transaction is held across this snapshot. Observe the deployment's lock
-ordering to avoid deadlocks. If these guarantees cannot be provided, backup is
-unavailable; a claim that writers are stopped is not a substitute. The stock
-file graph backend does not supply this snapshot: its layer mirror is
-process-local and loading it may settle a pending merge. There is no built-in
-integration for it or for PostgreSQL yet. A deployment must implement and test
-one before running the command. Restrict access to the artifact; the command
-creates a new owner-only file and refuses to overwrite one.
+For PostgreSQL or another deployment, a trusted integration may supply
+`authorization_hook()` and `open_backup(hook)`, yielding `(service, sessions,
+modes)`. It must provide a read-only `modes.backup_snapshot()` coordinated with
+all staged writes, mode changes and merges across instances, and use the same
+hook in the service. No PostgreSQL integration is supplied. The session backend
+transaction is held during collection; authorization runs after it is released.
 
 The command backs up all sessions in the directory or fails without producing an
 artifact. It refuses inaccessible references, unreadable staged-session records,
 invalid embedded assets, and any unmerged staged changes. Merge or discard those
-changes through the normal workflow before stopping writers and retrying. It does
+changes through the normal workflow before taking a fresh snapshot and retrying. It does
 not include transient presence, leases or activity. The backup is held in memory,
 so available memory and disk space must accommodate the full session data and
 embedded assets. It does not back up templates or graph data.

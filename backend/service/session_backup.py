@@ -6,6 +6,7 @@ writes and does not perform recovery or other writes.
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 
@@ -71,6 +72,7 @@ def create_backup(service, session_backend, write_modes):
     """
     sessions = []
     assets = {}
+    captured = []
     with session_context.bind_session(None):
         _authorize(
             service.authorization_hook,
@@ -85,11 +87,6 @@ def create_backup(service, session_backend, write_modes):
             raise BackupRefused("layer snapshot unavailable")
         with session_backend.transaction(), snapshot() as snapshot_modes:
             for session_id in sorted(session_backend.list_ids()):
-                _authorize(
-                    service.authorization_hook,
-                    target="get_visualization_session",
-                    session_id=session_id,
-                )
                 raw = session_backend.load(session_id)
                 if raw is None or raw.get("id") != session_id:
                     raise BackupRefused("invalid session record")
@@ -110,56 +107,54 @@ def create_backup(service, session_backend, write_modes):
                 state = raw.get("state")
                 if not isinstance(state, dict) or state.keys() - _empty_state().keys():
                     raise BackupRefused("invalid session state")
-                node_ids = session_capture.captured_node_ids(state)
-                # Explicit membership always names graph nodes, even when an ID
-                # happens to share the legacy local-group prefix.
-                for field in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
-                    node_ids.extend(
-                        i for i in state.get(field, []) if isinstance(i, str)
-                    )
-                local_groups = {
-                    key
-                    for field in ("positions", "shape_overrides")
-                    for key in state.get(field, {})
-                    if key.startswith("group-")
-                } - set(node_ids)
-                # Revisions can outlive membership, but still disclose node IDs.
+                captured.append((session_id, copy.deepcopy(raw), mode))
+        # Authorization can consult SessionStore and must not run under either
+        # persistence lock. The collected records are detached from the stores.
+        for session_id, raw, mode in captured:
+            _authorize(
+                service.authorization_hook,
+                target="get_visualization_session",
+                session_id=session_id,
+            )
+            session = Session.from_dict(raw)
+            state = raw["state"]
+            try:
+                node_ids = session_capture.captured_node_ids(
+                    state, include_legacy_groups=True
+                )
                 node_ids.extend(
                     key[5:]
                     for key in state.get("shape_revisions", {})
-                    if isinstance(key, str)
-                    and key.startswith("node:")
-                    and key[5:] not in local_groups
+                    if isinstance(key, str) and key.startswith("node:")
                 )
-                try:
-                    with session_context.bind_session(session_id):
-                        result = service.authorize_capture_refs(
-                            list(dict.fromkeys(node_ids)),
-                            session_capture.captured_edge_ids(state),
-                            target="backup_sessions",
-                        )
-                except Exception:
-                    raise BackupRefused("access denied") from None
-                if not result.get("success"):
-                    raise BackupRefused("access denied")
-                _assets(state, assets)
-                sessions.append(
-                    {
-                        "id": session.id,
-                        "name": session.name,
-                        "description": session.description,
-                        "revision": session.seq,
-                        "created_at": session.created_at,
-                        "updated_at": session.updated_at,
-                        "write_mode": mode,
-                        "write_mode_source": (
-                            "explicit"
-                            if mode != session.write_mode
-                            else session.write_mode_source
-                        ),
-                        "state": state,
-                    }
-                )
+                with session_context.bind_session(session_id):
+                    result = service.authorize_capture_refs(
+                        list(dict.fromkeys(node_ids)),
+                        session_capture.captured_edge_ids(state),
+                        target="backup_sessions",
+                    )
+            except Exception:
+                raise BackupRefused("access denied") from None
+            if not result.get("success"):
+                raise BackupRefused("access denied")
+            _assets(state, assets)
+            sessions.append(
+                {
+                    "id": session.id,
+                    "name": session.name,
+                    "description": session.description,
+                    "revision": session.seq,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "write_mode": mode,
+                    "write_mode_source": (
+                        "explicit"
+                        if mode != session.write_mode
+                        else session.write_mode_source
+                    ),
+                    "state": state,
+                }
+            )
     document = {
         "format_version": 1,
         "sessions": sessions,

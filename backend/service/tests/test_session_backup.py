@@ -1,4 +1,4 @@
-# covers: backend/service/session_backup.py, backend/service/session_capture.py, backend/service/views.py, backend/service/service.py, scripts/backup_sessions.py
+# covers: backend/service/session_backup.py, backend/service/session_capture.py, backend/service/views.py, backend/service/service.py, scripts/backup_sessions.py, scripts/session_backup_file_snapshot.py
 import base64
 import hashlib
 from contextlib import contextmanager
@@ -85,7 +85,7 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
     assert stored["state"] == session.state
     assert stored["write_mode"] == "staged"
     assert "activity_log" not in stored
-    assert service.references == [(["a", "old"], ["edge"])]
+    assert service.references == [(["a", "group-local", "old"], ["edge"])]
     assert backup["import_mappings"] == backup["import_reports"] == []
     digest = hashlib.sha256(payload).hexdigest()
     assert backup["assets"] == [{"sha256": digest, "data_url": url}]
@@ -172,9 +172,19 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
         },
         {"shape_revisions": {"node:secret": 1}},
         {"node_refs": ["group-secret"]},
+        {"positions": {"group-secret": {"x": 1, "y": 1}}},
+        {"shape_overrides": {"group-secret": "circle"}},
+        {"shape_revisions": {"node:group-secret": 1}},
+        {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
         {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
     ):
-        session.state.update(annotations=[], shape_revisions={}, node_refs=[])
+        session.state.update(
+            annotations=[],
+            shape_revisions={},
+            node_refs=[],
+            positions={},
+            shape_overrides={},
+        )
         session.state.update(state)
         backend.save(session.to_dict())
         with pytest.raises(BackupRefused):
@@ -313,3 +323,51 @@ def test_layer_write_is_ordered_with_snapshot(backend):
     assert finished.is_set()
     with pytest.raises(BackupRefused, match="unmerged staged changes"):
         create_backup(Service(), backend, modes)
+
+
+def test_authorization_runs_outside_session_transaction(backend):
+    import threading
+
+    backend.save(Session("1234-5678").to_dict())
+
+    class LockCheckingService(Service):
+        def authorize_capture_refs(self, nodes, edges, *, target):
+            done = threading.Event()
+
+            def read():
+                with backend.transaction():
+                    done.set()
+
+            thread = threading.Thread(target=read, daemon=True)
+            thread.start()
+            assert done.wait(2), "session transaction held during authorization"
+            thread.join()
+            return super().authorize_capture_refs(nodes, edges, target=target)
+
+    assert (
+        len(create_backup(LockCheckingService(), backend, WriteModes())["sessions"])
+        == 1
+    )
+
+
+def test_file_snapshot_integration(tmp_path, monkeypatch):
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from scripts import session_backup_file_snapshot as integration
+
+    graph = tmp_path / "graph.json"
+    layer = FileGraphPersistenceBackend(graph, staged_sessions=True)
+    layer.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
+    layer.record_staged("1234-5678")
+    sessions = tmp_path / "sessions"
+    FileSessionPersistenceBackend(sessions).save(Session("1234-5678").to_dict())
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setenv("SESSION_BACKUP_GRAPH", str(graph))
+    monkeypatch.setenv("SESSION_BACKUP_SESSIONS", str(sessions))
+    with integration.open_backup(Hook()) as (service, backend, modes):
+        backup = create_backup(service, backend, modes)
+    assert backup["sessions"][0]["id"] == "1234-5678"
+    assert {p: p.read_bytes() for p in before} == before
+    layer.journal_path.write_bytes(b"partial")
+    with pytest.raises(BackupRefused, match="incomplete snapshot journal"):
+        with integration.open_backup(Hook()):
+            pass
