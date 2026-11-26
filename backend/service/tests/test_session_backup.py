@@ -68,7 +68,8 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
         positions={"a": {"x": 2, "y": 3}},
         hidden_edge_ids=["edge"],
         annotations=[{"id": "image", "url": url}],
-        shape_revisions={"node:old": 2},
+        shape_revisions={"node:old": 2, "node:group-local": 1},
+        shape_overrides={"group-local": "circle"},
     )
     session.activity_log = [{"actor": "private"}]
     backend.save(session.to_dict())
@@ -207,7 +208,7 @@ def test_backup_uses_its_own_reference_scope(tmp_path):
             return GraphAuthorizationDecision(
                 allowed=True,
                 graph_access=GraphAccessNarrowing(
-                    enabled=context.target == "backup_sessions",
+                    enabled=(context.target == "backup_sessions" and bool(context.session_id)),
                     allow_local_graph=False,
                     include_graph_ids=("allowed",),
                 ),
@@ -248,7 +249,7 @@ def test_command_authorizes_before_opening_stores(tmp_path, monkeypatch):
 
     class Deny:
         def evaluate(self, context):
-            return GraphAuthorizationDecision(allowed=False)
+            return GraphAuthorizationDecision(allowed=context.action != "admin")
 
     def forbidden(*args):
         pytest.fail("stores opened before authorization")

@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.runtime.authorization import GRAPH_ACTION_ADMIN  # noqa: E402
 from backend.service.session_backup import (  # noqa: E402
     BackupRefused,
     _authorize,
@@ -26,7 +27,7 @@ def main():
     args = parser.parse_args()
     integration = importlib.import_module(args.integration)
     hook = integration.authorization_hook()
-    _authorize(hook, target="backup_sessions")
+    _authorize(hook, target="backup_sessions", action=GRAPH_ACTION_ADMIN)
     # The integration must open read-only stores and provide a layer snapshot
     # coordinated with every writer. Never construct a default policy or load
     # graph storage here: graph loading can perform merge recovery.

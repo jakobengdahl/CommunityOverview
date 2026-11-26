@@ -13,8 +13,8 @@ python3 scripts/backup_sessions.py --integration my_deployment.session_backup \
 
 The module supplies `authorization_hook()` for the deployment's actual operator
 policy and `open_backup(hook)`, a context manager yielding `(service, sessions,
-modes)`. The service must use that hook. The command checks `backup_sessions`
-access before opening the stores and checks every session and reference again
+modes)`. The service must use that hook. The command checks `backup_sessions` admin authorization
+(the default hook denies it) before opening the stores and checks every session and reference again
 while creating the document. Run it in the operator's authorization context.
 
 The integration must use read-only graph and layer access, without merge recovery,

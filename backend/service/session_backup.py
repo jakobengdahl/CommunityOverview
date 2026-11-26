@@ -11,7 +11,7 @@ import json
 
 from backend.core.session_store import Session, _empty_state
 from backend.runtime import session_context
-from backend.runtime.authorization import GRAPH_ACTION_READ
+from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
 from backend.service import access, session_capture
 
 
@@ -51,10 +51,10 @@ def _assets(value, found):
             _assets(child, found)
 
 
-def _authorize(hook, *, target, session_id=None):
+def _authorize(hook, *, target, session_id=None, action=GRAPH_ACTION_READ):
     try:
         denied = access.authorize_graph_access(
-            hook, action=GRAPH_ACTION_READ, target=target, session_id=session_id
+            hook, action=action, target=target, session_id=session_id
         )
     except Exception:
         raise BackupRefused("access denied") from None
@@ -72,7 +72,9 @@ def create_backup(service, session_backend, write_modes):
     sessions = []
     assets = {}
     with session_context.bind_session(None):
-        _authorize(service.authorization_hook, target="backup_sessions")
+        _authorize(
+            service.authorization_hook, target="backup_sessions", action=GRAPH_ACTION_ADMIN
+        )
         # A session transaction alone does not order staged writes. Only a
         # deployment-provided snapshot that coordinates with every layer writer
         # can supply this guarantee. The snapshot yields a read-only WriteModes.
@@ -106,21 +108,29 @@ def create_backup(service, session_backend, write_modes):
                 state = raw.get("state")
                 if not isinstance(state, dict) or state.keys() - _empty_state().keys():
                     raise BackupRefused("invalid session state")
-                node_ids = session_capture.captured_node_ids(
-                    state, include_legacy_groups=True
-                )
+                node_ids = session_capture.captured_node_ids(state)
+                # Explicit membership always names graph nodes, even when an ID
+                # happens to share the legacy local-group prefix.
+                for field in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
+                    node_ids.extend(i for i in state.get(field, []) if isinstance(i, str))
+                local_groups = {
+                    key for field in ("positions", "shape_overrides")
+                    for key in state.get(field, {}) if key.startswith("group-")
+                } - set(node_ids)
                 # Revisions can outlive membership, but still disclose node IDs.
                 node_ids.extend(
                     key[5:]
                     for key in state.get("shape_revisions", {})
                     if isinstance(key, str) and key.startswith("node:")
+                    and key[5:] not in local_groups
                 )
                 try:
-                    result = service.authorize_capture_refs(
-                        list(dict.fromkeys(node_ids)),
-                        session_capture.captured_edge_ids(state),
-                        target="backup_sessions",
-                    )
+                    with session_context.bind_session(session_id):
+                        result = service.authorize_capture_refs(
+                            list(dict.fromkeys(node_ids)),
+                            session_capture.captured_edge_ids(state),
+                            target="backup_sessions",
+                        )
                 except Exception:
                     raise BackupRefused("access denied") from None
                 if not result.get("success"):
