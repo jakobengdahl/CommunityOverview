@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,6 +32,8 @@ from .session_store import (
     is_valid_session_id,
     SessionPersistenceBackend,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_TEMPLATE_NODES = 500
 MAX_TEMPLATE_EDGES = 2000
@@ -255,8 +258,12 @@ class TemplateStore:
         if profile_dir is not None:
             with backend.transaction():
                 for path in sorted(profile_dir.glob("*.json")):
-                    with path.open(encoding="utf-8") as file:
-                        doc = validate_template(json.load(file))
+                    try:
+                        with path.open(encoding="utf-8") as file:
+                            doc = validate_template(json.load(file))
+                    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+                        logger.warning("Ignoring invalid profile template %s: %s", path, exc)
+                        continue
                     key = doc["template_id"]
                     if key in self._profile or backend.load(key) is not None:
                         raise TemplateError("profile_id_collision")
