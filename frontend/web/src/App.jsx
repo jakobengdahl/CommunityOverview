@@ -66,7 +66,7 @@ import {
 } from './utils/sessionScopedGraphEdits';
 import { loadUrlSavedView } from './utils/urlSavedView';
 import { createHistoryReplayQueue, replayCanvasHistory } from './utils/sessionActivity';
-import { createCaptureFlushQueue } from './utils/captureFlush';
+import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
@@ -2256,7 +2256,10 @@ function App() {
   const captureNodesRef = useRef(null);
   const getCaptureState = useCallback(
     () => ({
-      baseline: syncRef.current?.captureBaseline() || { node_refs: [], positions: {} },
+      baseline: syncForSession(syncRef.current, sessionIdRef.current)?.captureBaseline() || {
+        node_refs: [],
+        positions: {},
+      },
       nodes: captureNodesRef.current?.() || [],
     }),
     [syncRef]
@@ -2268,7 +2271,7 @@ function App() {
       const targetId = sessionIdRef.current;
       const epoch = useGraphStore.getState().sessionEpoch;
       return captureFlushQueue({
-        getSync: () => syncRef.current,
+        getSync: () => syncForSession(syncRef.current, targetId),
         isCurrent: () =>
           sessionIdRef.current === targetId && useGraphStore.getState().sessionEpoch === epoch,
         requestSnapshot: requestSessionSnapshot,

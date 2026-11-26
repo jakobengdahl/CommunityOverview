@@ -1,3 +1,9 @@
+// The sync client only while it still belongs to `sessionId`: until a switch
+// to a session with no client yet is cleaned up, the previous client remains.
+export function syncForSession(sync, sessionId) {
+  return sync?.sessionId === sessionId ? sync : null;
+}
+
 // The holds as they stand when a capture is requested, read before any queue
 // or await so a hold released before the capture runs is still accounted for.
 function readHolds(getSync) {
@@ -41,7 +47,7 @@ export function flushCanvasForCapture({
     };
     const deadline = setTimeout(() => finish(new Error('Canvas capture timed out')), timeoutMs);
     const unavailable = (sync) =>
-      !isCurrent() || (initialSync && sync !== initialSync) || sync?._closed;
+      !isCurrent() || !sync || (initialSync && sync !== initialSync) || sync._closed;
     let snapshotNeeded = requested.active;
     let seenGeneration = requested.generation;
     const holdsSince = (sync) =>

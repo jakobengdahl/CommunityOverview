@@ -1,6 +1,6 @@
 // covers: frontend/web/src/utils/captureFlush.js
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createCaptureFlushQueue, flushCanvasForCapture } from './captureFlush';
+import { createCaptureFlushQueue, flushCanvasForCapture, syncForSession } from './captureFlush';
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 function setup() {
@@ -108,6 +108,15 @@ it('queues an unheld capture behind one in flight and skips the queue once it is
   await Promise.resolve();
   expect(settled).toBe(true);
   expect(h.sync.flushPending).toHaveBeenCalledTimes(1);
+});
+it('fails without capturing while the installed sync client belongs to another session', async () => {
+  const previous = { sessionId: 'old', _renderHolds: 0 };
+  const getSync = () => syncForSession(previous, 'new');
+  const onReady = vi.fn();
+  await expect(
+    flushCanvasForCapture({ getSync, isCurrent: () => true, onReady })
+  ).rejects.toThrow();
+  expect(onReady).not.toHaveBeenCalled();
 });
 it.each(['timeout', 'held', 'closed'])('fails and removes callbacks on %s', async (reason) => {
   const h = setup();
