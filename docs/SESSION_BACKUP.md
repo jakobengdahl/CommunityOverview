@@ -20,7 +20,7 @@ context, with that module on `PYTHONPATH`:
 export SESSION_BACKUP_AUTH_MODULE=my_deployment.backup_auth
 export SESSION_BACKUP_GRAPH=/snapshot/graph.json
 export SESSION_BACKUP_SESSIONS=/snapshot/sessions
-export SESSION_BACKUP_TEMPLATES=/snapshot/templates
+export SESSION_BACKUP_TEMPLATES=/snapshot/sessions/templates
 python3 scripts/backup_sessions.py --integration scripts.session_backup_file_snapshot \
   --output /secure/session-backup.json
 ```
@@ -86,7 +86,8 @@ python3 scripts/restore_sessions.py --integration scripts.session_restore_file_s
 
 The output must not exist, and its parent must be on a filesystem supporting
 Linux atomic no-replace rename. The new directory contains the copied graph,
-sidecars, `snapshot.journal.ndjson`, and `sessions` and `templates` directories. Configure the
+sidecars, `snapshot.journal.ndjson`, and a `sessions` directory containing the
+mutable `templates` directory (`sessions/templates`). Configure the
 graph journal path to the copied journal if present. Verify the graph and
 sessions in a separate offline instance before switching any application to
 them. The command prints a JSON report of missing node and edge references,
@@ -101,7 +102,8 @@ the copied graph and restored data must fit on disk. Nonempty import mapping or
 report tables are refused: version 1 backup currently writes empty tables.
 The file integration reads profile templates from the `templates` directory beside the
 active schema configuration; set `SCHEMA_FILE` to the profile schema when necessary.
-Invalid or duplicate profile documents and template ID collisions refuse the restore.
+Invalid or duplicate profile documents and template ID collisions with profiles,
+restored sessions, or staged session records refuse the restore.
 Existing session IDs, retired staged records, and active staged records for
 direct sessions are collisions. Active records for staged sessions in the
 paired graph are retained. Resolve collisions in a separate clean graph

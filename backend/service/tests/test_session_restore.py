@@ -460,6 +460,44 @@ def test_templates_restore_atomically_with_sessions(damage):
             TemplateStore(templates).save(replacement, expected_revision=0)
 
 
+@pytest.mark.parametrize("kind", ["template", "tombstone"])
+@pytest.mark.parametrize("collision", ["restored", "active", "retired"])
+def test_template_ids_cannot_collide_with_session_namespace(kind, collision):
+    from backend.core.tests.test_template_store import document as template_document
+
+    doc = template_document()
+    template_id = doc["template_id"]
+    source = InMemorySessionPersistenceBackend()
+    source.save(
+        {"id": template_id, "document": doc}
+        if kind == "template"
+        else {"id": template_id, "deleted": True, "revision": 1}
+    )
+    document = create_backup(
+        Service(), InMemorySessionPersistenceBackend(), Modes(), template_backend=source
+    )
+    if collision == "restored":
+        document["sessions"] = backup()["sessions"]
+        document["sessions"][0]["id"] = template_id
+        sign(document)
+
+    class CollisionModes(Modes):
+        def staged_status(self, session_id):
+            if session_id == template_id and collision != "restored":
+                return collision
+            return "none"
+
+    sessions, templates = (
+        InMemorySessionPersistenceBackend(),
+        InMemorySessionPersistenceBackend(),
+    )
+    with pytest.raises(RestoreRefused, match="template collision"):
+        restore_backup(
+            Service(), sessions, CollisionModes(), document, template_backend=templates
+        )
+    assert not sessions.list_ids() and not templates.list_ids()
+
+
 def test_file_workspace_restores_templates_and_rejects_profile_collision(
     tmp_path, monkeypatch
 ):

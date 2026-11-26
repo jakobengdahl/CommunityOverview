@@ -356,6 +356,14 @@ def restore_backup(
             backend.transaction(),
             template_backend.transaction() if template_backend else nullcontext(),
         ):
+            restored_template_ids = {doc["template_id"] for doc in templates} | {
+                record["id"] for record in tombstones
+            }
+            if restored_template_ids & seen or any(
+                modes.staged_status(template_id) != "none"
+                for template_id in restored_template_ids
+            ):
+                raise RestoreRefused("template collision")
             if (
                 (template_backend is not None and template_backend.list_ids())
                 or backend.list_ids()
