@@ -1167,18 +1167,20 @@
   },
   "command_box": {
     "label": "Message or command",
-    "help": "Type @ and at least two characters to insert a node reference, or start with / for commands. Arrow keys choose a suggestion, Tab accepts the first one, Enter accepts the chosen one or sends the message, Escape closes the list.",
+    "help": "Type @ and at least two characters to insert a node or template reference, or start with / for commands. Arrow keys choose a suggestion, Tab accepts the first one, Enter accepts the chosen one or sends the message, Escape closes the list.",
     "suggestions": "Suggestions",
     "kind_node": "Node",
+    "kind_template": "Template",
     "kind_node_type": "Node type",
     "kind_command": "Command",
     "loading": "Searching…",
     "no_results": "No suggestions",
     "results": "{count} suggestions",
-    "search_failed": "Node search failed; only node types are suggested",
+    "search_failed": "Some suggestions could not be loaded",
     "command_failed": "Could not run {label}. Your text is kept."
   },
   "template": {
+    "insert_command": "Insert template: {name}",
     "save": "Save as template…",
     "command_description": "Save the selection or whole session as a template",
     "name": "Name (required)",

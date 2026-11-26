@@ -2,6 +2,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { echoingOpsFetch } from './fakeSessionServer';
 import { render, waitFor, act, screen, fireEvent, cleanup } from '@testing-library/react';
+import { useContext } from 'react';
+import { CommandRegistryContext } from '../src/commands/commandRegistry';
 
 // The session-scoped helpers App delegates to are tested on their own in
 // appAwaitingHandlerEpochGuards.test.js. What those tests cannot see is App's
@@ -16,6 +18,8 @@ const captured = vi.hoisted(() => ({
   syncHandlersRef: null,
   template: null,
   captureBarrier: null,
+  captureCalls: 0,
+  registry: null,
 }));
 
 vi.mock('../src/components/SaveTemplateDialog', () => ({
@@ -31,7 +35,10 @@ vi.mock('../src/utils/captureFlush', async (importOriginal) => {
     ...actual,
     createCaptureFlushQueue: () => {
       const queue = actual.createCaptureFlushQueue();
-      return (options) => captured.captureBarrier || queue(options);
+      return (options) => {
+        captured.captureCalls += 1;
+        return captured.captureBarrier || queue(options);
+      };
     },
   };
 });
@@ -53,6 +60,7 @@ vi.mock('../src/components/DesktopShell', async (importOriginal) => {
   return {
     default: function DesktopShellStub(props) {
       captured.desktop = props;
+      captured.registry = useContext(CommandRegistryContext);
       return <DesktopShell {...props} />;
     },
   };
@@ -121,6 +129,7 @@ vi.mock('../src/services/api', () => {
     updateEdge: vi.fn(async () => ({ success: true })),
     deleteEdge: vi.fn(async () => ({ success: true })),
     exportGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
+    insertTemplate: vi.fn(async () => ({})),
   };
 });
 
@@ -210,6 +219,7 @@ describe('App handler wiring', () => {
     captured.syncHandlersRef = null;
     captured.template = null;
     captured.captureBarrier = null;
+    captured.captureCalls = 0;
     startupStats = null;
     vi.clearAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -389,6 +399,31 @@ describe('App handler wiring', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(nodeIds()).toEqual([]);
+  });
+
+  it('aborts a template insertion before capture when the session changes during readiness', async () => {
+    await renderApp();
+    act(() => canvas().onSaveView({ nodes: [] }));
+    let releaseReady;
+    vi.spyOn(SessionSyncClient.prototype, 'whenReady').mockImplementationOnce(
+      () => new Promise((resolve) => (releaseReady = resolve))
+    );
+    const insert = captured.registry.get('template:insert').execute({}, { template_id: 't1' });
+    const rejected = expect(insert).rejects.toThrow('Session is no longer available');
+    const target = '8244-1742-3391-0057';
+    act(() => captured.desktop.onSelectSession(target));
+    await act(async () => canvas().onSaveView({ nodes: [], edges: [] }));
+    await waitFor(() => expect(canvas().sessionKey).toBe(target));
+    const signal = canvas().saveViewSignal;
+    const captureCalls = captured.captureCalls;
+    captured.captureBarrier = Promise.resolve();
+    await act(async () => {
+      releaseReady();
+      await rejected;
+    });
+    expect(canvas().saveViewSignal).toBe(signal);
+    expect(captured.captureCalls).toBe(captureCalls);
+    expect(api.insertTemplate).not.toHaveBeenCalled();
   });
 
   it('does not reconnect the old session when template preparation finishes after a switch', async () => {
