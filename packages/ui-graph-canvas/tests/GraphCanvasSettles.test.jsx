@@ -285,8 +285,9 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
     const returnedPosition = positionsById().get('node-2');
     expect(returnedPosition).toBeDefined();
     expect(returnedPosition).not.toEqual(before.get('node-2'));
-    expect(new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2'))
-      .toEqual(returnedPosition);
+    expect(
+      new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2')
+    ).toEqual(returnedPosition);
 
     // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
     // every node must land back where it was before focus.
