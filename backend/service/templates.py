@@ -168,11 +168,7 @@ def capture_template(
             all_annotations = state.get("annotations") or []
             whole = node_ids is None and annotation_ids is None
             membership = state.get("node_refs") or []
-            requested = (
-                membership
-                if whole
-                else (node_ids or [])
-            )
+            requested = membership if whole else (node_ids or [])
             requested = list(
                 dict.fromkeys(
                     i

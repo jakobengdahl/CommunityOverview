@@ -81,14 +81,18 @@ def test_denials_and_missing_references(capture):
             "attachment": {"target_id": "node-0"}
         }
         assert run(node_ids=["a"], annotation_ids=["note"]) == {
-            "success": False, "error": "access_denied"
+            "success": False,
+            "error": "access_denied",
         }
         session.state["annotations"][0] = {
-            "id": "note", "type": "reference", "target_kind": "resource",
+            "id": "note",
+            "type": "reference",
+            "target_kind": "resource",
             "content": {"target": "node-0"},
         }
         assert run(node_ids=["a"], annotation_ids=["note"]) == {
-            "success": False, "error": "access_denied"
+            "success": False,
+            "error": "access_denied",
         }
     assert run(node_ids=["missing", "group-old"])["document"]["nodes"] == []
 
