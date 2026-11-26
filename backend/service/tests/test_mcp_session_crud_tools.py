@@ -529,3 +529,22 @@ class TestSessionActivity:
         tools, manager = crud_tools
         assert "error" in tools["get_session_activity"](session_id)
         assert manager.get_session(session_id) is None
+
+
+def test_template_tools_share_crud_surface(crud_tools):
+    tools, manager = crud_tools
+    session = manager.create_session("source")
+    saved = tools["save_template"](
+        session_id=session.id, name="Example", expected_revision=session.seq
+    )
+    doc = saved["template"]
+    tid = doc["template_id"]
+    assert tools["list_templates"]()["templates"] == [doc]
+    assert tools["get_template"](template_id=tid)["template"] == doc
+    changed = tools["update_template"](
+        template_id=tid, expected_revision=doc["revision"], name="New"
+    )["template"]
+    assert changed["name"] == "New"
+    assert tools["delete_template"](
+        template_id=tid, expected_revision=changed["revision"]
+    )["deleted"]

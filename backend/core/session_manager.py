@@ -785,6 +785,10 @@ class SessionManager:
         write_modes: Optional[WriteModes] = None,
     ) -> None:
         self.store = store
+        from backend.core.session_store import InMemorySessionPersistenceBackend
+        from backend.core.template_store import TemplateStore
+
+        self.template_store = TemplateStore(InMemorySessionPersistenceBackend())
         # Every session is direct without one (docs/SESSION_OVERLAY_CONTRACT.md
         # §5): nothing can be staged, nothing is ever retired.
         self.write_modes = write_modes or WriteModes()

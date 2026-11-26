@@ -1790,3 +1790,46 @@ def test_implicit_rename_reports_storage_failure(test_app, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"]["error"] == "storage_error"
     assert store.get(sid) is None
+
+
+def test_template_routes_crud(test_app):
+    sid = test_app.post("/api/sessions", json={"name": "source"}).json()["id"]
+    response = test_app.post(
+        f"/api/sessions/{sid}/templates",
+        json={"name": "Example", "expected_revision": 0},
+    )
+    assert response.status_code == 200
+    doc = response.json()["template"]
+    path = f"/api/templates/{doc['template_id']}"
+    assert test_app.get(path).json()["template"] == doc
+    assert test_app.get("/api/templates").json()["templates"] == [doc]
+    changed = test_app.patch(
+        path, json={"expected_revision": doc["revision"], "name": "New"}
+    ).json()["template"]
+    assert changed["name"] == "New"
+    assert test_app.delete(
+        path, params={"expected_revision": changed["revision"]}
+    ).json()["deleted"]
+    assert test_app.get(path).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("access_denied", 403),
+        ("revision_conflict", 409),
+        ("staged_changes", 409),
+        ("nodes_limit", 413),
+        ("edges_limit", 413),
+        ("annotations_limit", 413),
+    ],
+)
+def test_template_route_failure_status(test_app, monkeypatch, code, status):
+    from backend.service import templates
+
+    monkeypatch.setattr(
+        templates, "save_template", lambda *args: {"success": False, "error": code}
+    )
+    response = test_app.post("/api/sessions/1234-5678/templates", json={})
+    assert response.status_code == status
+    assert response.json()["error"] == code

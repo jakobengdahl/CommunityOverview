@@ -312,3 +312,90 @@ def test_edge_limit_and_excluded_system_types(capture):
     ):
         assert run() == {"success": False, "error": "edges_limit"}
     assert "system" not in {n["source_node_id"] for n in run()["document"]["nodes"]}
+
+
+def test_template_crud_conflicts_and_authorization(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    saved = templates.save_template(
+        service, manager, session.id, "Example", session.seq
+    )
+    doc = saved["template"]
+    tid = doc["template_id"]
+    assert templates.list_templates(service, manager, tags=["missing"])["count"] == 0
+    assert templates.get_template(service, manager, tid)["template"] == doc
+    assert (
+        templates.update_template(service, manager, tid, 0, name="Changed")["error"]
+        == "revision_conflict"
+    )
+    refused = templates.update_template(
+        service,
+        manager,
+        tid,
+        doc["revision"],
+        replace_from={"session_id": session.id, "expected_revision": session.seq + 1},
+    )
+    assert (
+        refused["error"] == "revision_conflict" and refused["field"] == "replace_from"
+    )
+    assert templates.get_template(service, manager, tid)["template"] == doc
+    updated = templates.update_template(
+        service,
+        manager,
+        tid,
+        doc["revision"],
+        tags=["x"],
+        replace_from={"session_id": session.id, "expected_revision": session.seq},
+    )["template"]
+    assert templates.list_templates(service, manager, tags=["x"])["count"] == 1
+    with patch(
+        "backend.service.templates.access.authorize_graph_access",
+        return_value={"error_code": "access_denied"},
+    ) as auth:
+        assert (
+            templates.delete_template(service, manager, tid, updated["revision"])[
+                "error"
+            ]
+            == "access_denied"
+        )
+        assert auth.call_args.kwargs["target"] == "delete_visualization_session"
+        assert auth.call_args.kwargs["session_id"] == tid
+    assert (
+        templates.delete_template(service, manager, tid, doc["revision"])["error"]
+        == "revision_conflict"
+    )
+    assert templates.delete_template(service, manager, tid, updated["revision"])[
+        "success"
+    ]
+    assert (
+        templates.get_template(service, manager, tid)["error"] == "template_not_found"
+    )
+    assert templates.list_templates(service, manager)["count"] == 0
+    from backend.core.template_store import TemplateError
+
+    with pytest.raises(TemplateError) as exc:
+        manager.template_store.save(doc, doc["revision"])
+    assert exc.value.code == "deleted"
+
+
+def test_list_filters_templates_the_caller_cannot_read(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    with patch(
+        "backend.service.templates.access.authorize_graph_access",
+        side_effect=lambda hook, **kw: (
+            {"error": "access_denied"}
+            if kw["target"] == "get_visualization_session"
+            else None
+        ),
+    ):
+        assert (
+            templates.get_template(service, manager, doc["template_id"])["error"]
+            == "access_denied"
+        )
+        assert templates.list_templates(service, manager)["templates"] == []
