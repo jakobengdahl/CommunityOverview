@@ -113,7 +113,7 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
  * node types (`nodeTypes`: `{ id, label }`), nodes and readable templates once
  * the debounced searches settle, never commands. A superseded search's result is discarded.
  */
-export function useCommandSuggestions(input, context, nodeTypes) {
+export function useCommandSuggestions(input, context, nodeTypes, activeKey = null) {
   const { t } = useI18n();
   const registry = useCommandRegistry();
   const registryVersion = useCommandRegistryVersion(registry);
@@ -216,7 +216,14 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     template,
   }));
   const status = search.failed ? 'error' : 'ready';
-  const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
+  let items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
+  // A late template response must not evict the highlighted existing result.
+  if (activeKey && !items.some((item) => `${item.kind}:${item.id}` === activeKey)) {
+    const existingItems = rankSuggestions([...nodeItems, ...typeItems], query, locale);
+    if (existingItems.some((item) => `${item.kind}:${item.id}` === activeKey)) {
+      items = existingItems;
+    }
+  }
   return {
     mode,
     items,

@@ -177,8 +177,8 @@ describe('useCommandSuggestions', () => {
     const insert = vi.fn();
     registry.register({ id: 'template:insert', isAvailable: () => false, execute: insert });
     const { result, rerender } = renderHook(
-      ({ input }) => useCommandSuggestions(input, context, nodeTypes),
-      { wrapper, initialProps: { input: 'goal' } }
+      ({ input, activeKey }) => useCommandSuggestions(input, context, nodeTypes, activeKey),
+      { wrapper, initialProps: { input: 'goal', activeKey: 'node:weak5' } }
     );
     await settle(NODE_QUERY_DEBOUNCE_MS);
     expect(ids(result.current.items)).toEqual([
@@ -187,6 +187,12 @@ describe('useCommandSuggestions', () => {
       ...Array.from({ length: 6 }, (_, i) => `node:weak${i}`),
     ]);
     await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
+    expect(ids(result.current.items)).toEqual([
+      'node:n1',
+      'nodeType:Goal',
+      ...Array.from({ length: 6 }, (_, i) => `node:weak${i}`),
+    ]);
+    rerender({ input: 'goal', activeKey: null });
     expect(ids(result.current.items)).toEqual([
       'node:n1',
       'nodeType:Goal',
