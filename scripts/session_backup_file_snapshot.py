@@ -87,7 +87,12 @@ def open_backup(hook):
                 data = path.read_bytes()
                 if data and not data.endswith(b"\n"):
                     raise BackupRefused("incomplete snapshot journal")
-        _, pending = layer._read_merge_log()
+        try:
+            _, pending = layer._read_merge_log()
+        except Exception:
+            # Merge records can contain session IDs, and no session has yet
+            # been authorized. Suppress both the error and its traceback chain.
+            raise BackupRefused("unreadable session mode") from None
         if pending is not None or layer._merge_log_needs_repair:
             raise BackupRefused("unreadable session mode")
         storage = GraphStorage(str(graph), persistence_backend=layer)

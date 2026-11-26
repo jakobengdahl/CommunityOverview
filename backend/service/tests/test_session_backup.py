@@ -711,6 +711,13 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
                 with integration.open_backup(Hook(denied=session.id)):
                     pytest.fail("partial backup opened")
             assert "1234-5678" not in "".join(traceback.format_exception(exc.value))
+    merge_log = layer.merge_log_path
+    merge_log.write_text('{"merge_id":"merge", "status":"1234-5678"}\n')
+    with pytest.raises(BackupRefused, match="^unreadable session mode$") as exc:
+        with integration.open_backup(Hook(denied=session.id)):
+            pytest.fail("partial backup opened")
+    assert "1234-5678" not in "".join(traceback.format_exception(exc.value))
+    merge_log.unlink()
     original = layer.journal_path.read_bytes()
     for tail in (b"partial", b"malformed\n", b"{}\n"):
         layer.journal_path.write_bytes(original + tail)
