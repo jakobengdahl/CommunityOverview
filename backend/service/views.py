@@ -136,6 +136,8 @@ def authorize_capture_refs(
     hook: "GraphAuthorizationHook",
     node_ids: List[str],
     edge_ids: List[str],
+    *,
+    target: str = "save_session_view",
 ) -> Dict[str, Any]:
     """Whether a saved-view capture may keep every node and edge reference.
 
@@ -144,7 +146,6 @@ def authorize_capture_refs(
     absence could stand for a node the caller may not see, so it is denied
     too. A missing edge is kept, unreported, on the same terms.
     """
-    target = "save_session_view"
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_READ, target=target
     )
