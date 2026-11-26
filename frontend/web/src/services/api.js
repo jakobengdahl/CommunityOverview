@@ -602,7 +602,15 @@ export async function createSavedShape(key, name, definition) {
 }
 
 /** Edit the reviewed revision of a saved shape; a stale review is a 409. */
-export async function updateSavedShape(key, name, definition, revision, usage, templateUsage, templateUsageToken) {
+export async function updateSavedShape(
+  key,
+  name,
+  definition,
+  revision,
+  usage,
+  templateUsage,
+  templateUsageToken
+) {
   return apiFetch(savedShapeUrl(key), {
     method: 'PUT',
     body: JSON.stringify({

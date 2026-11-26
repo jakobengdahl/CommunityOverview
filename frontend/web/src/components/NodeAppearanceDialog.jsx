@@ -396,7 +396,12 @@ export default function NodeAppearanceDialog({
     if (action === 'edit') started.definition = structuredClone(shown);
     setLibraryBusy(true);
     try {
-      const { revision, usage, template_usage: templateUsage = 0, template_usage_token: templateUsageToken = null } = await library.usage(savedKey);
+      const {
+        revision,
+        usage,
+        template_usage: templateUsage = 0,
+        template_usage_token: templateUsageToken = null,
+      } = await library.usage(savedKey);
       if (revision !== pinned.revision) libraryFailed({ status: 409 });
       else {
         setLibraryStatus(null);
@@ -409,7 +414,8 @@ export default function NodeAppearanceDialog({
     }
   }
   async function confirmReview() {
-    const { action, key, name, definition, revision, usage, templateUsage, templateUsageToken } = review;
+    const { action, key, name, definition, revision, usage, templateUsage, templateUsageToken } =
+      review;
     if (action === 'delete') {
       const entry = await libraryWrite(
         () => library.remove(key, revision, usage, templateUsage, templateUsageToken),
@@ -424,7 +430,8 @@ export default function NodeAppearanceDialog({
       return;
     }
     const entry = await libraryWrite(
-      () => library.update(key, name, definition, revision, usage, templateUsage, templateUsageToken),
+      () =>
+        library.update(key, name, definition, revision, usage, templateUsage, templateUsageToken),
       'library_updated'
     );
     if (entry) {

@@ -894,7 +894,15 @@ describe('NodeAppearanceDialog', () => {
       await click('node_appearance.review_latest');
       await click('node_appearance.edit_saved');
       await click('node_appearance.confirm_edit');
-      expect(library.update).toHaveBeenCalledWith('card', 'Card', { ...latest, scale: 3 }, 4, 2, 0, null);
+      expect(library.update).toHaveBeenCalledWith(
+        'card',
+        'Card',
+        { ...latest, scale: 3 },
+        4,
+        2,
+        0,
+        null
+      );
     }
   );
   it('reviews a picked entry deleted elsewhere onto the built-in card, not the original entry', async () => {
