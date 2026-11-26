@@ -38,7 +38,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
-from backend.core.actor_attribution import replace_attribution, validate_erasure
+from backend.core.actor_attribution import (
+    preflight_sqlite,
+    replace_attribution,
+    validate_erasure,
+)
 
 from .models import (
     ABANDONED_REASON,
@@ -147,6 +151,11 @@ class SqliteExecutionStore:
         # in the file.
         self._conn.execute("PRAGMA secure_delete=ON")
         self._migrate()
+
+    @staticmethod
+    def preflight(db_path: Union[str, Path]) -> bool:
+        """Erasure preflight: False if absent, raise unless a writable current store."""
+        return preflight_sqlite(db_path, "execution_jobs", _SCHEMA_VERSION)
 
     # ------------------------------------------------------------------
     # Schema / lifecycle
