@@ -19,6 +19,7 @@ import CommandBoxHint from './CommandBoxHint';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
 import PendingActionCard from './PendingActionCard';
+import { captureContents } from '../utils/captureContents';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -56,7 +57,12 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel({ collectionShortName, variant = 'floating', flushBeforeCapture }) {
+function ChatPanel({
+  collectionShortName,
+  variant = 'floating',
+  flushBeforeCapture,
+  getCaptureState,
+}) {
   const isSheet = variant === 'sheet';
   const {
     chatMessages,
@@ -198,15 +204,14 @@ function ChatPanel({ collectionShortName, variant = 'floating', flushBeforeCaptu
       );
     };
     if (toolResult.action === 'save_view' || toolResult.action === 'save_visualization') {
-      await flushBeforeCapture?.();
+      const { node_ids, positions } = await captureContents(flushBeforeCapture, getCaptureState);
       const viewName = toolResult.name;
-      const currentNodes = useGraphStore.getState().nodes;
       const viewNode = {
         name: viewName,
         type: 'SavedView',
         description: t('notifications.saved_view_description', { name: viewName }),
-        summary: t('notifications.saved_view_summary', { count: currentNodes.length }),
-        metadata: { node_ids: currentNodes.map((n) => n.id) },
+        summary: t('notifications.saved_view_summary', { count: node_ids.length }),
+        metadata: { node_ids, positions },
         communities: [],
       };
       try {

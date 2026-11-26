@@ -2253,6 +2253,15 @@ function App() {
     };
   }, []);
 
+  const captureNodesRef = useRef(null);
+  const getCaptureState = useCallback(
+    () => ({
+      baseline: syncRef.current?.captureBaseline() || { node_refs: [], positions: {} },
+      nodes: captureNodesRef.current?.() || [],
+    }),
+    [syncRef]
+  );
+
   const [captureFlushQueue] = useState(createCaptureFlushQueue);
   const flushBeforeCapture = useCallback(() => {
     const targetId = sessionIdRef.current;
@@ -4047,6 +4056,7 @@ function App() {
 
   const shellProps = {
     flushBeforeCapture,
+    getCaptureState,
     sessionId,
     onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
@@ -4112,6 +4122,7 @@ function App() {
           onCreateGroup={handleCreateGroup}
           onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
+          captureNodesRef={captureNodesRef}
           onDropCreateNode={handleDropCreateNode}
           onImageIngest={handleImageIngest}
           onReferenceOpen={handleReferenceOpen}

@@ -467,6 +467,7 @@ function GraphCanvasInner({
   onConnect: onConnectCallback,
   onCreateGroup,
   onSaveView,
+  captureNodesRef,
   onNodePositionChange,
   layoutType = null,
   onDropCreateNode,
@@ -3496,6 +3497,15 @@ function GraphCanvasInner({
   // is a handful of nodes at ego-ring coordinates. Saving that would overwrite
   // the real layout with a temporary lens and drop every node not in the focus
   // set from the snapshot.
+  useEffect(() => {
+    if (!captureNodesRef) return undefined;
+    const read = () => (activeFocusRootId ? preFocusRef.current?.nodes : getFlowNodes()) || [];
+    captureNodesRef.current = read;
+    return () => {
+      if (captureNodesRef.current === read) captureNodesRef.current = null;
+    };
+  }, [captureNodesRef, activeFocusRootId, getFlowNodes]);
+
   const handleSaveView = useCallback(() => {
     if (!onSaveView) return;
     // While the focus view is active the mounted canvas is a temporary lens: a

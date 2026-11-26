@@ -44,6 +44,7 @@ function DesktopShell({
   onCreateSubscription,
   onSaveView,
   flushBeforeCapture,
+  getCaptureState,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
   llmAvailable,
@@ -98,6 +99,7 @@ function DesktopShell({
         <ChatPanel
           collectionShortName={akcShortName || undefined}
           flushBeforeCapture={flushBeforeCapture}
+          getCaptureState={getCaptureState}
         />
       )}
     </>

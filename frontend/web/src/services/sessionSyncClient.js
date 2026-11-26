@@ -1041,6 +1041,14 @@ export class SessionSyncClient {
     return p ? { x: p.x, y: p.y } : null;
   }
 
+  /** Membership and positions as held by the sync baseline at this instant. */
+  captureBaseline() {
+    return {
+      node_refs: [...this._baseline.node_refs],
+      positions: { ...this._baseline.positions },
+    };
+  }
+
   /** The node ids the baseline holds hidden. */
   baselineHiddenNodeIds() {
     return [...this._baseline.hidden_node_ids];
