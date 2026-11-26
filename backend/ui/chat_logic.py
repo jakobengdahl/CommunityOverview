@@ -766,6 +766,17 @@ _NO_ANSWER_MESSAGE = (
 _NO_TEXT_WITH_TOOL_CALLS_MESSAGE = "No text response from AI"
 
 
+def _model_visible_result(result):
+    """Tell the model a save_view signal saved nothing, so it cannot report a save.
+
+    Only the copy sent back to the model is marked; the client still receives the
+    unchanged save_view signal.
+    """
+    if isinstance(result, dict) and result.get("action") == "save_view":
+        return {**result, "saved": False}
+    return result
+
+
 def _response_text(response) -> str:
     """Join the text blocks of an LLMResponse; non-string text is not usable text."""
     return "".join(
@@ -2109,7 +2120,9 @@ class ChatProcessor:
                     {
                         "type": "tool_result",
                         "tool_use_id": tr["tool_use_id"],
-                        "content": json.dumps(tr["result"], default=str),
+                        "content": json.dumps(
+                            _model_visible_result(tr["result"]), default=str
+                        ),
                     }
                     for tr in tool_results
                 ],
@@ -2177,11 +2190,6 @@ class ChatProcessor:
                 provider,
                 active_system_prompt,
                 retry_allowed=rounds_remaining > 2,
-            )
-
-        if any(action.get("action") == "save_view" for action in pending_extra_actions):
-            final_text = (
-                "The browser has been asked to save the view; confirm the save there."
             )
 
         # Prepare final tool result with accumulated data
