@@ -63,6 +63,8 @@ def backend(request, tmp_path):
     "legacy_url,legacy_payload",
     [
         ("data:image/png;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
+        ("DaTa:ImAgE/PNG;BaSe64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
+        ("DATA:IMAGE/svg+xml,%3Csvg%3E", b"<svg>"),
         (
             "data:image/svg+xml;charset=utf-8,%3Csvg%3E%00%FF+%3C/svg%3E",
             b"<svg>\x00\xff+</svg>",
@@ -108,7 +110,7 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
     assert stored["state"] == session.state
     assert stored["write_mode"] == "staged"
     assert "activity_log" not in stored
-    assert service.references == [(["a", "old", "group-local"], ["edge"])]
+    assert service.references == [(["a", "group-local", "old"], ["edge"])]
     assert backup["import_mappings"] == backup["import_reports"] == []
     expected_assets = [
         {"sha256": hashlib.sha256(data).hexdigest(), "data_url": data_url}
@@ -181,7 +183,7 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
         create_backup(service, backend, modes)
 
 
-def test_backup_skips_legacy_canvas_group_keys_but_authorizes_other_references(backend):
+def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend):
     session = Session("1234-5678")
     session.state.update(
         node_refs=["group-local", "node"],
@@ -203,7 +205,14 @@ def test_backup_skips_legacy_canvas_group_keys_but_authorizes_other_references(b
     service = Service()
     create_backup(service, backend, WriteModes())
     assert service.references == [
-        (["node", "group-explicit", "group-member", "group-history"], [])
+        (
+            [
+                "group-local", "node", "group-hidden", "group-dimmed",
+                "group-position", "group-shape", "group-member", "group-explicit",
+                "group-history",
+            ],
+            [],
+        )
     ]
     with pytest.raises(BackupRefused, match="^access denied$"):
         create_backup(Service(refs_allowed=False), backend, WriteModes())
@@ -287,6 +296,12 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
         },
         {"shape_revisions": {"node:secret": 1}},
         {"shape_revisions": {"node:group-secret": 1}},
+        {"node_refs": ["group-secret"]},
+        {"hidden_node_ids": ["group-secret"]},
+        {"dimmed_node_ids": ["group-secret"]},
+        {"positions": {"group-secret": {"x": 1, "y": 1}}},
+        {"shape_overrides": {"group-secret": "circle"}},
+        {"annotations": [{"id": "ann", "attachment": {"target_id": "group-secret"}}]},
         {"annotations": [{"id": "group-secret", "member_node_ids": ["group-secret"]}]},
         {"annotations": [{"id": "ann", "member_node_ids": ["group-secret"]}]},
     ):
@@ -294,6 +309,8 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
             annotations=[],
             shape_revisions={},
             node_refs=[],
+            hidden_node_ids=[],
+            dimmed_node_ids=[],
             positions={},
             shape_overrides={},
         )

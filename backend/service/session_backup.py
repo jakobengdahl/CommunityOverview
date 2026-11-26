@@ -46,7 +46,7 @@ def _assets(state, found):
         if not isinstance(image, dict):
             continue
         value = image.get("url")
-        if not isinstance(value, str) or not value.startswith("data:image/"):
+        if not isinstance(value, str) or value[:11].lower() != "data:image/":
             continue
         try:
             header, encoded = value.split(",", 1)
@@ -136,7 +136,10 @@ def create_backup(service, session_backend, write_modes):
             session = Session.from_dict(raw)
             state = raw["state"]
             try:
-                node_ids = session_capture.captured_node_ids(state)
+                # A legacy group-shaped ID can also name a real graph node.
+                node_ids = session_capture.captured_node_ids(
+                    state, include_legacy_groups=True
+                )
                 annotation_ids = session_capture._annotation_ids(state)
                 # Explicit node links can collide with an annotation ID.
                 for annotation in state.get("annotations") or []:
