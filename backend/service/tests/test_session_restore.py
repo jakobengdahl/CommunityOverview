@@ -41,7 +41,13 @@ def backup():
     session = Session(id="1234-5678", name="Example", seq=7)
     session.state["node_refs"] = ["missing"]
     source.save(session.to_dict())
-    return create_backup(Service(), source, Modes())
+    document = create_backup(
+        Service(), source, Modes(), template_backend=InMemorySessionPersistenceBackend()
+    )
+    document["format_version"] = 1
+    del document["templates"]
+    sign(document)
+    return document
 
 
 def sign(document):

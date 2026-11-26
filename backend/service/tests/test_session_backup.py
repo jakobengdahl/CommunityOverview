@@ -110,8 +110,14 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
 
     monkeypatch.setattr(backend, "save", unexpected_save)
     service = Service()
-    backup = create_backup(service, backend, WriteModes(Layers()))
-    assert backup["format_version"] == 1
+    backup = create_backup(
+        service,
+        backend,
+        WriteModes(Layers()),
+        template_backend=InMemorySessionPersistenceBackend(),
+    )
+    assert backup["format_version"] == 2
+    assert backup["templates"] == []
     stored = backup["sessions"][0]
     assert (
         stored["id"],
@@ -158,7 +164,12 @@ def test_denied_session_is_authorized_before_record_or_layer_checks(
 
         monkeypatch.setattr(backend, "load", fail_load)
     with pytest.raises(BackupRefused, match="^access denied$"):
-        create_backup(Service(denied=session.id), backend, modes)
+        create_backup(
+            Service(denied=session.id),
+            backend,
+            modes,
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_authorizes_all_sessions_before_loading(backend, monkeypatch):
@@ -172,13 +183,23 @@ def test_backup_authorizes_all_sessions_before_loading(backend, monkeypatch):
 
     monkeypatch.setattr(backend, "load", fail_load)
     with pytest.raises(BackupRefused, match="^access denied$") as denied:
-        create_backup(Service(denied=unreadable.id), backend, WriteModes())
+        create_backup(
+            Service(denied=unreadable.id),
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
     assert all(
         value not in str(denied.value)
         for value in (broken.id, broken.name, unreadable.id, unreadable.name)
     )
     with pytest.raises(BackupRefused, match="^session_load_failed$"):
-        create_backup(Service(), backend, WriteModes())
+        create_backup(
+            Service(),
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_refuses_session_list_changes_before_reading_records(backend):
@@ -195,7 +216,12 @@ def test_backup_refuses_session_list_changes_before_reading_records(backend):
     service = Service()
     service.authorization_hook = ChangingHook()
     with pytest.raises(BackupRefused, match="session list changed"):
-        create_backup(service, backend, WriteModes())
+        create_backup(
+            service,
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -220,7 +246,12 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
         WriteModes(Layers([{"id": "change"}])) if failure == "staged" else WriteModes()
     )
     with pytest.raises(BackupRefused):
-        create_backup(service, backend, modes)
+        create_backup(
+            service,
+            backend,
+            modes,
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend):
@@ -243,7 +274,12 @@ def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend
     )
     backend.save(session.to_dict())
     service = Service()
-    create_backup(service, backend, WriteModes())
+    create_backup(
+        service,
+        backend,
+        WriteModes(),
+        template_backend=InMemorySessionPersistenceBackend(),
+    )
     assert service.references == [
         (
             [
@@ -261,7 +297,12 @@ def test_backup_authorizes_legacy_canvas_group_keys_and_other_references(backend
         )
     ]
     with pytest.raises(BackupRefused, match="^access denied$"):
-        create_backup(Service(refs_allowed=False), backend, WriteModes())
+        create_backup(
+            Service(refs_allowed=False),
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_hashes_case_insensitive_base64_asset_marker(backend):
@@ -269,7 +310,12 @@ def test_backup_hashes_case_insensitive_base64_asset_marker(backend):
     url = "data:image/png;BaSe64,cGl4ZWxz"
     session.state["annotations"] = [{"type": "image", "image": {"url": url}}]
     backend.save(session.to_dict())
-    backup = create_backup(Service(), backend, WriteModes())
+    backup = create_backup(
+        Service(),
+        backend,
+        WriteModes(),
+        template_backend=InMemorySessionPersistenceBackend(),
+    )
     assert backup["assets"] == [
         {"sha256": hashlib.sha256(b"pixels").hexdigest(), "data_url": url}
     ]
@@ -326,7 +372,12 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     ]
     backend.save(session.to_dict())
     assert (
-        create_backup(service, backend, WriteModes())["sessions"][0]["state"]
+        create_backup(
+            service,
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )["sessions"][0]["state"]
         == session.state
     )
     for state in (
@@ -367,7 +418,12 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
         session.state.update(state)
         backend.save(session.to_dict())
         with pytest.raises(BackupRefused):
-            create_backup(service, backend, WriteModes())
+            create_backup(
+                service,
+                backend,
+                WriteModes(),
+                template_backend=InMemorySessionPersistenceBackend(),
+            )
 
 
 def test_backup_denies_node_attachment_colliding_with_annotation(tmp_path):
@@ -415,7 +471,12 @@ def test_backup_denies_node_attachment_colliding_with_annotation(tmp_path):
     ]
     backend.save(session.to_dict())
     with pytest.raises(BackupRefused, match="^access denied$"):
-        create_backup(service, backend, WriteModes())
+        create_backup(
+            service,
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_file_layer_is_checked_after_reopening(tmp_path):
@@ -431,7 +492,12 @@ def test_file_layer_is_checked_after_reopening(tmp_path):
     backend = FileSessionPersistenceBackend(tmp_path / "sessions")
     backend.save(Session("1234-5678").to_dict())
     with pytest.raises(BackupRefused):
-        create_backup(Service(), backend, WriteModes(reopened))
+        create_backup(
+            Service(),
+            backend,
+            WriteModes(reopened),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_uses_its_own_reference_scope(tmp_path):
@@ -472,13 +538,23 @@ def test_backup_uses_its_own_reference_scope(tmp_path):
     backend.save(session.to_dict())
     assert service.authorize_capture_refs(["secret"], [])["success"]
     with pytest.raises(BackupRefused, match="access denied"):
-        create_backup(service, backend, WriteModes())
+        create_backup(
+            service,
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_backup_requires_coordinated_layer_snapshot(backend):
     backend.save(Session("1234-5678").to_dict())
     with pytest.raises(BackupRefused, match="layer snapshot unavailable"):
-        create_backup(Service(), backend, BaseWriteModes())
+        create_backup(
+            Service(),
+            backend,
+            BaseWriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_command_authorizes_before_opening_stores(tmp_path, monkeypatch):
@@ -544,12 +620,27 @@ def test_layer_write_is_ordered_with_snapshot(backend):
     writer = threading.Thread(target=stage)
     writer.start()
     try:
-        assert len(create_backup(Service(), backend, modes)["sessions"]) == 1
+        assert (
+            len(
+                create_backup(
+                    Service(),
+                    backend,
+                    modes,
+                    template_backend=InMemorySessionPersistenceBackend(),
+                )["sessions"]
+            )
+            == 1
+        )
     finally:
         writer.join(3)
     assert finished.is_set()
     with pytest.raises(BackupRefused, match="unmerged staged changes"):
-        create_backup(Service(), backend, modes)
+        create_backup(
+            Service(),
+            backend,
+            modes,
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_authorization_runs_outside_session_transaction(backend):
@@ -572,7 +663,14 @@ def test_authorization_runs_outside_session_transaction(backend):
             return super().authorize_capture_refs(nodes, edges, target=target)
 
     assert (
-        len(create_backup(LockCheckingService(), backend, WriteModes())["sessions"])
+        len(
+            create_backup(
+                LockCheckingService(),
+                backend,
+                WriteModes(),
+                template_backend=InMemorySessionPersistenceBackend(),
+            )["sessions"]
+        )
         == 1
     )
 
@@ -603,10 +701,20 @@ def test_revision_change_during_authorization_is_captured(backend, revoke):
     service.authorization_hook = ChangingHook()
     if revoke:
         with pytest.raises(BackupRefused, match="^access denied$") as exc:
-            create_backup(service, backend, WriteModes())
+            create_backup(
+                service,
+                backend,
+                WriteModes(),
+                template_backend=InMemorySessionPersistenceBackend(),
+            )
         assert session.id not in str(exc.value) and session.name not in str(exc.value)
     else:
-        backup = create_backup(service, backend, WriteModes())
+        backup = create_backup(
+            service,
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
         assert backup["sessions"][0]["revision"] == session.seq + 1
 
 
@@ -633,7 +741,17 @@ def test_session_authorization_hook_can_read_store(backend):
 
     service = Service()
     service.authorization_hook = ReadingHook()
-    assert len(create_backup(service, backend, WriteModes())["sessions"]) == 1
+    assert (
+        len(
+            create_backup(
+                service,
+                backend,
+                WriteModes(),
+                template_backend=InMemorySessionPersistenceBackend(),
+            )["sessions"]
+        )
+        == 1
+    )
 
 
 def test_session_reference_requires_target_read_access(backend):
@@ -648,7 +766,12 @@ def test_session_reference_requires_target_read_access(backend):
     ]
     backend.save(session.to_dict())
     with pytest.raises(BackupRefused, match="access denied"):
-        create_backup(Service(denied="4321-8765"), backend, WriteModes())
+        create_backup(
+            Service(denied="4321-8765"),
+            backend,
+            WriteModes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
 
 
 def test_file_snapshot_authorizes_before_loading_malformed_layer(
@@ -752,7 +875,12 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
 
     with integration.open_backup(NarrowHook()) as (service, backend, modes):
         with pytest.raises(BackupRefused, match="^access denied$"):
-            create_backup(service, backend, modes)
+            create_backup(
+                service,
+                backend,
+                modes,
+                template_backend=InMemorySessionPersistenceBackend(),
+            )
     # Copying happens before session authorization; even a traceback must not
     # reveal a denied session ID through a filesystem or aggregated copy error.
     import shutil
@@ -821,3 +949,10 @@ def test_templates_are_authorized_validated_and_integrity_protected(backend):
     templates.save({"id": doc["template_id"], "document": {}})
     with pytest.raises(BackupRefused):
         create_backup(Service(), backend, WriteModes(), template_backend=templates)
+
+
+@pytest.mark.parametrize("omit", [True, False])
+def test_backup_refuses_missing_template_backend(backend, omit):
+    kwargs = {} if omit else {"template_backend": None}
+    with pytest.raises(BackupRefused, match="template backend unavailable"):
+        create_backup(Service(), backend, WriteModes(), **kwargs)

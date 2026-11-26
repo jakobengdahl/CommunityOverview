@@ -120,6 +120,8 @@ def create_backup(service, session_backend, write_modes, *, template_backend=Non
                 target="get_visualization_session",
                 session_id=session_id,
             )
+        if template_backend is None:
+            raise BackupRefused("template backend unavailable")
         templates = []
         tombstones = []
         if template_backend is not None:
