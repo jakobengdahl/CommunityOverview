@@ -548,3 +548,25 @@ def test_template_tools_share_crud_surface(crud_tools):
     assert tools["delete_template"](
         template_id=tid, expected_revision=changed["revision"]
     )["deleted"]
+
+
+def test_template_published_schemas_and_raw_validation(tmp_path):
+    import asyncio
+    from mcp.server.fastmcp import FastMCP
+
+    service = GraphService(GraphStorage(json_path=str(tmp_path / "g.json")))
+    manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
+    mcp = FastMCP("test")
+    register_mcp_tools(mcp, service, session_manager=manager)
+    required = {
+        "save_template": {"session_id", "name", "expected_revision"},
+        "list_templates": set(),
+        "get_template": {"template_id"},
+        "update_template": {"template_id", "expected_revision"},
+        "delete_template": {"template_id", "expected_revision"},
+    }
+    for name, expected in required.items():
+        tool = mcp._tool_manager.get_tool(name)
+        assert set(tool.parameters.get("required", [])) == expected
+    result = asyncio.run(mcp.call_tool("list_templates", {"limit": "bad"}))
+    assert "invalid_request" in str(result)

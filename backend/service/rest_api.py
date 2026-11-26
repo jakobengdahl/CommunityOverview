@@ -1567,16 +1567,24 @@ def _register_session_endpoints(
             )
         return template_response(result)
 
+    def template_integer(value):
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return value  # Service validation supplies the invalid_request envelope.
+
     @router.get("/templates")
     async def list_template_route(
         http_request: Request,
         query: Optional[str] = None,
         tags: Optional[List[str]] = Query(None),
-        limit: Optional[int] = None,
+        limit: Optional[str] = None,
     ):
         with use_request_authorization(headers=http_request.headers):
             result = templates.list_templates(
-                service, session_manager, query, tags, limit
+                service, session_manager, query, tags, template_integer(limit)
             )
         return template_response(result)
 
@@ -1604,11 +1612,14 @@ def _register_session_endpoints(
 
     @router.delete("/templates/{template_id}")
     async def delete_template_route(
-        template_id: str, http_request: Request, expected_revision: Optional[int] = None
+        template_id: str, http_request: Request, expected_revision: Optional[str] = None
     ):
         with use_request_authorization(headers=http_request.headers):
             result = templates.delete_template(
-                service, session_manager, template_id, expected_revision
+                service,
+                session_manager,
+                template_id,
+                template_integer(expected_revision),
             )
         return template_response(result)
 

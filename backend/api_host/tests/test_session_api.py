@@ -1511,6 +1511,10 @@ class TestSessionsDirIsolation:
 
         app = create_app(config)
 
+        assert (
+            app.state.session_manager.template_store._backend.directory
+            == elsewhere / "templates"
+        )
         assert app.state.session_store._backend.directory == elsewhere, (
             "the server did not use the session directory it was configured "
             "with, so SESSIONS_DIR does not reach the store and a "
@@ -1833,3 +1837,16 @@ def test_template_route_failure_status(test_app, monkeypatch, code, status):
     response = test_app.post("/api/sessions/1234-5678/templates", json={})
     assert response.status_code == status
     assert response.json()["error"] == code
+
+
+@pytest.mark.parametrize(
+    "method,path,params",
+    [
+        ("get", "/api/templates", {"limit": "bad"}),
+        ("delete", "/api/templates/1234-5678", {"expected_revision": "bad"}),
+    ],
+)
+def test_template_invalid_integer_query(test_app, method, path, params):
+    response = getattr(test_app, method)(path, params=params)
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "error": "invalid_request"}

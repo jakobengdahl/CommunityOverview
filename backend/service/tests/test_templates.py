@@ -399,3 +399,33 @@ def test_list_filters_templates_the_caller_cannot_read(capture):
             == "access_denied"
         )
         assert templates.list_templates(service, manager)["templates"] == []
+
+
+def test_collection_authorization_ignores_bound_session(capture):
+    from backend.runtime.session_context import bind_session
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    seen = []
+
+    class Hook:
+        def evaluate(self, context):
+            seen.append((context.target, context.session_id))
+            return GraphAuthorizationDecision(
+                allowed=not (
+                    context.target
+                    in {"create_visualization_session", "list_visualization_sessions"}
+                    and context.session_id
+                )
+            )
+
+    service._authorization_hook = Hook()
+    with bind_session("9999-9999"):
+        saved = templates.save_template(
+            service, manager, session.id, "Example", session.seq
+        )
+        assert saved["success"]
+        assert templates.list_templates(service, manager)["count"] == 1
+    assert ("create_visualization_session", "") in seen
+    assert ("list_visualization_sessions", "") in seen
+    assert ("get_visualization_session", saved["template"]["template_id"]) in seen

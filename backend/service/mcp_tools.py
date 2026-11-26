@@ -768,7 +768,21 @@ def register_mcp_tools(
                 tool.parameters = {
                     **tool.parameters,
                     "properties": properties,
-                    "required": list(properties),
+                    "required": (
+                        list(properties)
+                        if func.__name__ == "save_session_view"
+                        else {
+                            "save_template": [
+                                "session_id",
+                                "name",
+                                "expected_revision",
+                            ],
+                            "list_templates": [],
+                            "get_template": ["template_id"],
+                            "update_template": ["template_id", "expected_revision"],
+                            "delete_template": ["template_id", "expected_revision"],
+                        }[func.__name__]
+                    ),
                 }
         tools_map[func.__name__] = wrapped
         return wrapped

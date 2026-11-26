@@ -400,13 +400,17 @@ ERROR_STATUS = {
 
 
 def _authorize(service, action, target, session_id=None):
+    from backend.runtime.session_context import bind_session
+
     try:
-        denied = access.authorize_graph_access(
-            service.authorization_hook,
-            action=action,
-            target=target,
-            session_id=session_id,
-        )
+        # Collection operations have no session target, regardless of any MCP binding.
+        with bind_session(None):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=action,
+                target=target,
+                session_id=session_id,
+            )
         return denied is None
     except Exception:
         return False
