@@ -92,10 +92,40 @@ nodes to a session. Missing, archived, or inaccessible nodes are reported as
 unchanged. Graph edges between session nodes remain those in the graph.
 
 Supply both finite `x` and `y` coordinates to place the template bounds at an
-explicit origin; omitted or incomplete coordinates return `invalid_request`.
+explicit origin. When both are omitted, the estimated template bounds are placed
+80 model-space pixels to the right of the existing content, with their tops
+aligned. Existing members without stored positions count at (0, 0) with the
+built-in card size. In an empty session the template bounds' top-left is placed
+at (0, 0). Supplying only one coordinate returns `invalid_request`.
 Annotation IDs are minted fresh and links remapped; links to missing nodes are
 removed. Shape selections become per-node overrides, with `tombstoned` and `missing_shape` entries in the
 shape report for fallbacks. The result includes `added`, `annotation_id_map`,
 `skipped`, `shapes`, and the session `revision`. Optional `expected_revision`
 and `template_revision` reject stale writes atomically with `revision_conflict`.
 Only `reference` mode is available; `copy` returns `unsupported_mode`.
+
+### Default placement bounds
+
+The server estimates model-space bounds using the following size table. These
+are placement rules, not a guarantee of exact browser rendering bounds. Stored
+annotation dimensions override the annotation defaults. Node shape sizes and
+the triangle label allowance scale with the shape definition. Rotation uses
+the axis-aligned bounding box around the box rotated about its center; a
+geometry rotation takes precedence over a top-level rotation.
+An inserted node with no template shape uses the target session's effective
+node or type shape (including configured type defaults) for its bounds.
+
+| Element | Default width × height (model pixels) | Bounds rule |
+| --- | --- | --- |
+| Built-in or unknown node shape | 200 × 100 | Box at node position |
+| Rectangle node shape | 200 × 120 | Box at node position |
+| Flat rectangle node shape | 240 × 96 | Box at node position |
+| Triangle node shape (up or down) | 240 × 180 | Include 28 pixels above the body for the label |
+| Reference annotation | 220 × 72 | Stored dimensions override default |
+| Heatmap annotation | 160 × 160 | Stored dimensions override default |
+| Other box annotation (including note, icon and vote dot) | 160 × 96 | Stored dimensions override default |
+| Line annotation | Δx 160, Δy 0 | Bound both endpoints; absent end uses start plus dx/dy |
+| Freehand annotation | Point at position if empty | Bound all stored absolute points |
+
+These defaults follow the browser's annotation model and node shape constants;
+the server does not measure content, strokes, attachments, or browser layout.
