@@ -26,8 +26,8 @@ const KIND_LABEL_KEYS = {
  * `@` trigger inside the reference.
  */
 function formatReference(kind, id, displayName) {
-  const name = String(displayName ?? id)
-    .replace(/\\/g, '')
+  const display = String(displayName ?? id);
+  const name = (kind === 'template' ? display.replace(/\\/g, '') : display)
     .replace(/[[\]]/g, '')
     .replace(/(?<=\s)@+/g, '');
   return `[${name}](${kind}:${id})`;

@@ -236,11 +236,12 @@ describe('ChatComposer', () => {
 
     // An @ inside an inserted reference never becomes a trigger of its own.
     api.searchGraph.mockResolvedValueOnce({
-      nodes: [{ id: 'n2', name: 'Team @alpha', type: 'Goal' }],
+      nodes: [{ id: 'n2', name: 'Team\\Ops @alpha', type: 'Goal' }],
     });
     type(input, '@team');
     await settle();
     key(input, 'Tab');
+    expect(input).toHaveValue('[Team\\Ops alpha](node:n2) ');
     type(input, `${input.value}x`);
     await settle();
     expect(api.searchGraph).toHaveBeenLastCalledWith('team', expect.anything());
