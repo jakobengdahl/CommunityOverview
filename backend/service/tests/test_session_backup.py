@@ -208,7 +208,9 @@ def test_backup_uses_its_own_reference_scope(tmp_path):
             return GraphAuthorizationDecision(
                 allowed=True,
                 graph_access=GraphAccessNarrowing(
-                    enabled=(context.target == "backup_sessions" and bool(context.session_id)),
+                    enabled=(
+                        context.target == "backup_sessions" and bool(context.session_id)
+                    ),
                     allow_local_graph=False,
                     include_graph_ids=("allowed",),
                 ),

@@ -73,7 +73,9 @@ def create_backup(service, session_backend, write_modes):
     assets = {}
     with session_context.bind_session(None):
         _authorize(
-            service.authorization_hook, target="backup_sessions", action=GRAPH_ACTION_ADMIN
+            service.authorization_hook,
+            target="backup_sessions",
+            action=GRAPH_ACTION_ADMIN,
         )
         # A session transaction alone does not order staged writes. Only a
         # deployment-provided snapshot that coordinates with every layer writer
@@ -112,16 +114,21 @@ def create_backup(service, session_backend, write_modes):
                 # Explicit membership always names graph nodes, even when an ID
                 # happens to share the legacy local-group prefix.
                 for field in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
-                    node_ids.extend(i for i in state.get(field, []) if isinstance(i, str))
+                    node_ids.extend(
+                        i for i in state.get(field, []) if isinstance(i, str)
+                    )
                 local_groups = {
-                    key for field in ("positions", "shape_overrides")
-                    for key in state.get(field, {}) if key.startswith("group-")
+                    key
+                    for field in ("positions", "shape_overrides")
+                    for key in state.get(field, {})
+                    if key.startswith("group-")
                 } - set(node_ids)
                 # Revisions can outlive membership, but still disclose node IDs.
                 node_ids.extend(
                     key[5:]
                     for key in state.get("shape_revisions", {})
-                    if isinstance(key, str) and key.startswith("node:")
+                    if isinstance(key, str)
+                    and key.startswith("node:")
                     and key[5:] not in local_groups
                 )
                 try:
