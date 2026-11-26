@@ -91,39 +91,41 @@ def create_backup(service, session_backend, write_modes):
         snapshot = getattr(write_modes, "backup_snapshot", None)
         if not callable(snapshot):
             raise BackupRefused("layer snapshot unavailable")
+        # Keep authorization and capture in one transaction so the authorized
+        # session cannot be replaced before its record is read.
         with session_backend.transaction():
             session_ids = sorted(session_backend.list_ids())
-        for session_id in session_ids:
-            _authorize(
-                service.authorization_hook,
-                target="get_visualization_session",
-                session_id=session_id,
-            )
-        with session_backend.transaction(), snapshot() as snapshot_modes:
+            for session_id in session_ids:
+                _authorize(
+                    service.authorization_hook,
+                    target="get_visualization_session",
+                    session_id=session_id,
+                )
             if sorted(session_backend.list_ids()) != session_ids:
                 raise BackupRefused("session list changed during backup")
-            for session_id in session_ids:
-                raw = session_backend.load(session_id)
-                if raw is None or raw.get("id") != session_id:
-                    raise BackupRefused("invalid session record")
-                session = Session.from_dict(raw)
-                status = snapshot_modes.staged_status(session_id)
-                if (
-                    status == "retired"
-                    or snapshot_modes.store_holds_unreadable_records()
-                ):
-                    raise BackupRefused("unreadable session mode")
-                mode = snapshot_modes.mode_of(session_id)
-                if session.write_mode == "staged" and mode != "staged":
-                    raise BackupRefused("unreadable session mode")
-                if mode == "staged" and snapshot_modes.layer_store.load_layer(
-                    session_id
-                ):
-                    raise BackupRefused("unmerged staged changes")
-                state = raw.get("state")
-                if not isinstance(state, dict) or state.keys() - _empty_state().keys():
-                    raise BackupRefused("invalid session state")
-                captured.append((session_id, copy.deepcopy(raw), mode))
+            with snapshot() as snapshot_modes:
+                for session_id in session_ids:
+                    raw = session_backend.load(session_id)
+                    if raw is None or raw.get("id") != session_id:
+                        raise BackupRefused("invalid session record")
+                    session = Session.from_dict(raw)
+                    status = snapshot_modes.staged_status(session_id)
+                    if (
+                        status == "retired"
+                        or snapshot_modes.store_holds_unreadable_records()
+                    ):
+                        raise BackupRefused("unreadable session mode")
+                    mode = snapshot_modes.mode_of(session_id)
+                    if session.write_mode == "staged" and mode != "staged":
+                        raise BackupRefused("unreadable session mode")
+                    if mode == "staged" and snapshot_modes.layer_store.load_layer(
+                        session_id
+                    ):
+                        raise BackupRefused("unmerged staged changes")
+                    state = raw.get("state")
+                    if not isinstance(state, dict) or state.keys() - _empty_state().keys():
+                        raise BackupRefused("invalid session state")
+                    captured.append((session_id, copy.deepcopy(raw), mode))
         # Reference authorization can consult SessionStore and must not run
         # under either persistence lock. The collected records are detached.
         for session_id, raw, mode in captured:
@@ -134,15 +136,15 @@ def create_backup(service, session_backend, write_modes):
                     state, include_legacy_groups=True
                 )
                 annotation_ids = session_capture._annotation_ids(state)
-                # A collision must not hide a possible graph node.
+                # Explicit node links can collide with an annotation ID.
                 for annotation in state.get("annotations") or []:
                     if not isinstance(annotation, dict):
                         continue
-                    for holder, key, _ in annotation_link_fields(annotation):
+                    for holder, key, declared in annotation_link_fields(annotation):
                         value = session_capture._link_id(
                             holder[key] if isinstance(holder, list) else holder.get(key)
                         )
-                        if value in annotation_ids:
+                        if declared == "node" and value in annotation_ids:
                             node_ids.append(value)
                 # Group members are node IDs even when an annotation has the
                 # same ID; capture's canvas link resolution can classify them

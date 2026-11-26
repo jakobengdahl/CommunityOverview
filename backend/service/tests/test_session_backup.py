@@ -173,6 +173,8 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
 
 def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     from backend.core import Node
+    from backend.core.session_manager import SessionManager
+    from backend.core.session_store import SessionStore
     from backend.core.storage import GraphStorage
     from backend.runtime.authorization import GraphAccessNarrowing
     from backend.service import GraphService
@@ -208,7 +210,17 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
     )
     service = GraphService(storage, authorization_hook=NarrowHook())
     backend = InMemorySessionPersistenceBackend()
+    service.attach_sessions(SessionManager(SessionStore(backend)))
     session = Session("1234-5678")
+    session.state["annotations"] = [
+        {"id": "local", "type": "text"},
+        {
+            "id": "note", "type": "text",
+            "attachment": {"target_type": "annotation", "target_id": "local"},
+        },
+    ]
+    backend.save(session.to_dict())
+    assert create_backup(service, backend, WriteModes())["sessions"][0]["state"] == session.state
     for state in (
         {
             "annotations": [
@@ -243,6 +255,8 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
 
 def test_backup_denies_node_attachment_colliding_with_annotation(tmp_path):
     from backend.core import Node
+    from backend.core.session_manager import SessionManager
+    from backend.core.session_store import SessionStore
     from backend.core.storage import GraphStorage
     from backend.runtime.authorization import GraphAccessNarrowing
     from backend.service import GraphService
@@ -272,6 +286,7 @@ def test_backup_denies_node_attachment_colliding_with_annotation(tmp_path):
     )
     service = GraphService(storage, authorization_hook=NarrowHook())
     backend = InMemorySessionPersistenceBackend()
+    service.attach_sessions(SessionManager(SessionStore(backend)))
     session = Session("1234-5678")
     session.state["annotations"] = [
         {"id": "secret", "type": "text"},
@@ -443,6 +458,42 @@ def test_authorization_runs_outside_session_transaction(backend):
         len(create_backup(LockCheckingService(), backend, WriteModes())["sessions"])
         == 1
     )
+
+
+def test_replacement_waits_for_authorized_snapshot(backend):
+    import threading
+
+    original = Session("1234-5678", name="original")
+    replacement = Session(original.id, name="replacement")
+    backend.save(original.to_dict())
+    entered, attempted, finished = (threading.Event() for _ in range(3))
+
+    class CoordinatedHook(Hook):
+        def evaluate(self, context):
+            if context.session_id == original.id:
+                entered.set()
+                assert attempted.wait(3)
+                assert not finished.wait(0.1)
+            return GraphAuthorizationDecision(allowed=True)
+
+    def replace():
+        assert entered.wait(3)
+        attempted.set()
+        with backend.transaction():
+            backend.delete(original.id)
+            backend.save(replacement.to_dict())
+        finished.set()
+
+    writer = threading.Thread(target=replace)
+    writer.start()
+    service = Service()
+    service.authorization_hook = CoordinatedHook()
+    try:
+        backup = create_backup(service, backend, WriteModes())
+        assert backup["sessions"][0]["name"] == "original"
+    finally:
+        writer.join(3)
+    assert finished.is_set()
 
 
 @pytest.mark.parametrize("custom_journal", [False, True])
