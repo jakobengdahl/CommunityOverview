@@ -161,7 +161,16 @@ describe('useCommandSuggestions', () => {
 
   it('does not block nodes on templates, refreshes access on revisit, and registers insert commands', async () => {
     let resolveTemplates;
-    api.searchGraph.mockResolvedValue({ nodes: [{ id: 'n1', name: 'Goal', type: 'Goal' }] });
+    api.searchGraph.mockResolvedValue({
+      nodes: [
+        { id: 'n1', name: 'Goal', type: 'Goal' },
+        ...Array.from({ length: 8 }, (_, i) => ({
+          id: `weak${i}`,
+          name: `Goals ${i}`,
+          type: 'Goal',
+        })),
+      ],
+    });
     api.listTemplates.mockImplementationOnce(
       () => new Promise((resolve) => (resolveTemplates = resolve))
     );
@@ -172,9 +181,18 @@ describe('useCommandSuggestions', () => {
       { wrapper, initialProps: { input: 'goal' } }
     );
     await settle(NODE_QUERY_DEBOUNCE_MS);
-    expect(ids(result.current.items)).toEqual(['node:n1', 'nodeType:Goal']);
+    expect(ids(result.current.items)).toEqual([
+      'node:n1',
+      'nodeType:Goal',
+      ...Array.from({ length: 6 }, (_, i) => `node:weak${i}`),
+    ]);
     await act(async () => resolveTemplates({ templates: [{ template_id: 't1', name: 'Goal' }] }));
-    expect(ids(result.current.items)).toContain('template:t1');
+    expect(ids(result.current.items)).toEqual([
+      'node:n1',
+      'nodeType:Goal',
+      'template:t1',
+      ...Array.from({ length: 5 }, (_, i) => `node:weak${i}`),
+    ]);
     rerender({ input: 'other' });
     rerender({ input: 'goal' });
     expect(result.current.items).toEqual([]);
@@ -187,6 +205,13 @@ describe('useCommandSuggestions', () => {
     expect(ids(result.current.items)).toEqual(['command:template:insert:t1']);
     await act(async () => result.current.items[0].command.execute(context));
     expect(insert).toHaveBeenCalledWith(context, { template_id: 't1', name: 'Goal' });
+    api.listTemplates.mockResolvedValueOnce({ templates: [{ template_id: 't1', name: 'Goal' }] });
+    rerender({ input: '/goal' });
+    await settle(1);
+    expect(ids(result.current.items)).toEqual([
+      'command:template:insert:t1',
+      'command:goal-command',
+    ]);
     rerender({ input: '/template' });
     expect(result.current.items).toEqual([]);
     await settle(1);

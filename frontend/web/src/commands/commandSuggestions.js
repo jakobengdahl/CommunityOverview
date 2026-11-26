@@ -132,23 +132,19 @@ export function useCommandSuggestions(input, context, nodeTypes) {
   useEffect(() => {
     if (!request) return undefined;
     let cancelled = false;
-    let nodesSettled = false;
     const timer = setTimeout(
       () => {
         api.listTemplates().then(
           (result) =>
-            !cancelled &&
-            setTemplateSearch({ request, templates: result.templates || [], late: nodesSettled }),
+            !cancelled && setTemplateSearch({ request, templates: result.templates || [] }),
           () => !cancelled && setTemplateSearch({ request, templates: [] })
         );
         if (mode === 'plain') {
           searchVisibleNodes(query, { federationDepth }).then(
             (nodes) => {
-              nodesSettled = true;
               if (!cancelled) setSearch({ request, nodes, failed: false });
             },
             () => {
-              nodesSettled = true;
               if (!cancelled) setSearch({ request, nodes: [], failed: true });
             }
           );
@@ -195,12 +191,7 @@ export function useCommandSuggestions(input, context, nodeTypes) {
       .map((command) => commandSuggestion(command, t));
     const listAllTemplates = templates.length && ['mall', 'template'].includes(query.toLowerCase());
     const limit = listAllTemplates ? Infinity : MAX_SUGGESTIONS;
-    const regular = items.filter((item) => !item.id.startsWith('template:insert:'));
-    const templateCommands = items.filter((item) => item.id.startsWith('template:insert:'));
-    return [
-      ...rankSuggestions(regular, query, locale, limit),
-      ...rankSuggestions(templateCommands, query, locale, limit),
-    ].slice(0, limit);
+    return rankSuggestions(items, query, locale, limit);
     // registryVersion: a newly registered command must show without an edit.
   }, [registry, registryVersion, mode, query, context, locale, t, templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -225,13 +216,7 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     template,
   }));
   const status = search.failed ? 'error' : 'ready';
-  const items =
-    templateSearch.request === request && templateSearch.late
-      ? [
-          ...rankSuggestions([...nodeItems, ...typeItems], query, locale),
-          ...rankSuggestions(templateItems, query, locale),
-        ].slice(0, MAX_SUGGESTIONS)
-      : rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
+  const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
   return {
     mode,
     items,
