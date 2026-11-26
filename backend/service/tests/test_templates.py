@@ -562,7 +562,9 @@ def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
     before = __import__("copy").deepcopy(target.state)
     tid = saved["template_id"]
     for x, y in ((10**400, 0), (0, -(10**400))):
-        assert templates.insert_template(service, manager, target.id, tid, x=x, y=y) == {
+        assert templates.insert_template(
+            service, manager, target.id, tid, x=x, y=y
+        ) == {
             "success": False,
             "error": "invalid_request",
         }
