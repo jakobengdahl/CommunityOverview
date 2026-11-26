@@ -58,13 +58,11 @@ import {
   createdNodesToCanvas,
   deleteEdgeEverywhere,
   expandNode,
-  loadSavedViewNode,
   openAgentEditor,
   persistNewNodes,
   persistNodeUpdates,
   setEdgeType,
 } from './utils/sessionScopedGraphEdits';
-import { loadUrlSavedView } from './utils/urlSavedView';
 import {
   captureCanvasSession,
   createHistoryReplayQueue,
@@ -213,19 +211,8 @@ function App() {
   const { t, setLanguage, language } = useI18n();
 
   const urlGuideStartedRef = useRef(false);
-  const urlViewLoadedRef = useRef(false);
-  // The in-flight ?session= bootstrap load, so a ?view= in the same URL can wait
-  // for it and be applied on top.
-  const urlSessionBootstrapRef = useRef(null);
-  const canvasEditEpochRef = useRef(0);
   const urlFocusNodeLoadedRef = useRef(false);
-  // The saved-view load clears the canvas after its own await, so focusing a
-  // ?node= before it settles can have the node wiped out from under the focus.
-  // Starts settled when there is no ?view= to wait for, which is also why this
-  // is derived at mount rather than set from inside the view effect.
-  const [urlViewSettled, setUrlViewSettled] = useState(
-    () => !new URLSearchParams(window.location.search).get('view')
-  );
+  const urlSessionBootstrapRef = useRef(null);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
   const lastEscapeRef = useRef(0);
@@ -331,8 +318,6 @@ function App() {
     api.setActiveSessionForRequests(id);
     setSessionIdState(id);
   }, []);
-  // The session the page was opened into, for the ?view= load to compare against.
-  const urlSessionIdRef = useRef(sessionId);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Independent viewport signals (WAVE 0 mobile-shell enabler) — isMobile is a
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
@@ -1369,6 +1354,7 @@ function App() {
       editingEdge ||
       deleteDialog ||
       saveViewDialog ||
+      saveViewDialog ||
       templateDialog ||
       showSubscriptionDialog ||
       showAgentDialog ||
@@ -1516,7 +1502,7 @@ function App() {
         },
       });
       // Bound the wait even if fetch never settles. Invalidate the load itself
-      // too, so a late reply cannot undo the view/focus that proceeds afterward.
+      // too, so a late reply cannot undo later canvas changes.
       urlSessionBootstrapRef.current = Promise.race([
         load,
         new Promise((resolve) => {
@@ -1527,15 +1513,13 @@ function App() {
           }, SYNC_REQUEST_TIMEOUT_MS);
         }),
       ])
-        .catch(() => {}) // The loader logs errors; URL view/focus may still proceed.
+        .catch(() => {}) // The loader logs errors.
         .finally(() => clearTimeout(timer));
     }
     setSessionsVersion((v) => v + 1);
     return () => {
       expired = true;
       clearTimeout(timer);
-      // StrictMode may already have a saved-view effect awaiting this promise.
-      // Release that waiter when retiring this bootstrap, even if fetch hangs.
       settleBootstrapWait?.();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1628,67 +1612,6 @@ function App() {
     }
   }, [presentation, startGuide]);
 
-  // Load saved view from URL param ?view=<name> — fires once after stats confirm backend is ready
-  useEffect(() => {
-    if (!stats || urlViewLoadedRef.current) return;
-    const urlViewName = new URLSearchParams(window.location.search).get('view');
-    if (!urlViewName) return;
-    urlViewLoadedRef.current = true;
-    (async () => {
-      try {
-        await loadUrlSavedView({
-          name: urlViewName,
-          sessionBootstrap: urlSessionBootstrapRef.current,
-          sessionId: urlSessionIdRef.current,
-          getCurrentSessionId: () => sessionIdRef.current,
-          getSavedView: api.getSavedView,
-          getCanvasEditEpoch: () => canvasEditEpochRef.current,
-          applyView: (result) => {
-            const positioned = result.nodes.map((n) =>
-              result.positions?.[n.id] ? { ...n, _savedPosition: result.positions[n.id] } : n
-            );
-            // A session stores the view's layout with the replace and every
-            // browser renders it from there, so this one does not save it back.
-            const sent = publishMembership(
-              'nodes_replaced',
-              positioned.map((n) => n.id),
-              {
-                nodes: positioned,
-                edges: result.edges || [],
-                view: {
-                  positions: result.positions || {},
-                  hidden_node_ids: result.hidden_node_ids || [],
-                  annotations: legacyMetadataToAnnotationDocument({
-                    groups: result.groups || [],
-                    parentIds: result.parentIds || {},
-                    annotations: result.annotations || [],
-                  }).annotations,
-                },
-              }
-            );
-            if (sent) return;
-            clearVisualization({ keepNodes: true });
-            if (result.hidden_node_ids?.length) setHiddenNodeIds(result.hidden_node_ids);
-            if (result.groups?.length)
-              setPendingGroups({ groups: result.groups, parentIds: result.parentIds || {} });
-            if (result.annotations?.length) setPendingAnnotations(result.annotations);
-          },
-        });
-      } catch (err) {
-        console.error('[App] Failed to load view from URL:', err);
-      } finally {
-        setUrlViewSettled(true);
-      }
-    })();
-  }, [
-    stats,
-    clearVisualization,
-    publishMembership,
-    setHiddenNodeIds,
-    setPendingGroups,
-    setPendingAnnotations,
-  ]);
-
   const notificationTimeoutRef = useRef(null);
   useEffect(() => () => clearTimeout(notificationTimeoutRef.current), []);
 
@@ -1721,17 +1644,18 @@ function App() {
   // builds — the parameter names live in backend/federation/teleport.py, so a
   // route this app hands out is one it can also consume.
   useEffect(() => {
-    // Waits for ?view= to settle: a saved-view load clears the canvas after its
-    // own await, and a gui_url may legitimately carry both parameters.
-    if (!stats || !urlViewSettled || urlFocusNodeLoadedRef.current) return;
+    if (!stats || urlFocusNodeLoadedRef.current) return;
     const params = new URLSearchParams(window.location.search);
     const focusId = params.get('node');
     if (!focusId) return;
     urlFocusNodeLoadedRef.current = true;
     const searchContext = params.get('q');
     const fromGraph = params.get('from_graph');
+    const startingSession = sessionIdRef.current;
     (async () => {
       try {
+        await urlSessionBootstrapRef.current;
+        if (sessionIdRef.current !== startingSession) return;
         const result = await api.getNodeDetails(focusId);
         if (!result?.success || !result.node) {
           showNotification('info', t('federation.teleport_focus_not_found'));
@@ -1755,15 +1679,7 @@ function App() {
         showNotification('info', t('federation.teleport_focus_not_found'));
       }
     })();
-  }, [
-    stats,
-    urlViewSettled,
-    publishMembership,
-    setFocusNodeId,
-    setGuideSearchInput,
-    showNotification,
-    t,
-  ]);
+  }, [stats, publishMembership, setFocusNodeId, setGuideSearchInput, showNotification, t]);
 
   useEffect(() => {
     const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
@@ -1823,31 +1739,10 @@ function App() {
   // Callback: Double-click on node
   const handleNodeDoubleClick = useCallback(
     async (nodeId, nodeData) => {
-      // If it's a SavedView, load it directly
-      if (nodeData.type === 'SavedView' || nodeData.nodeType === 'SavedView') {
-        await loadSavedViewNode({
-          nodeData,
-          getNodeDetails: api.getNodeDetails,
-          clearVisualization,
-          addNodesToVisualization,
-          setPendingGroups,
-          setPendingAnnotations,
-          showNotification,
-        });
-        return;
-      }
-
-      // For other nodes, show detail dialog
+      // Show node details
       setDetailNode({ id: nodeId, data: nodeData });
     },
-    [
-      clearVisualization,
-      addNodesToVisualization,
-      setPendingGroups,
-      setPendingAnnotations,
-      setDetailNode,
-      showNotification,
-    ]
+    [setDetailNode]
   );
 
   // Callback: leave for the graph that owns this node. The status-to-outcome
@@ -2415,7 +2310,6 @@ function App() {
     });
   }
   const publishAnnotationChange = useCallback((kind) => {
-    canvasEditEpochRef.current += 1;
     annotationSchedulerRef.current.schedule(kind);
   }, []);
 
@@ -2475,7 +2369,6 @@ function App() {
   // annotation geometry publishes immediately at this release-time call.
   const handleNodePositionChange = useCallback(
     (nodeId, _position, nodeType) => {
-      canvasEditEpochRef.current += 1;
       syncRef.current?.noteUserMoved([nodeId]);
       if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
         publishAnnotationChange('geometry');
@@ -4127,6 +4020,7 @@ function App() {
     flushBeforeCapture,
     getCaptureState,
     sessionId,
+    onSaveView: handleToolbarSaveView,
     onTeleportToSourceGraph: handleTeleportToSourceGraph,
     sessions,
     currentSessionId: sessionId,
@@ -4145,7 +4039,6 @@ function App() {
     onCreateNodeForType: handleCreateNodeForType,
     onCreateAgent: handleCreateAgent,
     onCreateSubscription: handleCreateSubscription,
-    onSaveView: handleToolbarSaveView,
     onCreateGroup: handleToolbarCreateGroup,
     onCreateActiveKnowledgeCollection: handleCreateAKC,
     llmAvailable,
