@@ -794,3 +794,66 @@ def test_default_origin_is_right_of_existing_annotation(capture, nested):
     result = templates.insert_template(service, manager, target.id, doc["template_id"])
     assert result["success"]
     assert target.state["positions"]["b"]["x"] == 2700
+
+
+def test_insert_uses_rendered_bounds_and_moves_implicit_annotations(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state["annotations"] = [
+        {"id": "implicit", "type": "label"},
+        {"id": "stroke", "type": "freehand", "points": [{"x": -50, "y": -30}]},
+    ]
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    target.state.update(
+        node_refs=["a"],
+        positions={},
+        annotations=[
+            {"id": "existing", "type": "reference", "position": {"x": 400, "y": 0}}
+        ],
+    )
+    result = templates.insert_template(service, manager, target.id, doc["template_id"])
+    assert result["success"]
+    # The reference ends at 620; the source stroke starts at -50.
+    assert target.state["annotations"][1]["position"] == {"x": 870, "y": 30}
+    assert target.state["annotations"][2]["points"] == [{"x": 820, "y": 0}]
+    assert target.state["positions"]["b"] == {"x": 870, "y": 30}
+
+
+def test_insert_default_origin_accounts_for_unpositioned_node(capture):
+    from backend.service import templates
+
+    _, service, manager, source = capture
+    source.state["annotations"] = []
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    target.state.update(node_refs=["a"], positions={})
+    assert templates.insert_template(service, manager, target.id, doc["template_id"])[
+        "success"
+    ]
+    assert target.state["positions"]["b"] == {"x": 400, "y": 0}
+
+
+def test_insert_rejects_overflow_without_writing(capture):
+    from backend.service import templates
+    import copy
+
+    _, service, manager, source = capture
+    source.state["annotations"] = [
+        {"id": "far", "type": "label", "position": {"x": -1e308, "y": 0}}
+    ]
+    doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
+        "template"
+    ]
+    target = manager.create_session("target")
+    before = copy.deepcopy(target.state)
+    result = templates.insert_template(
+        service, manager, target.id, doc["template_id"], x=1e308, y=0
+    )
+    assert result == {"success": False, "error": "invalid_request"}
+    assert target.state == before and target.seq == 0

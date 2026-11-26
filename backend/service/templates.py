@@ -2,6 +2,7 @@
 
 import copy
 import logging
+import math
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -65,6 +66,69 @@ def _freehand_points(annotation):
         if isinstance(payload, dict) and isinstance(payload.get("points"), list):
             points.extend(p for p in payload["points"] if isinstance(p, dict))
     return points
+
+
+def _rendered_bounds(positions, annotations):
+    """Canvas-space bounds, including fallback geometry and point-based marks."""
+    boxes = []
+    for position in positions:
+        p = position or {}
+        px, py = p.get("x", 0), p.get("y", 0)
+        boxes.append((px, py, px + 200, py + 100))  # canvas NODE_WIDTH/HEIGHT
+    for annotation in annotations:
+        points = _line_points(annotation) + _freehand_points(annotation)
+        if points:
+            boxes.extend(
+                (p.get("x", 0), p.get("y", 0), p.get("x", 0), p.get("y", 0))
+                for p in points
+            )
+            continue
+        position = annotation.get("position") or annotation.get("geometry") or {}
+        geometry = annotation.get("geometry") or {}
+        size = annotation.get("size") or geometry
+        kind = annotation_type_of(annotation)
+        default = (
+            (220, 72)
+            if kind == "reference"
+            else (160, 160)
+            if kind == "heatmap"
+            else (160, 96)
+        )
+        px, py = (
+            geometry.get("x", position.get("x", 0)),
+            geometry.get("y", position.get("y", 0)),
+        )
+        width = geometry.get(
+            "w", geometry.get("width", size.get("w", size.get("width", default[0])))
+        )
+        height = geometry.get(
+            "h", geometry.get("height", size.get("h", size.get("height", default[1])))
+        )
+        boxes.append((px, py, px + max(0, width), py + max(0, height)))
+    if not boxes:
+        return None
+    for box in boxes:
+        for value in box:
+            _placement_number(value)
+    return (
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    )
+
+
+class _InvalidPlacement(Exception):
+    pass
+
+
+def _placement_number(value):
+    try:
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise _InvalidPlacement
+    except OverflowError:
+        raise _InvalidPlacement from None
+    return value
 
 
 def _shape(node, state, config, saved):
@@ -831,23 +895,27 @@ def insert_template(
             added, skipped, keys = [], [], {}
             positions, overrides = {}, {}
             hidden = list(session.state.get("hidden_node_ids", []))
+            source_bounds = _rendered_bounds(
+                (node["position"] for node in doc["nodes"]),
+                doc["annotation_document"]["annotations"],
+            ) or (0, 0, 0, 0)
             if x is None:
-                right = [
-                    p.get("x", 0)
-                    for p in (session.state.get("positions") or {}).values()
-                ]
-                for annotation in session.state.get("annotations", []):
-                    p = annotation.get("position") or annotation.get("geometry") or {}
-                    size = annotation.get("size") or annotation.get("geometry") or {}
-                    right.append(p.get("x", 0) + size.get("width", size.get("w", 0)))
-                    right.extend(
-                        p["x"]
-                        for p in _line_points(annotation) + _freehand_points(annotation)
-                        if isinstance(p.get("x"), (int, float))
-                    )
-                x = max(right, default=-200) + 200
+                existing_positions = session.state.get("positions") or {}
+                existing_bounds = _rendered_bounds(
+                    (
+                        existing_positions.get(node_id)
+                        for node_id in session.state.get("node_refs", [])
+                    ),
+                    session.state.get("annotations", []),
+                )
+                x = (
+                    _placement_number(existing_bounds[2] + 200)
+                    if existing_bounds
+                    else 0
+                )
                 y = 0
-            dx, dy = x - doc["bounds"]["x"], y - doc["bounds"]["y"]
+            dx = _placement_number(x - source_bounds[0])
+            dy = _placement_number(y - source_bounds[1])
             library = manager.shape_library
             entries = library.backend.read()["entries"] if library else {}
             config = ConfigLoader().config.node_shapes
@@ -869,7 +937,10 @@ def insert_template(
                 present.add(node_id)
                 added.append(node_id)
                 p = node["position"]
-                positions[node_id] = {"x": p["x"] + dx, "y": p["y"] + dy}
+                positions[node_id] = {
+                    "x": _placement_number(p["x"] + dx),
+                    "y": _placement_number(p["y"] + dy),
+                }
                 if node["hidden"]:
                     hidden.append(node_id)
                 shape = node["shape"]
@@ -927,6 +998,20 @@ def insert_template(
             kept = {a["id"] for a in annotations}
             fresh = {old: new for old, new in fresh.items() if new in kept}
             for a in annotations:
+                # The canvas defaults absent coordinates to zero. Materialize them
+                # before translating, including resize-only geometry records.
+                position = a.get("position") or a.get("geometry") or {}
+                if not isinstance(a.get("position"), dict):
+                    a["position"] = {
+                        "x": position.get("x", 0),
+                        "y": position.get("y", 0),
+                    }
+                else:
+                    a["position"].setdefault("x", 0)
+                    a["position"].setdefault("y", 0)
+                if isinstance(a.get("geometry"), dict):
+                    a["geometry"].setdefault("x", position.get("x", 0))
+                    a["geometry"].setdefault("y", position.get("y", 0))
                 points = [
                     a.get("position"),
                     a.get("geometry"),
@@ -937,10 +1022,9 @@ def insert_template(
                 for p in points:
                     if isinstance(p, dict) and id(p) not in seen:
                         seen.add(id(p))
-                        if "x" in p:
-                            p["x"] += dx
-                        if "y" in p:
-                            p["y"] += dy
+                        p["x"] = _placement_number(p.get("x", 0) + dx)
+                        p["y"] = _placement_number(p.get("y", 0) + dy)
+            _rendered_bounds(positions.values(), annotations)
             op = {
                 "op": "nodes_replaced",
                 "client_id": "mcp-agent",
@@ -962,6 +1046,8 @@ def insert_template(
                 "shapes": shape_report,
                 "revision": session.seq,
             }
+    except (_InvalidPlacement, OverflowError):
+        return _failure("invalid_request")
     except AnnotationLimitReached:
         return _failure("annotations_limit")
     except OpBatchTooLarge:
