@@ -396,11 +396,11 @@ export default function NodeAppearanceDialog({
     if (action === 'edit') started.definition = structuredClone(shown);
     setLibraryBusy(true);
     try {
-      const { revision, usage, template_usage: templateUsage = 0 } = await library.usage(savedKey);
+      const { revision, usage, template_usage: templateUsage = 0, template_usage_token: templateUsageToken = null } = await library.usage(savedKey);
       if (revision !== pinned.revision) libraryFailed({ status: 409 });
       else {
         setLibraryStatus(null);
-        setReview({ ...started, revision, usage, templateUsage });
+        setReview({ ...started, revision, usage, templateUsage, templateUsageToken });
       }
     } catch (error) {
       libraryFailed(error?.status === 404 ? { status: 409 } : error);
@@ -409,10 +409,10 @@ export default function NodeAppearanceDialog({
     }
   }
   async function confirmReview() {
-    const { action, key, name, definition, revision, usage, templateUsage } = review;
+    const { action, key, name, definition, revision, usage, templateUsage, templateUsageToken } = review;
     if (action === 'delete') {
       const entry = await libraryWrite(
-        () => library.remove(key, revision, usage, templateUsage),
+        () => library.remove(key, revision, usage, templateUsage, templateUsageToken),
         'library_deleted'
       );
       // Its users, this draft included, now show the built-in card; the
@@ -424,7 +424,7 @@ export default function NodeAppearanceDialog({
       return;
     }
     const entry = await libraryWrite(
-      () => library.update(key, name, definition, revision, usage, templateUsage),
+      () => library.update(key, name, definition, revision, usage, templateUsage, templateUsageToken),
       'library_updated'
     );
     if (entry) {

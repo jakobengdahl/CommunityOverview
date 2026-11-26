@@ -247,7 +247,8 @@ See [the template contract](../TEMPLATES_CONTRACT.md#shape-resolution).
 
 The reverse index is rebuilt from persisted sessions and live template documents.
 It counts each session and each template once per saved shape, separately, and
-excludes deleted templates. Edit and delete review both counts; a changed count
+excludes deleted templates. Edit and delete review both counts and an opaque
+snapshot of template references; a changed count or set of referencing templates
 requires a new review. Deleting a shape leaves templates unchanged.
 
 ## Editor flow

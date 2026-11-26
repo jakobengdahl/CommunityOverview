@@ -4,6 +4,7 @@ import copy
 import errno
 import json
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -744,7 +745,7 @@ def test_library_routes_write_as_the_authenticated_principal_only(tmp_path):
     assert created.status_code == 201 and "owner" not in created.json()
     assert library.backend.read()["entries"]["card"]["owner"] == "user:alice"
     usage = client.get("/shape-library/card/usage")
-    assert usage.json() == {"revision": 1, "usage": 2, "template_usage": 0}
+    assert usage.json() == {"revision": 1, "usage": 2, "template_usage": 0, "template_usage_token": None}
     edit = {"name": "Flat", "definition": {**DEFINITION, "base": "rectangle-flat"}}
     stale = client.put(
         "/shape-library/card",
@@ -860,7 +861,8 @@ def test_a_replaced_policy_governs_every_library_route(tmp_path, monkeypatch):
     ]
 
 
-def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path):
+@pytest.mark.parametrize("action", ["put", "delete"])
+def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path, action):
     from backend.core.template_store import TemplateStore
     from backend.core.tests.test_template_store import document
 
@@ -885,6 +887,7 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path):
             expected_revision=entry["revision"],
             expected_usage=0,
         )
+    token = restarted.template_usage_token("card")
     doc["nodes"][0]["shape"]["ref"] = None
     doc = templates.save(doc, doc["revision"])
     with pytest.raises(LibraryConflict):
@@ -897,6 +900,19 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path):
             expected_usage=0,
             expected_template_usage=1,
         )
+    other = document()
+    other["template_id"] = "9876-5432-9876-5432"
+    other = templates.save(other, 0)
+    assert restarted.template_usage("card") == 1
+    with pytest.raises(LibraryConflict):
+        options = dict(identity="owner", expected_revision=entry["revision"],
+                       expected_usage=0, expected_template_usage=1,
+                       expected_template_usage_token=token)
+        if action == "delete":
+            restarted.delete("card", **options)
+        else:
+            restarted.put("card", "Card", DEFINITION, **options)
+    templates.delete(other["template_id"], other["revision"])
     doc["nodes"][0]["shape"]["ref"] = "saved:card"
     doc = templates.save(doc, doc["revision"])
     before = (tmp_path / "templates" / (doc["template_id"] + ".json")).read_bytes()
@@ -906,9 +922,35 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path):
         expected_revision=entry["revision"],
         expected_usage=0,
         expected_template_usage=1,
+        expected_template_usage_token=restarted.template_usage_token("card"),
     )
     assert (
         tmp_path / "templates" / (doc["template_id"] + ".json")
     ).read_bytes() == before
     templates.delete(doc["template_id"], doc["revision"])
     assert restarted.template_usage("card") == 0
+
+
+def test_session_creation_and_shape_writes_lock_sessions_before_templates(tmp_path, monkeypatch):
+    sessions = FileSessionPersistenceBackend(tmp_path / "sessions")
+    store = SessionStore(sessions)
+    manager = SessionManager(store)
+    templates = manager.template_store
+    library = ShapeLibrary(FileShapeLibraryPersistenceBackend(tmp_path / "library"),
+                           sessions, templates=templates, writes_enabled=True)
+    transaction = templates._backend.transaction
+    acquisitions = []
+
+    @contextmanager
+    def checked_transaction():
+        assert sessions._lock._is_owned()
+        acquisitions.append(True)
+        with transaction():
+            yield
+
+    monkeypatch.setattr(templates._backend, "transaction", checked_transaction)
+    manager.create_session()
+    entry = library.put("card", "Card", DEFINITION, identity="owner")
+    library.delete("card", identity="owner", expected_revision=entry["revision"],
+                   expected_usage=0)
+    assert len(acquisitions) >= 3

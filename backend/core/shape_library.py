@@ -19,6 +19,7 @@ docs/design/node-shapes/live-writers.md).
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -175,6 +176,27 @@ class ShapeLibrary:
     def template_usage(self, key):
         return len(self.template_references().get(key, ()))
 
+    def template_usage_token(self, key):
+        refs = sorted(self.template_references().get(key, ()))
+        if not refs:
+            return None
+        return hashlib.sha256(json.dumps(refs, ensure_ascii=True).encode()).hexdigest()
+
+    def usage_snapshot(self, key):
+        template_lock = (
+            self.templates._backend.transaction() if self.templates else nullcontext()
+        )
+        with self.sessions.transaction(), template_lock:
+            entry = self.snapshot()["entries"].get(key)
+            if entry is None:
+                return None
+            return {
+                "revision": entry["revision"],
+                "usage": self.usage(key),
+                "template_usage": self.template_usage(key),
+                "template_usage_token": self.template_usage_token(key),
+            }
+
     def template_references(self):
         index = {}
         if self.templates is not None:
@@ -208,6 +230,7 @@ class ShapeLibrary:
         expected_revision=None,
         expected_usage=None,
         expected_template_usage=0,
+        expected_template_usage_token=None,
         session: Session | None = None,
         apply=None,
     ):
@@ -221,6 +244,7 @@ class ShapeLibrary:
             expected_revision,
             expected_usage,
             expected_template_usage,
+            expected_template_usage_token,
             name=name,
             definition=definition,
             session=session,
@@ -235,6 +259,7 @@ class ShapeLibrary:
         expected_revision,
         expected_usage,
         expected_template_usage=0,
+        expected_template_usage_token=None,
         session: Session | None = None,
         apply=None,
     ):
@@ -244,6 +269,7 @@ class ShapeLibrary:
             expected_revision,
             expected_usage,
             expected_template_usage,
+            expected_template_usage_token,
             delete=True,
             session=session,
             apply=apply,
@@ -256,6 +282,7 @@ class ShapeLibrary:
         expected_revision,
         expected_usage,
         expected_template_usage,
+        expected_template_usage_token,
         *,
         name=None,
         definition=None,
@@ -296,6 +323,7 @@ class ShapeLibrary:
                 expected_usage is None
                 or expected_usage != self.usage(key)
                 or expected_template_usage != self.template_usage(key)
+                or expected_template_usage_token != self.template_usage_token(key)
             ):
                 raise LibraryConflict()
             now = datetime.now(timezone.utc).isoformat()
