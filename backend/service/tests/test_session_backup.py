@@ -67,7 +67,11 @@ def test_backup_keeps_persistent_state_and_checks_integrity(backend):
         node_refs=["a"],
         positions={"a": {"x": 2, "y": 3}},
         hidden_edge_ids=["edge"],
-        annotations=[{"id": "image", "url": url}],
+        annotations=[
+            {"id": "image", "type": "image", "image": {"url": url}},
+            {"id": "note", "type": "text", "text": "data:image/ ordinary text"},
+            {"id": "note2", "type": "text", "text": "data:image/png;base64,YQ=="},
+        ],
         shape_revisions={"node:old": 2, "node:group-local": 1},
         shape_overrides={"group-local": "circle"},
     )
@@ -105,7 +109,9 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
     first = Session("1234-5678")
     second = Session("1234-5679")
     if failure == "asset":
-        second.state["annotations"] = [{"url": "data:image/webp;base64,%%%"}]
+        second.state["annotations"] = [
+            {"type": "image", "image": {"url": "data:image/webp;base64,%%%"}}
+        ]
     if failure == "mode":
         second.write_mode = "staged"
     backend.save(first.to_dict())

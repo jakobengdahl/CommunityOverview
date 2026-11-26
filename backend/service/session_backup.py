@@ -31,10 +31,18 @@ def canonical_bytes(value):
     ).encode("utf-8")
 
 
-def _assets(value, found):
+def _assets(state, found):
     # Keep the original data URL in the state; the asset table makes each
     # embedded payload independently verifiable without rewriting the canvas.
-    if isinstance(value, str) and value.startswith("data:image/"):
+    for annotation in state.get("annotations", []):
+        if not isinstance(annotation, dict) or annotation.get("type") != "image":
+            continue
+        image = annotation.get("image")
+        if not isinstance(image, dict):
+            continue
+        value = image.get("url")
+        if not isinstance(value, str) or not value.startswith("data:image/"):
+            continue
         try:
             header, encoded = value.split(",", 1)
             if not header.endswith(";base64"):
@@ -44,12 +52,6 @@ def _assets(value, found):
             raise BackupRefused("invalid embedded asset") from exc
         digest = hashlib.sha256(data).hexdigest()
         found[digest] = {"sha256": digest, "data_url": value}
-    elif isinstance(value, dict):
-        for child in value.values():
-            _assets(child, found)
-    elif isinstance(value, list):
-        for child in value:
-            _assets(child, found)
 
 
 def _authorize(hook, *, target, session_id=None, action=GRAPH_ACTION_READ):
