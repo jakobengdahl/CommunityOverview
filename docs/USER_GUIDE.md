@@ -593,8 +593,17 @@ under **Recent sessions** in the session menu. If the session has staged
 changes, merge or discard them first. A failed or interrupted request may require
 checking the session list before trying again.
 
+The session menu opens recent sessions by ID and copies the server-provided link.
+The assistant and MCP session list also offer server-provided links; names can
+match more than one session, so choose by ID. Collection assistants can use the
+session list when that tool is allowed. API clients can use `session_url` from
+session responses. If the public address is not configured, a link is unavailable.
+
 Older SavedView nodes remain available: double-click one in the graph, or search for
-it and click "Restore view" in its detail panel.
+it and click "Restore view" in its detail panel. Existing `?view=` links still
+open the legacy view by name; they are not converted to sessions. To return to a
+legacy view, use its retained `?view=` link or the graph reader. Legacy views
+were not imported into sessions, and changes to sessions do not update them.
 
 ### Saving templates
 

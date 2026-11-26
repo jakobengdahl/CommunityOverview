@@ -36,6 +36,7 @@ const ASSISTANT_TOOLS = [
   { name: 'save_view', label: 'Save a view' },
   { name: 'get_saved_view', label: 'Load a saved view' },
   { name: 'list_saved_views', label: 'List saved views' },
+  { name: 'list_visualization_sessions', label: 'List sessions' },
   { name: 'clear_visualization', label: 'Clear the visualization' },
   { name: 'mark_nodes', label: 'Mark nodes' },
   { name: 'present_form', label: 'Present an input form' },

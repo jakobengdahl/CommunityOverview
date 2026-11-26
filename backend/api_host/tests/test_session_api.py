@@ -23,7 +23,14 @@ from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
-    def test_create_and_get(self, test_app: TestClient):
+    @pytest.mark.parametrize("base", [None, "/root?view=old"])
+    def test_create_and_get(self, test_app: TestClient, monkeypatch, base):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        if base is None:
+            monkeypatch.delenv(PUBLIC_BASE_URL_ENV, raising=False)
+        else:
+            monkeypatch.setenv(PUBLIC_BASE_URL_ENV, base)
         resp = test_app.post("/api/sessions", json={"name": "My session"})
         assert resp.status_code == 200
         body = resp.json()
@@ -35,6 +42,13 @@ class TestSessionCrud:
         got = test_app.get(f"/api/sessions/{sid}")
         assert got.status_code == 200
         assert got.json()["id"] == sid
+        assert (
+            body["session_url"] == got.json()["session_url"] == build_session_url(sid)
+        )
+        listed = test_app.get("/api/sessions").json()["sessions"]
+        assert next(item for item in listed if item["id"] == sid)[
+            "session_url"
+        ] == build_session_url(sid)
 
     def test_list_sessions(self, test_app: TestClient):
         a = test_app.post("/api/sessions", json={"name": "a"}).json()["id"]

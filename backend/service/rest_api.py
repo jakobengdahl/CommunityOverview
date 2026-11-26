@@ -1428,7 +1428,10 @@ def _register_session_endpoints(
     def _session_payload(
         session, *, resolve: bool, manager, http_request: Optional[Request] = None
     ) -> Dict[str, Any]:
+        from backend.config.config_loader import build_session_url
+
         payload = manager.describe(session)
+        payload["session_url"] = build_session_url(session.id)
         payload["roster"] = manager.roster(session.id)
         if resolve:
             authorization = (
@@ -1808,7 +1811,14 @@ def _register_session_endpoints(
 
     @router.get("/sessions")
     async def list_sessions() -> Dict[str, Any]:
-        return {"sessions": session_manager.list_sessions()}
+        from backend.config.config_loader import build_session_url
+
+        return {
+            "sessions": [
+                {**meta, "session_url": build_session_url(meta["id"])}
+                for meta in session_manager.list_sessions()
+            ]
+        }
 
     @router.get("/sessions/{session_id}")
     async def get_session(
