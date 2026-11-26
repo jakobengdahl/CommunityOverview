@@ -3,6 +3,7 @@
 import copy
 import logging
 import math
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -523,6 +524,8 @@ def capture_template(
 # The session authorization seam also governs templates in open core.
 ERROR_STATUS = {
     "unsupported_mode": 400,
+    "schema_mismatch": 422,
+    "staged_target_not_supported": 409,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -864,18 +867,22 @@ def delete_template(service, manager, template_id, expected_revision):
         return _failure("storage_error")
 
 
+class _CopyRefused(Exception):
+    pass
+
+
 def insert_template(
     service,
     manager,
     session_id,
     template_id,
-    mode="reference",
+    mode="copy",
     x=None,
     y=None,
     expected_revision=None,
     template_revision=None,
 ):
-    """Insert a template's existing nodes and presentation in one session write."""
+    """Insert a template snapshot or its source nodes into a session."""
     import math
     import secrets
     from backend.runtime.authorization import GRAPH_ACTION_MUTATE
@@ -906,14 +913,15 @@ def insert_template(
         or (x is not None and not all(valid_coordinate(v) for v in (x, y)))
     ):
         return _failure("invalid_request")
-    if mode != "reference":
-        return _failure("unsupported_mode" if mode == "copy" else "invalid_request")
+    if mode not in ("reference", "copy"):
+        return _failure("invalid_request")
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
-        # Hold both stores through the check and publication so neither revision
-        # can change between validation and the session write.
+        # Hold graph and session locks through validation, writes and rollback.
         with (
+            service._storage.node_lifecycle_lock if mode == "copy" else nullcontext(),
+            service._storage.write_lock if mode == "copy" else nullcontext(),
             manager.template_store._backend.transaction(),
             manager.store._lock,
             manager.store._backend.transaction(),
@@ -931,19 +939,59 @@ def insert_template(
                 return _failure("session_not_found")
             if expected_revision is not None and session.seq != expected_revision:
                 return _failure("revision_conflict", current_revision=session.seq)
-            ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))
-            with service.reading_in(session_id):
-                resolved = service.resolve_session_node_semantics(
-                    ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
-                )
-            if not resolved.get("success"):
-                return _failure("access_denied")
-            known = resolved.get("nodes") or {}
+            if mode == "copy" and (
+                session.write_mode == "staged"
+                or manager.write_modes.staged_status(session_id) != "none"
+            ):
+                return _failure("staged_target_not_supported")
+            if mode == "copy":
+                attached = service.session_gate.session_manager
+                if attached is not None and attached is not manager:
+                    return _failure("storage_error")
+                if attached is None:
+                    # Keep the shared service unchanged while routing this write
+                    # through the explicitly supplied manager's session gate.
+                    service = copy.copy(service)
+                    service.attach_sessions(manager)
+            known = {}
+            if mode == "reference":
+                ids = list(dict.fromkeys(n["source_node_id"] for n in doc["nodes"]))
+                with service.reading_in(session_id):
+                    resolved = service.resolve_session_node_semantics(
+                        ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+                    )
+                if not resolved.get("success"):
+                    return _failure("access_denied")
+                known = resolved.get("nodes") or {}
             present = set(session.state.get("node_refs", []))
             added, skipped, keys = [], [], {}
             positions, overrides = {}, {}
             hidden = list(session.state.get("hidden_node_ids", []))
             config_data = ConfigLoader().config
+            if mode == "copy":
+                from backend.core import Node
+
+                missing = sorted(
+                    {n["snapshot"]["type"] for n in doc["nodes"]}
+                    - set(config_data.schema_.node_types)
+                )
+                if missing:
+                    return _failure("schema_mismatch", types=missing)
+                copies = []
+                for node in doc["nodes"]:
+                    snapshot = copy.deepcopy(node["snapshot"])
+                    snapshot["metadata"]["template"] = {
+                        "id": template_id,
+                        "revision": doc["revision"],
+                        "key": node["key"],
+                    }
+                    copies.append(Node(**snapshot))
+                copy_ids = {
+                    node["key"]: new.id for node, new in zip(doc["nodes"], copies)
+                }
+                copies_by_key = dict(
+                    zip((node["key"] for node in doc["nodes"]), copies)
+                )
             shape_config = {
                 "types": {
                     k: v.model_dump() for k, v in config_data.schema_.node_types.items()
@@ -991,15 +1039,18 @@ def insert_template(
             config = config_data.node_shapes
             shape_report = []
             for node in doc["nodes"]:
-                node_id = node["source_node_id"]
-                graph_node = service._storage.get_node(node_id)
-                if (
-                    node_id not in known
-                    or graph_node is None
-                    or getattr(graph_node, "archived", False)
-                ):
-                    skipped.append({"node_id": node_id, "reason": "missing"})
-                    continue
+                node_id = (
+                    copy_ids[node["key"]] if mode == "copy" else node["source_node_id"]
+                )
+                if mode == "reference":
+                    graph_node = service._storage.get_node(node_id)
+                    if (
+                        node_id not in known
+                        or graph_node is None
+                        or getattr(graph_node, "archived", False)
+                    ):
+                        skipped.append({"node_id": node_id, "reason": "missing"})
+                        continue
                 keys[node["key"]] = node_id
                 if node_id in present:
                     skipped.append({"node_id": node_id, "reason": "already_present"})
@@ -1078,7 +1129,9 @@ def insert_template(
                         (
                             node["position"],
                             _shape(
-                                service._storage.get_node(node["source_node_id"]),
+                                copies_by_key[node["key"]]
+                                if mode == "copy"
+                                else service._storage.get_node(node["source_node_id"]),
                                 session.state,
                                 shape_config,
                                 saved,
@@ -1087,7 +1140,12 @@ def insert_template(
                             else source_definition(node),
                         )
                         for node in doc["nodes"]
-                        if node["source_node_id"] in added
+                        if (
+                            copy_ids[node["key"]]
+                            if mode == "copy"
+                            else node["source_node_id"]
+                        )
+                        in added
                     ),
                     annotations,
                 ) or (0, 0, 0, 0)
@@ -1158,17 +1216,97 @@ def insert_template(
                 "inserted_shape_overrides": overrides,
             }
             _check_op_image_sizes(op)
-            manager._apply_op_sync(
-                session, session_id, "mcp-agent", op, enforce_session_budgets=True
-            )
+            if mode == "copy":
+                edges = [
+                    {
+                        "source": copy_ids[e["source"]],
+                        "target": copy_ids[e["target"]],
+                        "type": e["type"],
+                        "label": e["label"],
+                    }
+                    for e in doc["edges"]
+                ]
+                saved_session = copy.deepcopy(session.__dict__)
+                ring = manager.store.ring(session_id)
+                saved_ring = list(ring) if ring is not None else None
+                existing = set(service._storage.nodes)
+                from backend.runtime.session_context import bind_session
+
+                try:
+                    with bind_session(session_id):
+                        created = service.add_nodes(
+                            [n.model_dump() for n in copies],
+                            edges,
+                            expect_absent=True,
+                            allow_federated_endpoints=False,
+                        )
+                    if not created.get("success"):
+                        error = created.get("error_code") or created.get("error")
+                        if error in ("write_failed", "write_outcome_unknown"):
+                            error = "storage_error"
+                        elif error == "busy":
+                            error = "session_busy"
+                        raise _CopyRefused(
+                            error if error in ERROR_STATUS else "invalid_request"
+                        )
+                    manager._apply_op_sync(
+                        session,
+                        session_id,
+                        "mcp-agent",
+                        op,
+                        enforce_session_budgets=True,
+                    )
+                except Exception:
+                    # Attempt every undo and preserve the insertion's original error.
+                    def undo(name, action):
+                        try:
+                            action()
+                        except Exception:
+                            logger.error("Template insertion rollback failed: %s", name)
+
+                    def restore_session():
+                        session.__dict__.clear()
+                        session.__dict__.update(saved_session)
+
+                    undo("restore session", restore_session)
+                    undo(
+                        "restore session ring",
+                        lambda: manager.store.restore_ring(session_id, saved_ring),
+                    )
+                    undo(
+                        "persist restored session",
+                        lambda: manager.store.persist(session),
+                    )
+                    ids = [
+                        node_id
+                        for node_id in copy_ids.values()
+                        if node_id not in existing
+                    ]
+
+                    def delete_batch(batch):
+                        result = service._storage.delete_nodes(batch, confirmed=True)
+                        if not result.success:
+                            raise RuntimeError(result.message)
+
+                    for i in reversed(range(0, len(ids), 10)):
+                        batch = ids[i : i + 10]
+                        undo("delete created nodes", lambda: delete_batch(batch))
+                    raise
+            else:
+                manager._apply_op_sync(
+                    session, session_id, "mcp-agent", op, enforce_session_budgets=True
+                )
             return {
                 "success": True,
                 "added": added,
+                **({"node_id_map": copy_ids} if mode == "copy" else {}),
                 "annotation_id_map": fresh,
                 "skipped": skipped,
                 "shapes": shape_report,
                 "revision": session.seq,
             }
+    except _CopyRefused as exc:
+        return _failure(exc.args[0])
     except (_InvalidPlacement, OverflowError):
         return _failure("invalid_request")
     except AnnotationLimitReached:
