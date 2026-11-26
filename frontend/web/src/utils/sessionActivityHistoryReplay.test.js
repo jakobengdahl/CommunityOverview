@@ -121,12 +121,11 @@ describe('createHistoryReplayQueue', () => {
 });
 
 describe('captureCanvasSession', () => {
-  it('captures the revision read after pending edits are confirmed', async () => {
+  it('flushes a layout hold before the snapshot and pending edits, then saves the read revision', async () => {
     const calls = [];
     const sync = {
       sessionId: 'source',
       flushPending: async () => calls.push('flush'),
-      sendOps: (ops) => calls.push(ops),
       _renderHolds: 1,
     };
     const save = vi.fn(async (...args) => {
@@ -148,43 +147,53 @@ describe('captureCanvasSession', () => {
             done();
             return () => {};
           },
-          onReady: () => {
-            calls.push('capture');
-            const baseline = {
-              node_refs: ['stored', 'computed'],
-              positions: { stored: { x: 1, y: 2 } },
-            };
-            return buildCaptureContents({
-              baseline,
-              nodes: [{ id: 'computed', position: { x: 3, y: 4 } }],
-            });
-          },
+          onReady: () => calls.push('capture'),
         }),
       isCurrent: () => true,
       read: async () => {
         calls.push('read');
-        return { seq: 12, state: { positions: { stored: { x: 1, y: 2 } } } };
+        return { seq: 12 };
       },
       save,
     });
-    await vi.waitFor(() => expect(calls).toEqual(['snapshot', 'flush']));
-    expect(save).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(calls).toEqual([]);
     sync._renderHolds = 0;
     const result = await pending;
     expect(calls).toEqual([
-      'snapshot',
-      'flush',
       'held snapshot',
       'flush',
       'capture',
-      'read',
-      [{ op: 'node_moved', node_id: 'computed', position: { x: 3, y: 4 } }],
+      'snapshot',
       'flush',
       'read',
       'save',
     ]);
     expect(save).toHaveBeenCalledWith('source', 'View', 12);
     expect(result.session_url).toBe('/link');
+  });
+
+  it('never sends browser-computed positions to the source session', async () => {
+    const sync = { sessionId: 'source', flushPending: async () => {}, sendOps: vi.fn() };
+    const read = vi.fn(async () => ({ seq: 4, state: { positions: {} } }));
+    const save = vi.fn(async () => ({ success: true }));
+    await captureCanvasSession({
+      sessionId: 'source',
+      name: 'View',
+      snapshot: async () => {},
+      getSync: () => sync,
+      capture: async () =>
+        buildCaptureContents({
+          baseline: { node_refs: ['computed'], positions: {} },
+          nodes: [{ id: 'computed', position: { x: 3, y: 4 } }],
+        }),
+      isCurrent: () => true,
+      read,
+      save,
+    });
+    expect(sync.sendOps).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledOnce();
+    expect(save).toHaveBeenCalledWith('source', 'View', 4);
   });
 
   it('does not capture after a session switch or a failed flush', async () => {
