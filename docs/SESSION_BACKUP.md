@@ -85,9 +85,8 @@ Linux atomic no-replace rename. The new directory contains the copied graph,
 sidecars, `snapshot.journal.ndjson`, and a `sessions` directory. Configure the
 graph journal path to the copied journal if present. Verify the graph and
 sessions in a separate offline instance before switching any application to
-them. The command prints a JSON report of missing node references, subject to
-the operator's graph visibility; missing edges remain stored but are not
-reported. Protect the report as session data.
+them. The command prints a JSON report of missing node and edge references,
+subject to the operator's graph visibility. Protect the report as session data.
 
 Restore checks document and asset hashes, IDs, revisions, annotation safety and
 the normal session and image limits before publication. Version 1 supports up
@@ -95,8 +94,9 @@ to 10,000 sessions and 2,000 annotations per session, subject also to the
 normal document and image size limits. The whole backup must fit in memory and
 the copied graph and restored data must fit on disk. Nonempty import mapping or
 report tables are refused: version 1 backup currently writes empty tables.
-Existing session IDs or staged-session records in the target graph are
-collisions, including retired IDs; resolve them in a separate clean graph
+Existing session IDs, retired staged records, and active staged records for
+direct sessions are collisions. Active records for staged sessions in the
+paired graph are retained. Resolve collisions in a separate clean graph
 workspace before retrying. No data is overwritten.
 
 All writes occur in a private temporary workspace. A failed validation or
@@ -107,3 +107,7 @@ integration is for file storage; another backend needs a trusted offline
 integration whose `open_restore(hook, output)` yields the service, empty session
 backend, write modes and an atomic publish callback, and discards its workspace
 on failure.
+
+Before rolling back, take a fresh coordinated session and graph backup. When
+returning, restore that session backup with its paired graph backup using the
+procedure above, then verify the restored workspace before switching to it.

@@ -20,9 +20,11 @@ def main():
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    integration = importlib.import_module(args.integration)
-    hook = integration.authorization_hook()
+    authorized = False
+    restoring = False
     try:
+        integration = importlib.import_module(args.integration)
+        hook = integration.authorization_hook()
         _authorize(hook, target="restore_sessions", action=GRAPH_ACTION_ADMIN)
         with args.input.open(encoding="utf-8") as source:
             document = json.load(source)
@@ -34,12 +36,18 @@ def main():
         ):
             if service.authorization_hook is not hook:
                 raise RestoreRefused("access denied")
+            restoring = True
             report = restore_backup(service, sessions, modes, document)
+            authorized = True
             publish()
     except RestoreRefused:
-        raise
+        if restoring:
+            raise
+        raise RestoreRefused("access denied") from None
     except Exception:
-        raise RestoreRefused("restore failed") from None
+        raise RestoreRefused(
+            "restore failed" if authorized else "access denied"
+        ) from None
     print(json.dumps(report))
 
 

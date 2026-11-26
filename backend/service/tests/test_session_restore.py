@@ -1,4 +1,4 @@
-# covers: backend/service/session_restore.py, scripts/session_restore_file_snapshot.py
+# covers: backend/service/session_restore.py, scripts/session_restore_file_snapshot.py, scripts/restore_sessions.py
 import copy
 import hashlib
 from contextlib import contextmanager
@@ -58,16 +58,43 @@ def test_round_trip_into_separate_store_preserves_identity_and_missing_reference
     record = target.load("1234-5678")
     assert record["seq"] == 7
     assert record["state"] == document["sessions"][0]["state"]
-    assert report == [{"session_id": "1234-5678", "missing_node_ids": ["missing"]}]
+    assert report == [
+        {
+            "session_id": "1234-5678",
+            "missing_node_ids": ["missing"],
+            "missing_edge_ids": [],
+        }
+    ]
 
 
 @pytest.mark.parametrize(
-    "damage", ["version", "integrity", "duplicate", "unsafe", "limit", "assets"]
+    "damage",
+    [
+        "version",
+        "missing_version",
+        "integrity",
+        "duplicate",
+        "unsafe",
+        "limit",
+        "assets",
+        "node_type",
+        "edge_type",
+        "positions_type",
+    ],
 )
 def test_invalid_backup_never_changes_target(damage):
     document = backup()
     if damage == "version":
         document["format_version"] = 2
+    elif damage == "missing_version":
+        del document["format_version"]
+    elif damage in ("node_type", "edge_type", "positions_type"):
+        key = {
+            "node_type": "node_refs",
+            "edge_type": "hidden_edge_ids",
+            "positions_type": "positions",
+        }[damage]
+        document["sessions"][0]["state"][key] = [123]
     elif damage == "integrity":
         document["sessions"][0]["revision"] = 9
     elif damage == "duplicate":
@@ -86,7 +113,7 @@ def test_invalid_backup_never_changes_target(damage):
     if damage != "integrity":
         sign(document)
     target = InMemorySessionPersistenceBackend()
-    with pytest.raises(RestoreRefused):
+    with pytest.raises(RestoreRefused) as error:
         restore_backup(
             Service(),
             target,
@@ -94,6 +121,8 @@ def test_invalid_backup_never_changes_target(damage):
             document,
             max_sessions=0 if damage == "limit" else 10000,
         )
+    if damage == "missing_version":
+        assert str(error.value) == "unsupported version"
     assert target.list_ids() == []
 
 
@@ -111,6 +140,50 @@ def test_denied_reference_precedes_validation_and_collision():
         restore_backup(service, target, Modes(), document)
     assert str(denied.value) == str(admin_denied.value)
     assert target.list_ids() == []
+
+
+@pytest.mark.parametrize("failure", ["admin", "input", "reference"])
+def test_command_conceals_pre_authorization_failures(tmp_path, monkeypatch, failure):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from scripts import restore_sessions
+
+    service = Service()
+    service.authorization_hook.allowed = failure != "admin"
+    service.allowed = failure != "reference"
+    source = tmp_path / "backup.json"
+    if failure != "input":
+        source.write_text(json.dumps(backup()))
+    opened = []
+
+    @contextmanager
+    def open_restore(hook, output):
+        opened.append(True)
+        yield service, InMemorySessionPersistenceBackend(), Modes(), lambda: None
+
+    integration = SimpleNamespace(
+        authorization_hook=lambda: service.authorization_hook, open_restore=open_restore
+    )
+    monkeypatch.setattr(
+        restore_sessions.importlib, "import_module", lambda name: integration
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "restore_sessions",
+            "--integration",
+            "test",
+            "--input",
+            str(source),
+            "--output",
+            str(tmp_path / "out"),
+        ],
+    )
+    with pytest.raises(RestoreRefused, match="^access denied$"):
+        restore_sessions.main()
+    assert bool(opened) == (failure == "reference")
 
 
 def test_existing_target_and_publication_collision_are_unchanged(tmp_path):
@@ -147,12 +220,18 @@ def test_offline_file_integration_publishes_only_complete_workspace(
     hook = Hook()
     document = backup()
     document["sessions"][0]["write_mode"] = mode
+    document["sessions"][0]["state"]["hidden_edge_ids"] = ["missing-edge"]
+    if mode == "staged":
+        FileGraphPersistenceBackend(graph, staged_sessions=True).record_staged(
+            "1234-5678"
+        )
     sign(document)
     with open_restore(hook, output) as (service, sessions, modes, publish):
         report = restore_backup(service, sessions, modes, document)
         assert not output.exists()
         publish()
     assert report[0]["missing_node_ids"] == ["missing"]
+    assert report[0]["missing_edge_ids"] == ["missing-edge"]
     restored = FileSessionPersistenceBackend(output / "sessions")
     assert restored.load("1234-5678")["seq"] == 7
     restored_graph = FileGraphPersistenceBackend(

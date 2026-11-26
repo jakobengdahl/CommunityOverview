@@ -27,6 +27,27 @@ class RestoreRefused(Exception):
     """The backup could not be restored safely."""
 
 
+def _validate_reference_fields(state):
+    # The capture helpers deliberately ignore non-string IDs. Reject them
+    # before calling those helpers so no persisted reference bypasses access.
+    if not isinstance(state, dict):
+        raise ValueError()
+    for key in (
+        "node_refs",
+        "hidden_node_ids",
+        "dimmed_node_ids",
+        "hidden_edge_ids",
+        "dimmed_edge_ids",
+    ):
+        value = state.get(key, [])
+        if not isinstance(value, list) or any(not isinstance(i, str) for i in value):
+            raise ValueError()
+    for key in ("positions", "shape_overrides", "shape_revisions"):
+        value = state.get(key, {})
+        if not isinstance(value, dict) or any(not isinstance(i, str) for i in value):
+            raise ValueError()
+
+
 def restore_backup(
     service, backend, modes, document, *, max_sessions=10000, max_annotations=2000
 ):
@@ -44,6 +65,7 @@ def restore_backup(
             reports = []
             for item in sessions:
                 sid, state = item["id"], item["state"]
+                _validate_reference_fields(state)
                 _authorize(
                     service.authorization_hook,
                     target="get_visualization_session",
@@ -73,15 +95,27 @@ def restore_backup(
                 if not result.get("success"):
                     raise ValueError()
                 reports.append(
-                    {"session_id": sid, "missing_node_ids": result["missing_node_ids"]}
+                    {
+                        "session_id": sid,
+                        "missing_node_ids": result["missing_node_ids"],
+                        "missing_edge_ids": (
+                            [
+                                edge
+                                for edge in edges
+                                if edge not in service._storage.edges
+                            ]
+                            if hasattr(service, "_storage")
+                            else result.get("missing_edge_ids", [])
+                        ),
+                    }
                 )
         except Exception:
             raise RestoreRefused("access denied") from None
 
         try:
             if (
-                document["format_version"] != 1
-                or type(document["format_version"]) is not int
+                document.get("format_version") != 1
+                or type(document.get("format_version")) is not int
             ):
                 raise RestoreRefused("unsupported version")
             integrity = document["integrity"]
@@ -191,7 +225,9 @@ def restore_backup(
         # completes. Discarding that workspace is the rollback for every failure.
         with backend.transaction():
             if backend.list_ids() or any(
-                modes.staged_status(r["id"]) != "none" for r, _ in records
+                modes.staged_status(r["id"])
+                not in (("none", "active") if mode == "staged" else ("none",))
+                for r, mode in records
             ):
                 raise RestoreRefused("target collision")
             for record, mode in records:
