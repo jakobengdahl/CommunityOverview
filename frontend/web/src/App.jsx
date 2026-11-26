@@ -4021,9 +4021,9 @@ function App() {
         id: node.id,
         annotation: CANVAS_ANNOTATION_TYPES.has(node.type),
       }));
-      setTemplateDialog({ sessionId, selected, materialized: isSessionMaterialized() });
+      setTemplateDialog({ sessionId, selected });
     },
-    [sessionId, isSessionMaterialized]
+    [sessionId]
   );
 
   // The command box's registry. Only this interactive view provides it; kiosk
@@ -4522,7 +4522,6 @@ function App() {
           {...templateDialog}
           schema={schema}
           prepare={async () => {
-            if (!templateDialog.materialized) return null;
             const epoch = useGraphStore.getState().sessionEpoch;
             const annotationPending = annotationSchedulerRef.current.clearPending();
             const canvasPending = autoSaveTimerRef.current != null;
@@ -4544,9 +4543,9 @@ function App() {
                   useGraphStore.getState().sessionEpoch !== epoch
                 )
                   throw new Error();
-                const sync = ensureSyncConnected(templateDialog.sessionId);
+                const sync = syncForSession(syncRef.current, templateDialog.sessionId);
+                if (!sync) return null;
                 if (
-                  !sync ||
                   sync.sessionId !== templateDialog.sessionId ||
                   sessionIdRef.current !== templateDialog.sessionId
                 )

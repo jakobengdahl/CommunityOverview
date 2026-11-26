@@ -432,14 +432,27 @@ describe('App handler wiring', () => {
     expect(api.getSession).not.toHaveBeenCalledWith(oldSession, { resolve: true });
   });
 
-  it('does not connect an unmaterialized session when opening and cancelling the template dialog', async () => {
+  it.each([false, true])('prepares a newly edited session for templates (edited: %s)', async (edited) => {
     await renderApp();
+    if (!edited) act(() => store().clearVisualization());
     const connect = vi.spyOn(SessionSyncClient.prototype, 'connect');
     act(() => canvas().onSaveSelectionAsTemplate([]));
-    await expect(captured.template.prepare()).resolves.toBeNull();
+    const preparation = captured.template.prepare();
+    await act(async () => {
+      await Promise.resolve();
+      await canvas().onSaveView({ nodes: [], edges: [] });
+    });
+    const source = await preparation;
+    if (edited) {
+      expect(source).toMatchObject({ id: canvas().sessionKey });
+      expect(connect).toHaveBeenCalled();
+      expect(api.getSession).toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+    } else {
+      expect(source).toBeNull();
+      expect(connect).not.toHaveBeenCalled();
+      expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
+    }
     act(() => captured.template.onClose());
-    expect(connect).not.toHaveBeenCalled();
-    expect(api.getSession).not.toHaveBeenCalledWith(canvas().sessionKey, { resolve: true });
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
