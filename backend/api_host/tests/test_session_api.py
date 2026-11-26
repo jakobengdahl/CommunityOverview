@@ -1811,7 +1811,9 @@ def test_template_routes_crud(test_app, with_session_header):
     assert test_app.get(path, headers=headers).json()["template"] == doc
     assert test_app.get("/api/templates", headers=headers).json()["templates"] == [doc]
     changed = test_app.patch(
-        path, json={"expected_revision": doc["revision"], "name": "New"}, headers=headers
+        path,
+        json={"expected_revision": doc["revision"], "name": "New"},
+        headers=headers,
     ).json()["template"]
     assert changed["name"] == "New"
     assert test_app.delete(
