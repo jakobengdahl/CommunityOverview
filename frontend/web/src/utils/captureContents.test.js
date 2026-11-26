@@ -1,5 +1,6 @@
-// covers: frontend/web/src/utils/captureContents.js
+// covers: frontend/web/src/utils/captureContents.js, frontend/web/src/services/sessionSyncClient.js
 import { expect, it, vi } from 'vitest';
+import { SessionSyncClient } from '../services/sessionSyncClient';
 import { buildCaptureContents, captureContents, readyBaseline } from './captureContents';
 it('keeps baseline members and positions, filling only missing positions from the canvas', () => {
   const baseline = {
@@ -15,21 +16,52 @@ it('keeps baseline members and positions, filling only missing positions from th
   });
 });
 
-it.each([
-  ['no sync client', null],
-  ['a client whose stream has not delivered state', { _ready: false, captureBaseline: () => ({}) }],
-])('captures the store members with %s', (_label, sync) => {
-  const nodes = [{ id: 'a', position: { x: 1, y: 2 } }];
-  expect(
-    buildCaptureContents({ baseline: readyBaseline(sync), members: ['a', 'b'], nodes })
-  ).toEqual({ node_ids: ['a', 'b'], positions: { a: { x: 1, y: 2 } } });
-});
-it('captures the baseline, not the store, once the client is ready', () => {
-  const sync = { _ready: true, captureBaseline: () => ({ node_refs: [], positions: {} }) };
-  expect(buildCaptureContents({ baseline: readyBaseline(sync), members: ['a'] })).toEqual({
-    node_ids: [],
-    positions: {},
+class FakeEventSource {
+  constructor() {
+    FakeEventSource.last = this;
+  }
+  close() {}
+}
+
+// A real client: seeded as each host call site seeds it, then driven by its stream.
+function client(seed, ...events) {
+  const sync = new SessionSyncClient({
+    sessionId: 's',
+    streamUrl: '/stream',
+    opsUrl: '/ops',
+    fetchImpl: vi.fn(),
+    EventSourceImpl: FakeEventSource,
   });
+  if (seed) sync.setBaseline(...seed);
+  sync.connect();
+  for (const event of events) {
+    if (event === 'drop') FakeEventSource.last.onerror();
+    else FakeEventSource.last.onmessage({ data: JSON.stringify(event) });
+  }
+  sync.close();
+  return sync;
+}
+
+const loaded = [{ node_refs: ['hidden'], positions: { hidden: { x: 7, y: 8 } } }, { seq: 4 }];
+const snapshot = { type: 'snapshot', seq: 4 };
+const store = { node_ids: ['a', 'b'], positions: { a: { x: 1, y: 2 } } };
+const baseline = { node_ids: ['hidden'], positions: { hidden: { x: 7, y: 8 } } };
+
+it.each([
+  ['no sync client', () => null, store],
+  ['a placeholder seeded before the stream delivered', () => client([{}, { seq: 0 }]), store],
+  ['an unseeded client before the stream delivered', () => client(null), store],
+  ['a loaded baseline before the first snapshot', () => client(loaded), baseline],
+  ['a loaded baseline once the client is ready', () => client(loaded, snapshot), baseline],
+  ['a loaded baseline after the stream dropped', () => client(loaded, snapshot, 'drop'), baseline],
+])('captures from %s', (_label, makeSync, expected) => {
+  const nodes = [
+    { id: 'a', position: { x: 1, y: 2 } },
+    { id: 'hidden', position: { x: 0, y: 0 } },
+  ];
+  expect(
+    buildCaptureContents({ baseline: readyBaseline(makeSync()), members: ['a', 'b'], nodes })
+  ).toEqual(expected);
 });
 
 it('reads after a successful flush and never reads after failure', async () => {

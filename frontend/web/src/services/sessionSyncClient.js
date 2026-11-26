@@ -895,6 +895,9 @@ export class SessionSyncClient {
     // guards on, instead of racing the stream's own lazy materialisation.
     this._readyWaiters = [];
     this._hadSnapshot = false;
+    // Whether setBaseline() was given loaded state rather than the `{}`
+    // placeholder a not-yet-loaded session is seeded with.
+    this._baselineSeeded = false;
     this._refusalProbed = false; // asked once why the stream never opened
     this._probeController = null;
     // Seq the host's initial REST load reflected (setBaseline's `seq`), or
@@ -1047,6 +1050,14 @@ export class SessionSyncClient {
       node_refs: [...this._baseline.node_refs],
       positions: { ...this._baseline.positions },
     };
+  }
+
+  /**
+   * Whether the baseline reflects server state: a load seeded it, or the
+   * stream has delivered once. A stream drop since then does not undo that.
+   */
+  hasCaptureBaseline() {
+    return this._hadSnapshot || this._baselineSeeded;
   }
 
   /** The node ids the baseline holds hidden. */
@@ -1568,6 +1579,7 @@ export class SessionSyncClient {
    */
   setBaseline(state, { seq } = {}) {
     this._baseline = normalizeMirror(state);
+    this._baselineSeeded = Object.keys(state || {}).length > 0;
     if (typeof seq === 'number') {
       this._loadedSeq = seq;
       this._membershipVersion = seq;

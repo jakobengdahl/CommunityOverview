@@ -1,9 +1,10 @@
 /**
  * The sync baseline to capture from, or null when there is none to trust: no
- * client for the session, or one whose stream has not yet delivered state.
+ * client for the session, or one holding only a placeholder seeded before its
+ * stream delivered state.
  */
 export function readyBaseline(sync) {
-  return sync?._ready ? sync.captureBaseline() : null;
+  return sync?.hasCaptureBaseline() ? sync.captureBaseline() : null;
 }
 
 /**
