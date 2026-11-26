@@ -10,7 +10,7 @@ import copy
 import hashlib
 import json
 
-from backend.core.session_annotations import annotation_type_of
+from backend.core.session_annotations import annotation_link_fields, annotation_type_of
 from backend.core.session_store import Session, _empty_state
 from backend.runtime import session_context
 from backend.runtime.authorization import GRAPH_ACTION_ADMIN, GRAPH_ACTION_READ
@@ -133,6 +133,17 @@ def create_backup(service, session_backend, write_modes):
                 node_ids = session_capture.captured_node_ids(
                     state, include_legacy_groups=True
                 )
+                annotation_ids = session_capture._annotation_ids(state)
+                # A collision must not hide a possible graph node.
+                for annotation in state.get("annotations") or []:
+                    if not isinstance(annotation, dict):
+                        continue
+                    for holder, key, _ in annotation_link_fields(annotation):
+                        value = session_capture._link_id(
+                            holder[key] if isinstance(holder, list) else holder.get(key)
+                        )
+                        if value in annotation_ids:
+                            node_ids.append(value)
                 # Group members are node IDs even when an annotation has the
                 # same ID; capture's canvas link resolution can classify them
                 # as annotations instead.

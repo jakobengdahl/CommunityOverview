@@ -241,6 +241,51 @@ def test_graph_access_checks_nested_targets_and_shape_history(tmp_path):
             create_backup(service, backend, WriteModes())
 
 
+def test_backup_denies_node_attachment_colliding_with_annotation(tmp_path):
+    from backend.core import Node
+    from backend.core.storage import GraphStorage
+    from backend.runtime.authorization import GraphAccessNarrowing
+    from backend.service import GraphService
+
+    class NarrowHook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True,
+                    allow_local_graph=False,
+                    include_graph_ids=("allowed",),
+                ),
+            )
+
+    storage = GraphStorage(str(tmp_path / "graph.json"))
+    storage.add_nodes(
+        [
+            Node(
+                id="secret",
+                type="Actor",
+                name="Private",
+                metadata={"origin_graph_id": "other"},
+            )
+        ],
+        [],
+    )
+    service = GraphService(storage, authorization_hook=NarrowHook())
+    backend = InMemorySessionPersistenceBackend()
+    session = Session("1234-5678")
+    session.state["annotations"] = [
+        {"id": "secret", "type": "text"},
+        {
+            "id": "note",
+            "type": "text",
+            "attachment": {"target_type": "node", "target_id": "secret"},
+        },
+    ]
+    backend.save(session.to_dict())
+    with pytest.raises(BackupRefused, match="^access denied$"):
+        create_backup(service, backend, WriteModes())
+
+
 def test_file_layer_is_checked_after_reopening(tmp_path):
     from backend.core.storage_backends import FileGraphPersistenceBackend
     from backend.core.tests.layer_store_contract import entry
