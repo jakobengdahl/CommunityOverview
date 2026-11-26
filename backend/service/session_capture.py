@@ -73,6 +73,7 @@ _UNTYPED_LINKS = ("startAnchor", "endAnchor", "parentId", "parent_id", "parentNo
 # normalizeAttachment); every alias is read, not only the one it would pick.
 _ATTACHMENT_IDS = ("target_id", "targetId", "node_id", "nodeId")
 _ATTACHMENT_TYPES = ("target_type", "targetType")
+_JS_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def _annotation_ids(state: Dict[str, Any]) -> set:
@@ -86,14 +87,19 @@ def _annotation_ids(state: Dict[str, Any]) -> set:
 def _link_id(value: Any) -> Optional[str]:
     """The id the canvas resolves ``value`` to, ``None`` for no link.
 
-    The canvas skips falsy values and stringifies the rest; an integer
-    stringifies alike in both languages, any other value is refused.
+    The canvas skips falsy values and stringifies the rest; an integer in
+    the JS safe range stringifies alike in both languages, any other value
+    (beyond it JS loses precision or switches to exponent form) is refused.
     """
     if not value:
         return None
     if isinstance(value, str):
         return value
-    if isinstance(value, int) and not isinstance(value, bool):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and abs(value) <= _JS_MAX_SAFE_INTEGER
+    ):
         return str(value)
     raise CaptureRefused("invalid_presentation")
 

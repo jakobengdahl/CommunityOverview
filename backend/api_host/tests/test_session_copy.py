@@ -664,6 +664,8 @@ def test_save_view_enforces_annotation_limit(test_app, transport):
         },
         {"id": "a", "type": "unknown"},
         {"id": "a", "type": "line", "start": {"target_id": 1.5}},
+        {"id": "a", "type": "line", "start": {"target_id": 2**53}},
+        {"id": "a", "type": "line", "start": {"target_id": -(10**21)}},
     ],
 )
 def test_save_view_rejects_unsafe_annotations(test_app, transport, annotation):
