@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import * as api from '../services/api';
 import { useI18n } from '../i18n';
 import useGraphStore from '../store/graphStore';
@@ -121,10 +121,13 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
   const { mode, query } = parseCommandInput(input);
   const enabled = registry && context.view === 'interactive' && mode !== 'idle' && active;
   // A fresh identity also prevents a previous visit to the same query from resurfacing.
-  const templateCache = useRef(NO_TEMPLATES);
   const request = useMemo(
-    () => (enabled ? { templates: templateCache.current, displayed: false } : null),
+    () => (enabled ? {} : null),
     [enabled, input, mode, query, federationDepth]
+  );
+  const templateRequest = useMemo(
+    () => (request ? { displayed: false } : null),
+    [request, visible]
   );
   const [search, setSearch] = useState({
     request: null,
@@ -134,33 +137,25 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
   const [templateSearch, setTemplateSearch] = useState({ request: null, templates: [] });
 
   useEffect(() => {
-    if (!request) return undefined;
+    if (!templateRequest) return undefined;
     let cancelled = false;
     const timer = setTimeout(
       () => {
         api.listTemplates().then(
           (result) => {
             if (cancelled) return;
-            templateCache.current = result.templates || [];
-            if (!request.displayed)
-              setTemplateSearch({ request, templates: templateCache.current });
+            if (!templateRequest.displayed)
+              setTemplateSearch({
+                request: templateRequest,
+                templates: result.templates || NO_TEMPLATES,
+              });
           },
           () => {
             if (cancelled) return;
-            templateCache.current = NO_TEMPLATES;
-            if (!request.displayed) setTemplateSearch({ request, templates: NO_TEMPLATES });
+            if (!templateRequest.displayed)
+              setTemplateSearch({ request: templateRequest, templates: NO_TEMPLATES });
           }
         );
-        if (mode === 'plain') {
-          searchVisibleNodes(query, { federationDepth }).then(
-            (nodes) => {
-              if (!cancelled) setSearch({ request, nodes, failed: false });
-            },
-            () => {
-              if (!cancelled) setSearch({ request, nodes: [], failed: true });
-            }
-          );
-        }
       },
       mode === 'plain' ? NODE_QUERY_DEBOUNCE_MS : 0
     );
@@ -168,12 +163,29 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
       cancelled = true;
       clearTimeout(timer);
     };
+  }, [templateRequest, mode]);
+
+  useEffect(() => {
+    if (!request || mode !== 'plain') return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchVisibleNodes(query, { federationDepth }).then(
+        (nodes) => {
+          if (!cancelled) setSearch({ request, nodes, failed: false });
+        },
+        () => {
+          if (!cancelled) setSearch({ request, nodes: [], failed: true });
+        }
+      );
+    }, NODE_QUERY_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [request, mode, query, federationDepth]);
 
   const templates =
-    templateSearch.request === request
-      ? templateSearch.templates
-      : request?.templates || NO_TEMPLATES;
+    templateSearch.request === templateRequest ? templateSearch.templates : NO_TEMPLATES;
   useEffect(() => {
     if (!registry || mode !== 'command' || !request) return undefined;
     const cleanups = templates.map((template) =>
@@ -212,11 +224,7 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
 
   if (!request) return { mode, items: [], status: 'idle' };
   if (mode === 'command') {
-    // Wait for the registry effect before exposing a partially populated list.
-    if (templates.some((template) => !registry.get(`template:insert:${template.template_id}`))) {
-      return { mode, items: [], status: 'loading' };
-    }
-    if (visible && commandItems.length) request.displayed = true;
+    if (visible && commandItems.length) templateRequest.displayed = true;
     return { mode, items: commandItems, status: 'ready' };
   }
 
@@ -239,7 +247,7 @@ export function useCommandSuggestions(input, context, nodeTypes, active = true, 
   }));
   const status = search.failed ? 'error' : 'ready';
   const items = rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale);
-  if (visible && items.length) request.displayed = true;
+  if (visible && items.length) templateRequest.displayed = true;
   return {
     mode,
     items,
