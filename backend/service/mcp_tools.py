@@ -3500,6 +3500,7 @@ def register_mcp_tools(
         y: Any = None,
         expected_revision: Any = None,
         template_revision: Any = None,
+        expected_session_seq: Any = None,
     ) -> Dict[str, Any]:
         """Insert a template into a session."""
         return templates.insert_template(
@@ -3512,6 +3513,7 @@ def register_mcp_tools(
             y,
             expected_revision,
             template_revision,
+            expected_session_seq,
         )
 
     @register_tool

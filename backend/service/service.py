@@ -161,7 +161,11 @@ class GraphService:
             return run(None)
         for attempt in range(self.STAGING_ATTEMPTS):
             try:
-                with self._storage.write_lock:
+                with (
+                    self._session_gate.session_manager.store._lock,
+                    self._session_gate.session_manager.store._backend.transaction(),
+                    self._storage.write_lock,
+                ):
                     return run(staging)
             except layer_store.LayerRaced:
                 # Another op changed an entry this one read: decided again on

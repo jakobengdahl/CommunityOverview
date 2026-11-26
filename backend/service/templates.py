@@ -3,7 +3,6 @@
 import copy
 import logging
 import math
-from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -525,7 +524,8 @@ def capture_template(
 ERROR_STATUS = {
     "unsupported_mode": 400,
     "schema_mismatch": 422,
-    "staged_target_not_supported": 409,
+    "layer_full": 422,
+    "session_seq_conflict": 409,
     "invalid_request": 400,
     "access_denied": 403,
     "template_not_found": 404,
@@ -881,6 +881,7 @@ def insert_template(
     y=None,
     expected_revision=None,
     template_revision=None,
+    expected_session_seq=None,
 ):
     """Insert a template snapshot or its source nodes into a session."""
     import math
@@ -907,7 +908,7 @@ def insert_template(
         or not is_valid_session_id(template_id)
         or any(
             v is not None and (type(v) is not int or v < 0)
-            for v in (expected_revision, template_revision)
+            for v in (expected_revision, template_revision, expected_session_seq)
         )
         or (x is None) != (y is None)
         or (x is not None and not all(valid_coordinate(v) for v in (x, y)))
@@ -918,14 +919,16 @@ def insert_template(
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
-        # Hold graph and session locks through validation, writes and rollback.
-        with (
-            service._storage.node_lifecycle_lock if mode == "copy" else nullcontext(),
-            service._storage.write_lock if mode == "copy" else nullcontext(),
-            manager.template_store._backend.transaction(),
-            manager.store._lock,
-            manager.store._backend.transaction(),
-        ):
+        # Staged writes take the session store before graph locks, as staging does.
+        from contextlib import ExitStack
+
+        with ExitStack() as locks:
+            locks.enter_context(manager.store._lock)
+            locks.enter_context(manager.store._backend.transaction())
+            if mode == "copy":
+                locks.enter_context(service._storage.node_lifecycle_lock)
+                locks.enter_context(service._storage.write_lock)
+            locks.enter_context(manager.template_store._backend.transaction())
             result = get_template(service, manager, template_id)
             if not result["success"]:
                 return result
@@ -939,11 +942,16 @@ def insert_template(
                 return _failure("session_not_found")
             if expected_revision is not None and session.seq != expected_revision:
                 return _failure("revision_conflict", current_revision=session.seq)
-            if mode == "copy" and (
+            if expected_session_seq is not None and session.seq != expected_session_seq:
+                return _failure(
+                    "session_seq_conflict",
+                    expected_session_seq=expected_session_seq,
+                    session_seq=session.seq,
+                )
+            staged_target = mode == "copy" and (
                 session.write_mode == "staged"
                 or manager.write_modes.staged_status(session_id) != "none"
-            ):
-                return _failure("staged_target_not_supported")
+            )
             if mode == "copy":
                 attached = service.session_gate.session_manager
                 if attached is not None and attached is not manager:
@@ -1238,8 +1246,12 @@ def insert_template(
                 existing = set(service._storage.nodes)
                 from backend.runtime.session_context import bind_session
 
+                pending = None
                 try:
-                    with bind_session(session_id):
+                    with (
+                        manager.defer_staged_events(session_id) as pending,
+                        bind_session(session_id),
+                    ):
                         created = service.add_nodes(
                             [n.model_dump() for n in copies],
                             edges,
@@ -1261,6 +1273,11 @@ def insert_template(
                         "mcp-agent",
                         op,
                         enforce_session_budgets=True,
+                        before_broadcast=(
+                            lambda: manager.publish_staged_events(pending)
+                        )
+                        if staged_target
+                        else None,
                     )
                 except Exception:
                     # Attempt every undo and preserve the insertion's original error.
@@ -1294,9 +1311,21 @@ def insert_template(
                         if not result.success:
                             raise RuntimeError(result.message)
 
-                    for i in reversed(range(0, len(ids), 10)):
-                        batch = ids[i : i + 10]
-                        undo("delete created nodes", lambda: delete_batch(batch))
+                    if staged_target:
+                        for entry in reversed(pending["entries"] if pending else []):
+                            key = (entry["kind"], entry["entity_id"])
+                            undo(
+                                "discard staged entry",
+                                lambda: manager.write_modes.layer_store.discard(
+                                    session_id,
+                                    [key],
+                                    expected={key: entry["version"]},
+                                ),
+                            )
+                    else:
+                        for i in reversed(range(0, len(ids), 10)):
+                            batch = ids[i : i + 10]
+                            undo("delete created nodes", lambda: delete_batch(batch))
                     raise
             else:
                 manager._apply_op_sync(
