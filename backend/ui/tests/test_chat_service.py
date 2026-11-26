@@ -80,7 +80,10 @@ def test_session_listing_offers_server_links_for_duplicate_names(
     a = manager.create_session("Same")
     b = manager.create_session("Same")
     with patch("backend.ui.chat_logic.create_provider"):
-        result = ChatService(graph_service)._tools_map["list_visualization_sessions"]()
+        service = ChatService(graph_service)
+        result = service._tools_map["list_visualization_sessions"]()
+    assert "offer its server-provided session_url verbatim" in service._processor.system_prompt
+    assert "If session_url is\n   null, tell the user that the session link is unavailable" in service._processor.system_prompt
     assert {item["session_id"]: item["session_url"] for item in result["sessions"]} == {
         a.id: build_session_url(a.id),
         b.id: build_session_url(b.id),
