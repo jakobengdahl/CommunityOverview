@@ -264,8 +264,9 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
       />
     );
 
-    // A member removed and re-added during focus is a new live instance, not
-    // the one whose coordinates were captured before focus.
+    // A member removed and re-added during focus gets a fresh ego-ring
+    // position, but leaving focus restores its pre-focus one (asserted below),
+    // so capture must report the pre-focus position too.
     rerender(
       <GraphCanvas
         nodes={triangleNodes.filter((node) => node.id !== 'node-2')}
@@ -287,7 +288,7 @@ describe('GraphCanvas settle check still commits a position-only change', () => 
     expect(returnedPosition).not.toEqual(before.get('node-2'));
     expect(
       new Map(captureNodesRef.current().map((node) => [node.id, node.position])).get('node-2')
-    ).toEqual(returnedPosition);
+    ).toEqual(before.get('node-2'));
 
     // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
     // every node must land back where it was before focus.
