@@ -135,6 +135,29 @@ def test_document_round_trips_without_normalization():
                 "content": {"target_kind": "resource", "target": "outside"},
             }
         ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "ref",
+                "type": "reference",
+                "target_kind": "resource",
+                "target": "outside",
+                "content": {"target": "a"},
+            }
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "img",
+                "type": "image",
+                "image": {"url": "https://example.com/x.png"},
+                "content": {"image": {"url": "data:image/webp;base64,AAAA"}},
+            }
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {"id": "label", "type": "label", "anchor": {"target_id": "outside"}}
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {"id": "line", "type": "line", "start": {"nodeId": "outside"}}
+        ),
         lambda d: d["nodes"][0]["snapshot"].update(type="SavedView"),
         lambda d: d["nodes"][0]["snapshot"]["metadata"].update(secret="x"),
         lambda d: d["nodes"][0]["shape"].update(inline=None),

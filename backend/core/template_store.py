@@ -17,7 +17,12 @@ from pydantic import (
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES
 from backend.config.node_shapes import ShapeDefinition, ShapeSelection
-from .session_annotations import _validate_generic_content, image_annotation_error
+from .session_annotations import (
+    _validate_generic_content,
+    annotation_link_fields,
+    annotation_type_of,
+    image_annotation_error,
+)
 from .session_store import (
     _DEFAULT_MAX_ANNOTATIONS,
     _validate_annotation,
@@ -154,58 +159,39 @@ class TemplateDocument(VersionedDocument):
             set(ids)
         ) != len(ids):
             raise ValueError("invalid annotation id")
-        targets = keys | set(ids)
+        node_or_annotation = keys | set(ids)
         for annotation in annotations:
             _validate_annotation(annotation, require_id=True)
             content = annotation.get("content")
             if content is not None and not isinstance(content, dict):
                 raise ValueError("invalid annotation content")
+            # A key set in both places would let one copy hide the other from
+            # the checks below while a reader of the other copy uses it.
+            if content and content.keys() & annotation.keys():
+                raise ValueError("ambiguous annotation content")
             payload = {**annotation, **(content or {})}
-            if _validate_generic_content(
-                annotation.get("type") or annotation.get("kind"), payload
-            ):
+            ann_type = annotation_type_of(payload)
+            if _validate_generic_content(ann_type, payload):
                 raise ValueError("invalid annotation content")
             if image_annotation_error(payload):
                 raise ValueError("invalid image annotation")
-            if (
-                (annotation.get("type") or annotation.get("kind")) == "reference"
-                and payload.get("target_kind") == "resource"
-                and payload.get("target") not in keys
+            members = payload.get("member_node_ids", [])
+            if not isinstance(members, list) or any(
+                not isinstance(k, str) or not k for k in members
             ):
-                raise ValueError("invalid resource target")
-            for payload in (annotation, annotation.get("content")):
-                if not isinstance(payload, dict):
+                raise ValueError("invalid group members")
+            for holder, key, declared in annotation_link_fields(payload):
+                value = holder[key] if isinstance(holder, list) else holder.get(key)
+                if not value:
                     continue
-                members = payload.get("member_node_ids", [])
-                if not isinstance(members, list) or any(
-                    not isinstance(k, str) or k not in keys for k in members
-                ):
-                    raise ValueError("invalid group members")
-                for field in ("startAnchor", "endAnchor"):
-                    if payload.get(field) is not None and payload[field] not in targets:
-                        raise ValueError("invalid anchor")
-                attachments = [payload.get("attachment")]
-                for field in ("start", "end", "startEndpoint", "endEndpoint"):
-                    endpoint = payload.get(field)
-                    if isinstance(endpoint, dict):
-                        attachments.append(endpoint.get("attachment"))
-                        if "target_id" in endpoint:
-                            attachments.append(endpoint)
-                for attachment in attachments:
-                    if attachment is None:
-                        continue
-                    if not isinstance(attachment, dict):
-                        raise ValueError("invalid attachment")
-                    kind = attachment.get("target_type", "node")
-                    valid = (
-                        keys
-                        if kind == "node"
-                        else set(ids)
-                        if kind == "annotation"
-                        else set()
-                    )
-                    if attachment.get("target_id") not in valid:
-                        raise ValueError("invalid attachment target")
+                if isinstance(holder, list) or declared == "node":
+                    valid = keys
+                elif declared == "annotation":
+                    valid = set(ids)
+                else:
+                    valid = node_or_annotation if declared is None else set()
+                if not isinstance(value, str) or value not in valid:
+                    raise ValueError("invalid annotation reference")
         return self
 
 
