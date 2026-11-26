@@ -901,10 +901,11 @@ def insert_template(
     if not _authorize(service, GRAPH_ACTION_MUTATE, "add_nodes_to_session", session_id):
         return _failure("access_denied")
     try:
-        # Graph writes take the lifecycle lock before the session store lock.
+        # Staged graph writes take the graph lock before the session store lock.
         # Hold both stores through validation and publication.
         with (
             service._storage.node_lifecycle_lock if mode == "copy" else nullcontext(),
+            service._storage.write_lock if mode == "copy" else nullcontext(),
             manager.template_store._backend.transaction(),
             manager.store._lock,
             manager.store._backend.transaction(),
@@ -1167,6 +1168,8 @@ def insert_template(
                                 )
                                 if error in ("write_failed", "write_outcome_unknown"):
                                     error = "storage_error"
+                                elif error == "busy":
+                                    error = "session_busy"
                                 raise _CopyRefused(
                                     error
                                     if error in ERROR_STATUS

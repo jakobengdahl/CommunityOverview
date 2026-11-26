@@ -1037,6 +1037,12 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
     if staged:
         assert service._storage.layer_store.load_layer(target.id) == []
     lifecycle_lock = service._storage.node_lifecycle_lock
+    graph_lock = service._storage.write_lock
+    add_nodes = service.add_nodes
+
+    def checked_add_nodes(*args, **kwargs):
+        assert service._storage.write_lock._is_owned()
+        return add_nodes(*args, **kwargs)
 
     class CheckedLock:
         def __enter__(self):
@@ -1047,7 +1053,23 @@ def test_copy_inserts_snapshots_and_edges_atomically(capture, tmp_path, staged):
         def __exit__(self, *args):
             return lifecycle_lock.__exit__(*args)
 
-    with patch.object(service._storage, "node_lifecycle_lock", CheckedLock()):
+    class CheckedGraphLock:
+        def __enter__(self):
+            if not graph_lock._is_owned():
+                assert not manager.store._lock._is_owned()
+            return graph_lock.__enter__()
+
+        def __exit__(self, *args):
+            return graph_lock.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(graph_lock, name)
+
+    with (
+        patch.object(service._storage, "node_lifecycle_lock", CheckedLock()),
+        patch.object(service._storage, "_lock", CheckedGraphLock()),
+        patch.object(service, "add_nodes", side_effect=checked_add_nodes),
+    ):
         result = templates.insert_template(
             service, manager, target.id, doc["template_id"], x=10, y=20
         )
@@ -1120,9 +1142,14 @@ def test_copy_rejects_missing_schema_and_denied_graph_write(capture):
 
 
 def test_copy_holds_staged_broadcast_until_presentation_write(capture, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.core.layer_store import LayerRaced
     from backend.core.storage_backends import FileGraphPersistenceBackend
     from backend.core.write_modes import WriteModes
     from backend.service import templates
+    from backend.service.rest_api import create_rest_router
+    from backend.service.staging import StagedWrite
 
     _, service, manager, source = capture
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
@@ -1146,6 +1173,22 @@ def test_copy_holds_staged_broadcast_until_presentation_write(capture, tmp_path)
     target = manager.create_session("target", "staged")
     subscriber = manager.bus.subscribe(target.id)
     original = manager._apply_op_sync
+
+    app = FastAPI()
+    app.include_router(
+        create_rest_router(service, session_manager=manager), prefix="/api"
+    )
+    with patch.object(
+        StagedWrite, "_commit", side_effect=LayerRaced(target.id, ("node", "raced"))
+    ) as commit:
+        response = TestClient(app).post(
+            f"/api/sessions/{target.id}/insert-template",
+            json={"template_id": doc["template_id"], "x": 0, "y": 0},
+        )
+    assert commit.call_count == service.STAGING_ATTEMPTS
+    assert response.status_code == 409 and response.json()["error"] == "session_busy"
+    assert target.seq == 0 and not storage.layer_store.load_layer(target.id)
+    assert not storage.nodes and subscriber.queue.empty()
 
     def fail(*args, **kwargs):
         assert subscriber.queue.empty()
