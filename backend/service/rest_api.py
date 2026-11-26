@@ -78,7 +78,7 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from . import attachments as attachment_ops
-from . import session_capture
+from . import session_capture, templates
 from .json_response import GraphJSONRoute
 from .mutations import VALIDATION_ERROR_CODE
 from .service import GraphService
@@ -1534,6 +1534,94 @@ def _register_session_endpoints(
         except WriteModeRefused as exc:
             raise _session_refusal(exc.code, exc.message, exc.status)
         return _session_payload(session, resolve=False, manager=session_manager)
+
+    def template_response(result):
+        return JSONResponse(
+            result,
+            status_code=200
+            if result["success"]
+            else templates.ERROR_STATUS.get(result["error"], 400),
+        )
+
+    async def template_body(request):
+        try:
+            body = await request.json()
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    @router.post("/sessions/{session_id}/templates")
+    async def create_template_route(session_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.save_template(
+                service,
+                session_manager,
+                session_id,
+                body.get("name"),
+                body.get("expected_revision"),
+                body.get("node_ids"),
+                body.get("annotation_ids"),
+                body.get("description", ""),
+                body.get("tags"),
+            )
+        return template_response(result)
+
+    def template_integer(value):
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return value  # Service validation supplies the invalid_request envelope.
+
+    @router.get("/templates")
+    async def list_template_route(
+        http_request: Request,
+        query: Optional[str] = None,
+        tags: Optional[List[str]] = Query(None),
+        limit: Optional[str] = None,
+    ):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.list_templates(
+                service, session_manager, query, tags, template_integer(limit)
+            )
+        return template_response(result)
+
+    @router.get("/templates/{template_id}")
+    async def get_template_route(template_id: str, http_request: Request):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.get_template(service, session_manager, template_id)
+        return template_response(result)
+
+    @router.patch("/templates/{template_id}")
+    async def update_template_route(template_id: str, http_request: Request):
+        body = await template_body(http_request)
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.update_template(
+                service,
+                session_manager,
+                template_id,
+                body.get("expected_revision"),
+                body.get("name"),
+                body.get("description"),
+                body.get("tags"),
+                body.get("replace_from"),
+            )
+        return template_response(result)
+
+    @router.delete("/templates/{template_id}")
+    async def delete_template_route(
+        template_id: str, http_request: Request, expected_revision: Optional[str] = None
+    ):
+        with use_request_authorization(headers=http_request.headers):
+            result = templates.delete_template(
+                service,
+                session_manager,
+                template_id,
+                template_integer(expected_revision),
+            )
+        return template_response(result)
 
     @router.post("/sessions/{session_id}/save-view")
     async def save_session_view(session_id: str, http_request: Request) -> Response:

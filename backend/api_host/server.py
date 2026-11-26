@@ -455,6 +455,11 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         staged_status=write_modes.staged_status,
     )
     session_manager = SessionManager(session_store, write_modes=write_modes)
+    from backend.core.template_store import TemplateStore
+
+    session_manager.template_store = TemplateStore(
+        FileSessionPersistenceBackend(Path(sessions_dir) / "templates")
+    )
     # Writes need the identity the auth middleware authenticated (the REST
     # routes refuse without one); a commit invalidates the referencing sessions.
     session_manager.shape_library = ShapeLibrary(
