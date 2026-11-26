@@ -1,6 +1,7 @@
 """Capture a session as a validated, self-contained template document."""
 
 import copy
+import logging
 from datetime import datetime, timezone
 
 from backend.config.config_loader import SYSTEM_NODE_TYPES, ConfigLoader
@@ -31,8 +32,11 @@ from .session_capture import (
     _hook_call,
     _LEGACY_GROUP_PREFIX,
     _link_id,
+    INVALID_SESSION_ID_MESSAGE,
 )
 from .staging import HookFailed
+
+logger = logging.getLogger(__name__)
 
 
 def _shape(node, state, config, saved):
@@ -380,3 +384,337 @@ def capture_template(
 
     except Exception:
         return {"success": False, "error": "storage_error"}
+
+
+# The session authorization seam also governs templates in open core.
+ERROR_STATUS = {
+    "invalid_request": 400,
+    "access_denied": 403,
+    "template_not_found": 404,
+    "session_not_found": 404,
+    "revision_conflict": 409,
+    "session_busy": 409,
+    "staged_changes": 409,
+    "invalid_presentation": 422,
+    "nodes_limit": 413,
+    "edges_limit": 413,
+    "annotations_limit": 413,
+    "storage_error": 503,
+}
+
+
+def _authorize(service, action, target, session_id=None):
+    from backend.runtime.session_context import bind_session
+
+    try:
+        # Collection operations have no session target, regardless of any MCP binding.
+        with bind_session(None):
+            denied = access.authorize_graph_access(
+                service.authorization_hook,
+                action=action,
+                target=target,
+                session_id=session_id,
+            )
+        return denied is None
+    except Exception:
+        return False
+
+
+def _failure(code, **extra):
+    return {"success": False, "error": code, **extra}
+
+
+def _conflict(store, template_id):
+    # The CAS lost to a concurrent writer; answer with what it wrote.
+    try:
+        doc = store.get(template_id)
+    except Exception:
+        return _failure("storage_error")
+    if doc is None:
+        return _failure("template_not_found")
+    return _failure("revision_conflict", current_revision=doc["revision"])
+
+
+def _metadata(name, description, tags):
+    return (
+        isinstance(name, str)
+        and bool(name.strip())
+        and len(name) <= 200
+        and isinstance(description, str)
+        and isinstance(tags, list)
+        and all(isinstance(tag, str) for tag in tags)
+    )
+
+
+def save_template(
+    service,
+    manager,
+    session_id,
+    name,
+    expected_revision,
+    node_ids=None,
+    annotation_ids=None,
+    description="",
+    tags=None,
+):
+    import secrets
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    if manager is None:
+        return _failure("storage_error")
+    if not isinstance(session_id, str) or not is_valid_session_id(session_id):
+        return _failure("invalid_request", message=INVALID_SESSION_ID_MESSAGE)
+    tags = [] if tags is None else tags
+    if not _metadata(name, description, tags):
+        return _failure("invalid_request")
+    if not _authorize(service, GRAPH_ACTION_MUTATE, "create_visualization_session"):
+        return _failure("access_denied")
+    try:
+        store = manager.template_store
+        with store._backend.transaction():
+            for _ in range(100):
+                template_id = "-".join(
+                    f"{secrets.randbelow(10000):04d}" for _ in range(4)
+                )
+                # Templates authorize as sessions by id, so a template id
+                # must never name a session, live or retired.
+                if (
+                    store._backend.load(template_id) is None
+                    and not manager.store.exists(template_id)
+                    and manager.write_modes.staged_status(template_id) == "none"
+                ):
+                    break
+            else:
+                return _failure("storage_error")
+            result = capture_template(
+                service,
+                manager,
+                session_id,
+                template_id=template_id,
+                name=name,
+                created_by=access.build_mutation_actor_id(
+                    target="create_visualization_session"
+                ),
+                expected_revision=expected_revision,
+                description=description,
+                tags=tags,
+                node_ids=node_ids,
+                annotation_ids=annotation_ids,
+            )
+            if not result["success"]:
+                if result["error"] == "invalid_document":
+                    result["error"] = "invalid_presentation"
+                return result
+            hook = service.authorization_hook
+            try:
+                with session_context.bind_session(None):
+                    denied = access.assign_copied_session_access(
+                        hook,
+                        source_session_id=session_id,
+                        copy_session_id=template_id,
+                        target="save_template",
+                    )
+            except Exception:
+                denied = True
+            if denied:
+                # A refusing or raising hook may still have granted something.
+                try:
+                    with session_context.bind_session(None):
+                        access.revoke_copied_session_access(
+                            hook,
+                            source_session_id=session_id,
+                            copy_session_id=template_id,
+                            target="save_template",
+                        )
+                except Exception:
+                    logger.exception("Revoking access to an unsaved template failed")
+                return _failure("access_denied")
+            try:
+                saved = store.save(result["document"], 0)
+            except Exception:
+                with session_context.bind_session(None):
+                    access.revoke_copied_session_access(
+                        hook,
+                        source_session_id=session_id,
+                        copy_session_id=template_id,
+                        target="save_template",
+                    )
+                raise
+            return {"success": True, "template": saved}
+    except Exception:
+        return _failure("storage_error")
+
+
+def list_templates(service, manager, query=None, tags=None, limit=None):
+    if manager is None:
+        return _failure("storage_error")
+    if (
+        (query is not None and not isinstance(query, str))
+        or (
+            tags is not None
+            and (
+                not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)
+            )
+        )
+        or (limit is not None and (type(limit) is not int or limit < 1))
+    ):
+        return _failure("invalid_request")
+    if not _authorize(service, GRAPH_ACTION_READ, "list_visualization_sessions"):
+        return _failure("access_denied")
+    try:
+        docs = [
+            doc
+            for doc in manager.template_store.list()
+            if _authorize(
+                service,
+                GRAPH_ACTION_READ,
+                "get_visualization_session",
+                doc["template_id"],
+            )
+            and (
+                not query
+                or query.casefold()
+                in (doc["name"] + " " + doc["description"]).casefold()
+            )
+            and (not tags or set(tags) <= set(doc["tags"]))
+        ]
+        return {"success": True, "templates": docs[:limit], "count": len(docs[:limit])}
+    except Exception:
+        return _failure("storage_error")
+
+
+def get_template(service, manager, template_id):
+    if manager is None:
+        return _failure("storage_error")
+    if not isinstance(template_id, str) or not is_valid_session_id(template_id):
+        return _failure("invalid_request")
+    if not _authorize(
+        service, GRAPH_ACTION_READ, "get_visualization_session", template_id
+    ):
+        return _failure("access_denied")
+    try:
+        doc = manager.template_store.get(template_id)
+        return (
+            {"success": True, "template": doc}
+            if doc
+            else _failure("template_not_found")
+        )
+    except Exception:
+        return _failure("storage_error")
+
+
+def update_template(
+    service,
+    manager,
+    template_id,
+    expected_revision,
+    name=None,
+    description=None,
+    tags=None,
+    replace_from=None,
+):
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    if manager is None:
+        return _failure("storage_error")
+    if (
+        not isinstance(template_id, str)
+        or not is_valid_session_id(template_id)
+        or type(expected_revision) is not int
+        or expected_revision < 0
+    ):
+        return _failure("invalid_request")
+    if not _authorize(
+        service, GRAPH_ACTION_MUTATE, "visualization_session", template_id
+    ):
+        return _failure("access_denied")
+    try:
+        store = manager.template_store
+        with store._backend.transaction():
+            try:
+                doc = store.get(template_id)
+            except TemplateError:
+                # An unreadable stored document, as get_template answers it.
+                return _failure("storage_error")
+            if doc is None:
+                return _failure("template_not_found")
+            if doc["revision"] != expected_revision:
+                return _failure("revision_conflict", current_revision=doc["revision"])
+            new_name = doc["name"] if name is None else name
+            new_description = doc["description"] if description is None else description
+            new_tags = doc["tags"] if tags is None else tags
+            if not _metadata(new_name, new_description, new_tags):
+                return _failure("invalid_request")
+            if replace_from is not None:
+                if not isinstance(replace_from, dict) or set(replace_from) - {
+                    "session_id",
+                    "expected_revision",
+                    "node_ids",
+                    "annotation_ids",
+                }:
+                    return _failure("invalid_request", field="replace_from")
+                result = capture_template(
+                    service,
+                    manager,
+                    replace_from.get("session_id"),
+                    template_id=template_id,
+                    name=new_name,
+                    created_by=doc["created_by"],
+                    expected_revision=replace_from.get("expected_revision"),
+                    description=new_description,
+                    tags=new_tags,
+                    node_ids=replace_from.get("node_ids"),
+                    annotation_ids=replace_from.get("annotation_ids"),
+                )
+                if not result["success"]:
+                    if result["error"] == "invalid_document":
+                        result["error"] = "invalid_presentation"
+                    return {**result, "field": "replace_from"}
+                fresh = result["document"]
+                for key in (
+                    "source_session_id",
+                    "source_session_revision",
+                    "nodes",
+                    "edges",
+                    "annotation_document",
+                    "bounds",
+                    "thumbnail",
+                ):
+                    doc[key] = fresh[key]
+            doc.update(
+                name=new_name.strip(), description=new_description, tags=new_tags
+            )
+            return {"success": True, "template": store.save(doc, expected_revision)}
+    except TemplateError as exc:
+        if exc.code == "revision_conflict":
+            return _conflict(store, template_id)
+        return _failure("invalid_request")
+    except Exception:
+        return _failure("storage_error")
+
+
+def delete_template(service, manager, template_id, expected_revision):
+    from backend.runtime.authorization import GRAPH_ACTION_MUTATE
+
+    if manager is None:
+        return _failure("storage_error")
+    if (
+        not isinstance(template_id, str)
+        or not is_valid_session_id(template_id)
+        or type(expected_revision) is not int
+        or expected_revision < 0
+    ):
+        return _failure("invalid_request")
+    if not _authorize(
+        service, GRAPH_ACTION_MUTATE, "delete_visualization_session", template_id
+    ):
+        return _failure("access_denied")
+    try:
+        manager.template_store.delete(template_id, expected_revision)
+        return {"success": True, "deleted": True}
+    except TemplateError as exc:
+        if exc.code == "not_found":
+            return _failure("template_not_found")
+        return _conflict(manager.template_store, template_id)
+    except Exception:
+        return _failure("storage_error")

@@ -102,7 +102,7 @@ from backend.runtime.authorization import (
     GRAPH_OPERATION_STAGE,
     use_request_authorization,
 )
-from . import access, graph_merge_plan, session_capture
+from . import access, graph_merge_plan, session_capture, templates
 from .service import GraphService
 from .staging import outside_storage, refusal_result, session_storage_error
 from .system_nodes import SYSTEM_CREATE_MODELS, make_system_create_tools
@@ -214,7 +214,16 @@ _PUSHING_TOOLS = frozenset({"search_graph", "get_related_nodes", "get_saved_view
 
 # Tools that take a session id as a plain argument and answer every refusal
 # with their own codes: the session is never reconciled with a bound one.
-_RAW_SESSION_TOOLS = frozenset({"save_session_view"})
+_RAW_SESSION_TOOLS = frozenset(
+    {
+        "save_session_view",
+        "save_template",
+        "list_templates",
+        "get_template",
+        "update_template",
+        "delete_template",
+    }
+)
 
 
 def _message_request(mcp) -> Tuple[bool, Any]:
@@ -759,7 +768,21 @@ def register_mcp_tools(
                 tool.parameters = {
                     **tool.parameters,
                     "properties": properties,
-                    "required": list(properties),
+                    "required": (
+                        list(properties)
+                        if func.__name__ == "save_session_view"
+                        else {
+                            "save_template": [
+                                "session_id",
+                                "name",
+                                "expected_revision",
+                            ],
+                            "list_templates": [],
+                            "get_template": ["template_id"],
+                            "update_template": ["template_id", "expected_revision"],
+                            "delete_template": ["template_id", "expected_revision"],
+                        }[func.__name__]
+                    ),
                 }
         tools_map[func.__name__] = wrapped
         return wrapped
@@ -3441,6 +3464,71 @@ def register_mcp_tools(
         """
         return session_capture.save_session_view(
             service, session_manager, session_id, name, expected_revision
+        )
+
+    @register_tool
+    def save_template(
+        session_id: str = None,
+        name: str = None,
+        expected_revision: Any = None,
+        node_ids: Any = None,
+        annotation_ids: Any = None,
+        description: Any = "",
+        tags: Any = None,
+    ) -> Dict[str, Any]:
+        """Capture a session as a reusable template."""
+        return templates.save_template(
+            service,
+            session_manager,
+            session_id,
+            name,
+            expected_revision,
+            node_ids,
+            annotation_ids,
+            description,
+            tags,
+        )
+
+    @register_tool
+    def list_templates(
+        query: Any = None, tags: Any = None, limit: Any = None
+    ) -> Dict[str, Any]:
+        """List accessible templates, optionally filtered by text and tags."""
+        return templates.list_templates(service, session_manager, query, tags, limit)
+
+    @register_tool
+    def get_template(template_id: str = None) -> Dict[str, Any]:
+        """Read a template by ID."""
+        return templates.get_template(service, session_manager, template_id)
+
+    @register_tool
+    def update_template(
+        template_id: str = None,
+        expected_revision: Any = None,
+        name: Any = None,
+        description: Any = None,
+        tags: Any = None,
+        replace_from: Any = None,
+    ) -> Dict[str, Any]:
+        """Update template metadata or replace its capture at a source revision."""
+        return templates.update_template(
+            service,
+            session_manager,
+            template_id,
+            expected_revision,
+            name,
+            description,
+            tags,
+            replace_from,
+        )
+
+    @register_tool
+    def delete_template(
+        template_id: str = None, expected_revision: Any = None
+    ) -> Dict[str, Any]:
+        """Delete a template at its current revision."""
+        return templates.delete_template(
+            service, session_manager, template_id, expected_revision
         )
 
     @register_tool

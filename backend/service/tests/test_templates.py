@@ -1,11 +1,15 @@
-# covers: backend/service/templates.py
+# covers: backend/service/templates.py, backend/core/session_manager.py
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from backend.core import Edge, GraphStorage, Node
-from backend.core.session_manager import CaptureRefused, SessionManager
+from backend.core.session_manager import (
+    CaptureRefused,
+    SessionManager,
+    SessionNotFound,
+)
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
 from backend.runtime.authorization import (
     GraphAccessNarrowing,
@@ -312,3 +316,230 @@ def test_edge_limit_and_excluded_system_types(capture):
     ):
         assert run() == {"success": False, "error": "edges_limit"}
     assert "system" not in {n["source_node_id"] for n in run()["document"]["nodes"]}
+
+
+def test_template_crud_conflicts_and_authorization(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    saved = templates.save_template(
+        service, manager, session.id, "Example", session.seq
+    )
+    doc = saved["template"]
+    tid = doc["template_id"]
+    assert templates.list_templates(service, manager, tags=["missing"])["count"] == 0
+    assert templates.get_template(service, manager, tid)["template"] == doc
+    assert (
+        templates.update_template(service, manager, tid, 0, name="Changed")["error"]
+        == "revision_conflict"
+    )
+    refused = templates.update_template(
+        service,
+        manager,
+        tid,
+        doc["revision"],
+        replace_from={"session_id": session.id, "expected_revision": session.seq + 1},
+    )
+    assert (
+        refused["error"] == "revision_conflict" and refused["field"] == "replace_from"
+    )
+    assert templates.get_template(service, manager, tid)["template"] == doc
+    updated = templates.update_template(
+        service,
+        manager,
+        tid,
+        doc["revision"],
+        tags=["x"],
+        replace_from={"session_id": session.id, "expected_revision": session.seq},
+    )["template"]
+    assert templates.list_templates(service, manager, tags=["x"])["count"] == 1
+    with patch(
+        "backend.service.templates.access.authorize_graph_access",
+        return_value={"error_code": "access_denied"},
+    ) as auth:
+        assert (
+            templates.delete_template(service, manager, tid, updated["revision"])[
+                "error"
+            ]
+            == "access_denied"
+        )
+        assert auth.call_args.kwargs["target"] == "delete_visualization_session"
+        assert auth.call_args.kwargs["session_id"] == tid
+    assert templates.delete_template(service, manager, tid, doc["revision"]) == {
+        "success": False,
+        "error": "revision_conflict",
+        "current_revision": updated["revision"],
+    }
+    assert templates.delete_template(service, manager, tid, updated["revision"])[
+        "success"
+    ]
+    assert (
+        templates.get_template(service, manager, tid)["error"] == "template_not_found"
+    )
+    assert templates.list_templates(service, manager)["count"] == 0
+    from backend.core.template_store import TemplateError
+
+    with pytest.raises(TemplateError) as exc:
+        manager.template_store.save(doc, doc["revision"])
+    assert exc.value.code == "deleted"
+
+
+def test_list_filters_templates_the_caller_cannot_read(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    with patch(
+        "backend.service.templates.access.authorize_graph_access",
+        side_effect=lambda hook, **kw: (
+            {"error": "access_denied"}
+            if kw["target"] == "get_visualization_session"
+            else None
+        ),
+    ):
+        assert (
+            templates.get_template(service, manager, doc["template_id"])["error"]
+            == "access_denied"
+        )
+        assert templates.list_templates(service, manager)["templates"] == []
+
+
+def test_collection_authorization_ignores_bound_session(capture):
+    from backend.runtime.session_context import bind_session
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    seen = []
+
+    class Hook:
+        def evaluate(self, context):
+            seen.append((context.target, context.session_id))
+            return GraphAuthorizationDecision(
+                allowed=not (
+                    context.target
+                    in {"create_visualization_session", "list_visualization_sessions"}
+                    and context.session_id
+                )
+            )
+
+    service._authorization_hook = Hook()
+    with bind_session("9999-9999"):
+        saved = templates.save_template(
+            service, manager, session.id, "Example", session.seq
+        )
+        assert saved["success"]
+        assert templates.list_templates(service, manager)["count"] == 1
+    assert ("create_visualization_session", "") in seen
+    assert ("list_visualization_sessions", "") in seen
+    assert ("get_visualization_session", saved["template"]["template_id"]) in seen
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_save_assigns_creator_access_to_a_fresh_non_session_id(capture, allowed):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    assigned = []
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=True)
+
+        def assign_copied_session_access(self, context, *, copy_session_id):
+            assigned.append((context.target, context.session_id, copy_session_id))
+            return GraphAuthorizationDecision(allowed=allowed)
+
+    service._authorization_hook = Hook()
+    # The first candidate is the session's own id and must be skipped.
+    parts = iter([int(p) for p in session.id.split("-")] + [1111, 2222, 3333, 4444])
+    with patch("secrets.randbelow", side_effect=lambda _: next(parts)):
+        saved = templates.save_template(
+            service, manager, session.id, "Example", session.seq
+        )
+    assert assigned == [("save_template", session.id, "1111-2222-3333-4444")]
+    assert saved["success"] is allowed
+    if not allowed:
+        assert saved["error"] == "access_denied"
+    assert templates.list_templates(service, manager)["count"] == int(allowed)
+    if allowed:
+        # Nor does a session id ever name a template, deleted or not.
+        tid = saved["template"]["template_id"]
+        templates.delete_template(service, manager, tid, 1)
+        with pytest.raises(SessionNotFound):
+            manager.get_or_create(tid)
+        parts = iter([1111, 2222, 3333, 4444, 5555, 6666, 7777, 8888])
+        with patch("secrets.randbelow", side_effect=lambda _: next(parts)):
+            assert manager.create_session("new").id == "5555-6666-7777-8888"
+        assert not manager.store.exists(tid)
+
+
+def test_update_losing_the_store_cas_reports_current_revision(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    store = manager.template_store
+    real_save = store.save
+
+    def concurrent_save(document, expected_revision):
+        real_save(dict(doc), doc["revision"])
+        return real_save(document, expected_revision)
+
+    with patch.object(store, "save", side_effect=concurrent_save):
+        result = templates.update_template(
+            service, manager, doc["template_id"], doc["revision"], name="New"
+        )
+    assert result == {
+        "success": False,
+        "error": "revision_conflict",
+        "current_revision": doc["revision"] + 1,
+    }
+
+
+def test_failed_creator_assignment_leaves_no_grant(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    grants = set()
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(allowed=True)
+
+        def assign_copied_session_access(self, context, *, copy_session_id):
+            grants.add(copy_session_id)
+            raise RuntimeError("assignment backend down")
+
+        def revoke_copied_session_access(self, context, *, copy_session_id):
+            grants.discard(copy_session_id)
+
+    service._authorization_hook = Hook()
+    saved = templates.save_template(
+        service, manager, session.id, "Example", session.seq
+    )
+    assert saved == {"success": False, "error": "access_denied"}
+    assert grants == set()
+    assert templates.list_templates(service, manager)["count"] == 0
+
+
+def test_unreadable_stored_template_is_a_storage_error(capture):
+    from backend.service import templates
+
+    _, service, manager, session = capture
+    doc = templates.save_template(service, manager, session.id, "Example", session.seq)[
+        "template"
+    ]
+    record = manager.template_store._backend.load(doc["template_id"])
+    record["document"]["nodes"] = "broken"
+    manager.template_store._backend.save(record)
+    for result in (
+        templates.get_template(service, manager, doc["template_id"]),
+        templates.update_template(
+            service, manager, doc["template_id"], doc["revision"], name="New"
+        ),
+    ):
+        assert result == {"success": False, "error": "storage_error"}

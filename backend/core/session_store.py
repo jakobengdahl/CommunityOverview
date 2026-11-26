@@ -932,6 +932,9 @@ class SessionStore:
         # endpoint grow data/sessions/ past max_sessions across restarts.
         # Invalidated on every backend.save()/delete() call.
         self._meta_cache: Optional[List[Dict[str, Any]]] = None
+        # Ids another store holds (templates authorize as sessions by id), so
+        # no session is ever created under one. Called under ``_lock``.
+        self.id_reserved: Optional[Callable[[str], bool]] = None
 
     # ---------------- lifecycle ----------------
 
@@ -947,6 +950,7 @@ class SessionStore:
                     self._staged_status is None
                     or self._staged_status(candidate) == "none"
                 )
+                and (self.id_reserved is None or not self.id_reserved(candidate))
             ):
                 return candidate
         raise RuntimeError("could not allocate a free session id")
@@ -1000,6 +1004,8 @@ class SessionStore:
                 if existing is not None:
                     return existing, False
                 self._refuse_retired(session_id)
+                if self.id_reserved is not None and self.id_reserved(session_id):
+                    raise SessionRetired(session_id)
             self._check_capacity(max_sessions)
             session = Session(
                 id=session_id if session_id is not None else self._new_id(),
