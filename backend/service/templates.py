@@ -57,6 +57,16 @@ def _line_points(annotation):
     return [p for p in points if isinstance(p, dict)]
 
 
+def _freehand_points(annotation):
+    if annotation_type_of(annotation) != "freehand":
+        return []
+    points = []
+    for payload in (annotation, annotation.get("content")):
+        if isinstance(payload, dict) and isinstance(payload.get("points"), list):
+            points.extend(p for p in payload["points"] if isinstance(p, dict))
+    return points
+
+
 def _shape(node, state, config, saved):
     overrides = state.get("shape_overrides") or {}
     defaults = state.get("type_shapes") or {}
@@ -759,6 +769,16 @@ def insert_template(
     from backend.core.session_manager import OpBatchTooLarge, _check_op_image_sizes
     from .session_capture import relink_capture
 
+    def valid_coordinate(value):
+        if value is None:
+            return True
+        if type(value) not in (int, float):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+
     if manager is None:
         return _failure("storage_error")
     if not isinstance(session_id, str) or not is_valid_session_id(session_id):
@@ -770,10 +790,7 @@ def insert_template(
             v is not None and (type(v) is not int or v < 0)
             for v in (expected_revision, template_revision)
         )
-        or any(
-            v is not None and (type(v) not in (int, float) or not math.isfinite(v))
-            for v in (x, y)
-        )
+        or not all(valid_coordinate(v) for v in (x, y))
         or (x is None) != (y is None)
     ):
         return _failure("invalid_request")
@@ -825,7 +842,7 @@ def insert_template(
                     right.append(p.get("x", 0) + size.get("width", size.get("w", 0)))
                     right.extend(
                         p["x"]
-                        for p in _line_points(annotation)
+                        for p in _line_points(annotation) + _freehand_points(annotation)
                         if isinstance(p.get("x"), (int, float))
                     )
                 x = max(right, default=-200) + 200
@@ -910,13 +927,12 @@ def insert_template(
             kept = {a["id"] for a in annotations}
             fresh = {old: new for old, new in fresh.items() if new in kept}
             for a in annotations:
-                points = [a.get("position"), a.get("geometry"), *_line_points(a)]
-                if annotation_type_of(a) == "freehand":
-                    for payload in (a, a.get("content")):
-                        if isinstance(payload, dict) and isinstance(
-                            payload.get("points"), list
-                        ):
-                            points.extend(payload["points"])
+                points = [
+                    a.get("position"),
+                    a.get("geometry"),
+                    *_line_points(a),
+                    *_freehand_points(a),
+                ]
                 seen = set()
                 for p in points:
                     if isinstance(p, dict) and id(p) not in seen:

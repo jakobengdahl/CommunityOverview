@@ -561,6 +561,11 @@ def test_insert_reference_is_atomic_and_preserves_existing_nodes(capture):
     )
     before = __import__("copy").deepcopy(target.state)
     tid = saved["template_id"]
+    for x, y in ((10**400, 0), (0, -(10**400))):
+        assert templates.insert_template(service, manager, target.id, tid, x=x, y=y) == {
+            "success": False,
+            "error": "invalid_request",
+        }
     assert (
         templates.insert_template(
             service, manager, target.id, tid, expected_revision=99
@@ -752,7 +757,8 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
     assert stroke["points"] == [{"x": 105, "y": 206}, {"x": 107, "y": 208}]
 
 
-def test_default_origin_is_right_of_existing_annotation(capture):
+@pytest.mark.parametrize("nested", [False, True])
+def test_default_origin_is_right_of_existing_annotation(capture, nested):
     from backend.service import templates
 
     _, service, manager, source = capture
@@ -773,7 +779,16 @@ def test_default_origin_is_right_of_existing_annotation(capture):
             "from": {"x": 10, "y": 0},
             "end": {"point": {"x": 1500, "y": 0}},
         },
+        {
+            "id": "stroke",
+            "type": "freehand",
+            **(
+                {"content": {"points": [{"x": 2500, "y": 0}]}}
+                if nested
+                else {"points": [{"x": 2500, "y": 0}]}
+            ),
+        },
     ]
     result = templates.insert_template(service, manager, target.id, doc["template_id"])
     assert result["success"]
-    assert target.state["positions"]["b"]["x"] > 1500
+    assert target.state["positions"]["b"]["x"] == 2700
