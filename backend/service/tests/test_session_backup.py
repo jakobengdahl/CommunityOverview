@@ -678,7 +678,10 @@ def test_file_snapshot_integration(tmp_path, monkeypatch, custom_journal):
     import traceback
 
     secret_path = str(sessions / "1234-5678.json")
-    for error in (OSError(secret_path), shutil.Error([(secret_path, "dest", "denied")])):
+    for error in (
+        OSError(secret_path),
+        shutil.Error([(secret_path, "dest", "denied")]),
+    ):
         with monkeypatch.context() as patch:
 
             def fail_copy(*args, **kwargs):
