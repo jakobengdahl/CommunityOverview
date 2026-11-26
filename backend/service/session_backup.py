@@ -9,6 +9,7 @@ import binascii
 import copy
 import hashlib
 import json
+from urllib.parse import unquote_to_bytes
 
 from backend.core.session_annotations import annotation_link_fields, annotation_type_of
 from backend.core.session_store import Session, _empty_state
@@ -49,9 +50,9 @@ def _assets(state, found):
             continue
         try:
             header, encoded = value.split(",", 1)
-            if not header.endswith(";base64"):
-                raise ValueError()
-            data = base64.b64decode(encoded, validate=True)
+            data = unquote_to_bytes(encoded)
+            if header.endswith(";base64"):
+                data = base64.b64decode(data, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise BackupRefused("invalid embedded asset") from exc
         digest = hashlib.sha256(data).hexdigest()

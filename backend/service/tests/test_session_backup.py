@@ -59,12 +59,19 @@ def backend(request, tmp_path):
     return InMemorySessionPersistenceBackend()
 
 
-def test_backup_keeps_persistent_state_and_checks_integrity(backend, monkeypatch):
+@pytest.mark.parametrize(
+    "legacy_url,legacy_payload",
+    [
+        ("data:image/png;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
+        ("data:image/svg+xml;charset=utf-8,%3Csvg%3E%00%FF+%3C/svg%3E", b"<svg>\x00\xff+</svg>"),
+    ],
+)
+def test_backup_keeps_persistent_state_and_checks_integrity(
+    backend, monkeypatch, legacy_url, legacy_payload
+):
     session = Session("1234-5678", name="Map", description="Details", seq=7)
     payload = b"pixels"
     url = "data:image/webp;base64," + base64.b64encode(payload).decode()
-    legacy_payload = b"legacy pixels"
-    legacy_url = "data:image/png;base64," + base64.b64encode(legacy_payload).decode()
     session.state.update(
         node_refs=["a"],
         positions={"a": {"x": 2, "y": 3}},
