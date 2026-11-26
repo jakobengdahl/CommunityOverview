@@ -156,6 +156,32 @@ def test_document_round_trips_without_normalization():
             {"id": "label", "type": "label", "anchor": {"target_id": "outside"}}
         ),
         lambda d: d["annotation_document"]["annotations"].append(
+            {"id": "label", "type": "label", "anchor": {"target_id": {}}}
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {"id": "label", "type": "label", "anchor": {"target_id": []}}
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {"id": "img", "kind": "image", "image": {"url": "https://example.com/x"}}
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "img",
+                "kind": "image",
+                "image": {"url": "https://example.com/x"},
+                "content": {"type": "label"},
+            }
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
+            {
+                "id": "ref",
+                "kind": "reference",
+                "target_kind": "resource",
+                "target": "outside",
+                "content": {"type": "label"},
+            }
+        ),
+        lambda d: d["annotation_document"]["annotations"].append(
             {"id": "line", "type": "line", "start": {"nodeId": "outside"}}
         ),
         lambda d: d["nodes"][0]["snapshot"].update(type="SavedView"),
@@ -194,6 +220,17 @@ def test_limits_reject_the_whole_document(field, count, code):
         validate_template(value)
     assert error.value.code == code
     assert len(target[field]) == count
+
+
+def test_limits_accept_exactly_the_maximum():
+    value = document()
+    node = value["nodes"][0]
+    value["nodes"] = [{**node, "key": f"n{i}"} for i in range(500)]
+    value["edges"] = [{**value["edges"][0], "source": "n0", "target": "n0"}] * 2000
+    value["annotation_document"]["annotations"] = [
+        {"id": f"a{i}", "type": "label"} for i in range(2000)
+    ]
+    assert validate_template(value) == value
 
 
 @pytest.mark.parametrize("file_backend", [False, True])

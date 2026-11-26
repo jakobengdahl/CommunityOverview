@@ -22,6 +22,7 @@ from .session_annotations import (
     annotation_link_fields,
     annotation_type_of,
     image_annotation_error,
+    resolve_annotation_type_alias,
 )
 from .session_store import (
     _DEFAULT_MAX_ANNOTATIONS,
@@ -169,8 +170,16 @@ class TemplateDocument(VersionedDocument):
             # the checks below while a reader of the other copy uses it.
             if content and content.keys() & annotation.keys():
                 raise ValueError("ambiguous annotation content")
-            payload = {**annotation, **(content or {})}
-            ann_type = annotation_type_of(payload)
+            # type and kind are aliases: the canvas resolves the type from the
+            # top level only, so content must not claim a different one.
+            ann_type = annotation_type_of(annotation)
+            if content and any(
+                key in content
+                and resolve_annotation_type_alias(content[key]) != ann_type
+                for key in ("type", "kind")
+            ):
+                raise ValueError("ambiguous annotation content")
+            payload = {**annotation, **(content or {}), "type": ann_type}
             if _validate_generic_content(ann_type, payload):
                 raise ValueError("invalid annotation content")
             if image_annotation_error(payload):
@@ -182,7 +191,7 @@ class TemplateDocument(VersionedDocument):
                 raise ValueError("invalid group members")
             for holder, key, declared in annotation_link_fields(payload):
                 value = holder[key] if isinstance(holder, list) else holder.get(key)
-                if not value:
+                if value is None or value == "":
                     continue
                 if isinstance(holder, list) or declared == "node":
                     valid = keys
