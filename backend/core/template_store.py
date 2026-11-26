@@ -262,7 +262,9 @@ class TemplateStore:
                         with path.open(encoding="utf-8") as file:
                             doc = validate_template(json.load(file))
                     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
-                        logger.warning("Ignoring invalid profile template %s: %s", path, exc)
+                        logger.warning(
+                            "Ignoring invalid profile template %s: %s", path, exc
+                        )
                         continue
                     key = doc["template_id"]
                     if key in self._profile or backend.load(key) is not None:

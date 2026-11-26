@@ -354,7 +354,8 @@ def test_profile_templates_are_merged_read_only_and_isolated(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "problem", ["duplicate", "mutable", "tombstone", "invalid", "json", "utf8", "nested"]
+    "problem",
+    ["duplicate", "mutable", "tombstone", "invalid", "json", "utf8", "nested"],
 )
 def test_profile_loading_rejects_invalid_documents_and_id_collisions(
     tmp_path, problem, caplog
