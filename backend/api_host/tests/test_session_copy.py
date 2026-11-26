@@ -590,6 +590,48 @@ def test_save_view_copies_annotations_and_groups(test_app, transport):
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_save_view_reads_graph_ids_only_from_explicit_link_fields(test_app, transport):
+    """An id is an annotation only where the source stores one under it and
+    the field does not declare a node; free-form payload names nothing, and
+    legacy group- canvas keys name no node."""
+    manager = test_app.app.state.session_manager
+    source = manager.create_session()
+    free_form = {"target_id": "free", "member_node_ids": ["free"], "parentId": "node-1"}
+    source.state.update(
+        node_refs=["node-1"],
+        positions={"node-1": {"x": 1, "y": 2}, "group-1": {"x": 0, "y": 0}},
+        shape_overrides={"node-1": {"shape": "box"}, "group-1": {"shape": "box"}},
+        annotations=[
+            {"id": "node-1", "type": "note", "data": free_form},
+            {"id": "g", "type": "group", "member_node_ids": ["node-1"]},
+            {
+                "id": "l",
+                "type": "line",
+                "start": {"attachment": {"target_type": "node", "target_id": "node-1"}},
+            },
+            {
+                "id": "r",
+                "kind": "reference",
+                "target_kind": "resource",
+                "target": "gone",
+            },
+        ],
+    )
+    status, result = save_view(
+        test_app, source.id, {"name": "V", "expected_revision": 0}, transport
+    )
+    assert status == 200 and result["missing_node_ids"] == ["gone"]
+    state = manager.get_session(result["session_id"]).state
+    note, group, line, reference = state["annotations"]
+    assert state["node_refs"] == ["node-1"] and note["data"] == free_form
+    assert state["positions"].keys() == {"node-1", "group-1"}
+    assert state["shape_overrides"].keys() == {note["id"], "group-1"}
+    assert group["member_node_ids"] == [note["id"]]
+    assert line["start"]["attachment"]["target_id"] == "node-1"
+    assert reference["target"] == "gone"
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
 def test_save_view_enforces_annotation_limit(test_app, transport):
     manager = test_app.app.state.session_manager
     source = manager.create_session()

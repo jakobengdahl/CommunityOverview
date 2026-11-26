@@ -6,7 +6,7 @@ so the same input gives the same result on either surface
 """
 
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, Tuple
 
 from backend.config.config_loader import build_session_url
 from backend.core.session_annotations import annotation_type_of
@@ -64,65 +64,107 @@ def _refused(code: str, **extra: Any) -> Dict[str, Any]:
     return {"success": False, "error": code, **extra}
 
 
+# Before groups became annotations, the canvas stored them as nodes keyed
+# "group-<n>"; such a canvas key names no graph node.
+_LEGACY_GROUP_PREFIX = "group-"
+# Top-level fields the canvas resolves by id alone, as a node or an annotation.
+_UNTYPED_LINKS = ("startAnchor", "endAnchor", "parentId", "parent_id", "parentNode")
+
+
+def _annotation_ids(state: Dict[str, Any]) -> set:
+    return {
+        a["id"]
+        for a in state.get("annotations") or []
+        if isinstance(a, dict) and isinstance(a.get("id"), str)
+    }
+
+
+def _annotation_links(
+    annotation: Dict[str, Any], annotation_ids: Collection[str]
+) -> Iterator[Tuple[Any, Any, str, str]]:
+    """``(holder, key, id, kind)`` for every id ``holder[key]`` an annotation
+    links to, ``kind`` being ``"node"`` or ``"annotation"``.
+
+    Only the explicit link fields of the annotation write schema are read: a
+    resource reference's ``target``, an ``attachment`` (top level or a line's
+    ``start``/``end``), the untyped canvas links and group members. An id
+    counts as an annotation only when the source stores an annotation under
+    it and the field does not declare it a node; free-form payload is never
+    read, and an annotation-typed link to no stored annotation is skipped.
+    """
+    fields: List[Tuple[Any, Any, Optional[str]]] = []
+    if (
+        annotation_type_of(annotation) == "reference"
+        and annotation.get("target_kind") == "resource"
+    ):
+        fields.append((annotation, "target", "node"))
+    for endpoint in (annotation, annotation.get("start"), annotation.get("end")):
+        attachment = endpoint.get("attachment") if isinstance(endpoint, dict) else None
+        if isinstance(attachment, dict):
+            fields.append((attachment, "target_id", attachment.get("target_type")))
+    fields.extend((annotation, key, None) for key in _UNTYPED_LINKS)
+    members = annotation.get("member_node_ids")
+    if isinstance(members, list):
+        fields.extend((members, i, None) for i in range(len(members)))
+    for holder, key, declared in fields:
+        value = holder[key] if isinstance(holder, list) else holder.get(key)
+        if not isinstance(value, str):
+            continue
+        if declared in (None, "annotation") and value in annotation_ids:
+            yield holder, key, value, "annotation"
+        elif declared != "annotation":
+            yield holder, key, value, "node"
+
+
 def captured_node_ids(state: Dict[str, Any]) -> List[str]:
     """Every graph node id the captured canvas names, first use first.
 
     ``shape_revisions`` keys are not read: they outlive a node's removal from
     the canvas, so a removed node would be checked and reported missing.
+    Position keys always name nodes; a shape override keyed by an annotation
+    id belongs to that annotation.
     """
+    annotation_ids = _annotation_ids(state)
     ids: Dict[str, None] = {}
-    for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids"):
+    for key in ("node_refs", "hidden_node_ids", "dimmed_node_ids", "positions"):
         ids.update(dict.fromkeys(state.get(key) or []))
-    annotations = state.get("annotations") or []
-    annotation_ids = {a.get("id") for a in annotations if isinstance(a, dict)}
-    # Positions always name graph nodes; unlike shape overrides, their keys
-    # are copied verbatim even when they collide with an annotation id.
-    ids.update(dict.fromkeys(state.get("positions") or {}))
     ids.update(
         dict.fromkeys(
             i for i in (state.get("shape_overrides") or {}) if i not in annotation_ids
         )
     )
+    canvas = [
+        i for i in ids if isinstance(i, str) and not i.startswith(_LEGACY_GROUP_PREFIX)
+    ]
+    linked = [
+        value
+        for annotation in state.get("annotations") or []
+        if isinstance(annotation, dict)
+        for _, _, value, kind in _annotation_links(annotation, annotation_ids)
+        if kind == "node"
+    ]
+    return list(dict.fromkeys(canvas + linked))
 
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            if (
-                annotation_type_of(value) == "reference"
-                and value.get("target_kind") == "resource"
-            ):
-                target = value.get("target")
-                if isinstance(target, str):
-                    ids[target] = None
-            target = value.get("target_id")
-            if isinstance(target, str) and (
-                value.get("target_type") == "node" or target not in annotation_ids
-            ):
-                ids[target] = None
-            for key, child in value.items():
-                if key == "member_node_ids" and isinstance(child, list):
-                    graph_members = [i for i in child if i not in annotation_ids]
-                    ids.update(dict.fromkeys(graph_members))
-                elif (
-                    key
-                    in (
-                        "startAnchor",
-                        "endAnchor",
-                        "parentId",
-                        "parent_id",
-                        "parentNode",
-                    )
-                    and isinstance(child, str)
-                    and child not in annotation_ids
-                ):
-                    ids[child] = None
-                else:
-                    visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
 
-    visit(annotations)
-    return [i for i in ids if isinstance(i, str)]
+def relink_capture(state: Dict[str, Any], fresh_ids: Dict[str, str]) -> None:
+    """Point every annotation link and shape override that names a copied
+    annotation at its fresh id (``fresh_ids``: source id to copy id), and
+    drop group members that are graph nodes off the captured canvas."""
+    on_canvas = {i for i in state.get("node_refs") or [] if isinstance(i, str)}
+    for annotation in state["annotations"]:
+        links = list(_annotation_links(annotation, fresh_ids))
+        for holder, key, value, kind in links:
+            if kind == "annotation":
+                holder[key] = fresh_ids[value]
+        members = annotation.get("member_node_ids")
+        if isinstance(members, list):
+            graph = {i for h, i, _, kind in links if h is members and kind == "node"}
+            annotation["member_node_ids"] = [
+                m for i, m in enumerate(members) if i not in graph or m in on_canvas
+            ]
+    state["shape_overrides"] = {
+        fresh_ids.get(k, k): v for k, v in (state.get("shape_overrides") or {}).items()
+    }
 
 
 def captured_edge_ids(state: Dict[str, Any]) -> List[str]:
@@ -230,6 +272,7 @@ def save_session_view(
                 name.strip(),
                 expected_revision,
                 authorize_capture=_hook_call(authorize_capture),
+                relink_capture=relink_capture,
                 assign_access=_hook_call(assign_access),
                 revoke_access=revoke_access,
             )

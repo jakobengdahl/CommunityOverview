@@ -714,7 +714,11 @@ _ADDITIVE_ACTIONS = frozenset({"add_to_visualization", "update_in_visualization"
 AUTO_ADD_ACTOR_PREFIX = "auto-add-agent:"
 
 
-def _refresh_annotation_ids(state: Dict[str, Any]) -> Dict[str, str]:
+def _refresh_annotation_ids(
+    state: Dict[str, Any], *, relink: bool = True
+) -> Dict[str, str]:
+    """Give every annotation a fresh id; returns source id to fresh id.
+    ``relink=False`` leaves references to annotations for the caller."""
     ids = {a["id"]: str(uuid.uuid4()) for a in state["annotations"]}
 
     # Untyped attachments and the canvas's startAnchor/endAnchor snaps are
@@ -744,15 +748,16 @@ def _refresh_annotation_ids(state: Dict[str, Any]) -> Dict[str, str]:
             raise OpError(error)
     for annotation in state["annotations"]:
         annotation["id"] = ids[annotation["id"]]
-        for key in ("startAnchor", "endAnchor"):
-            anchor = annotation.get(key)
-            if isinstance(anchor, str) and anchor in ids:
-                annotation[key] = ids[anchor]
         annotation["version"] = 1
         annotation["field_versions"] = {}
         annotation.pop("created_by", None)
         annotation.pop("updated_by", None)
-        remap_attachment(annotation)
+        if relink:
+            for key in ("startAnchor", "endAnchor"):
+                anchor = annotation.get(key)
+                if isinstance(anchor, str) and anchor in ids:
+                    annotation[key] = ids[anchor]
+            remap_attachment(annotation)
     return ids
 
 
@@ -1098,12 +1103,15 @@ class SessionManager:
         expected_revision: int,
         *,
         authorize_capture: Callable[[Dict[str, Any]], List[str]],
+        relink_capture: Callable[[Dict[str, Any], Dict[str, str]], None],
         assign_access: Callable[[str], None],
         revoke_access: Callable[[str], None],
     ) -> Tuple[Session, List[str]]:
         """Capture a session's presentation at ``expected_revision`` into a
         new session named ``name``; returns it and the missing node ids
         ``authorize_capture`` reported for the captured state.
+        ``relink_capture`` points the copied annotations' links at their fresh
+        ids.
 
         Runs without yielding and refuses an in-flight state batch, so the
         checks, snapshot and publication see one revision. Access is assigned
@@ -1170,44 +1178,13 @@ class SessionManager:
             raise CaptureRefused("invalid_presentation") from exc
         # Authorize the original references before filtering group membership.
         missing = authorize_capture(state)
-        members = set(state["node_refs"])
-        for annotation in annotations:
-            if "member_node_ids" in annotation:
-                annotation["member_node_ids"] = [
-                    member
-                    for member in annotation["member_node_ids"]
-                    if member in members or member in seen
-                ]
         try:
-            ids = _refresh_annotation_ids(state)
+            ids = _refresh_annotation_ids(state, relink=False)
         except OpError as exc:
             raise CaptureRefused("invalid_presentation") from exc
+        relink_capture(state, ids)
         for annotation in annotations:
             annotation["updated_at"] = _now_iso()
-
-        def remap_links(value):
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    if key in (
-                        "parentId",
-                        "parent_id",
-                        "parentNode",
-                        "startAnchor",
-                        "endAnchor",
-                    ) and isinstance(child, str):
-                        value[key] = ids.get(child, child)
-                    elif key == "member_node_ids" and isinstance(child, list):
-                        value[key] = [ids.get(item, item) for item in child]
-                    else:
-                        remap_links(child)
-            elif isinstance(value, list):
-                for child in value:
-                    remap_links(child)
-
-        remap_links(annotations)
-        state["shape_overrides"] = {
-            ids.get(k, k): v for k, v in state["shape_overrides"].items()
-        }
         # A removed node's revision outlives it; copying it would carry an id
         # the capture neither authorizes nor reports.
         on_canvas = {"node:" + n for n in state["node_refs"] if isinstance(n, str)}
