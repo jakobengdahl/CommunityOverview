@@ -160,6 +160,12 @@ def test_document_round_trips_without_normalization():
         ),
         lambda d: d["nodes"][0]["snapshot"].update(type="SavedView"),
         lambda d: d["nodes"][0]["snapshot"]["metadata"].update(secret="x"),
+        lambda d: d["nodes"][0]["snapshot"]["metadata"].update(
+            color={1: "x", "1": "y"}
+        ),
+        lambda d: d["annotation_document"]["annotations"][0].update(
+            style={1: "x", "1": "y"}
+        ),
         lambda d: d["nodes"][0]["shape"].update(inline=None),
         lambda d: d.update(type_shapes={}),
     ],

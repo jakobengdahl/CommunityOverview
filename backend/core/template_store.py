@@ -195,6 +195,18 @@ class TemplateDocument(VersionedDocument):
         return self
 
 
+def _has_non_string_key(value: Any) -> bool:
+    # json.dumps coerces int/bool/None keys to strings, so a stored document
+    # would read back different from (or with fewer entries than) the input.
+    if isinstance(value, dict):
+        return any(
+            not isinstance(k, str) or _has_non_string_key(v) for k, v in value.items()
+        )
+    if isinstance(value, list):
+        return any(_has_non_string_key(v) for v in value)
+    return False
+
+
 def validate_template(document: Any) -> dict[str, Any]:
     """Validate without normalizing, filtering, or changing the supplied JSON."""
     try:
@@ -214,6 +226,8 @@ def validate_template(document: Any) -> dict[str, Any]:
                 if isinstance(value, list) and len(value) > limit:
                     raise TemplateError(code)
         json.dumps(document, allow_nan=False)
+        if _has_non_string_key(document):
+            raise TemplateError("invalid_document")
         TemplateDocument.model_validate(document)
     except TemplateError:
         raise
