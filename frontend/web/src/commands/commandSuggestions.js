@@ -15,8 +15,8 @@ const TIER_WORD_PREFIX = 2;
 const TIER_SUBSTRING = 3;
 const NO_MATCH = -1;
 
-// Nodes before node types within a tier. Commands are ranked in their own set.
-const KIND_ORDER = { node: 0, nodeType: 1, command: 0 };
+// Nodes, node types, then templates within a tier. Commands have their own set.
+const KIND_ORDER = { node: 0, nodeType: 1, template: 2, command: 0 };
 
 /**
  * Splits input into the command box's modes: `command` when the first
@@ -64,7 +64,7 @@ export function matchTier(label, aliases, query, locale) {
 
 /**
  * Ranks `{ kind, id, label, aliases? }` items for `query`: match tier, then
- * nodes before node types, then locale-aware label, then id. An empty query
+ * nodes before node types before templates, then locale-aware label, then id. An empty query
  * keeps every item in label/id order (bare `/`). No fuzzy match, no recency.
  */
 export function rankSuggestions(items, query, locale) {
@@ -109,8 +109,8 @@ export async function searchVisibleNodes(query, { limit = 10, federationDepth } 
 /**
  * Suggestions for the command box's current `input`. Slash mode offers the
  * registry's available commands only, filtered immediately; plain mode offers
- * node types (`nodeTypes`: `{ id, label }`) and nodes once the debounced graph
- * search settles, never commands. A superseded search's result is discarded.
+ * node types (`nodeTypes`: `{ id, label }`), nodes and readable templates once
+ * the debounced searches settle, never commands. A superseded search's result is discarded.
  */
 export function useCommandSuggestions(input, context, nodeTypes) {
   const { t } = useI18n();
@@ -119,20 +119,30 @@ export function useCommandSuggestions(input, context, nodeTypes) {
   const federationDepth = useGraphStore((s) => s.federationDepth);
   const { mode, query } = parseCommandInput(input);
   const searchQuery = registry && mode === 'plain' ? query : null;
-  const [search, setSearch] = useState({ query: null, scope: null, nodes: [], failed: false });
+  const [search, setSearch] = useState({
+    query: null,
+    scope: null,
+    nodes: [],
+    templates: [],
+    failed: false,
+  });
 
   useEffect(() => {
     if (searchQuery === null) return undefined;
     let cancelled = false;
     const timer = setTimeout(async () => {
-      let nodes = [];
-      let failed = false;
-      try {
-        nodes = await searchVisibleNodes(searchQuery, { federationDepth });
-      } catch {
-        failed = true;
-      }
-      if (!cancelled) setSearch({ query: searchQuery, scope: federationDepth, nodes, failed });
+      const [nodes, templates] = await Promise.allSettled([
+        searchVisibleNodes(searchQuery, { federationDepth }),
+        api.listTemplates(),
+      ]);
+      if (!cancelled)
+        setSearch({
+          query: searchQuery,
+          scope: federationDepth,
+          nodes: nodes.status === 'fulfilled' ? nodes.value : [],
+          templates: templates.status === 'fulfilled' ? templates.value.templates || [] : [],
+          failed: nodes.status === 'rejected' || templates.status === 'rejected',
+        });
     }, NODE_QUERY_DEBOUNCE_MS);
     return () => {
       cancelled = true;
@@ -162,6 +172,16 @@ export function useCommandSuggestions(input, context, nodeTypes) {
     label: node.name,
     node,
   }));
+  const templateItems = search.templates.map((template) => ({
+    kind: 'template',
+    id: template.template_id,
+    label: template.name,
+    template,
+  }));
   const status = search.failed ? 'error' : 'ready';
-  return { mode, items: rankSuggestions([...nodeItems, ...typeItems], query, locale), status };
+  return {
+    mode,
+    items: rankSuggestions([...nodeItems, ...typeItems, ...templateItems], query, locale),
+    status,
+  };
 }

@@ -16,6 +16,7 @@ import { parseCommandInput, useCommandSuggestions } from '../commands/commandSug
 const KIND_LABEL_KEYS = {
   node: 'command_box.kind_node',
   nodeType: 'command_box.kind_node_type',
+  template: 'command_box.kind_template',
   command: 'command_box.kind_command',
 };
 
@@ -24,11 +25,15 @@ const KIND_LABEL_KEYS = {
  * id. A whitespace-preceded `@` in the name is dropped, as it would start a new
  * `@` trigger inside the reference.
  */
-export function formatNodeReference(node) {
-  const name = String(node.name ?? node.id)
+function formatReference(kind, id, displayName) {
+  const name = String(displayName ?? id)
     .replace(/[[\]]/g, '')
     .replace(/(?<=\s)@+/g, '');
-  return `[${name}](node:${node.id})`;
+  return `[${name}](${kind}:${id})`;
+}
+
+export function formatNodeReference(node) {
+  return formatReference('node', node.id, node.name);
 }
 
 const isComposingKey = (e) => e.nativeEvent?.isComposing || e.keyCode === 229;
@@ -199,7 +204,7 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
     onChange(target.value);
   };
 
-  // Node and type suggestions replace the `@` reference they were queried with.
+  // Suggestions replace the `@` reference they were queried with.
   const insert = (text) => {
     const mention = mentionAtCaret(value, caret);
     if (!mention) return;
@@ -240,7 +245,9 @@ function CommandBox({ ref, registry, value, onChange, onSend, onFocus, disabled,
 
   const accept = (item) => {
     if (item.kind === 'command') runCommand(item);
-    else insert(item.kind === 'node' ? formatNodeReference(item.node) : item.label);
+    else if (item.kind === 'node') insert(formatNodeReference(item.node));
+    else if (item.kind === 'template') insert(formatReference('template', item.id, item.label));
+    else insert(item.label);
   };
 
   const submit = () => {

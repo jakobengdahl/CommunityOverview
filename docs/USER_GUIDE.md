@@ -745,9 +745,8 @@ rendered properly.
 
 #### Suggestions and commands in the chat input
 
-The chat input also suggests things as you type. Type **@** to insert a node
-reference: after **@** and two more characters it lists matching nodes and node
-types above the input, and the name may contain spaces (`@labour force`). An
+The chat input also suggests things as you type. Type **@** to insert a reference: after **@** and two more characters it lists
+matching nodes, node types and templates above the input, and the name may contain spaces (`@labour force`). An
 **@** inside a word, as in an e-mail address, does not trigger suggestions.
 Start with **/** to list commands instead, such as creating a node, saving a view or the session actions
 (**/** alone lists them all). Commands are only offered after **/**, so ordinary
@@ -758,8 +757,8 @@ text never runs one.
   touch screen, tap a row.
 - A node replaces the **@** and what you typed after it with a reference such
   as `[Labour Force Survey](node:…)`, which the assistant can look up; a node
-  type is inserted as its name. Neither
-  sends the message.
+  type is inserted as its name. A template inserts a reference containing its ID.
+  These selections do not send the message or create anything.
 - A command opens the same dialog or action as its button elsewhere, including
   any confirmation. If it cannot run, your text is kept.
 - With no suggestion chosen, **Enter** and **Send** send your text as a chat

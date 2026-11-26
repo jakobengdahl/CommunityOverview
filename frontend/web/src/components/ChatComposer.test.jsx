@@ -7,7 +7,7 @@ import { NODE_QUERY_DEBOUNCE_MS } from '../commands/commandSuggestions';
 import ChatComposer, { formatNodeReference } from './ChatComposer';
 
 const scope = vi.hoisted(() => ({ language: 'en', federationDepth: 1 }));
-vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
+vi.mock('../services/api', () => ({ searchGraph: vi.fn(), listTemplates: vi.fn() }));
 vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key, language: scope.language }) }));
 vi.mock('../store/graphStore', () => ({
   default: (selector) => selector({ federationDepth: scope.federationDepth, schema: null }),
@@ -63,6 +63,7 @@ describe('ChatComposer', () => {
     ['alpha', 'beta', 'gamma'].forEach((id) => registry.register(command(id)));
     onSend = vi.fn();
     api.searchGraph.mockReset().mockResolvedValue({ nodes: [goalNode] });
+    api.listTemplates.mockReset().mockResolvedValue({ templates: [] });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -249,6 +250,14 @@ describe('ChatComposer', () => {
     await settle();
     key(input, 'Tab');
     expect(input).toHaveValue('Goal ');
+
+    api.listTemplates.mockResolvedValue({
+      templates: [{ template_id: '1234-5678', name: 'Plan' }],
+    });
+    type(input, 'use @plan');
+    await settle();
+    key(input, 'Tab');
+    expect(input).toHaveValue('use [Plan](template:1234-5678) ');
     expect(input).toHaveFocus();
     expect(onSend).not.toHaveBeenCalled();
   });

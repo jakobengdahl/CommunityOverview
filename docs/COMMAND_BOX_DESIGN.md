@@ -33,12 +33,12 @@ choices made here under delegated authority, with a reason for each.
 
 | Choice | Rule | Reason |
 |---|---|---|
-| Trigger | With input focus, suggest nodes and node types only after an `@` trigger (owner decision 2026-11-22): the query is the text from the nearest `@` before the caret up to the caret, may contain spaces, and needs two non-whitespace characters. An `@` directly after a non-whitespace character (an e-mail address) is not a trigger; without an active `@` there are no plain-text suggestions. A slash at the start of the input, ignoring leading whitespace, enters command mode immediately; bare `/` lists available commands. Slashes elsewhere are ordinary text. | Avoid noisy single-letter searches while keeping command discovery immediate. |
+| Trigger | With input focus, suggest nodes, node types and templates only after an `@` trigger (owner decision 2026-11-22): the query is the text from the nearest `@` before the caret up to the caret, may contain spaces, and needs two non-whitespace characters. An `@` directly after a non-whitespace character (an e-mail address) is not a trigger; without an active `@` there are no plain-text suggestions. A slash at the start of the input, ignoring leading whitespace, enters command mode immediately; bare `/` lists available commands. Slashes elsewhere are ordinary text. | Avoid noisy single-letter searches while keeping command discovery immediate. |
 | Debounce | Debounce node/type queries by 150 ms after the last edit; filter the local command registry immediately. Cancel superseded work and discard results for an old query, scope or closed popup. | Reduce query traffic without delaying local commands or showing stale results. |
 | Show | Open when the trigger is satisfied and at least one eligible result exists. Initially no item is selected. Loading, no-results and error feedback are non-selectable status text. | Typing and sending chat must remain the default action. |
 | Hide | Close on Esc, loss of focus outside the box and popup, cleared/short input, no results, submission or acceptance. After Esc, keep closed until the next edit or explicit ArrowDown request. | Dismissal stays effective and stale choices cannot be accepted. |
-| Candidate sets | Plain text includes nodes and node types only; slash mode includes commands only, matching the text after `/`. Respect current graph scope and permissions in both modes. | Commands cannot leak into ordinary chat completion. |
-| Ranking | Match case-insensitively against displayed labels and declared aliases: exact match, then prefix, then word prefix, then substring. Within a match tier put nodes before node types; then sort by locale-aware label and stable ID. Commands use the same match tiers, label and ID tie-breaks in their separate set. No recency boost or fuzzy matches. | Predictable primary match tiers prevent a weak node match from outranking an exact type match. |
+| Candidate sets | Plain text includes nodes, node types and readable templates; slash mode includes commands only, matching the text after `/`. Respect current graph scope and permissions in both modes. | Commands cannot leak into ordinary chat completion. |
+| Ranking | Match case-insensitively against displayed labels and declared aliases: exact match, then prefix, then word prefix, then substring. Within a match tier put nodes before node types and templates after both; then sort by locale-aware label and stable ID. Commands use the same match tiers, label and ID tie-breaks in their separate set. No recency boost or fuzzy matches. | Predictable primary match tiers prevent a weak node match from outranking an exact type match. |
 | Size | Show at most eight results in a scrollable list, scrolling the active item into view. Bare `/` uses the command label/ID ordering. | Bound visual and assistive-technology navigation effort. |
 
 For example, an exact node-type label beats a node's substring match. An exact
@@ -58,7 +58,7 @@ results before acceptance is possible.
 | Edit | Any edit clears the active item immediately, including while awaiting results. | A selection must correspond to the visible, current query. |
 
 Accepting a node replaces the `@` trigger and its query with a structured node
-reference; accepting a node type inserts its displayed label in the same place. Both close the list and keep the
+reference; accepting a template inserts a structured template reference, and accepting a node type inserts its displayed label in the same place. All close the list and keep the
 draft focused without sending chat or creating graph data. Accepting a command
 closes the list and invokes its handler only if the input is still in slash mode
 and the command is still available. The handler opens its existing action flow;
@@ -66,7 +66,7 @@ destructive operations retain their existing confirmation. Clear a command draft
 only after successful handoff; preserve it and announce failure otherwise.
 
 A plain message can therefore neither display nor select nor execute a command.
-Tab completes nodes/types in plain text mode and invokes a command only in slash
+Tab completes nodes, types or template references in plain text mode and invokes a command only in slash
 mode, where its command label is visible before acceptance.
 
 ## Accessibility, touch and placement

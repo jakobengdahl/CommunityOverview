@@ -10,7 +10,7 @@ import {
   useCommandSuggestions,
 } from './commandSuggestions';
 
-vi.mock('../services/api', () => ({ searchGraph: vi.fn() }));
+vi.mock('../services/api', () => ({ searchGraph: vi.fn(), listTemplates: vi.fn() }));
 vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key }) }));
 vi.mock('../store/graphStore', () => ({
   default: (selector) => selector({ federationDepth: 1 }),
@@ -50,12 +50,16 @@ describe('rankSuggestions', () => {
       { kind: 'nodeType', id: 'Goal', label: 'Goal' }, // exact
       { kind: 'node', id: 'n3', label: 'Goals 2030' }, // prefix
       { kind: 'node', id: 'n4', label: 'GOAL' }, // exact, case-insensitive
+      { kind: 'template', id: 't1', label: 'Goal' },
+      { kind: 'template', id: 't2', label: 'Goals 2030' },
       { kind: 'node', id: 'n5', label: 'Gaol' }, // no fuzzy match
     ];
     expect(ids(rankSuggestions(items, 'goal', 'en'))).toEqual([
       'node:n4',
       'nodeType:Goal',
+      'template:t1',
       'node:n3',
+      'template:t2',
       'node:n1',
       'node:n2',
     ]);
@@ -100,6 +104,7 @@ describe('useCommandSuggestions', () => {
       execute: async () => {},
     });
     api.searchGraph.mockReset();
+    api.listTemplates.mockReset().mockResolvedValue({ templates: [] });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -112,6 +117,7 @@ describe('useCommandSuggestions', () => {
         { id: 'c1', name: 'Goal community', type: 'Community' },
       ],
     });
+    api.listTemplates.mockResolvedValue({ templates: [{ template_id: 't1', name: 'Goal' }] });
     const { result, rerender } = renderHook(
       ({ input }) => useCommandSuggestions(input, context, nodeTypes),
       { wrapper, initialProps: { input: 'goal' } }
@@ -123,7 +129,7 @@ describe('useCommandSuggestions', () => {
 
     await settle(1);
     expect(api.searchGraph).toHaveBeenCalledWith('goal', { limit: 10, federationDepth: 1 });
-    expect(ids(result.current.items)).toEqual(['nodeType:Goal', 'node:n1']);
+    expect(ids(result.current.items)).toEqual(['nodeType:Goal', 'template:t1', 'node:n1']);
 
     rerender({ input: '/goal' });
     expect(ids(result.current.items)).toEqual(['command:goal-command']);

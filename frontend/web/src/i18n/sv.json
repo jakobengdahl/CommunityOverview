@@ -1167,15 +1167,16 @@
   },
   "command_box": {
     "label": "Meddelande eller kommando",
-    "help": "Skriv @ och minst två tecken för att infoga en nodreferens, eller börja med / för kommandon. Piltangenterna väljer ett förslag, Tab tar det första, Enter tar det valda eller skickar meddelandet, Escape stänger listan.",
+    "help": "Skriv @ och minst två tecken för att infoga en nod- eller mallreferens, eller börja med / för kommandon. Piltangenterna väljer ett förslag, Tab tar det första, Enter tar det valda eller skickar meddelandet, Escape stänger listan.",
     "suggestions": "Förslag",
     "kind_node": "Nod",
+    "kind_template": "Mall",
     "kind_node_type": "Nodtyp",
     "kind_command": "Kommando",
     "loading": "Söker…",
     "no_results": "Inga förslag",
     "results": "{count} förslag",
-    "search_failed": "Nodsökningen misslyckades; bara nodtyper föreslås",
+    "search_failed": "Vissa förslag kunde inte hämtas",
     "command_failed": "Kunde inte köra {label}. Din text finns kvar."
   },
   "template": {
