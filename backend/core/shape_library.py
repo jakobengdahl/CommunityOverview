@@ -205,7 +205,9 @@ class ShapeLibrary:
                     selection = node.get("shape") or {}
                     ref = selection.get("ref")
                     if isinstance(ref, str) and ref.startswith("saved:"):
-                        index.setdefault(ref[6:], set()).add(document["template_id"])
+                        index.setdefault(ref[6:], set()).add(
+                            (document["template_id"], document["revision"])
+                        )
         return index
 
     def references(self):

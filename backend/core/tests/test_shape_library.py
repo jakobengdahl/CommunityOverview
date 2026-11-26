@@ -924,6 +924,18 @@ def test_template_usage_rebuild_conflicts_and_shape_deletion(tmp_path, action):
     templates.delete(other["template_id"], other["revision"])
     doc["nodes"][0]["shape"]["ref"] = "saved:card"
     doc = templates.save(doc, doc["revision"])
+    with pytest.raises(LibraryConflict):
+        options = dict(
+            identity="owner",
+            expected_revision=entry["revision"],
+            expected_usage=0,
+            expected_template_usage=1,
+            expected_template_usage_token=token,
+        )
+        if action == "delete":
+            restarted.delete("card", **options)
+        else:
+            restarted.put("card", "Card", DEFINITION, **options)
     before = (tmp_path / "templates" / (doc["template_id"] + ".json")).read_bytes()
     restarted.delete(
         "card",
