@@ -73,6 +73,7 @@ import {
 import { createCaptureFlushQueue, syncForSession } from './utils/captureFlush';
 import { buildCaptureContents, readyBaseline } from './utils/captureContents';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
+import { prepareTemplateCapture } from './utils/templateCapture';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
@@ -2337,6 +2338,7 @@ function App() {
     if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
       requestSessionSnapshot(null);
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
@@ -2434,6 +2436,7 @@ function App() {
         try {
           annotationSchedulerRef.current.clearPending();
           if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+          autoSaveTimerRef.current = null;
           await replayCanvasHistory({
             sessionId: targetId,
             snapshot: () => new Promise((resolve) => requestSessionSnapshot(resolve)),
@@ -2482,6 +2485,7 @@ function App() {
     scheduleAutoSave();
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
     };
   }, [
     nodes,
@@ -2513,6 +2517,7 @@ function App() {
       try {
         annotationSchedulerRef.current.clearPending();
         if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
         const result = await captureCanvasSession({
           sessionId,
           name,
@@ -4515,22 +4520,36 @@ function App() {
           {...templateDialog}
           schema={schema}
           prepare={async () => {
-            annotationSchedulerRef.current.clearPending();
-            if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-            await flushBeforeCapture(() => buildCaptureContents(getCaptureState()));
-            await new Promise((resolve) => requestSessionSnapshot(resolve));
-            const sync = ensureSyncConnected(templateDialog.sessionId);
-            if (
-              !sync ||
-              sync.sessionId !== templateDialog.sessionId ||
-              sessionIdRef.current !== templateDialog.sessionId
-            )
-              throw new Error();
-            await sync.flushPending();
-            const source = await api.getSession(templateDialog.sessionId, { resolve: true });
-            if (sessionIdRef.current !== templateDialog.sessionId || syncRef.current !== sync)
-              throw new Error();
-            return source;
+            const epoch = useGraphStore.getState().sessionEpoch;
+            const annotationPending = annotationSchedulerRef.current.clearPending();
+            const canvasPending = autoSaveTimerRef.current != null;
+            if (canvasPending) clearTimeout(autoSaveTimerRef.current);
+            autoSaveTimerRef.current = null;
+            return prepareTemplateCapture({
+              annotationPending,
+              canvasPending,
+              isCurrent: () =>
+                sessionIdRef.current === templateDialog.sessionId &&
+                useGraphStore.getState().sessionEpoch === epoch,
+              scheduleAnnotation: () => annotationSchedulerRef.current.schedule('text'),
+              scheduleCanvas: scheduleAutoSave,
+              prepare: async () => {
+                await flushBeforeCapture(() => buildCaptureContents(getCaptureState()));
+                await new Promise((resolve) => requestSessionSnapshot(resolve));
+                const sync = ensureSyncConnected(templateDialog.sessionId);
+                if (
+                  !sync ||
+                  sync.sessionId !== templateDialog.sessionId ||
+                  sessionIdRef.current !== templateDialog.sessionId
+                )
+                  throw new Error();
+                await sync.flushPending();
+                const source = await api.getSession(templateDialog.sessionId, { resolve: true });
+                if (sessionIdRef.current !== templateDialog.sessionId || syncRef.current !== sync)
+                  throw new Error();
+                return source;
+              },
+            });
           }}
           onClose={() => setTemplateDialog(null)}
           onSaved={(counts) => {

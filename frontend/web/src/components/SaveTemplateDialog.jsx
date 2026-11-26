@@ -12,6 +12,18 @@ const errorCodes = new Set([
   'revision_conflict',
 ]);
 
+// Keep in sync with SYSTEM_NODE_TYPES in backend/config/config_loader.py,
+// which the template capture route uses regardless of schema categories.
+export const SYSTEM_NODE_TYPES = new Set([
+  'SavedView',
+  'VisualizationView',
+  'EventSubscription',
+  'Agent',
+  'Skill',
+  'ActiveKnowledgeCollection',
+  'CollectionResponse',
+]);
+
 export function templateSummary(source, selected, schema) {
   if (!schema?.node_types) return null;
   const whole = selected.length === 0;
@@ -20,8 +32,7 @@ export function templateSummary(source, selected, schema) {
     selected.filter((item) => item.annotation).map((item) => item.id)
   );
   const nodes = (source.resolved?.nodes || []).filter(
-    (node) =>
-      (whole || chosenNodes.has(node.id)) && schema?.node_types?.[node.type]?.category !== 'system'
+    (node) => (whole || chosenNodes.has(node.id)) && !SYSTEM_NODE_TYPES.has(node.type)
   );
   const ids = new Set(nodes.map((node) => node.id));
   const annotations = (source.state?.annotations || []).filter((annotation) => {
@@ -35,7 +46,10 @@ export function templateSummary(source, selected, schema) {
       !ids.has(target)
     );
   });
-  return { nodes: nodes.length, annotations: annotations.length };
+  const edges = (source.resolved?.edges || []).filter(
+    (edge) => ids.has(edge.source) && ids.has(edge.target)
+  );
+  return { nodes: nodes.length, edges: edges.length, annotations: annotations.length };
 }
 
 export default function SaveTemplateDialog({

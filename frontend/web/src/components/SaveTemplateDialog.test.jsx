@@ -1,7 +1,9 @@
 // covers: frontend/web/src/components/SaveTemplateDialog.jsx
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import SaveTemplateDialog, { templateSummary } from './SaveTemplateDialog';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import SaveTemplateDialog, { SYSTEM_NODE_TYPES, templateSummary } from './SaveTemplateDialog';
 import * as api from '../services/api';
 
 vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key) => key }) }));
@@ -38,12 +40,30 @@ describe('saving templates', () => {
     expect(templateSummary(source, [], null)).toBeNull();
     expect(templateSummary(source, selection, schema)).toEqual({
       nodes: 1,
+      edges: 0,
       annotations: 1,
     });
-    expect(templateSummary(source, [], schema)).toEqual({ nodes: 2, annotations: 2 });
-    // Graph edges can change without a session revision, so no stale count is previewed.
-    expect(templateSummary({ ...source, resolved: { ...source.resolved, edges: [] } }, [], schema))
-      .toEqual(templateSummary(source, [], schema));
+    expect(templateSummary(source, [], schema)).toEqual({ nodes: 2, edges: 1, annotations: 2 });
+    expect(
+      templateSummary({ ...source, resolved: { ...source.resolved, edges: [] } }, [], schema)
+    ).toEqual({ nodes: 2, edges: 0, annotations: 2 });
+  });
+
+  it('uses the capture route system type set, independent of schema categories', () => {
+    const python = readFileSync(
+      resolve(process.cwd(), '../../backend/config/config_loader.py'),
+      'utf8'
+    );
+    const block = python.match(/^SYSTEM_NODE_TYPES = \{$(.*?)^\}$/ms)[1];
+    const types = [...block.matchAll(/^ {4}"(\w+)":/gm)].map((match) => match[1]);
+    expect([...SYSTEM_NODE_TYPES].sort()).toEqual(types.sort());
+    const nodes = types.map((type) => ({ id: type, type }));
+    nodes.push({ id: 'domain', type: 'Custom' });
+    expect(
+      templateSummary({ resolved: { nodes } }, [], {
+        node_types: { Custom: { category: 'system' } },
+      })
+    ).toEqual({ nodes: 1, edges: 0, annotations: 0 });
   });
 
   it('waits for schema before displaying counts or enabling save', async () => {
@@ -65,11 +85,9 @@ describe('saving templates', () => {
   });
 
   it.each([[selection], [[]]])('validates and sends the chosen scope once', async (selected) => {
-    api.saveTemplate
-      .mockReset()
-      .mockResolvedValue({
-        template: { nodes: [{}], edges: [{}, {}], annotation_document: { annotations: [] } },
-      });
+    api.saveTemplate.mockReset().mockResolvedValue({
+      template: { nodes: [{}], edges: [{}, {}], annotation_document: { annotations: [] } },
+    });
     const saved = vi.fn();
     render(
       <SaveTemplateDialog
