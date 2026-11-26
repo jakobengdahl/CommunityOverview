@@ -39,6 +39,24 @@ from .staging import HookFailed
 logger = logging.getLogger(__name__)
 
 
+def _line_points(annotation):
+    """Explicit line coordinates, including legacy and nested endpoints."""
+    if annotation_type_of(annotation) != "line":
+        return []
+    points = []
+    for payload in (annotation, annotation.get("content")):
+        if not isinstance(payload, dict):
+            continue
+        points.extend(payload.get(k) for k in ("from", "to"))
+        for field in ("start", "end", "startEndpoint", "endEndpoint"):
+            endpoint = payload.get(field)
+            if isinstance(endpoint, dict):
+                points.append(
+                    endpoint.get("point") or endpoint.get("position") or endpoint
+                )
+    return [p for p in points if isinstance(p, dict)]
+
+
 def _shape(node, state, config, saved):
     overrides = state.get("shape_overrides") or {}
     defaults = state.get("type_shapes") or {}
@@ -805,6 +823,11 @@ def insert_template(
                     p = annotation.get("position") or annotation.get("geometry") or {}
                     size = annotation.get("size") or annotation.get("geometry") or {}
                     right.append(p.get("x", 0) + size.get("width", size.get("w", 0)))
+                    right.extend(
+                        p["x"]
+                        for p in _line_points(annotation)
+                        if isinstance(p.get("x"), (int, float))
+                    )
                 x = max(right, default=-200) + 200
                 y = 0
             dx, dy = x - doc["bounds"]["x"], y - doc["bounds"]["y"]
@@ -887,20 +910,13 @@ def insert_template(
             kept = {a["id"] for a in annotations}
             fresh = {old: new for old, new in fresh.items() if new in kept}
             for a in annotations:
-                points = [a.get("position"), a.get("geometry")]
-                if annotation_type_of(a) == "line":
+                points = [a.get("position"), a.get("geometry"), *_line_points(a)]
+                if annotation_type_of(a) == "freehand":
                     for payload in (a, a.get("content")):
-                        if not isinstance(payload, dict):
-                            continue
-                        points.extend(payload.get(k) for k in ("from", "to"))
-                        for field in ("start", "end", "startEndpoint", "endEndpoint"):
-                            endpoint = payload.get(field)
-                            if isinstance(endpoint, dict):
-                                points.append(
-                                    endpoint.get("point")
-                                    or endpoint.get("position")
-                                    or endpoint
-                                )
+                        if isinstance(payload, dict) and isinstance(
+                            payload.get("points"), list
+                        ):
+                            points.extend(payload["points"])
                 seen = set()
                 for p in points:
                     if isinstance(p, dict) and id(p) not in seen:

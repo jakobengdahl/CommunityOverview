@@ -725,6 +725,11 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
                 "attachment": {"target_id": "b", "target_type": "node"},
             },
         },
+        {
+            "id": "stroke",
+            "type": "freehand",
+            "points": [{"x": 5, "y": 6}, {"x": 7, "y": 8}],
+        },
     ]
     doc = templates.save_template(service, manager, source.id, "Example", source.seq)[
         "template"
@@ -734,7 +739,7 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
         service, manager, target.id, doc["template_id"], x=100, y=200
     )
     assert result["success"]
-    group, line = target.state["annotations"]
+    group, line, stroke = target.state["annotations"]
     assert group["member_node_ids"] == ["a", "b"]
     assert (
         line["start"]["attachment"]["target_id"]
@@ -744,6 +749,7 @@ def test_insert_remaps_groups_and_line_endpoints(capture):
     assert line["end"]["attachment"]["target_id"] == "b"
     assert line["from"] == line["start"]["point"] == {"x": 101, "y": 202}
     assert line["end"]["point"] == {"x": 104, "y": 205}
+    assert stroke["points"] == [{"x": 105, "y": 206}, {"x": 107, "y": 208}]
 
 
 def test_default_origin_is_right_of_existing_annotation(capture):
@@ -760,8 +766,14 @@ def test_default_origin_is_right_of_existing_annotation(capture):
             "type": "label",
             "position": {"x": 100, "y": 0},
             "size": {"w": 600, "h": 20},
-        }
+        },
+        {
+            "id": "line",
+            "type": "line",
+            "from": {"x": 10, "y": 0},
+            "end": {"point": {"x": 1500, "y": 0}},
+        },
     ]
     result = templates.insert_template(service, manager, target.id, doc["template_id"])
     assert result["success"]
-    assert target.state["positions"]["b"]["x"] > 700
+    assert target.state["positions"]["b"]["x"] > 1500

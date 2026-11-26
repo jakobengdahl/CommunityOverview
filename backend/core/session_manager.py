@@ -1896,20 +1896,25 @@ class SessionManager:
             if session is None:
                 raise SessionNotFound()
 
-            if authorize_appearance and (
+            has_appearance = (
                 session.state.get("shape_overrides")
                 or session.state.get("type_shapes")
                 or session.state.get("shape_operation_ids")
-                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
-            ):
+                or any(
+                    op["op"] in {"node_shape_set", "type_shape_set"}
+                    or (
+                        op["op"] == "nodes_replaced"
+                        and op.get("inserted_shape_overrides")
+                    )
+                    for op in ops
+                )
+            )
+            if authorize_appearance and has_appearance:
                 authorize_appearance()
 
-            if (
-                session.state.get("shape_overrides")
-                or session.state.get("type_shapes")
-                or session.state.get("shape_operation_ids")
-                or any(op["op"] in {"node_shape_set", "type_shape_set"} for op in ops)
-            ) and (type(appearance_version) is not int or appearance_version != 1):
+            if has_appearance and (
+                type(appearance_version) is not int or appearance_version != 1
+            ):
                 raise AppearanceVersionRequired("appearance version 1 required")
 
             cancelled = False
