@@ -733,3 +733,41 @@ def test_http_session_refusal_does_not_consume_graph_delivery_key(host):
         assert response.status_code == 200
         assert execute.call_args.args[2].context.session_id == "session"
     assert execute.call_count == 2
+
+
+def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypatch):
+    service, execute, _, _ = host
+    refusal = service._refusal
+    monkeypatch.setattr(
+        service,
+        "_refusal",
+        lambda function_id, binding, trigger, input: refusal(
+            function_id, binding, "manual", input
+        ),
+    )
+    binding = {"actor_id": "operator"}
+    accepted = service.invoke(
+        "example",
+        {},
+        trigger="future",
+        actor_binding=binding,
+        correlation_id="chain",
+        chain_depth=3,
+    )
+    envelope = execute.call_args.args[3]
+    assert accepted.state == ExecutionState.SUCCEEDED
+    assert envelope["invocation"]["trigger"] == "future"
+    assert envelope["invocation"]["chain_depth"] == 3
+    assert envelope["origin"]["event_correlation_id"] == "chain"
+    rejected = service.invoke(
+        "example",
+        {},
+        trigger="future",
+        actor_binding=binding,
+        correlation_id="chain",
+        chain_depth=4,
+    )
+    assert rejected.result["error"]["code"] == "chain_depth_exceeded"
+    assert rejected.payload["chain_depth"] == 4
+    assert rejected.correlation_id == "chain"
+    assert execute.call_count == 1

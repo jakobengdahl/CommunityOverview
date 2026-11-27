@@ -1,3 +1,4 @@
+# covers: backend/api_host/server.py, backend/service/rest_api.py, backend/service/staging.py, backend/service/staged_review.py, backend/core/storage.py
 """End-to-end acceptance of staged sessions as a workshop uses them
 (docs/SESSION_OVERLAY_CONTRACT.md §21, slice S7).
 
@@ -288,6 +289,17 @@ def test_traversal_walks_staged_edges_in_the_owning_session_only(client):
             }
         ],
     )
+    edited = client.patch(
+        "/api/edges/kelp-link",
+        headers=_h(a),
+        json={"updates": {"label": "Workshop link"}},
+    )
+    assert edited.status_code == 200
+    related = client.post("/api/nodes/node-1/related", headers=_h(a), json={})
+    assert (
+        next(e for e in related.json()["edges"] if e["id"] == "kelp-link")["label"]
+        == "Workshop link"
+    )
     # A also removes a main edge: traversal in A must stop following it.
     removed = client.delete("/api/edges/edge-1", headers=_h(a))
     assert removed.status_code == 200, removed.text
@@ -300,6 +312,21 @@ def test_traversal_walks_staged_edges_in_the_owning_session_only(client):
         assert "kelp" not in nodes and "kelp-link" not in edges
         assert "edge-1" in edges and "node-2" in nodes
     assert _main(client).edges.get("edge-1") is not None
+
+    deleted = client.request(
+        "DELETE",
+        "/api/nodes",
+        headers=_h(a),
+        json={"node_ids": ["node-2"], "confirmed": True},
+    )
+    assert deleted.status_code == 200
+    assert _node(client, a, "node-2") is None
+    assert "node-2" not in _search(client, a, "test")
+    nodes, edges = _related(client, a, "node-3")
+    assert "node-2" not in nodes and "edge-2" not in edges
+    for sid in (b, None):
+        assert _node(client, sid, "node-2") is not None
+        assert "edge-2" in _related(client, sid, "node-3")[1]
 
 
 # -- 3. concurrent main-graph edits -----------------------------------------------
@@ -356,6 +383,9 @@ def test_a_selective_merge_takes_a_dependency_closed_subset_and_leaves_the_rest(
     client,
 ):
     a = _session(client)
+    client.headers["x-communityoverview-actor-id"] = "author"
+    events = []
+    _main(client).add_system_listener(events.append)
     _add(
         client,
         a,
@@ -374,6 +404,8 @@ def test_a_selective_merge_takes_a_dependency_closed_subset_and_leaves_the_rest(
     )
     _patch(client, a, "node-2", {"name": "Not yet agreed"})
     diff = _diff(client, a)
+    assert not events
+    assert all(item["staged_by"] == "author" for item in diff.values())
     assert diff[("edge", "kelp-link")]["depends_on"] == [
         {"kind": "node", "entity_id": "kelp"}
     ]
@@ -389,6 +421,7 @@ def test_a_selective_merge_takes_a_dependency_closed_subset_and_leaves_the_rest(
     assert {"kind": "node", "entity_id": "kelp"} in detail["missing"]
     assert _main(client).edges.get("kelp-link") is None
 
+    client.headers["x-communityoverview-actor-id"] = "reviewer"
     merged = client.post(
         f"/api/sessions/{a}/staged/merge",
         json={
@@ -397,6 +430,14 @@ def test_a_selective_merge_takes_a_dependency_closed_subset_and_leaves_the_rest(
         },
     )
     assert merged.status_code == 200, merged.text
+    record = _main(client).layer_store.load_merge("s-1")
+    assert record["session_id"] == a and record["actor"] == "reviewer"
+    assert {(i["kind"], i["entity_id"]) for i in record["entries"]} == {
+        ("node", "kelp"),
+        ("edge", "kelp-link"),
+    }
+    assert {e.entity.id for e in events} == {"kelp", "kelp-link"}
+    assert all(e.origin.event_correlation_id == "s-1" for e in events)
     assert _main(client).get_node("kelp") is not None
     assert _main(client).edges.get("kelp-link").source == "kelp"
     assert _main(client).get_node("later") is None
@@ -445,3 +486,27 @@ def test_direct_mode_writes_land_in_the_main_graph_as_before(client, session):
         )
         assert response.status_code == 409
         assert response.json()["detail"]["error"] == "session_not_staged"
+
+
+def test_layer_size_tracks_changes_not_graph_size(client):
+    """A workshop keeps only changed entities as the graph grows."""
+    _add(
+        client,
+        None,
+        [
+            {"id": f"extra-{i}", "type": "Actor", "name": f"Extra {i}"}
+            for i in range(50)
+        ],
+    )
+    sid = _session(client)
+    store = _main(client).layer_store
+    assert store.load_layer(sid) == []
+    _patch(client, sid, "node-1", {"description": "First edit"})
+    _patch(client, sid, "node-1", {"description": "Second edit"})
+    with patch.object(store, "load_layer", wraps=store.load_layer) as loads:
+        _search(client, sid, "test")
+    assert 1 <= loads.call_count <= 10
+    assert len(_main(client).get_all_nodes()) == 53
+    assert [(e["kind"], e["entity_id"]) for e in store.load_layer(sid)] == [
+        ("node", "node-1")
+    ]

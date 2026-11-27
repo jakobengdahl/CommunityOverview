@@ -93,8 +93,35 @@ def test_template_limits_precede_authorization_and_writes(limit, monkeypatch):
     assert not sessions.list_ids() and not templates.list_ids()
 
 
-def test_round_trip_into_separate_store_preserves_identity_and_missing_references():
+@pytest.mark.parametrize("shared_asset", [False, True])
+def test_round_trip_into_separate_store_preserves_identity_and_missing_references(
+    shared_asset,
+):
     document = backup()
+    if shared_asset:
+        source = InMemorySessionPersistenceBackend()
+        session = Session(id="1234-5678", name="Example", seq=7)
+        session.state["node_refs"] = ["missing"]
+        session.state["annotations"] = [
+            {"id": str(i), "type": "image", "image": {"url": url}}
+            for i, url in enumerate(
+                (
+                    "data:image/webp;base64,cGl4ZWxz",
+                    "data:image/webp;base64,cGl4%5A%57xz",
+                )
+            )
+        ]
+        source.save(session.to_dict())
+        document = create_backup(
+            Service(),
+            source,
+            Modes(),
+            template_backend=InMemorySessionPersistenceBackend(),
+        )
+        assert len(document["assets"]) == 1
+        document["format_version"] = 1
+        del document["templates"]
+        sign(document)
     target = InMemorySessionPersistenceBackend()
     report = restore_backup(Service(), target, Modes(), document)
     record = target.load("1234-5678")

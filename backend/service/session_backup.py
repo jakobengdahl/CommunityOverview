@@ -47,7 +47,7 @@ def _assets(state, found):
         if not isinstance(image, dict):
             continue
         value = image.get("url")
-        if not isinstance(value, str) or value[:11].lower() != "data:image/":
+        if not isinstance(value, str) or value[:5].lower() != "data:":
             continue
         try:
             header, encoded = value.split(",", 1)
