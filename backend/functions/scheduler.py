@@ -110,6 +110,15 @@ class FunctionScheduler:
                         )
                     }
                     projected = filtered_entity(entity, fields, sensitive)
+                    if "debounce_seconds" in matching[0]:
+                        projected["changed_fields"] = [
+                            path
+                            for path in projected["changed_fields"]
+                            if not any(
+                                path == secret or path.startswith(secret + ".")
+                                for secret in sensitive
+                            )
+                        ]
                     retry = manifest.get("retry")
                     self.slots.enqueue_event(
                         function_id,
@@ -119,6 +128,9 @@ class FunctionScheduler:
                         graph_id=bound_graph,
                         node_types=sorted(types),
                         matched_triggers=[_trigger_fingerprint(t) for t in matching],
+                        batching=matching[0]
+                        if "debounce_seconds" in matching[0]
+                        else None,
                     )
             except (OSError, ValueError, TypeError):
                 logger.warning(
@@ -237,6 +249,15 @@ class FunctionScheduler:
                     for path in entity["changed_fields"]
                 }
             )
+            if "entries" in job.payload:
+                projected["changed_fields"] = [
+                    path
+                    for path in projected["changed_fields"]
+                    if not any(
+                        path == secret or path.startswith(secret + ".")
+                        for secret in sensitive
+                    )
+                ]
             return projected
         except (OSError, ValueError, TypeError, KeyError):
             logger.warning(

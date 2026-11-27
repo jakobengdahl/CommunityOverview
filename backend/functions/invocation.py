@@ -167,7 +167,7 @@ def _valid_input(manifest, input):
 def _valid_schedule_retry(manifest):
     retry = manifest.get("retry")
     if (
-        manifest.get("contract_version") not in {"5", "6"}
+        manifest.get("contract_version") not in {"5", "6", "7"}
         or not isinstance(retry, dict)
         or set(retry) != {"max_attempts", "base_seconds", "factor", "max_seconds"}
         or not any(
@@ -199,12 +199,17 @@ def _valid_triggers(manifest):
             from backend.functions.graph_change import valid_trigger
 
             return (
-                manifest.get("contract_version") == "6"
+                manifest.get("contract_version") in {"6", "7"}
+                and (
+                    manifest.get("contract_version") == "7"
+                    or "debounce_seconds" not in item
+                    and "batch_size" not in item
+                )
                 and "graph:read" in manifest.get("grants", [])
                 and valid_trigger(item)
             )
         return (
-            manifest.get("contract_version") in {"5", "6"}
+            manifest.get("contract_version") in {"5", "6", "7"}
             and isinstance(item, dict)
             and set(item) == {"kind", "interval_seconds"}
             and item["kind"] == "schedule"
@@ -261,7 +266,7 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2", "3", "4", "5", "6"}
+        manifest["contract_version"] not in {"1", "2", "3", "4", "5", "6", "7"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
@@ -275,7 +280,7 @@ def load_manifest(root, function_id):
         or manifest.get("write_target", "graph")
         not in (
             ("graph", "session")
-            if manifest["contract_version"] in {"4", "5", "6"}
+            if manifest["contract_version"] in {"4", "5", "6", "7"}
             else ("graph",)
         )
         or any(key in manifest for key in ("secrets", "egress"))
@@ -622,6 +627,7 @@ class FunctionInvocationService:
         correlation_id=None,
         chain_depth=0,
         entity=None,
+        correlation_ids=None,
     ) -> RunRecord:
         admitted = self.admit(
             function_id,
@@ -631,6 +637,7 @@ class FunctionInvocationService:
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
             chain_depth=chain_depth,
+            correlation_ids=correlation_ids,
         )
         if not isinstance(admitted, Admission):
             return admitted
@@ -647,6 +654,7 @@ class FunctionInvocationService:
         correlation_id=None,
         chain_depth=0,
         reservation=None,
+        correlation_ids=None,
     ):
         """Claim the run record, or return the replayed or rejected record.
 
@@ -717,6 +725,11 @@ class FunctionInvocationService:
                 "function_binding_digest": _binding_digest(write_target, session_id),
                 "trigger": trigger,
                 "chain_depth": chain_depth,
+                **(
+                    {"correlation_ids": correlation_ids}
+                    if correlation_ids is not None
+                    else {}
+                ),
                 "attribution": {
                     "actor": {
                         key: binding[key]

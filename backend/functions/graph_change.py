@@ -8,7 +8,18 @@ def valid_trigger(trigger, sensitive_fields=()):
         "fields",
         "before",
         "after",
+        "debounce_seconds",
+        "batch_size",
     }:
+        return False
+    if ("debounce_seconds" in trigger) != ("batch_size" in trigger):
+        return False
+    if "debounce_seconds" in trigger and (
+        type(trigger["debounce_seconds"]) is not int
+        or not 1 <= trigger["debounce_seconds"] <= 300
+        or type(trigger["batch_size"]) is not int
+        or not 1 <= trigger["batch_size"] <= 100
+    ):
         return False
     types = trigger.get("node_types")
     fields = trigger.get("fields")

@@ -191,7 +191,7 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 adds `webhook`; version 5 adds `schedule` and version 6 adds `graph_change` (§12). |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 adds `webhook`; version 5 adds `schedule` and version 6 adds `graph_change`; version 7 adds batching (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Versions 1–3 accept only `"graph"`, the default; version 4 also accepts `"session"` (§12). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
@@ -719,9 +719,27 @@ increase the causing event's depth by one; other events start at depth zero.
 Admission records refusals above the configured depth limit. One event has one
 durable delivery identity per function, retained independently of run history.
 Graph events use the same retry policy, rate budget and delivery ledger as
-schedules; each matching event is delivered individually without debounce or
-aggregation. Enabled functions use the configured schedule graph binding and
+schedules; triggers without batching deliver each matching event individually. Enabled functions use the configured schedule graph binding and
 are restricted to events in that graph.
+
+### Version 7: graph-change batching
+
+A graph-change trigger may opt in by declaring both integer fields
+`debounce_seconds` (1–300) and `batch_size` (1–100). A batch closes when
+its fixed window from the first event elapses or it reaches its declared size,
+whichever comes first. Further events start another batch. An open batch is
+persisted and remains eligible for delivery after restart.
+
+The invocation `entity` is `{"events": [{"event_id": "...",
+"correlation_id": "...", "entity": {...}}]}`. Each inner entity has the
+version 6 projected shape, except sensitive changed-field names are omitted.
+Only declared values are persisted, and no batch summary contains sensitive
+paths. The run record includes all member correlation IDs in `correlation_ids`.
+Each event belongs to at most one durable batch per function; the batch has one
+stable delivery identity independent of run history. The existing retry and
+rate-limit rules apply to the batch. Self-origin events are excluded before
+batching; its chain depth is the maximum derived member depth and the normal
+admission limit applies. Triggers without these fields retain version 6 behavior.
 
 ## 13. Reserved for later versions
 
