@@ -93,7 +93,12 @@ class GraphSemanticsProvider:
                 result = sanitizer._sanitize(value)
                 if value.strip() and not result:
                     raise ValueError("Schema content rejected")
-                return result
+                if not value.strip():
+                    return value
+                # The loader strips outer whitespace; it is meaningful schema data.
+                leading = value[: len(value) - len(value.lstrip())]
+                trailing = value[len(value.rstrip()) :]
+                return leading + result + trailing
             if isinstance(value, dict):
                 result = {}
                 for key, item in value.items():
@@ -114,6 +119,7 @@ class GraphSemanticsProvider:
         snapshot = clean(
             {
                 "node_types": self.schema["node_types"],
+                "node_shapes": self.schema.get("node_shapes", {}),
                 "relationship_types": self.schema["relationship_types"],
                 "vocabularies": self.schema.get("vocabularies", {}),
                 "default_language": self.presentation["default_language"],

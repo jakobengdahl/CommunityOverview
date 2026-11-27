@@ -215,6 +215,19 @@ def snapshot(app_config, mock_llm_provider, enabled):
 def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
     app_config, mock_llm_provider, monkeypatch, grant, ceiling, expected
 ):
+    from backend.config.config_loader import _get_loader
+    from backend.config.node_shapes import ShapeDefinition
+
+    shape = ShapeDefinition.model_validate(
+        {
+            "version": 1,
+            "base": "rectangle",
+            "scale": 1.0,
+            "placement": "middle-centre",
+            "areas": {"first": None, "second": None, "third": None},
+        }
+    )
+    monkeypatch.setitem(_get_loader().config.node_shapes, "test-shape", shape)
     monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", ceiling)
     if grant != "off":
         app_config = replace(
@@ -226,9 +239,13 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
     off, tools_off, resources_off, listing_off, discover_off, _ = snapshot(
         app_config, mock_llm_provider, False
     )
-    on, tools_on, resources_on, listing_on, discover_on, content = snapshot(
-        app_config, mock_llm_provider, True
-    )
+    with patch(
+        "backend.skills.mcp.GraphSemanticsProvider", wraps=GraphSemanticsProvider
+    ) as factory:
+        on, tools_on, resources_on, listing_on, discover_on, content = snapshot(
+            app_config, mock_llm_provider, True
+        )
+    assert factory.call_args.args[0]["node_shapes"]["test-shape"] == shape.model_dump()
     assert (
         not off["capabilities"]
         .get("extensions", {})
@@ -309,9 +326,11 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
                 "description": "<script>bad</script><example>safe</example>",
                 "labels": {},
                 "static": False,
+                "shape": "card",
                 "context_menu": [{"items": ["first", "second"]}],
             }
         },
+        "node_shapes": {"card": {"base": "rectangle", "scale": 1.0}},
         "relationship_types": {"LINK": {"source_types": ["Z"], "target_types": ["Z"]}},
         "vocabularies": {"terms": {"item": "Label", "ordered": ["first", "second"]}},
     }
@@ -329,6 +348,10 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     assert data["node_types"]["Z"]["subtypes"] == ["One", "Two"]
     assert data["node_types"]["Z"]["description"] == "<example>safe</example>"
     assert data["node_types"]["Z"]["static"] is False
+    assert (
+        data["node_shapes"][data["node_types"]["Z"]["shape"]]
+        == schema["node_shapes"]["card"]
+    )
     assert data["node_types"]["Z"]["context_menu"][0]["items"] == ["first", "second"]
     assert data["relationship_types"]["LINK"]["source_types"] == ["Z"]
     assert data["vocabularies"]["terms"]["item"] == "Label"
@@ -347,17 +370,40 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     )
     assert changed.entries[uri]["resources"] != ext.entries[uri]["resources"]
 
-    for change in ("static", "vocabulary_order"):
+    for change in (
+        "static",
+        "vocabulary_order",
+        "shape",
+        "leading",
+        "trailing",
+        "whitespace",
+    ):
         modified = json.loads(json.dumps(schema))
         if change == "static":
             modified["node_types"]["Z"]["static"] = True
-        else:
+        elif change == "vocabulary_order":
             modified["vocabularies"]["terms"]["ordered"].reverse()
+        elif change == "shape":
+            modified["node_shapes"]["card"]["scale"] = 2.0
+        else:
+            modified["vocabularies"]["terms"]["item"] = {
+                "leading": " Label",
+                "trailing": "Label ",
+                "whitespace": " ",
+            }[change]
         changed = SkillsExtension(
             [GraphSemanticsProvider(modified, presentation)], 0, "private"
         )
         assert changed.files[uri] != content
         assert changed.entries[uri]["resources"] != ext.entries[uri]["resources"]
+        if change in ("leading", "trailing", "whitespace"):
+            changed_data = json.loads(
+                changed.files[uri].split("```json\n")[1].split("\n```")[0]
+            )
+            assert (
+                changed_data["vocabularies"]["terms"]["item"]
+                == modified["vocabularies"]["terms"]["item"]
+            )
 
     async def check():
         ctx = SimpleNamespace(protocol_version="2026-07-28")

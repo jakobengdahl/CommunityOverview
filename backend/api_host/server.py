@@ -673,7 +673,13 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
                 [
                     CoreSkillProvider(enabled_tools),
                     GraphSemanticsProvider(
-                        profile.schema_.model_dump(),
+                        {
+                            **profile.schema_.model_dump(),
+                            "node_shapes": {
+                                name: shape.model_dump()
+                                for name, shape in profile.node_shapes.items()
+                            },
+                        },
                         profile.presentation.model_dump(
                             include={
                                 "prompt_prefix",
