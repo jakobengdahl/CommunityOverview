@@ -100,6 +100,10 @@ def test_get_list_and_cache_hints():
         uri = listing["skills"][0]["uri"]
         result = await extension.get_skill(ctx, SimpleNamespace(uri=uri))
         assert result["skill"] == listing["skills"][0]
+        assert result["cacheScope"] == result["skill"]["cacheScope"] == "public"
+        extension.authorization_hook = object()
+        assert extension.entry(ctx, uri)["cacheScope"] == "private"
+        extension.authorization_hook = None
         with pytest.raises(Exception) as exc:
             await extension.get_skill(
                 ctx, SimpleNamespace(uri="skill://missing/SKILL.md")
@@ -569,8 +573,10 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         hook.admin = True
         result = await refresh(ctx)
         assert result == await ext.list_skills(request, SimpleNamespace(cursor=None))
-        assert result["skills"][0]["cacheScope"] == "public"
+        assert result["skills"][0]["cacheScope"] == "private"
         assert result["cacheScope"] == "private"
+        fetched = await get(uri, ctx)
+        assert fetched["cacheScope"] == fetched["skill"]["cacheScope"] == "private"
         assert len(events) == len(other_events) == 1
         assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "second"
         assert (
@@ -622,5 +628,23 @@ def test_refresh_and_fallback_share_authorized_snapshot():
             await refresh(ctx)
             resume.set()
         assert len(errors) == 1 and errors[0].code == -32602
+
+        # Identical content still installs the new owner's authorization rules.
+        restrictive = Provider(dict(replacement.files))
+
+        async def deny_read(ctx, name):
+            return False
+
+        restrictive.can_read = deny_read
+        ext.providers = [restrictive]
+        prior_events = len(events)
+        assert (await refresh(ctx))["skills"] == []
+        assert len(events) == len(other_events) == prior_events
+        assert (await listing(ctx))["skills"] == []
+        assert (await get(uri, ctx))["error_code"] == "not_found"
+        with pytest.raises(Exception):
+            await ext.get_skill(request, SimpleNamespace(uri=uri))
+        with pytest.raises(Exception):
+            await ext.resource_access(read_ctx, call_next)
 
     anyio.run(check)

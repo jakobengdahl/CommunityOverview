@@ -326,9 +326,15 @@ class SkillsExtension(Extension):
         }
 
     def entry(self, ctx, uri):
+        hints = dict(self.skill_hints[uri])
+        if self.authorization_hook is not None or any(
+            type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
+            for provider in self.providers
+        ):
+            hints["cacheScope"] = "private"
         return {
             **self.entries[uri],
-            **(self.skill_hints[uri] if ctx.protocol_version >= "2026-07-28" else {}),
+            **(hints if ctx.protocol_version >= "2026-07-28" else {}),
         }
 
     async def list_skills(self, ctx, params):
@@ -351,10 +357,11 @@ class SkillsExtension(Extension):
             or self.entries is not entries
         ):
             raise MCPError(code=INVALID_PARAMS, message="Unknown skill")
+        entry = self.entry(ctx, params.uri)
         return {
-            "skill": self.entry(ctx, params.uri),
+            "skill": entry,
             **(
-                self.skill_hints[params.uri]
+                {key: entry[key] for key in ("ttlMs", "cacheScope")}
                 if ctx.protocol_version >= "2026-07-28"
                 else {}
             ),
@@ -445,12 +452,13 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
                         for binding in updated.resources()
                     }
                 )
-                extension.entries, extension.files = updated.entries, updated.files
-                extension.owners, extension.skill_hints = (
-                    updated.owners,
-                    updated.skill_hints,
-                )
                 manager._resources = resources
+            extension.entries, extension.files = updated.entries, updated.files
+            extension.owners, extension.skill_hints = (
+                updated.owners,
+                updated.skill_hints,
+            )
+            if old != new:
                 await publisher.publish()
             return await extension.list_skills(ctx.request_context, ListSkillParams())
 
