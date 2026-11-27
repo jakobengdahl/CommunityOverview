@@ -171,7 +171,25 @@ def snapshot(app_config, mock_llm_provider, enabled):
         resources = rpc(client, "resources/list", {}, headers)["result"]["resources"]
         listing = rpc(client, "skills/list", {}, headers)
         if enabled:
+            fallback = rpc(
+                client, "tools/call", {"name": "list_skills", "arguments": {}}, headers
+            )["result"]
+            assert (
+                json.loads(fallback["content"][0]["text"])["skills"]
+                == listing["result"]["skills"]
+            )
             entry = listing["result"]["skills"][0]
+            fetched = rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "get_skill",
+                    "arguments": {"uri": entry["uri"], "file": "SKILL.md"},
+                },
+                headers,
+            )["result"]
+            fetched = json.loads(fetched["content"][0]["text"])
+            assert fetched["skill"] == entry
             got = rpc(client, "skills/get", {"uri": entry["uri"]}, headers)["result"][
                 "skill"
             ]
@@ -259,7 +277,11 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
         "extensions", {}
     )
     assert "io.modelcontextprotocol/skills" in discover_on["capabilities"]["extensions"]
-    assert tools_off == tools_on
+    assert tools_off == [
+        tool
+        for tool in tools_on
+        if tool["name"] not in {"refresh_skills", "list_skills", "get_skill"}
+    ]
     assert ("read_node_attachment" in {tool["name"] for tool in tools_on}) is expected
     assert ("Attachments" in content) is expected
     assert [
@@ -497,3 +519,73 @@ def test_graph_semantics_settings_validate_independently():
             "ttlMs": 0,
             "cacheScope": "private",
         }
+
+
+def test_refresh_and_fallback_share_authorized_snapshot():
+    from mcp.server.mcpserver import MCPServer
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.skills.mcp import register_skill_tools
+
+    class Hook:
+        admin = False
+        read = True
+
+        def evaluate(self, ctx):
+            return GraphAuthorizationDecision(
+                allowed=self.admin if ctx.action == "admin" else self.read
+            )
+
+    async def check():
+        provider = Provider({"SKILL.md": skill(), "ref.md": "first"})
+        ext = SkillsExtension([provider], 10, "public")
+        server = MCPServer("test", extensions=[ext])
+        hook = Hook()
+        without_fallback = MCPServer(
+            "test", extensions=[SkillsExtension([provider], 0, "private")]
+        )
+        register_skill_tools(
+            without_fallback, without_fallback._extensions[0], hook, False
+        )
+        assert without_fallback._tool_manager.get_tool("refresh_skills") is not None
+        assert without_fallback._tool_manager.get_tool("list_skills") is None
+        assert without_fallback._tool_manager.get_tool("get_skill") is None
+        register_skill_tools(server, ext, hook, True)
+        events, other_events = [], []
+        server._subscriptions.subscribe(events.append)
+        server._subscriptions.subscribe(other_events.append)
+        request = SimpleNamespace(
+            protocol_version="2026-07-28",
+            request=SimpleNamespace(headers={"x-skill-user": "allowed"}),
+        )
+        ctx = SimpleNamespace(request_context=request)
+        refresh = server._tool_manager.get_tool("refresh_skills").fn
+        listing = server._tool_manager.get_tool("list_skills").fn
+        get = server._tool_manager.get_tool("get_skill").fn
+        uri = "skill://extra/SKILL.md"
+        provider.files["ref.md"] = "second"
+        assert (await refresh(ctx))["error_code"] == "access_denied"
+        assert not events
+        assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "first"
+        hook.admin = True
+        result = await refresh(ctx)
+        assert result == await ext.list_skills(request, SimpleNamespace(cursor=None))
+        assert result["skills"][0]["cacheScope"] == "private"
+        assert len(events) == len(other_events) == 1
+        assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "second"
+        assert (
+            await server._resource_manager.get_resource("skill://extra/ref.md", None)
+        ).text == "second"
+        await refresh(ctx)
+        assert len(events) == 1
+        assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
+        hook.read = False
+        assert (await listing(ctx))["skills"] == []
+        assert (await refresh(ctx))["skills"] == []
+        assert (await get(uri, ctx))["error_code"] == "not_found"
+        assert len(events) == 1
+        del provider.files["ref.md"]
+        await refresh(ctx)
+        assert len(events) == 2
+        assert "skill://extra/ref.md" not in server._resource_manager._resources
+
+    anyio.run(check)

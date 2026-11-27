@@ -122,6 +122,7 @@ class MCPSkillHints(BaseModel):
 
 class MCPSkillsConfig(MCPSkillHints):
     enabled: bool = False
+    fallback: bool = True
     graphSemantics: MCPSkillHints = Field(default_factory=MCPSkillHints)
 
     @field_validator("graphSemantics", mode="before")

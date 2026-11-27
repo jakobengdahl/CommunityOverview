@@ -1,10 +1,11 @@
 """Opt-in MCP skills catalog and provider contract.
 
-Providers return a fixed snapshot at server construction and authorize each request.
+Providers supply snapshots and authorize each request.
 All files are UTF-8 text and are validated before any are published.
 """
 
 import hashlib
+import anyio
 import json
 from copy import deepcopy
 from datetime import date, timedelta
@@ -15,6 +16,8 @@ from typing import Mapping, Protocol, Sequence
 import yaml
 from mcp.server.extension import Extension, MethodBinding, ResourceBinding
 from mcp.server.mcpserver.resources.types import TextResource
+from mcp.server.mcpserver import Context
+from mcp.shared.subscriptions import ResourcesListChanged
 from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, RequestParams
 
@@ -161,12 +164,28 @@ class GetSkillParams(RequestParams):
     uri: str
 
 
+class SkillChangePublisher(Protocol):
+    async def publish(self) -> None: ...
+
+
+class InProcessSkillChangePublisher:
+    """Map catalog changes to the standard resource-list notification."""
+
+    def __init__(self, bus):
+        self.bus = bus
+
+    async def publish(self):
+        await self.bus.publish(ResourcesListChanged())
+
+
 class SkillsExtension(Extension):
     identifier = "io.modelcontextprotocol/skills"
 
     def __init__(
         self, providers: Sequence[SkillProvider], ttl_ms: int, cache_scope: str
     ):
+        self.providers = providers
+        self.authorization_hook = None
         self.ttl_ms = ttl_ms
         self.cache_scope = cache_scope
         self.entries = {}
@@ -329,6 +348,22 @@ class SkillsExtension(Extension):
 
     async def allowed(self, ctx, uri):
         provider, name = self.owners[uri]
+        if self.authorization_hook is not None:
+            from backend.runtime.authorization import GRAPH_ACTION_READ
+            from backend.service.access import evaluate_graph_access
+
+            try:
+                decision = evaluate_graph_access(
+                    self.authorization_hook,
+                    action=GRAPH_ACTION_READ,
+                    target="get_node_details",
+                )
+                if not decision.allowed or not decision.graph_access.matches(
+                    graph_id=""
+                ):
+                    return False
+            except Exception:
+                return False
         # Providers without an authorization hook fail closed.
         check = getattr(provider, "can_read", None)
         return check is not None and await check(ctx, name) is True
@@ -348,3 +383,81 @@ class SkillsExtension(Extension):
             ]
             return {**result, "resources": resources}
         return result
+
+
+def register_skill_tools(mcp, extension, authorization_hook, fallback):
+    """Register tools over the extension's validated, shared catalog."""
+    from backend.runtime.authorization import GRAPH_ACTION_ADMIN
+    from backend.service.access import authorize_graph_access
+
+    extension.authorization_hook = authorization_hook
+    # Access can vary with the request even for the built-in providers.
+    for hint in extension.skill_hints.values():
+        hint["cacheScope"] = "private"
+    publisher: SkillChangePublisher = InProcessSkillChangePublisher(mcp._subscriptions)
+    lock = anyio.Lock()
+
+    @mcp.tool()
+    async def refresh_skills(ctx: Context) -> dict:
+        """Refresh the skill catalog (admin only)."""
+        try:
+            denied = authorize_graph_access(
+                authorization_hook, action=GRAPH_ACTION_ADMIN, target="refresh_skills"
+            )
+        except Exception:
+            denied = True
+        if denied:
+            return {"error_code": "access_denied"}
+        async with lock:
+            updated = SkillsExtension(
+                extension.providers, extension.ttl_ms, extension.cache_scope
+            )
+            for hint in updated.skill_hints.values():
+                hint["cacheScope"] = "private"
+            old = {uri: entry["resources"] for uri, entry in extension.entries.items()}
+            new = {uri: entry["resources"] for uri, entry in updated.entries.items()}
+            if old != new:
+                manager = mcp._resource_manager
+                resources = dict(manager._resources)
+                for uri in extension.files:
+                    resources.pop(uri, None)
+                resources.update(
+                    {
+                        str(binding.resource.uri): binding.resource
+                        for binding in updated.resources()
+                    }
+                )
+                extension.entries, extension.files = updated.entries, updated.files
+                extension.owners, extension.skill_hints = (
+                    updated.owners,
+                    updated.skill_hints,
+                )
+                manager._resources = resources
+                await publisher.publish()
+            return await extension.list_skills(ctx.request_context, ListSkillParams())
+
+    if fallback:
+
+        @mcp.tool()
+        async def list_skills(ctx: Context) -> dict:
+            """List skills available to this caller."""
+            return await extension.list_skills(ctx.request_context, ListSkillParams())
+
+        @mcp.tool()
+        async def get_skill(uri: str, ctx: Context, file: str = "") -> dict:
+            """Get a skill manifest and optionally one of its files."""
+            request = ctx.request_context
+            if uri not in extension.entries or not await extension.allowed(
+                request, uri
+            ):
+                return {"error_code": "not_found"}
+            result = await extension.get_skill(request, GetSkillParams(uri=uri))
+            if file:
+                file_uri = uri.rsplit("/", 1)[0] + "/" + file
+                if (
+                    file_uri not in extension.files
+                    or extension.owners.get(file_uri) != extension.owners[uri]
+                ):
+                    return {"error_code": "not_found"}
+                result["file"] = {"uri": file_uri, "text": extension.files[file_uri]}
+            return result

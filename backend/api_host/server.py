@@ -648,7 +648,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         auto_add_registry=auto_add_registry,
     )
 
-    # The catalog is fixed at construction, so its resource bindings match its manifest.
+    # Initialize the catalog and its resource bindings from the same snapshot.
     from backend.config.config_loader import _get_loader, get_skills_config
 
     skills_config = get_skills_config().mcp
@@ -700,7 +700,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     mcp = MCPServer(
         config.mcp_name,
         instructions=build_mcp_instructions(),
-        subscriptions=False,
+        subscriptions=None if mcp_extensions else False,
         **({"extensions": mcp_extensions} if mcp_extensions else {}),
     )
     if mcp_extensions:
@@ -714,6 +714,16 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         widget_dist_path=config.widget_static_path,
         attachment_access=config.mcp_attachment_tools,
     )
+
+    if mcp_extensions:
+        from backend.skills.mcp import register_skill_tools
+
+        register_skill_tools(
+            mcp,
+            mcp_extensions[0],
+            graph_service.authorization_hook,
+            skills_config.fallback,
+        )
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp
