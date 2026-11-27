@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, timezone
 
 from backend.functions.invocation import load_manifest
+from backend.runtime.extensions import bind_runtime_extensions, get_runtime_extensions
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class FunctionScheduler:
         self.service = service
         self.slots = slots
         self.graph_bindings = graph_bindings
+        self.extensions = get_runtime_extensions()
         self.stop_event = threading.Event()
         self.thread = None
         self.slots.reconcile(self.service)
@@ -72,7 +74,8 @@ class FunctionScheduler:
     def _run(self):
         while not self.stop_event.is_set():
             try:
-                self.tick(datetime.now(timezone.utc))
+                with bind_runtime_extensions(self.extensions):
+                    self.tick(datetime.now(timezone.utc))
             except Exception:
                 logger.exception("Function scheduler pass failed")
             self.stop_event.wait(1)

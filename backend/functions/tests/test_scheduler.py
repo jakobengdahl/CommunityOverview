@@ -82,3 +82,30 @@ def test_rate_limit_uses_each_dispatch_time(tmp_path, monkeypatch):
     scheduler.tick(now + timedelta(seconds=61))
     assert [call.args[0] for call in service.invoke.call_args_list] == ["a", "b"]
     scheduler.stop()
+
+
+def test_scheduler_thread_binds_application_admission(tmp_path):
+    import threading
+    from backend.runtime.extensions import (
+        RuntimeExtensions,
+        bind_runtime_extensions,
+        get_runtime_extensions,
+    )
+
+    extensions = RuntimeExtensions()
+    service = SimpleNamespace(store=SimpleNamespace(list_jobs=lambda **kwargs: []))
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    with bind_runtime_extensions(extensions):
+        scheduler = FunctionScheduler(service, slots, {})
+    seen = []
+    done = threading.Event()
+
+    def tick(now):
+        seen.append(get_runtime_extensions())
+        done.set()
+
+    scheduler.tick = tick
+    scheduler.start()
+    assert done.wait(5)
+    scheduler.stop()
+    assert seen == [extensions]

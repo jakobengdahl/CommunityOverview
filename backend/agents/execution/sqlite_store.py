@@ -55,7 +55,7 @@ from .models import (
 )
 from .store import JobNotFoundError
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _TERMINAL_VALUES = (
     ExecutionState.SUCCEEDED.value,
@@ -189,6 +189,13 @@ class SqliteExecutionStore:
                             self._conn.execute(statement)
                 if version < 2 and "redacted_at" not in self._columns():
                     self._conn.execute(_MIGRATE_V2)
+                if version < 3:
+                    self._conn.execute("""
+                        CREATE TABLE IF NOT EXISTS schedule_attempt_outcomes (
+                            idempotency_key TEXT PRIMARY KEY, state TEXT NOT NULL,
+                            uncertain INTEGER NOT NULL, finished_at REAL NOT NULL
+                        )
+                    """)
                 if version < _SCHEMA_VERSION:
                     # PRAGMA does not accept bound parameters.
                     self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
@@ -693,12 +700,38 @@ class SqliteExecutionStore:
                 self._checkpoint()
         return count
 
+    def schedule_attempt_outcome(self, key: str):
+        """Return the content-free outcome retained when a schedule run is purged."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state, uncertain, finished_at FROM schedule_attempt_outcomes "
+                "WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            ExecutionState(row["state"]),
+            bool(row["uncertain"]),
+            _from_epoch(row["finished_at"]),
+        )
+
     def purge(self, job_ids: Sequence[str]) -> int:
         params = [(job_id, *_TERMINAL_VALUES) for job_id in dict.fromkeys(job_ids)]
         if not params:
             return 0
         with self._lock:
             try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.executemany(
+                    """INSERT OR REPLACE INTO schedule_attempt_outcomes
+                       SELECT idempotency_key, state, COALESCE(dead_letter_reason = ?, 0),
+                              COALESCE(finished_at, updated_at)
+                       FROM execution_jobs WHERE id = ? AND state IN (?,?,?)
+                         AND kind = 'function'
+                         AND idempotency_key GLOB 'fn:*:function-schedule:*:attempt:*'""",
+                    [(ABANDONED_REASON, *param) for param in params],
+                )
                 cur = self._conn.executemany(
                     "DELETE FROM execution_jobs WHERE id = ? AND state IN (?,?,?)",
                     params,

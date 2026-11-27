@@ -24,6 +24,7 @@ from backend.agents.execution import (
     SqliteExecutionStore,
 )
 from backend.agents.execution.store import JobNotFoundError
+from backend.agents.execution.models import ABANDONED_REASON
 
 
 def _valid_retry_policy(policy: RetryPolicy) -> bool:
@@ -323,12 +324,28 @@ class ScheduleSlots:
                 agent_id=job.agent_id, kind=ExecutionKind.FUNCTION
             )
             run = next((run for run in runs if run.idempotency_key == key), None)
+            if run is None:
+                lookup = getattr(service.store, "schedule_attempt_outcome", None)
+                outcome = lookup(key) if lookup else None
+                if outcome is not None:
+                    from types import SimpleNamespace
+
+                    state, uncertain, finished = outcome
+                    run = SimpleNamespace(
+                        state=state,
+                        finished_at=finished,
+                        updated_at=finished,
+                        dead_letter_reason=(ABANDONED_REASON if uncertain else None),
+                    )
             if run is not None and run.state.is_terminal:
                 self._finish_result(
                     service, job, run, run.finished_at or run.updated_at
                 )
 
     def _finish_result(self, service, job, result, finished):
+        if getattr(result, "dead_letter_reason", None) == ABANDONED_REASON:
+            # Retention cannot prove the worker stopped; never retry uncertainty.
+            return
         if result.state == ExecutionState.SUCCEEDED:
             self.complete(job.id, attempt=job.attempts, now=finished)
         elif result.state == ExecutionState.DEAD_LETTER:

@@ -350,3 +350,70 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
         assert slots.enqueue("example", TIMEPOINT).state == ExecutionState.DEAD_LETTER
     finally:
         slots.close()
+
+
+@pytest.mark.parametrize(
+    "outcome,purge,expected",
+    [
+        ("failed", True, ExecutionState.PENDING),
+        ("failed", False, ExecutionState.PENDING),
+        ("abandoned", False, ExecutionState.RUNNING),
+        ("abandoned", True, ExecutionState.RUNNING),
+        ("succeeded", True, ExecutionState.SUCCEEDED),
+        ("no_retry", True, ExecutionState.DEAD_LETTER),
+    ],
+)
+def test_reconcile_retained_and_purged_outcomes(
+    tmp_path, monkeypatch, outcome, purge, expected
+):
+    from types import SimpleNamespace
+    from backend.agents.execution import ExecutionJob, ExecutionKind
+    from backend.functions import invocation
+
+    policy = RetryPolicy(max_attempts=2, base_seconds=5)
+    monkeypatch.setattr(
+        invocation,
+        "load_manifest",
+        lambda *args: (
+            {"retry": policy.to_dict()} if outcome != "no_retry" else {},
+            None,
+        ),
+    )
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    store = SqliteExecutionStore(tmp_path / "runs.db")
+    try:
+        slot = slots.enqueue("example", TIMEPOINT, retry_policy=policy)
+        slots.claim_next("w", now=TIMEPOINT, lease_seconds=10)
+        run = ExecutionJob(
+            agent_id="example",
+            kind=ExecutionKind.FUNCTION,
+            idempotency_key=f"fn:example:{slot.idempotency_key}:attempt:1",
+            state=(
+                ExecutionState.RUNNING
+                if outcome == "abandoned"
+                else ExecutionState.SUCCEEDED
+                if outcome == "succeeded"
+                else ExecutionState.DEAD_LETTER
+            ),
+            updated_at=TIMEPOINT,
+            finished_at=None if outcome == "abandoned" else TIMEPOINT,
+        )
+        store.enqueue(run)
+        if outcome == "abandoned":
+            assert store.abandon([run.id], cutoff=TIMEPOINT + timedelta(days=1)) == 1
+            assert store.redact([run.id]) == 1
+        if purge:
+            assert store.purge([run.id]) == 1
+            store.close()
+            store = SqliteExecutionStore(tmp_path / "runs.db")
+        slots.close()
+        slots = ScheduleSlots(tmp_path / "slots.db")
+        slots.reconcile(SimpleNamespace(store=store, root=tmp_path))
+        current = slots.enqueue("example", TIMEPOINT)
+        assert current.state == expected
+        assert current.attempts == 1
+        if expected == ExecutionState.PENDING:
+            assert current.run_at == TIMEPOINT + timedelta(seconds=5)
+    finally:
+        store.close()
+        slots.close()
