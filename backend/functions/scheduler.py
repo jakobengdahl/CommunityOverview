@@ -1,5 +1,7 @@
 """Application scheduler for enabled, graph-bound function packages."""
 
+import hashlib
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -10,15 +12,120 @@ from backend.runtime.extensions import bind_runtime_extensions, get_runtime_exte
 logger = logging.getLogger(__name__)
 
 
+def _trigger_fingerprint(trigger):
+    return hashlib.sha256(
+        json.dumps(trigger, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class FunctionScheduler:
-    def __init__(self, service, slots, graph_bindings):
+    def __init__(
+        self,
+        service,
+        slots,
+        graph_bindings,
+        *,
+        local_graph_id=None,
+        sensitive_fields=None,
+    ):
         self.service = service
         self.slots = slots
         self.graph_bindings = graph_bindings
+        self.local_graph_id = local_graph_id
+        self.sensitive_fields = sensitive_fields or {}
         self.extensions = get_runtime_extensions()
         self.stop_event = threading.Event()
         self.thread = None
         self.slots.reconcile(self.service)
+
+    def on_graph_event(self, event):
+        from backend.agents.execution import RetryPolicy
+        from backend.functions.graph_change import (
+            filtered_entity,
+            matches,
+            valid_trigger,
+        )
+
+        origin = event.origin.event_origin or ""
+        # External refreshes can combine multiple writes and carry no reliable
+        # causation. Treating them as root events would bypass loop prevention.
+        if origin == "external-change":
+            return
+        entity = event.to_webhook_payload()["entity"]
+        data = entity["data"]
+        # The broker denies untagged nodes to graph-bound functions.
+        graph_ids = [
+            (snapshot.get("metadata") or {}).get("origin_graph_id")
+            for snapshot in (data["before"], data["after"])
+            if snapshot is not None
+        ]
+        for function_id, bound_graph in self.graph_bindings.items():
+            if (
+                function_id not in self.service.enabled
+                or not graph_ids
+                or any(graph_id != bound_graph for graph_id in graph_ids)
+                or origin.startswith(f"function:{function_id}@")
+            ):
+                continue
+            try:
+                manifest, _ = load_manifest(self.service.root, function_id)
+                types = {entity["type"]}
+                types.update(
+                    snapshot.get("type")
+                    for snapshot in (data["before"], data["after"])
+                    if isinstance(snapshot, dict)
+                    and isinstance(snapshot.get("type"), str)
+                )
+                schema = (
+                    self.sensitive_fields()
+                    if callable(self.sensitive_fields)
+                    else self.sensitive_fields
+                )
+                sensitive = {
+                    path for node_type in types for path in schema.get(node_type, [])
+                }
+                matching = [
+                    t
+                    for t in manifest["triggers"]
+                    if t["kind"] == "graph_change"
+                    and valid_trigger(
+                        t,
+                        sensitive
+                        | {
+                            path
+                            for node_type in t.get("node_types", [])
+                            for path in schema.get(node_type, [])
+                        },
+                    )
+                    and matches(t, event)
+                ]
+                if matching:
+                    fields = {
+                        field
+                        for t in matching
+                        for field in (
+                            t["fields"]
+                            + list(t.get("before", {}))
+                            + list(t.get("after", {}))
+                        )
+                    }
+                    projected = filtered_entity(entity, fields, sensitive)
+                    retry = manifest.get("retry")
+                    self.slots.enqueue_event(
+                        function_id,
+                        event,
+                        projected,
+                        RetryPolicy(**retry) if retry else None,
+                        graph_id=bound_graph,
+                        node_types=sorted(types),
+                        matched_triggers=[_trigger_fingerprint(t) for t in matching],
+                    )
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "Cannot enqueue graph event for function %s",
+                    function_id,
+                    exc_info=True,
+                )
 
     def tick(self, now):
         self.slots.reconcile(self.service)
@@ -49,6 +156,7 @@ class FunctionScheduler:
                 "function-scheduler",
                 now=datetime.now(timezone.utc),
                 lease_seconds=3600,
+                graph_event_filter=self._filter_graph_event,
                 actor_binding=lambda function_id: (
                     {
                         "actor_id": f"function_schedule:{function_id}",
@@ -61,6 +169,80 @@ class FunctionScheduler:
                     else None
                 ),
             )
+
+    def _filter_graph_event(self, job):
+        from types import SimpleNamespace
+        from backend.functions.graph_change import (
+            filtered_entity,
+            matches,
+            valid_trigger,
+        )
+
+        entity = job.payload["entity"]
+        event = SimpleNamespace(to_webhook_payload=lambda: {"entity": entity})
+        try:
+            manifest, _ = load_manifest(self.service.root, job.agent_id)
+            schema = (
+                self.sensitive_fields()
+                if callable(self.sensitive_fields)
+                else self.sensitive_fields
+            )
+            sensitive = {
+                field
+                for node_type in (job.payload.get("node_types") or [entity["type"]])
+                for field in schema.get(node_type, [])
+            }
+            matching = [
+                trigger
+                for trigger in manifest["triggers"]
+                if trigger["kind"] == "graph_change"
+                and valid_trigger(
+                    trigger,
+                    sensitive
+                    | {
+                        path
+                        for node_type in trigger.get("node_types", [])
+                        for path in schema.get(node_type, [])
+                    },
+                )
+                and (
+                    _trigger_fingerprint(trigger)
+                    in job.payload.get("matched_triggers", [])
+                    or matches(trigger, event)
+                )
+            ]
+            if not matching:
+                return None
+            fields = {
+                field
+                for trigger in matching
+                for field in (
+                    trigger["fields"]
+                    + list(trigger.get("before", {}))
+                    + list(trigger.get("after", {}))
+                )
+            }
+            projected = filtered_entity(entity, fields, sensitive)
+            projected["changed_fields"] = sorted(
+                {
+                    min(
+                        (
+                            secret
+                            for secret in sensitive
+                            if path == secret or path.startswith(secret + ".")
+                        ),
+                        default=path,
+                        key=len,
+                    )
+                    for path in entity["changed_fields"]
+                }
+            )
+            return projected
+        except (OSError, ValueError, TypeError, KeyError):
+            logger.warning(
+                "Cannot filter graph event for function %s", job.agent_id, exc_info=True
+            )
+            return None
 
     def start(self):
         if self.thread and self.thread.is_alive():

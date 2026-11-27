@@ -1,6 +1,6 @@
 # User Function Contract
 
-**Contract versions:** 1, 2, 3, 4 and 5
+**Contract versions:** 1, 2, 3, 4, 5 and 6
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
@@ -8,7 +8,7 @@ and its protocol session (§6, §7, §9 attribution, the per-message and tool-ca
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
 Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Also implemented: manifest validation, manual REST and CLI invocation through a
 shared admission service, graph-bound inbound webhooks, and function run records in the existing history store.
-**Scope:** Open-source core. These versions cover manual, webhook and scheduled invocation of functions that
+**Scope:** Open-source core. These versions cover manual, webhook, scheduled and graph-change invocation of functions that
 read and write the graph through a broker. Other triggers, tools and bindings
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
 will need are reserved here so that adding them is not a breaking change.
@@ -191,11 +191,11 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 adds `webhook`; version 5 adds `schedule` (§12). |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 adds `webhook`; version 5 adds `schedule` and version 6 adds `graph_change` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Versions 1–3 accept only `"graph"`, the default; version 4 also accepts `"session"` (§12). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
-| `retry` | no | Version 5 schedule retry policy (§12); absent in earlier versions. |
+| `retry` | no | Version 5/6 trigger retry policy (§12); absent in earlier versions. |
 | `secrets` | reserved | Secret references (§13). Must be absent in version 1. |
 | `egress` | reserved | Outbound network allowlist (§13). Must be absent in version 1. |
 
@@ -273,14 +273,16 @@ block:
 }
 ```
 
-- `entity` is `null` for a manual invocation. Graph-change triggers (§13) fill
-  it with the triggering entity's `before`, `after` and `patch`, unchanged from
+- `entity` is `null` for a manual invocation. Graph-change triggers (§12) fill
+  it with declared, non-sensitive triggering entity fields from
   the event payload.
 - `origin` describes **who started the run**. The origin the run's own writes
   carry is defined in §9.
 - `deadline` is informative: the function may use it to stop early. The runner
   enforces the limit regardless (§8).
-- The envelope never contains a secret, a credential or a token.
+- Secrets resolved by the runtime never enter the envelope. For graph-change
+  values, operators must mark sensitive schema paths and avoid declaring fields
+  that contain secrets (§12).
 
 ### 5.3 Idempotency
 
@@ -477,8 +479,7 @@ Every write a run makes carries an event context set by the host:
 - `event_session_id` = `null` in version 1;
 - `attribution` = the invoking actor and scope.
 
-This gives a later graph-change trigger what it needs to avoid loops, and fixes
-the rules it must follow:
+Graph-change triggers follow these loop prevention rules:
 
 - **Self-exclusion is mandatory.** A function is never triggered by an event
   whose origin is its own `function:<id>@…`. Unlike event subscriptions, where
@@ -690,6 +691,38 @@ Fire times are aligned to the Unix epoch at the declared interval; each poll
 generates only the latest due slot. The scheduler starts and stops with the
 application and uses a graph-bound `function_schedule` system actor.
 
+### Version 6: graph-change triggers
+
+Version 6 adds `{"kind": "graph_change", "node_types": ["Task"],
+"fields": ["metadata.status"], "before": {"metadata.status": "open"},
+"after": {"metadata.status": "done"}}`. `node_types` and `fields` are
+nonempty lists. Fields and predicate keys are dot-separated paths into the
+node snapshots. At least one listed field must change, and all optional
+`before` and `after` equality predicates must match. A missing path is distinct
+from null. Creates and deletes match when a listed field changes between absent
+and present; edge events do not match. The trigger requires a graph target and the `graph:read` grant. Fields and
+predicate paths may not overlap a schema-sensitive path, including its parents
+and descendants; triggers are checked against the current schema at delivery.
+
+The invocation entity carries the entity kind, id, type and `changed_fields`
+(dot-separated names of changed paths, stopping at sensitive paths). Its `data.before`, `data.after` and
+`data.patch` contain only paths declared in the matching triggers' `fields` or
+predicate keys. Values are preserved, except that paths listed in the node type's
+schema `sensitive_fields` are omitted, including from declared parent objects.
+Operators must mark sensitive paths and avoid declaring fields containing secrets.
+The projection is applied before persistence. Both present snapshots must have
+an origin graph tag matching the bound graph; untagged snapshots are excluded.
+Self-originated writes are excluded across all
+versions of the same function. A function-origin event forwards its correlation
+id and increases the causing run's depth by one. Agent-origin events also
+increase the causing event's depth by one; other events start at depth zero.
+Admission records refusals above the configured depth limit. One event has one
+durable delivery identity per function, retained independently of run history.
+Graph events use the same retry policy, rate budget and delivery ledger as
+schedules; each matching event is delivered individually without debounce or
+aggregation. Enabled functions use the configured schedule graph binding and
+are restricted to events in that graph.
+
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
@@ -698,7 +731,6 @@ already reserved for it, so that adding it is an additive contract version
 
 | Capability | Reserved now | Constraint already fixed |
 |---|---|---|
-| Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
 | Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
 | Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |
 | Secrets | `secrets` | References resolved by the broker at the point of use through the `SecretProvider` seam; never placed in the envelope, the environment of the function process, logs or run records. |
