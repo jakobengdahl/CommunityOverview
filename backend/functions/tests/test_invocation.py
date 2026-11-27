@@ -531,8 +531,12 @@ def test_webhook_version_and_write_switch_use_bound_actor(host):
     assert not context.grant_enabled("graph:write")
 
 
-def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypatch):
+@pytest.mark.parametrize("limit", [1, 3])
+def test_shared_trigger_forwards_context_and_refuses_excess_depth(
+    host, monkeypatch, limit
+):
     service, execute, _, _ = host
+    service.chain_depth_limit = limit
     refusal = service._refusal
     monkeypatch.setattr(
         service,
@@ -548,12 +552,12 @@ def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypa
         trigger="future",
         actor_binding=binding,
         correlation_id="chain",
-        chain_depth=3,
+        chain_depth=limit,
     )
     envelope = execute.call_args.args[3]
     assert accepted.state == ExecutionState.SUCCEEDED
     assert envelope["invocation"]["trigger"] == "future"
-    assert envelope["invocation"]["chain_depth"] == 3
+    assert envelope["invocation"]["chain_depth"] == limit
     assert envelope["origin"]["event_correlation_id"] == "chain"
     rejected = service.invoke(
         "example",
@@ -561,9 +565,15 @@ def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypa
         trigger="future",
         actor_binding=binding,
         correlation_id="chain",
-        chain_depth=4,
+        chain_depth=limit + 1,
     )
     assert rejected.result["error"]["code"] == "chain_depth_exceeded"
-    assert rejected.payload["chain_depth"] == 4
+    assert rejected.payload["chain_depth"] == limit + 1
     assert rejected.correlation_id == "chain"
+    assert execute.call_count == 1
+    for trigger in ("manual", "webhook"):
+        with pytest.raises(ValueError, match="depth zero"):
+            service.invoke(
+                "example", {}, trigger=trigger, actor_binding=binding, chain_depth=1
+            )
     assert execute.call_count == 1
