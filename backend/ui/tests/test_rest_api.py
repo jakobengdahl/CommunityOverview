@@ -686,14 +686,16 @@ def test_reasoning_is_capped_request_local_display_metadata(reasoning, monkeypat
     """Only separate reasoning reaches progress; response and prompts stay intact."""
     from types import SimpleNamespace
     from unittest.mock import Mock
+    from backend.llm.llm_providers import LLMResponse
     from backend.ui.chat_logic import (
         MAX_REASONING_CHARS_PER_ROUND,
         _chat_completion,
         report_chat_progress,
     )
 
-    response = SimpleNamespace(
+    response = LLMResponse(
         content=[{"type": "text", "text": "<think>ordinary answer</think>"}],
+        stop_reason="end_turn",
         raw_response=SimpleNamespace(
             choices=[
                 SimpleNamespace(message=SimpleNamespace(reasoning_content=reasoning))
