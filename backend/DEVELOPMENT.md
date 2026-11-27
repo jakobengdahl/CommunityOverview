@@ -539,9 +539,9 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/search` | Search nodes |
-| POST | `/api/functions/{function_id}/webhook` | Run with the graph-bound function bearer token and JSON input, or multipart JSON input plus run-scoped files for version 3 functions (see User Function Contract §12) |
+| POST | `/api/functions/{function_id}/webhook` | Run with the graph-bound function bearer token and JSON input, or multipart JSON input plus run-scoped files for version 3 or later functions (see User Function Contract §12) |
 | PUT | `/api/functions/{function_id}/webhook-settings` | Graph admin sets `enabled` and `allow_write` |
-| POST | `/api/functions/{function_id}/invoke` | Manually run an enabled operator function; accepts `input`, optional `correlation_id`, and `Idempotency-Key`; returns a run record (see *Manual user functions*) |
+| POST | `/api/functions/{function_id}/invoke` | Manually run an enabled operator function; accepts `input`, optional `correlation_id`, and `Idempotency-Key`; returns a run record; version 4 session-targeted functions require the staged-session header (see *Manual user functions*) |
 | GET | `/api/nodes/{id}` | Get node details |
 | POST | `/api/nodes/{id}/related` | Get related nodes |
 | POST | `/api/nodes` | Add nodes and edges (`expect_absent` optional; see *Entity revisions*) |
@@ -2272,6 +2272,13 @@ isolated malformed external definitions or missing references. Shape selections
 are opt-in; no renderer or appearance mutation endpoint is enabled yet.
 
 ### Manual user functions
+
+Version 4 manifests can set `write_target` to `session`. Supply the staged
+session in `x-communityoverview-session-id` on the manual invocation; the
+caller must have write access to that session. Writes await session review and
+merge. Session-targeted functions cannot attach run files, and webhooks cannot
+bind a session. Reusing an idempotency key with another target or session is
+refused.
 
 `POST /functions/{function_id}/invoke` (under the configured API prefix) runs an
 operator-enabled function synchronously and returns its durable run record.

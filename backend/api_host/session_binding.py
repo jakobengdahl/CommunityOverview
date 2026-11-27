@@ -40,6 +40,7 @@ from backend.runtime import session_context
 # the request to tools that do and refuse the session themselves. Paths under
 # the API prefix are given without it.
 _API_SESSION_AWARE: Sequence[Tuple[str, str]] = (
+    ("POST", r"/functions/[^/]+/invoke"),
     ("POST", r"/search"),
     ("GET", r"/nodes/[^/]+"),
     ("POST", r"/nodes/[^/]+/related"),

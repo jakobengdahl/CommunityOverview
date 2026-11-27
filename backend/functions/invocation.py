@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import fcntl
 import logging
 import os
@@ -34,7 +35,11 @@ from backend.functions.runner import (
     run_function,
     safe_relative_path,
 )
-from backend.runtime.authorization import use_request_authorization
+from backend.runtime.authorization import (
+    GRAPH_OPERATION_STAGE,
+    use_request_authorization,
+)
+from backend.runtime.session_context import current_session_id, not_supported
 from backend.service.access import evaluate_graph_access
 
 # The local host uses one process with threads. Share admission across service
@@ -113,6 +118,10 @@ def _schema(schema):
 _UNCHECKED = object()
 
 
+def _binding_digest(write_target, session_id):
+    return hashlib.sha256(json.dumps([write_target, session_id]).encode()).hexdigest()
+
+
 def _bind(actor_binding):
     return {
         key: actor_binding.get(key)
@@ -167,8 +176,8 @@ def _valid_triggers(manifest):
     )
 
 
-def load_manifest(root, function_id):
-    """Read and validate a package without following paths outside its directory."""
+def _read_manifest(root, function_id):
+    """Read the declared manifest without following paths outside its directory."""
     if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
         raise ValueError("Invalid function id")
     root_real = os.path.realpath(root)
@@ -192,6 +201,12 @@ def load_manifest(root, function_id):
     manifest = json.loads(Path(manifest_real).read_text())
     if not isinstance(manifest, dict):
         raise ValueError("Manifest must be an object")
+    return manifest, root_prefix, directory_real, directory
+
+
+def load_manifest(root, function_id):
+    """Read and validate a package without following paths outside its directory."""
+    manifest, root_prefix, directory_real, directory = _read_manifest(root, function_id)
     for key in ("contract_version", "id", "version", "name", "runtime", "entry_point"):
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             raise ValueError("Missing or invalid required field")
@@ -202,12 +217,15 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2", "3"}
+        manifest["contract_version"] not in {"1", "2", "3", "4"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
         or not _valid_triggers(manifest)
-        or manifest.get("write_target", "graph") != "graph"
+        or manifest.get("write_target", "graph")
+        not in (
+            ("graph", "session") if manifest["contract_version"] == "4" else ("graph",)
+        )
         or any(key in manifest for key in ("retry", "secrets", "egress"))
         or ("description" in manifest and not isinstance(manifest["description"], str))
     ):
@@ -359,7 +377,15 @@ class FunctionInvocationService:
                 "configure run_history_db"
             )
 
-    def _replay(self, existing, binding):
+    def _replay(self, existing, binding, write_target="graph", session_id=None):
+        digest = existing.payload.get("function_binding_digest")
+        if digest is not None and digest != _binding_digest(write_target, session_id):
+            raise PermissionError("Conflicting invocation binding")
+        if digest is None and (
+            existing.payload.get("write_target", "graph") != write_target
+            or existing.payload.get("session_id") != session_id
+        ):
+            raise PermissionError("Conflicting invocation binding")
         # Authentication transport is not identity. Redacted records have no
         # attribution or content left; current graph access gates their replay.
         if not binding.get("actor_id"):
@@ -392,6 +418,12 @@ class FunctionInvocationService:
 
     def replay_webhook(self, function_id, idempotency_key, actor_binding):
         binding = _bind(actor_binding)
+        try:
+            manifest, _, _, _ = _read_manifest(self.root, function_id)
+        except (OSError, ValueError):
+            manifest = None
+        if manifest and manifest.get("write_target", "graph") == "session":
+            raise PermissionError("A staged session is required")
         with _admission(self.root):
             previous = self.store.list_jobs(
                 agent_id=function_id, kind=ExecutionKind.FUNCTION
@@ -402,7 +434,8 @@ class FunctionInvocationService:
                     and existing.idempotency_key
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
-                    return self._replay(existing, binding)
+                    target = (manifest or {}).get("write_target", "graph")
+                    return self._replay(existing, binding, target)
             if self._busy(function_id, previous) and not self._in_progress(
                 function_id, idempotency_key
             ):
@@ -441,7 +474,14 @@ class FunctionInvocationService:
                     and existing.idempotency_key
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
-                    return self._replay(existing, binding)
+                    try:
+                        manifest, _, _, _ = _read_manifest(self.root, function_id)
+                    except (OSError, ValueError):
+                        manifest = None
+                    target = (manifest or {}).get("write_target", "graph")
+                    if target == "session":
+                        raise PermissionError("A staged session is required")
+                    return self._replay(existing, binding, target)
             return self._rejected(function_id, binding, idempotency_key, code)
 
     def _rejected(self, function_id, binding, idempotency_key, code):
@@ -570,6 +610,38 @@ class FunctionInvocationService:
         # Only the trusted binding supplies identity and scope. In particular,
         # never carry its headers through the authorization helper.
         binding = _bind(actor_binding)
+        session_id = current_session_id()
+        try:
+            current_manifest, _, _, _ = _read_manifest(self.root, function_id)
+        except (OSError, ValueError):
+            current_manifest = None
+        declared_target = (current_manifest or {}).get("write_target", "graph")
+        old_session_target = declared_target == "session" and (
+            current_manifest or {}
+        ).get("contract_version") in ("1", "2", "3")
+        write_target = "graph" if old_session_target else declared_target
+        if write_target == "graph" and session_id is not None:
+            raise not_supported("Function invocation")
+        if write_target == "session":
+            if session_id is None:
+                raise ValueError("A staged session is required")
+            try:
+                if self.graph_service.session_gate.named_mode(session_id) != "staged":
+                    raise ValueError("A staged session is required")
+                with use_request_authorization(**binding):
+                    decision = evaluate_graph_access(
+                        self.graph_service.authorization_hook,
+                        action="mutate",
+                        target="invoke_function",
+                        graph_operation=GRAPH_OPERATION_STAGE,
+                        session_id=session_id,
+                    )
+                if not binding.get("actor_id") or not decision.allowed:
+                    raise PermissionError("Access denied")
+            except PermissionError:
+                raise
+            except Exception as exc:
+                raise ValueError("Invalid staged session") from exc
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
@@ -579,6 +651,9 @@ class FunctionInvocationService:
             correlation_id=correlation_id or str(uuid.uuid4()),
             payload={
                 "function_id": function_id,
+                "write_target": write_target,
+                "session_id": session_id,
+                "function_binding_digest": _binding_digest(write_target, session_id),
                 "trigger": trigger,
                 "chain_depth": chain_depth,
                 "attribution": {
@@ -602,7 +677,9 @@ class FunctionInvocationService:
             )
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
-                    return self._replay(existing, binding)
+                    if old_session_target:
+                        raise PermissionError("Invalid manifest binding")
+                    return self._replay(existing, binding, write_target, session_id)
             if self._in_progress(function_id, idempotency_key, reservation):
                 job.state, job.started_at = ExecutionState.CANCELLED, None
                 job.result = {
@@ -614,6 +691,11 @@ class FunctionInvocationService:
             code, manifest, package = self._refusal(
                 function_id, binding, trigger, input
             )
+            if (
+                manifest is not None
+                and manifest.get("write_target", "graph") != write_target
+            ):
+                raise PermissionError("Invocation binding changed")
             if code is None and chain_depth > self.chain_depth_limit:
                 code = "chain_depth_exceeded"
             if manifest is not None:
@@ -637,13 +719,15 @@ class FunctionInvocationService:
                 job.started_at = utcnow()
             stored = self.store.enqueue(job)
             if stored.id != job.id:
+                if old_session_target:
+                    raise PermissionError("Invalid manifest binding")
                 if (
                     stored.kind != ExecutionKind.FUNCTION
                     or stored.agent_id != function_id
                     or stored.idempotency_key != job.idempotency_key
                 ):
                     raise PermissionError("Conflicting run identity")
-                return self._replay(stored, binding)
+                return self._replay(stored, binding, write_target, session_id)
             if code:
                 return self.reject(Admission(job, started), code)
         return Admission(
@@ -715,6 +799,7 @@ class FunctionInvocationService:
                 max_tool_calls=limits.get("max_tool_calls", 200),
                 run_files=run_files,
                 contract_version=manifest["contract_version"],
+                session_id=job.payload.get("session_id"),
             )
             envelope = {
                 "schema_version": "1.0",

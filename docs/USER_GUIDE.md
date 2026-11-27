@@ -1710,6 +1710,10 @@ Webhook credentials can be minted, rotated and revoked through the function API.
 The token is shown only on mint or rotation; save it securely. A graph-admin
 authorization hook is required. Webhook invocation is not yet available.
 
+Version 4 functions can write into a staged session when the caller supplies
+that session on the manual invocation. Their changes stay in the session until
+reviewed and merged; see the [function contract](USER_FUNCTION_CONTRACT.md#version-4-session-staged-writes).
+
 ### Inbound user-function webhooks
 
 An administrator of the bound graph can enable an external function call using

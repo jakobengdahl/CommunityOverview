@@ -23,7 +23,7 @@ origin-based loop prevention reused here),
 [`SECRET_PROVIDER_CONTRACT.md`](SECRET_PROVIDER_CONTRACT.md) (the seam a later
 version binds secrets through),
 [`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md) (the staged-write
-model a later `write_target: session` follows),
+model `write_target: session` follows),
 [`EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`](EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md)
 (actor classes and correlation forwarding).
 
@@ -193,7 +193,7 @@ of a function that is enabled (§4.4).
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
 | `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
-| `write_target` | no | Where writes land. Version 1 accepts only `"graph"`, the default (§13). |
+| `write_target` | no | Where writes land. Versions 1–3 accept only `"graph"`, the default; version 4 also accepts `"session"` (§12). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
 | `retry` | reserved | Retry policy for non-manual triggers (§13). Must be absent in version 1. |
 | `secrets` | reserved | Secret references (§13). Must be absent in version 1. |
@@ -207,7 +207,7 @@ A manifest is **rejected**, and the function cannot run, when:
 - `contract_version` is not one the host supports;
 - a required field is missing, or a field has the wrong type;
 - a field holds a value this contract version does not allow, such as a trigger
-  kind unsupported by the declared version, a `write_target` other than `graph`, an unknown
+  kind unsupported by the declared version, a `write_target` unsupported by the declared version, an unknown
   grant, a limit above the contract maximum in §8, or any reserved field;
 - `entry_point` does not resolve to a file inside the function directory.
 
@@ -292,7 +292,9 @@ a key returns the existing run instead of starting a new one, in any state,
 until retention purges that run. Callers that retry a manual invocation after a
 network failure therefore pass the same key. A `rejected` run also holds its
 key: after fixing the cause (for example, enabling the function), invoke with a
-new key.
+new key. The host validates the write target and session binding before replay; a
+key previously used with a different target or session is refused. A graph-targeted
+invocation carrying a session is refused before a run or key is recorded.
 
 ## 6. Broker protocol (ABI)
 
@@ -650,6 +652,18 @@ attachment audit. Attachment content remains untrusted. File ids are scoped
 to the run; filesystem paths and files belonging to another run are not accepted.
 Accepting files into a run does not require the write switch.
 
+### Version 4: session-staged writes
+
+A manifest may set `write_target` to `"session"`. The host binds the staged
+session from the authenticated invocation request context; function arguments
+and output cannot select or change it. Admission requires an existing staged
+session and authorization to write in it. The broker acts in that session for
+all graph calls, and every staged entry records the function id and version,
+run id and correlation id. The main graph changes only through the session's
+existing review and merge path. Attachment writes cannot be staged and are
+refused for session-targeted runs. Webhooks do not bind a session and therefore
+cannot invoke a session-targeted function.
+
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
@@ -660,7 +674,6 @@ already reserved for it, so that adding it is an additive contract version
 |---|---|---|
 | Scheduled triggers | `triggers[].kind = "schedule"`, `retry` | Idempotency per fire time, as in `DURABLE_EXECUTION_CONTRACT.md` §5. |
 | Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
-| Session-staged writes | `write_target = "session"` | Writes land in a session overlay and reach the graph only through that contract's review and merge (`SESSION_OVERLAY_CONTRACT.md`). |
 | Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
 | Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |
 | Secrets | `secrets` | References resolved by the broker at the point of use through the `SecretProvider` seam; never placed in the envelope, the environment of the function process, logs or run records. |

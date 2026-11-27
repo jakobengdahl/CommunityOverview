@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agents.run_history import function_run_to_dict
+from backend.runtime.session_context import SessionRefused
 
 
 class InvocationRequest(BaseModel):
@@ -35,6 +36,8 @@ def register_function_routes(router, service):
                 idempotency_key=request.headers.get("Idempotency-Key"),
                 correlation_id=body.correlation_id,
             )
+        except SessionRefused as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.to_result())
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         except PermissionError:

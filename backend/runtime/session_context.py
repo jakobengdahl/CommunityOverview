@@ -26,6 +26,24 @@ _bound_session: ContextVar[Optional[str]] = ContextVar(
     "communityoverview_bound_session", default=None
 )
 
+_function_origin: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "function_origin", default=None
+)
+
+
+@contextmanager
+def bind_function_origin(origin: Optional[Dict[str, str]]) -> Iterator[None]:
+    token = _function_origin.set(origin)
+    try:
+        yield
+    finally:
+        _function_origin.reset(token)
+
+
+def current_function_origin() -> Optional[Dict[str, str]]:
+    return _function_origin.get()
+
+
 SESSION_NOT_FOUND = "session_not_found"
 SESSION_NOT_SUPPORTED = "session_not_supported"
 SESSION_MISMATCH = "session_mismatch"
