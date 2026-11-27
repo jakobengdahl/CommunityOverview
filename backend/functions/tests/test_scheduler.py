@@ -606,3 +606,126 @@ def test_changed_fields_stops_at_sensitive_dictionary():
     }
     projected = filtered_entity(entity, ["name"], {"metadata.private"})
     assert projected["changed_fields"] == ["metadata.private"]
+
+
+def test_batch_bounds_version_and_durable_delivery(tmp_path, monkeypatch):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+    from backend.functions.invocation import _valid_triggers
+
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["name"],
+        "debounce_seconds": 30,
+        "batch_size": 2,
+    }
+    manifest = {
+        "contract_version": "7",
+        "grants": ["graph:read"],
+        "triggers": [trigger],
+    }
+    assert _valid_triggers(manifest)
+    assert not _valid_triggers({**manifest, "contract_version": "6"})
+    for key, value in [
+        ("debounce_seconds", 0),
+        ("debounce_seconds", 301),
+        ("batch_size", 0),
+        ("batch_size", 101),
+    ]:
+        assert not _valid_triggers({**manifest, "triggers": [{**trigger, key: value}]})
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest", lambda *args: (manifest, None)
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    path = tmp_path / "slots.db"
+    scheduler = FunctionScheduler(
+        service,
+        ScheduleSlots(path),
+        {"example": "g"},
+        sensitive_fields={"Task": ["secret"]},
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(
+            event_origin="agent:other",
+            event_correlation_id="c1",
+            event_causation_depth=1,
+        ),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={
+                "name": "old",
+                "secret": "hidden",
+                "metadata": {"origin_graph_id": "g"},
+            },
+            after={
+                "name": "new",
+                "secret": "changed",
+                "metadata": {"origin_graph_id": "g"},
+            },
+            patch={"name": "new", "secret": "changed"},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    scheduler.on_graph_event(event)
+    scheduler.stop()
+    scheduler = FunctionScheduler(
+        service,
+        ScheduleSlots(path),
+        {"example": "g"},
+        sensitive_fields={"Task": ["secret"]},
+    )
+    second = event.model_copy(deep=True)
+    second.event_id = "second"
+    second.origin.event_correlation_id = "c2"
+    second.origin.event_causation_depth = 3
+    scheduler.on_graph_event(second)
+    third = event.model_copy(deep=True)
+    third.event_id = "third"
+    scheduler.on_graph_event(third)
+    scheduler.tick(datetime.now(timezone.utc))
+    assert service.invoke.call_count == 1
+    call = service.invoke.call_args.kwargs
+    assert call["chain_depth"] == 4 and call["correlation_ids"] == ["c1", "c2"]
+    assert [e["event_id"] for e in call["entity"]["events"]] == [
+        event.event_id,
+        "second",
+    ]
+    assert all(
+        e["entity"]["changed_fields"] == ["name"] for e in call["entity"]["events"]
+    )
+    assert all(
+        e["entity"]["data"]["after"] == {"name": "new"}
+        for e in call["entity"]["events"]
+    )
+    scheduler.stop()
+    slots = ScheduleSlots(path)
+    jobs = slots._store._conn.execute("SELECT payload FROM schedule_jobs").fetchall()
+    import json
+
+    for row in jobs:
+        payload = json.loads(row[0])
+        for entry in payload["entries"]:
+            assert entry["entity"]["changed_fields"] == ["name"]
+            assert entry["entity"]["data"]["before"] == {"name": "old"}
+            assert entry["entity"]["data"]["after"] == {"name": "new"}
+    job = slots.claim_next(
+        "worker",
+        now=datetime.now(timezone.utc) + timedelta(seconds=31),
+        lease_seconds=60,
+    )
+    assert len(job.payload["entries"]) == 1
+    slots.close()

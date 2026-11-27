@@ -13,7 +13,7 @@ import json
 import math
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.agents.execution import (
@@ -85,6 +85,11 @@ class _LedgerStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS schedule_rate "
                 "(function_id TEXT NOT NULL, admitted_at REAL NOT NULL)"
+            )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS graph_batch_members "
+                "(function_id TEXT NOT NULL, event_id TEXT NOT NULL, job_id TEXT NOT NULL, "
+                "PRIMARY KEY (function_id, event_id))"
             )
             self._conn.commit()
         except Exception:
@@ -195,6 +200,7 @@ class ScheduleSlots:
         graph_id=None,
         node_types=None,
         matched_triggers=None,
+        batching=None,
     ):
         payload = event.to_webhook_payload()
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
@@ -203,24 +209,126 @@ class ScheduleSlots:
         caused = (origin.get("event_origin") or "").startswith(("function:", "agent:"))
         depth = origin.get("event_causation_depth", 0) + 1 if caused else 0
         policy = retry_policy or RetryPolicy(max_attempts=1)
-        return self._store.enqueue(
-            ExecutionJob(
-                agent_id=function_id,
-                kind=ExecutionKind.SCHEDULED,
-                idempotency_key=key,
-                correlation_id=origin.get("event_correlation_id")
-                or payload["event_id"],
-                run_at=datetime.now(timezone.utc),
-                payload={
-                    "retry_policy": policy.to_dict(),
-                    "entity": entity,
-                    "chain_depth": depth,
-                    "graph_id": graph_id,
-                    "node_types": node_types,
-                    "matched_triggers": matched_triggers or [],
-                },
-            )
+        correlation = origin.get("event_correlation_id") or payload["event_id"]
+        now = datetime.now(timezone.utc)
+        job = ExecutionJob(
+            agent_id=function_id,
+            kind=ExecutionKind.SCHEDULED,
+            idempotency_key=key,
+            correlation_id=correlation,
+            run_at=now,
+            payload={
+                "retry_policy": policy.to_dict(),
+                "entity": entity,
+                "chain_depth": depth,
+                "graph_id": graph_id,
+                "node_types": node_types,
+                "matched_triggers": matched_triggers or [],
+            },
         )
+        return self._enqueue_graph(job, payload["event_id"], batching, now)
+
+    def _enqueue_graph(self, job, event_id, batching, now):
+        store = self._store
+        with store._lock:
+            conn = store._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                member = conn.execute(
+                    "SELECT job_id FROM graph_batch_members WHERE function_id = ? AND event_id = ?",
+                    (job.agent_id, event_id),
+                ).fetchone()
+                if member:
+                    result = store._get_by_id(member[0])
+                    conn.commit()
+                    return result
+                old = conn.execute(
+                    "SELECT * FROM schedule_jobs WHERE idempotency_key = ?",
+                    (job.idempotency_key,),
+                ).fetchone()
+                if old:
+                    existing = SqliteExecutionStore._row_to_job(old)
+                    conn.execute(
+                        "INSERT INTO graph_batch_members VALUES (?, ?, ?)",
+                        (job.agent_id, event_id, existing.id),
+                    )
+                    conn.commit()
+                    return existing
+                if batching:
+                    fingerprint = job.payload["matched_triggers"]
+                    rows = conn.execute(
+                        "SELECT * FROM schedule_jobs WHERE agent_id = ? AND state = ? "
+                        "AND attempts = 0 AND run_at > ? AND idempotency_key GLOB 'function-graph:*' "
+                        "ORDER BY created_at",
+                        (job.agent_id, ExecutionState.PENDING.value, now.timestamp()),
+                    ).fetchall()
+                    existing = next(
+                        (
+                            SqliteExecutionStore._row_to_job(row)
+                            for row in rows
+                            if json.loads(row["payload"]).get("batch_fingerprint")
+                            == fingerprint
+                            and json.loads(row["payload"]).get("graph_id")
+                            == job.payload["graph_id"]
+                            and json.loads(row["payload"]).get("retry_policy")
+                            == job.payload["retry_policy"]
+                        ),
+                        None,
+                    )
+                    entry = {
+                        "entity": job.payload["entity"],
+                        "correlation_id": job.correlation_id,
+                        "event_id": event_id,
+                        "chain_depth": job.payload["chain_depth"],
+                        "node_types": job.payload["node_types"],
+                    }
+                    if existing:
+                        job = existing
+                        job.payload["entries"].append(entry)
+                        job.payload["chain_depth"] = max(
+                            job.payload["chain_depth"], entry["chain_depth"]
+                        )
+                        run_at = (
+                            now.timestamp()
+                            if len(job.payload["entries"]) >= batching["batch_size"]
+                            else job.run_at.timestamp()
+                        )
+                        conn.execute(
+                            "UPDATE schedule_jobs SET payload = ?, run_at = ?, updated_at = ? WHERE id = ?",
+                            (json.dumps(job.payload), run_at, now.timestamp(), job.id),
+                        )
+                    else:
+                        job.payload["entries"] = [entry]
+                        job.payload["batch_fingerprint"] = fingerprint
+                        job.run_at = (
+                            now
+                            if batching["batch_size"] == 1
+                            else now + timedelta(seconds=batching["debounce_seconds"])
+                        )
+                        conn.execute(
+                            "INSERT INTO schedule_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            SqliteExecutionStore._to_row(job),
+                        )
+                else:
+                    conn.execute(
+                        "INSERT INTO schedule_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING",
+                        SqliteExecutionStore._to_row(job),
+                    )
+                    job = SqliteExecutionStore._row_to_job(
+                        conn.execute(
+                            "SELECT * FROM schedule_jobs WHERE idempotency_key = ?",
+                            (job.idempotency_key,),
+                        ).fetchone()
+                    )
+                conn.execute(
+                    "INSERT INTO graph_batch_members VALUES (?, ?, ?)",
+                    (job.agent_id, event_id, job.id),
+                )
+                conn.commit()
+                return job
+            except Exception:
+                conn.rollback()
+                raise
 
     def claim_next(self, worker_id: str, *, now: datetime, lease_seconds: float):
         if not isinstance(worker_id, str) or not worker_id:
@@ -449,11 +557,44 @@ class ScheduleSlots:
             )
             return None
         if graph_event:
-            entity = graph_event_filter(job) if graph_event_filter else None
+            if "entries" in job.payload:
+                from types import SimpleNamespace
+
+                entries = []
+                for entry in job.payload["entries"]:
+                    member_payload = {
+                        **job.payload,
+                        "entity": entry["entity"],
+                        "node_types": entry["node_types"],
+                    }
+                    filtered = (
+                        graph_event_filter(
+                            SimpleNamespace(
+                                agent_id=job.agent_id, payload=member_payload
+                            )
+                        )
+                        if graph_event_filter
+                        else None
+                    )
+                    if filtered is not None:
+                        entries.append(
+                            {
+                                "event_id": entry["event_id"],
+                                "correlation_id": entry["correlation_id"],
+                                "entity": filtered,
+                            }
+                        )
+                entity = {"events": entries} if entries else None
+            else:
+                entity = graph_event_filter(job) if graph_event_filter else None
             if entity is None:
                 self._skip(job, now, "trigger_changed")
                 return None
             extra = {"entity": entity}
+            if "entries" in job.payload:
+                extra["correlation_ids"] = [
+                    entry["correlation_id"] for entry in job.payload["entries"]
+                ]
         else:
             extra = {}
         result = service.invoke(

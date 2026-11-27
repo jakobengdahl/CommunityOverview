@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "7"),
+        ("contract_version", "8"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -944,7 +944,8 @@ def test_graph_trigger_version_and_envelope(host):
     assert envelope["origin"]["event_correlation_id"] == "corr"
 
 
-def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
+@pytest.mark.parametrize("batching", [False, True])
+def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path, batching):
     from backend.core.events.models import (
         Event,
         EventContext,
@@ -963,8 +964,15 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
     manifest["grants"].append("graph:read")
     service.enabled["example"].append("graph:read")
     manifest.update(
-        contract_version="6",
-        triggers=[{"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}],
+        contract_version="7" if batching else "6",
+        triggers=[
+            {
+                "kind": "graph_change",
+                "node_types": ["Task"],
+                "fields": ["name"],
+                **({"debounce_seconds": 5, "batch_size": 1} if batching else {}),
+            }
+        ],
         retry={"max_attempts": 2, "base_seconds": 0, "factor": 1, "max_seconds": 0},
     )
     (directory / "function.json").write_text(json.dumps(manifest))
@@ -1000,6 +1008,8 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
     assert (
         records[0].correlation_id == "corr" and records[0].payload["chain_depth"] == 4
     )
+    if batching:
+        assert records[0].payload["correlation_ids"] == ["corr"]
     execute.assert_not_called()
     event.event_id = "new-event"
     event.origin.event_causation_depth = 0

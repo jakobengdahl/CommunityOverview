@@ -332,6 +332,7 @@ class FunctionBroker:
             "4",
             "5",
             "6",
+            "7",
         }:
             raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 

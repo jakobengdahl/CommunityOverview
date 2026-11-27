@@ -1724,6 +1724,11 @@ Version 4 functions can write into a staged session when the caller supplies
 that session on the manual invocation. Their changes stay in the session until
 reviewed and merged; see the [function contract](USER_FUNCTION_CONTRACT.md#version-4-session-staged-writes).
 
+Graph-change triggers can group bursts into bounded batches with contract version 7.
+Set a debounce window and batch size in the trigger; events are delivered when
+the window expires or the batch fills. See the [function contract](USER_FUNCTION_CONTRACT.md#version-7-graph-change-batching)
+for limits and the invocation envelope.
+
 ### Inbound user-function webhooks
 
 An administrator of the bound graph can enable an external function call using
