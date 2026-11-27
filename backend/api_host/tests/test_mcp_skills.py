@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -138,6 +139,8 @@ def snapshot(app_config, mock_llm_provider, enabled):
         app = create_app(app_config)
     with TestClient(app) as client:
         headers = {"Accept": "application/json, text/event-stream"}
+        if app_config.auth_bearer_token:
+            headers["Authorization"] = f"Bearer {app_config.auth_bearer_token}"
         init = client.post(
             "/mcp/",
             json={
@@ -176,6 +179,8 @@ def snapshot(app_config, mock_llm_provider, enabled):
             "Mcp-Protocol-Version": "2026-07-28",
             "Mcp-Method": "server/discover",
         }
+        if app_config.auth_bearer_token:
+            modern_headers["Authorization"] = f"Bearer {app_config.auth_bearer_token}"
         meta = {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientCapabilities": {},
@@ -190,16 +195,33 @@ def snapshot(app_config, mock_llm_provider, enabled):
             ]
             assert modern_list["ttlMs"] == 400
             assert modern_list["cacheScope"] == "public"
-        return result, tools, resources, listing, discover
+        return result, tools, resources, listing, discover, content if enabled else None
 
 
+@pytest.mark.parametrize(
+    "grant, ceiling, expected",
+    [
+        ("off", "read", False),
+        ("read", "off", False),
+        ("read", "read", True),
+        ("read_write", "read_write", True),
+    ],
+)
 def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
-    app_config, mock_llm_provider
+    app_config, mock_llm_provider, monkeypatch, grant, ceiling, expected
 ):
-    off, tools_off, resources_off, listing_off, discover_off = snapshot(
+    monkeypatch.setenv("ATTACHMENT_CONTENT_ACCESS", ceiling)
+    if grant != "off":
+        app_config = replace(
+            app_config,
+            mcp_attachment_tools=grant,
+            auth_enabled=True,
+            auth_bearer_token="test-token",
+        )
+    off, tools_off, resources_off, listing_off, discover_off, _ = snapshot(
         app_config, mock_llm_provider, False
     )
-    on, tools_on, resources_on, listing_on, discover_on = snapshot(
+    on, tools_on, resources_on, listing_on, discover_on, content = snapshot(
         app_config, mock_llm_provider, True
     )
     assert (
@@ -212,6 +234,8 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
     )
     assert "io.modelcontextprotocol/skills" in discover_on["capabilities"]["extensions"]
     assert tools_off == tools_on
+    assert ("read_node_attachment" in {tool["name"] for tool in tools_on}) is expected
+    assert ("Attachments" in content) is expected
     assert [
         r for r in resources_on if not r["uri"].startswith("skill://")
     ] == resources_off

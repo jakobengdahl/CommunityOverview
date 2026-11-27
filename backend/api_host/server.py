@@ -623,11 +623,12 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     skills_config = get_skills_config().mcp
     mcp_extensions = []
     if skills_config.enabled:
+        from backend.runtime.attachment_access import attachment_tool_allowed
         from backend.skills.mcp import CoreSkillProvider, SkillsExtension
 
         enabled_tools = set()
         if (
-            config.mcp_attachment_tools != "off"
+            attachment_tool_allowed("read_node_attachment", config.mcp_attachment_tools)
             and graph_service.attachment_settings is not None
         ):
             enabled_tools.add("read_node_attachment")
