@@ -37,7 +37,7 @@ from enum import Enum
 from urllib.parse import urlparse, urljoin
 
 import httpx2 as httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator
 
 from backend.core.events.delivery import (
     MAX_REDIRECTS,
@@ -123,6 +123,19 @@ class MCPSkillHints(BaseModel):
 class MCPSkillsConfig(MCPSkillHints):
     enabled: bool = False
     graphSemantics: MCPSkillHints = Field(default_factory=MCPSkillHints)
+
+    @field_validator("graphSemantics", mode="before")
+    @classmethod
+    def _ignore_invalid_disabled_graph_hints(cls, value: Any, info: ValidationInfo) -> Any:
+        if not info.data.get("enabled", False):
+            try:
+                return MCPSkillHints.model_validate(value)
+            except ValidationError:
+                logger.warning(
+                    "Ignoring invalid graphSemantics hints while MCP skills are disabled"
+                )
+                return MCPSkillHints()
+        return value
 
 
 class SkillsConfig(BaseModel):

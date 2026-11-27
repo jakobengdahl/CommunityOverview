@@ -48,6 +48,24 @@ class TestConfigLoader:
             assert schema["node_types"][system_type]["static"] is True
             assert schema["node_types"][system_type]["category"] == "system"
 
+    @pytest.mark.parametrize("invalid", [{"ttlMs": -1}, {"cacheScope": "shared"}, None, "bad"])
+    @pytest.mark.parametrize("enabled", [False, None])
+    def test_disabled_mcp_invalid_graph_hints_preserve_profile(self, tmp_path, invalid, enabled):
+        from backend.config import config_loader
+
+        mcp = {"graphSemantics": invalid}
+        if enabled is not None:
+            mcp["enabled"] = enabled
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps({
+            "presentation": {"skills_config": {"mcp": mcp}},
+            "schema": {"node_types": {"MyDomain": {"fields": ["name"]}}},
+        }), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+        assert "MyDomain" in config_loader.get_schema()["node_types"]
+        assert not config_loader.get_skills_config().mcp.enabled
+
     def test_all_system_node_types_injected_from_code(self):
         """System node types must come from code, not from config."""
         from backend.config import config_loader
