@@ -197,6 +197,7 @@ _COMPOSING_TOOLS = frozenset(
         "find_similar_nodes",
         "find_similar_nodes_batch",
         "get_graph_stats",
+        "describe_graph",
         "get_subtypes",
         "audit_relationship_applicability",
         "show_graph_widget",

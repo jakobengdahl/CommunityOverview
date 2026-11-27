@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend import __version__
 from backend.api_host.server import create_app
+from backend.runtime.session_context import SESSION_ID_HEADER
 from backend.skills.loader import MCPSkillsConfig, SkillsConfig
 from backend.skills.mcp import (
     CoreSkillProvider,
@@ -208,15 +209,16 @@ def snapshot(app_config, mock_llm_provider, enabled):
         headers["Mcp-Protocol-Version"] = "2025-03-26"
         tools = rpc(client, "tools/list", {}, headers)["result"]["tools"]
         resources = rpc(client, "resources/list", {}, headers)["result"]["resources"]
+        # A session-bound client gets the profile as other composing reads do.
+        session = client.post("/api/sessions", json={"name": "p"}, headers=headers)
+        bound = dict(headers, **{SESSION_ID_HEADER: session.json()["id"]})
         profile_result = rpc(
-            client, "tools/call", {"name": "describe_graph", "arguments": {}}, headers
+            client, "tools/call", {"name": "describe_graph", "arguments": {}}, bound
         )["result"]
-        resource = rpc(client, "resources/read", {"uri": "graph://profile"}, headers)[
-            "result"
-        ]
-        assert json.loads(profile_result["content"][0]["text"]) == json.loads(
-            resource["contents"][0]["text"]
-        )
+        resource = rpc(client, "resources/read", {"uri": "graph://profile"}, bound)
+        described = json.loads(profile_result["content"][0]["text"])
+        assert "node_count" in described
+        assert described == json.loads(resource["result"]["contents"][0]["text"])
         listing = rpc(client, "skills/list", {}, headers)
         if enabled:
             fallback = rpc(
@@ -928,11 +930,12 @@ def test_profile_change_publishes_only_for_changed_profile():
         )
 
         current_scope = ContextVar("profile_scope", default=GraphAccessNarrowing())
+        gate = ContextVar("profile_gate", default={"allowed": True})
 
         class Hook:
             def evaluate(self, context):
                 return GraphAuthorizationDecision(
-                    allowed=True, graph_access=current_scope.get()
+                    allowed=gate.get()["allowed"], graph_access=current_scope.get()
                 )
 
         publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
@@ -941,6 +944,11 @@ def test_profile_change_publishes_only_for_changed_profile():
         publisher.subscribe(public.append)
         current_scope.set(GraphAccessNarrowing(enabled=True, allow_local_graph=True))
         publisher.subscribe(restricted.append)  # No prior resource read.
+        revoked = {"allowed": False}
+        reset = gate.set(revoked)
+        restored = []
+        publisher.subscribe(restored.append)
+        gate.reset(reset)
         nodes.append(
             Node(
                 id="h",
@@ -952,14 +960,15 @@ def test_profile_change_publishes_only_for_changed_profile():
         publisher.on_event(None)
         await asyncio.sleep(0.05)
         assert public == [ResourceUpdated(uri="graph://profile")]
-        assert restricted == []
+        assert restricted == [] and restored == []
+        revoked["allowed"] = True
         nodes.append(Node(id="b", name="B", type="Person"))
         publisher.on_event(None)
         await asyncio.sleep(0.05)
-        assert len(public) == 2 and len(restricted) == 1
+        assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
         publisher.on_event(None)
         await asyncio.sleep(0.05)
-        assert len(public) == 2 and len(restricted) == 1
+        assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
         nodes[0].metadata["origin_graph_id"] = "hidden"
         publisher.on_event(None)
         await asyncio.sleep(0.05)

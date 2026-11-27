@@ -1035,7 +1035,8 @@ entity main no longer holds) or `none`; `revision` is main's, or `0` for
 `POST /api/similar` and `/api/similar/batch`, `GET /api/stats`,
 `GET /api/meta/subtypes`, `GET /api/meta/relationship-applicability/audit`,
 `GET /api/export` and `/export_graph`,
-the config-driven typed interfaces, their MCP tools (`show_graph_widget` included)
+the config-driven typed interfaces, their MCP tools (`show_graph_widget` and
+`describe_graph` with `graph://profile` included)
 and the chat assistant's graph tools. A session's
 own canvas resolves its node ids in its composed view too:
 `GET /api/sessions/{id}?resolve=true`, `add_nodes_to_session` (which accepts a

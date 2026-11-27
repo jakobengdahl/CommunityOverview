@@ -555,7 +555,9 @@ Place individual v1 template JSON documents in `config/<profile>/templates/` alo
 The `describe_graph` tool and read-only `graph://profile` resource return the
 same deterministic statistics for the local graph. Each read recomputes the
 profile; there is no cache or TTL. The caller's graph read access filters nodes
-and both endpoints of edges, and archived nodes and edges are excluded.
+and both endpoints of edges, and archived nodes and edges are excluded. In a
+staged session the profile is computed from the session's composed view, like
+other composing reads.
 
 `node_count` is the visible total. `node_types` and `subtypes` contain counts;
 `tags` counts nodes carrying each tag. `relationships` reports each directed
@@ -571,6 +573,7 @@ by descending count then name. A self-loop contributes two to degree.
 When MCP skills are enabled, each listen stream compares its own authorized
 profile, starting when it subscribes, and receives the standard
 `notifications/resources/updated` for `graph://profile` only when that profile
-changes. The notification carries no profile content. With skills disabled the
+changes, or on the first graph change after its read access returns. The
+notification carries no profile content. With skills disabled the
 bus is absent and no notification is published. Graph content does
 not change skill files or their digests.

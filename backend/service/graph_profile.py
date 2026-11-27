@@ -163,11 +163,8 @@ class ProfileChangePublisher:
                 for token, (context, previous) in list(self.listeners.items()):
                     scope, denied = context.copy().run(read_access, self.hook)
                     updated = profile(self.storage, scope) if not denied else None
-                    if (
-                        updated is not None
-                        and previous is not None
-                        and updated != previous
-                    ):
+                    # A listener whose read access returns has missed changes.
+                    if updated is not None and updated != previous:
                         changed.add((token, scope))
                     self.listeners[token] = (context, updated)
                 if changed and self.loop is not None and not self.loop.is_closed():
