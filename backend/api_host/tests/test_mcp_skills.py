@@ -127,6 +127,32 @@ def test_get_list_and_cache_hints():
     anyio.run(check)
 
 
+def test_caller_dependent_access_has_private_cache_hints():
+    extension = SkillsExtension(
+        [CoreSkillProvider(set()), Provider({"SKILL.md": skill()})], 1000, "public"
+    )
+
+    async def check():
+        for user in ("allowed", "denied"):
+            ctx = SimpleNamespace(
+                protocol_version="2026-07-28",
+                request=SimpleNamespace(headers={"x-skill-user": user}),
+            )
+            listing = await extension.list_skills(ctx, SimpleNamespace(cursor=None))
+            assert len(listing["skills"]) == (2 if user == "allowed" else 1)
+            assert listing["cacheScope"] == "private"
+            for entry in listing["skills"]:
+                assert entry["cacheScope"] == "private"
+                result = await extension.get_skill(
+                    ctx, SimpleNamespace(uri=entry["uri"])
+                )
+                assert (
+                    result["cacheScope"] == result["skill"]["cacheScope"] == "private"
+                )
+
+    anyio.run(check)
+
+
 def rpc(client, method, params, headers):
     response = client.post(
         "/mcp/",
@@ -523,6 +549,45 @@ def test_graph_semantics_settings_validate_independently():
             "ttlMs": 0,
             "cacheScope": "private",
         }
+
+
+def test_refresh_replaces_owner_when_manifest_is_unchanged():
+    from mcp.server.mcpserver import MCPServer
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.skills.mcp import register_skill_tools
+
+    class Hook:
+        def evaluate(self, ctx):
+            return GraphAuthorizationDecision(allowed=True)
+
+    async def check():
+        original = Provider({"SKILL.md": skill(), "ref.md": "reference"})
+        replacement = Provider(dict(original.files))
+
+        async def deny(ctx, name):
+            return False
+
+        replacement.can_read = deny
+        extension = SkillsExtension([original], 10, "public")
+        server = MCPServer("test", extensions=[extension])
+        register_skill_tools(server, extension, Hook(), True)
+        events = []
+        server._subscriptions.subscribe(events.append)
+        request = SimpleNamespace(
+            protocol_version="2026-07-28",
+            request=SimpleNamespace(headers={"x-skill-user": "allowed"}),
+        )
+        uri = "skill://extra/SKILL.md"
+        assert await extension.allowed(request, uri)
+        extension.providers = [replacement]
+        refresh = server._tool_manager.get_tool("refresh_skills").fn
+        result = await refresh(SimpleNamespace(request_context=request))
+        assert result["skills"] == []
+        assert all(owner is replacement for owner, _ in extension.owners.values())
+        assert not await extension.allowed(request, uri)
+        assert not events
+
+    anyio.run(check)
 
 
 def test_refresh_and_fallback_share_authorized_snapshot():
