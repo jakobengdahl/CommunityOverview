@@ -435,7 +435,7 @@ class ScheduleSlots:
                         )
                         conn.commit()
                         return None
-                conn.execute(
+                admission = conn.execute(
                     "INSERT INTO schedule_rate VALUES (?, ?)", (row["agent_id"], ts)
                 )
                 conn.execute(
@@ -455,6 +455,8 @@ class ScheduleSlots:
                     ),
                 )
                 job = store._get_by_id(row["id"])
+                job._previous_update = row["updated_at"]
+                job._admission_id = admission.lastrowid
                 conn.commit()
                 return job
             except Exception:
@@ -543,6 +545,7 @@ class ScheduleSlots:
 
         An exception leaves the attempt running: its outcome may be uncertain.
         """
+        self._refresh_pending_retries(service, now)
         job = self.claim_next(worker_id, now=now, lease_seconds=lease_seconds)
         if job is None:
             return None
@@ -556,11 +559,23 @@ class ScheduleSlots:
         ):
             self._skip(job, now, "binding_changed")
             return None
-        if job.attempts > 1 and not self._retry_declared(service, job):
-            self._finish(
-                job.id, attempt=job.attempts, now=now, success=False, retry=False
-            )
-            return None
+        if job.attempts > 1:
+            policy = self._retry_declared(service, job)
+            if not policy or job.attempts > policy.max_attempts:
+                self._finish(
+                    job.id, attempt=job.attempts, now=now, success=False, retry=False
+                )
+                return None
+            try:
+                run_at = _retry_at(policy, job.attempts - 1, job._previous_update)
+            except (OverflowError, ValueError, OSError):
+                self._finish(
+                    job.id, attempt=job.attempts, now=now, success=False, retry=False
+                )
+                return None
+            if run_at > now.timestamp():
+                self._defer_retry(job, run_at, now)
+                return None
         if actor_binding is None:
             self._finish(
                 job.id, attempt=job.attempts, now=now, success=False, retry=False
@@ -640,6 +655,35 @@ class ScheduleSlots:
         self._finish_result(service, job, result, datetime.now(timezone.utc))
         return result
 
+    def _defer_retry(self, job, run_at, now):
+        with self._store._lock:
+            conn = self._store._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                updated = conn.execute(
+                    "UPDATE schedule_jobs SET state = ?, attempts = attempts - 1, "
+                    "run_at = ?, updated_at = ?, lease_owner = NULL, lease_expiry = NULL "
+                    "WHERE id = ? AND state = ? AND attempts = ? AND lease_owner = ?",
+                    (
+                        ExecutionState.PENDING.value,
+                        run_at,
+                        job._previous_update,
+                        job.id,
+                        ExecutionState.RUNNING.value,
+                        job.attempts,
+                        job.lease_owner,
+                    ),
+                )
+                if updated.rowcount:
+                    conn.execute(
+                        "DELETE FROM schedule_rate WHERE rowid = ? AND function_id = ? AND admitted_at = ?",
+                        (job._admission_id, job.agent_id, now.timestamp()),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
     def _skip(self, job, now, reason):
         with self._store._lock:
             self._store._conn.execute(
@@ -659,17 +703,109 @@ class ScheduleSlots:
             self._store._conn.commit()
 
     @staticmethod
-    def _retry_declared(service, job):
+    def _read_retry_policy(service, job):
         from backend.functions.invocation import load_manifest
 
         try:
             manifest, _ = load_manifest(service.root, job.agent_id)
+        except Exception:
+            return None
+        try:
             declared = manifest.get("retry")
-            return bool(declared) and RetryPolicy(
-                **declared
-            ).to_dict() == job.payload.get("retry_policy")
-        except (OSError, ValueError, TypeError):
-            return False
+            if (
+                not isinstance(declared, dict)
+                or set(declared)
+                != {"max_attempts", "base_seconds", "factor", "max_seconds"}
+                or any(type(value) not in (int, float) for value in declared.values())
+            ):
+                return None
+            policy = RetryPolicy(**declared)
+            if not _valid_retry_policy(policy):
+                return None
+            return policy
+        except (OSError, ValueError, TypeError, OverflowError):
+            return None
+
+    def _retry_declared(self, service, job):
+        policy = self._read_retry_policy(service, job)
+        if policy is not None:
+            with self._store._lock:
+                current = self._store._get_by_id(job.id)
+                if (
+                    current is None
+                    or current.state != ExecutionState.RUNNING
+                    or current.attempts != job.attempts
+                ):
+                    return None
+                current.payload["retry_policy"] = policy.to_dict()
+                updated = self._store._conn.execute(
+                    "UPDATE schedule_jobs SET payload = ? WHERE id = ? AND state = ? AND attempts = ?",
+                    (
+                        json.dumps(current.payload),
+                        job.id,
+                        ExecutionState.RUNNING.value,
+                        job.attempts,
+                    ),
+                )
+                self._store._conn.commit()
+                if not updated.rowcount:
+                    return None
+        return policy
+
+    def _refresh_pending_retries(self, service, now):
+        store = self._store
+        with store._lock:
+            conn = store._conn
+            ids = conn.execute(
+                "SELECT id FROM schedule_jobs WHERE state = ? AND attempts > 0",
+                (ExecutionState.PENDING.value,),
+            ).fetchall()
+            for item in ids:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM schedule_jobs WHERE id = ? AND state = ? AND attempts > 0",
+                        (item["id"], ExecutionState.PENDING.value),
+                    ).fetchone()
+                    if row is None:
+                        conn.commit()
+                        continue
+                    job = SqliteExecutionStore._row_to_job(row)
+                    policy = self._read_retry_policy(service, job)
+                    try:
+                        run_at = (
+                            _retry_at(policy, job.attempts, job.updated_at.timestamp())
+                            if policy
+                            else None
+                        )
+                    except (OverflowError, ValueError, OSError):
+                        run_at = None
+                    if policy is not None:
+                        job.payload["retry_policy"] = policy.to_dict()
+                    if (
+                        policy is None
+                        or run_at is None
+                        or job.attempts >= policy.max_attempts
+                    ):
+                        conn.execute(
+                            "UPDATE schedule_jobs SET state = ?, payload = ?, dead_letter_reason = ?, finished_at = ? WHERE id = ?",
+                            (
+                                ExecutionState.DEAD_LETTER.value,
+                                json.dumps(job.payload),
+                                "attempts exhausted",
+                                now.timestamp(),
+                                job.id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE schedule_jobs SET payload = ?, run_at = ? WHERE id = ?",
+                            (json.dumps(job.payload), run_at, job.id),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
     def _finish(
         self,
