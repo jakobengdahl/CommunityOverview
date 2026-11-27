@@ -140,6 +140,13 @@ class GraphSemanticsProvider:
 
         snapshot = clean(source)
         data = canonical(snapshot)
+        # Values are clean one by one, but a tag can still form across two JSON
+        # strings; escaping its "<" keeps the JSON values while breaking the tag.
+        while True:
+            escaped = _DANGEROUS_TAG_RE.sub(lambda m: "\\u003c" + m[0][1:], data)
+            if escaped == data:
+                break
+            data = escaped
         source_digest = hashlib.sha256(canonical(source).encode()).hexdigest()
         # A reproducible date identifier, not the time the schema was modified.
         days = int(source_digest[:8], 16) % 36525

@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend import __version__
 from backend.api_host.server import create_app
-from backend.skills.loader import MCPSkillsConfig, SkillsConfig
+from backend.skills.loader import _DANGEROUS_TAG_RE, MCPSkillsConfig, SkillsConfig
 from backend.skills.mcp import (
     CoreSkillProvider,
     GraphSemanticsProvider,
@@ -530,7 +530,7 @@ def test_unsafe_or_oversized_schema_is_refused(value):
         SkillsExtension([GraphSemanticsProvider(schema, presentation)], 0, "private")
 
 
-def test_schema_values_cannot_strip_across_json_properties():
+def test_schema_values_cannot_strip_or_form_html_across_json_properties():
     schema = {
         "node_types": {"Type": {"first": "<script", "second": "></script>"}},
         "relationship_types": {},
@@ -546,6 +546,7 @@ def test_schema_values_cannot_strip_across_json_properties():
     content = extension.files["skill://graph-semantics/SKILL.md"]
     data = json.loads(content.split("```json\n")[1].split("\n```")[0])
     assert data["node_types"]["Type"] == schema["node_types"]["Type"]
+    assert _DANGEROUS_TAG_RE.search(content) is None
 
 
 def test_graph_semantics_settings_validate_independently():
