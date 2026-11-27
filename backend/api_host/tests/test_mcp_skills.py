@@ -816,7 +816,7 @@ def test_refresh_and_fallback_share_authorized_snapshot():
     anyio.run(check)
 
 
-def test_profile_counts_visibility_order_and_freshness():
+def test_profile_counts_visibility_order_and_freshness(monkeypatch):
     from backend.core import Edge, Node
     from backend.runtime.authorization import GraphAccessNarrowing
     from backend.service.graph_profile import profile
@@ -881,6 +881,36 @@ def test_profile_counts_visibility_order_and_freshness():
     assert describe(storage, Hook(True, narrowing))["node_count"] == 4
     assert describe(storage, Hook(False, narrowing))["error_code"] == "access_denied"
 
+    class TargetHook(Hook):
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=context.target != "get_node_details" or self.allowed,
+                graph_access=self.scope
+                if context.target == "get_node_details"
+                else GraphAccessNarrowing(),
+            )
+
+    assert (
+        describe(storage, TargetHook(False, narrowing))["error_code"] == "access_denied"
+    )
+    assert describe(storage, TargetHook(True, narrowing))["node_count"] == 4
+    from backend.service import access
+
+    original_filter = access.filter_nodes_and_edges
+
+    def mutate_after_snapshot(**kwargs):
+        next(n for n in nodes if n.id == "a").metadata["origin_graph_id"] = "hidden"
+        return original_filter(**kwargs)
+
+    monkeypatch.setattr(access, "filter_nodes_and_edges", mutate_after_snapshot)
+    assert profile(storage, narrowing)["node_count"] == 4
+    monkeypatch.setattr(access, "filter_nodes_and_edges", original_filter)
+    long = "z" * 10000
+    nodes[:] = [Node(id=long, name="Name", type=long, tags=["tag"], subtypes=[long])]
+    bounded = profile(storage, GraphAccessNarrowing())
+    assert len(json.dumps(bounded)) < 2000
+    assert len(bounded["central_nodes"][0]["id"]) == 256
+
 
 def test_profile_change_publishes_only_for_changed_profile():
     import asyncio
@@ -891,34 +921,75 @@ def test_profile_change_publishes_only_for_changed_profile():
     async def check():
         nodes = [Node(id="a", name="A", type="Person")]
         storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
-        bus = InMemorySubscriptionBus()
-        received = asyncio.Event()
-        events = []
+        from contextvars import ContextVar
+        from backend.runtime.authorization import (
+            GraphAccessNarrowing,
+            GraphAuthorizationDecision,
+        )
 
-        def record(event):
-            events.append(event)
-            received.set()
+        current_scope = ContextVar("profile_scope", default=GraphAccessNarrowing())
 
-        bus.subscribe(record)
-        publisher = ProfileChangePublisher(storage, bus)
+        class Hook:
+            def evaluate(self, context):
+                return GraphAuthorizationDecision(
+                    allowed=True, graph_access=current_scope.get()
+                )
+
+        publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
         publisher.loop = asyncio.get_running_loop()
+        public, restricted = [], []
+        publisher.subscribe(public.append)
+        current_scope.set(GraphAccessNarrowing(enabled=True, allow_local_graph=True))
+        publisher.subscribe(restricted.append)  # No prior resource read.
+        nodes.append(
+            Node(
+                id="h",
+                name="Hidden",
+                type="Person",
+                metadata={"origin_graph_id": "hidden"},
+            )
+        )
         publisher.on_event(None)
-        assert events == []
+        await asyncio.sleep(0.05)
+        assert public == [ResourceUpdated(uri="graph://profile")]
+        assert restricted == []
         nodes.append(Node(id="b", name="B", type="Person"))
         publisher.on_event(None)
-        await asyncio.wait_for(received.wait(), 2)
-        assert events == [ResourceUpdated(uri="graph://profile")]
+        await asyncio.sleep(0.05)
+        assert len(public) == 2 and len(restricted) == 1
         publisher.on_event(None)
-        assert len(events) == 1
-        from backend.runtime.authorization import GraphAccessNarrowing
-        from backend.service.graph_profile import profile
-
-        scope = GraphAccessNarrowing(enabled=True, allow_local_graph=True)
-        publisher.observe(scope, profile(storage, scope))
-        received.clear()
+        await asyncio.sleep(0.05)
+        assert len(public) == 2 and len(restricted) == 1
         nodes[0].metadata["origin_graph_id"] = "hidden"
         publisher.on_event(None)
-        await asyncio.wait_for(received.wait(), 2)
-        assert events == [ResourceUpdated(uri="graph://profile")] * 2
+        await asyncio.sleep(0.05)
+        assert len(public) == 2 and len(restricted) == 2
+
+        # Changes hidden by the unrestricted cap still reach an unobserved scope.
+        nodes[:] = [Node(id=str(i), name=str(i), type=f"A{i:03}") for i in range(101)]
+        nodes.append(
+            Node(
+                id="private",
+                name="Private",
+                type="Z",
+                metadata={"origin_graph_id": "hidden"},
+            )
+        )
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        public.clear()
+        restricted.clear()
+        current_scope.set(
+            GraphAccessNarrowing(
+                enabled=True, allow_local_graph=False, include_graph_ids=("hidden",)
+            )
+        )
+        private = []
+        publisher.subscribe(private.append)
+        nodes[-1].name = "Changed"
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        assert public == [] and restricted == []
+        assert private == [ResourceUpdated(uri="graph://profile")]
 
     anyio.run(check)

@@ -710,22 +710,25 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             )
         )
 
+    profile_publisher = None
+    if mcp_extensions:
+        from mcp.server.subscriptions import InMemorySubscriptionBus
+        from backend.service.graph_profile import ProfileChangePublisher
+
+        profile_publisher = ProfileChangePublisher(
+            graph_storage, InMemorySubscriptionBus(), graph_service.authorization_hook
+        )
+        graph_storage.add_system_listener(profile_publisher.on_event)
+
     # Initialize MCPServer with dynamic instructions built from schema configuration
     mcp = MCPServer(
         config.mcp_name,
         instructions=build_mcp_instructions(),
-        subscriptions=None if mcp_extensions else False,
+        subscriptions=profile_publisher if mcp_extensions else False,
         **({"extensions": mcp_extensions} if mcp_extensions else {}),
     )
     if mcp_extensions:
         mcp.middleware.append(mcp_extensions[0].resource_access)
-    profile_publisher = None
-    if mcp_extensions:
-        from backend.service.graph_profile import ProfileChangePublisher
-
-        profile_publisher = ProfileChangePublisher(graph_storage, mcp._subscriptions)
-        graph_storage.add_system_listener(profile_publisher.on_event)
-
     tools_map = register_mcp_tools(
         mcp,
         graph_service,

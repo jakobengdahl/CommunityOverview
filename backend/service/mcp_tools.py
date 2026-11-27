@@ -1586,7 +1586,7 @@ def register_mcp_tools(
         from .graph_profile import describe
 
         return service._read(
-            "describe_graph",
+            "get_node_details",
             lambda storage: describe(
                 storage, service.authorization_hook, profile_publisher
             ),

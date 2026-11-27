@@ -563,13 +563,14 @@ source type, relationship type and target type, the number of distinct source
 nodes with at least one matching edge, and that count divided by the visible
 source-type count. `central_nodes` ranks nodes by visible incident edge count,
 including zero-degree nodes, with ties ordered by ID. Each list is capped at 100
-entries. Types, subtypes and relationships are ordered by name; tags are ordered
+entries. Each string is truncated to 256 Unicode characters in the response;
+ordering and counts use the original values, so truncated labels can coincide.
+Types, subtypes and relationships are ordered by name; tags are ordered
 by descending count then name. A self-loop contributes two to degree.
 
-When MCP skills are enabled, changes to the unrestricted profile or to a
-previously read access scope publish the standard `notifications/resources/updated` notification for `graph://profile`
-on the in-process subscription bus. A change visible only to a scope that has
-not yet read the profile may not produce a notification. It carries no profile
-content. With skills
-disabled the bus is absent and no notification is published. Graph content does
+When MCP skills are enabled, each listen stream compares its own authorized
+profile, starting when it subscribes, and receives the standard
+`notifications/resources/updated` for `graph://profile` only when that profile
+changes. The notification carries no profile content. With skills disabled the
+bus is absent and no notification is published. Graph content does
 not change skill files or their digests.
