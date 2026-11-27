@@ -571,9 +571,16 @@ Types, subtypes and relationships are ordered by name; tags are ordered
 by descending count then name. A self-loop contributes two to degree.
 
 When MCP skills are enabled, each listen stream compares its own authorized
-profile, starting when it subscribes, and receives the standard
+profile, evaluated with the listen request's own authorization headers,
+starting when it subscribes, and receives the standard
 `notifications/resources/updated` for `graph://profile` only when that profile
-changes, or on the first graph change after its read access returns. The
+differs from the last one the stream could read. While its read access is
+denied nothing is sent, and access returning to an unchanged profile announces
+nothing. A stream that has never been able to read the profile is notified on
+the first graph change after access is granted. The comparison uses the main
+graph, not a staged session's composed view: staged session writes send no
+notification, and a main-graph change masked by a session layer still sends
+one. Notifying from a session's composed view is not yet implemented. The
 notification carries no profile content. With skills disabled the
 bus is absent and no notification is published. Graph content does
 not change skill files or their digests.

@@ -940,6 +940,8 @@ def test_profile_change_publishes_only_for_changed_profile():
 
         class Hook:
             def evaluate(self, context):
+                if gate.get().get("raise"):
+                    raise RuntimeError("hook failure")
                 return GraphAuthorizationDecision(
                     allowed=gate.get()["allowed"], graph_access=current_scope.get()
                 )
@@ -979,7 +981,27 @@ def test_profile_change_publishes_only_for_changed_profile():
         nodes[0].metadata["origin_graph_id"] = "hidden"
         publisher.on_event(None)
         await asyncio.sleep(0.05)
-        assert len(public) == 2 and len(restricted) == 2
+        assert len(public) == 2 and len(restricted) == 2 and len(restored) == 2
+
+        # Access returning to an unchanged profile announces nothing.
+        revoked["allowed"] = False
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        revoked["allowed"] = True
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        assert len(restored) == 2
+        # A failing hook for one stream neither blocks the others nor loses
+        # that stream's change.
+        revoked["raise"] = True
+        nodes.append(Node(id="c", name="C", type="Person"))
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        assert len(public) == 3 and len(restricted) == 3 and len(restored) == 2
+        del revoked["raise"]
+        publisher.on_event(None)
+        await asyncio.sleep(0.05)
+        assert len(public) == 3 and len(restricted) == 3 and len(restored) == 3
 
         # Changes hidden by the unrestricted cap still reach an unobserved scope.
         nodes[:] = [Node(id=str(i), name=str(i), type=f"A{i:03}") for i in range(101)]
@@ -1033,16 +1055,25 @@ def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
         ),
     )
 
+    from backend.runtime.authorization import get_current_request_authorization_inputs
+    from starlette.requests import Request
+
+    seen = []
+
     class Hook:
         def evaluate(self, context):
+            seen.append(get_current_request_authorization_inputs().get("headers"))
             return GraphAuthorizationDecision(
                 allowed=True, graph_access=GraphAccessNarrowing()
             )
 
     async def listen(publisher, listener, uri):
+        # The listen message's own headers, not the opening request's.
+        request = Request({"type": "http", "headers": [(b"x-listen", uri.encode())]})
         ctx = SimpleNamespace(
             method="subscriptions/listen",
             params={"notifications": {"resourceSubscriptions": [uri]}},
+            request=request,
         )
 
         async def call_next(ctx):
@@ -1076,5 +1107,9 @@ def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
         assert len(computed) == 1
         assert tracked == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
         assert other == []
+        assert seen and all(
+            h is not None and h.get("x-listen") == graph_profile.PROFILE_URI
+            for h in seen
+        )
 
     anyio.run(check)

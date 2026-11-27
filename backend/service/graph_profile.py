@@ -1,6 +1,7 @@
 """Deterministic, access-filtered statistics for the visible local graph."""
 
 import asyncio
+import logging
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from contextvars import ContextVar, copy_context
@@ -10,9 +11,12 @@ from threading import RLock
 
 from mcp_types import SubscriptionsListenRequestParams
 from pydantic import ValidationError
+from starlette.requests import Request
 
-from backend.runtime.authorization import GRAPH_ACTION_READ
+from backend.runtime.authorization import GRAPH_ACTION_READ, use_request_authorization
 from . import access
+
+logger = logging.getLogger(__name__)
 
 # Bound every collection in the response, including type and subtype counts.
 MAX_ITEMS = 100
@@ -130,6 +134,15 @@ class ProfileChangePublisher:
     resource still gets its composed view on read.
     """
 
+    @staticmethod
+    def _access(context, hook):
+        """``read_access`` in a listener's context; a failing hook denies."""
+        try:
+            return context.copy().run(read_access, hook)
+        except Exception:
+            logger.exception("Graph profile access check failed")
+            return None, True
+
     debounce = 0.25
 
     def __init__(self, storage, bus, hook):
@@ -151,9 +164,18 @@ class ProfileChangePublisher:
             uris = frozenset(params.notifications.resource_subscriptions or ())
         except ValidationError:
             uris = frozenset()  # The listen handler rejects the request.
+        # As for tool calls: on legacy SSE the handler inherits the opening
+        # request's context, so bind this listen message's own headers.
+        request = getattr(ctx, "request", None)
+        authorization = (
+            use_request_authorization(headers=request.headers)
+            if isinstance(request, Request)
+            else nullcontext()
+        )
         reset = _LISTEN_URIS.set(uris)
         try:
-            return await call_next(ctx)
+            with authorization:
+                return await call_next(ctx)
         finally:
             _LISTEN_URIS.reset(reset)
 
@@ -168,7 +190,7 @@ class ProfileChangePublisher:
             if not isinstance(event, _ProfileUpdates):
                 listener(event)
             elif tracked:
-                current, denied = context.copy().run(read_access, self.hook)
+                current, denied = self._access(context, self.hook)
                 if not denied and (token, current) in event.tokens:
                     listener(ResourceUpdated(uri=PROFILE_URI))
 
@@ -176,7 +198,7 @@ class ProfileChangePublisher:
             return self.bus.subscribe(deliver)
         with self.lock:
             generation = self.generation
-        scope, denied = context.copy().run(read_access, self.hook)
+        scope, denied = self._access(context, self.hook)
         baseline = profile(self.storage, scope) if not denied else None
         with self.lock:
             self.listeners[token] = (context, baseline)
@@ -231,10 +253,17 @@ class ProfileChangePublisher:
     def _recompute(self, listeners):
         changed = set()
         for token, (context, previous) in listeners:
-            scope, denied = context.copy().run(read_access, self.hook)
-            updated = profile(self.storage, scope) if not denied else None
-            # A listener whose read access returns has missed changes.
-            if updated is not None and updated != previous:
+            scope, denied = self._access(context, self.hook)
+            if denied:
+                # Keep the last visible baseline: access returning to an
+                # unchanged profile announces nothing.
+                continue
+            try:
+                updated = profile(self.storage, scope)
+            except Exception:
+                logger.exception("Graph profile recompute failed")
+                continue
+            if updated != previous:
                 changed.add((token, scope))
             with self.lock:
                 if token in self.listeners:
