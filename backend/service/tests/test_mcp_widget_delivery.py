@@ -3,7 +3,7 @@
 The widget reaches ChatGPT and Claude through one mechanism, the MCP Apps
 extension (spec 2026-01-26): a tool's ``_meta`` names a ``ui://`` resource and
 the host reads that resource as ``text/html;profile=mcp-app``. These tests run
-a real FastMCP server through an in-memory client session, so they check what
+a real MCPServer server through an in-memory client session, so they check what
 a host actually receives on the wire rather than what the code intends.
 """
 
@@ -11,8 +11,8 @@ import os
 from unittest.mock import MagicMock, Mock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.server.mcpserver import MCPServer
+from mcp.client import Client
 
 from backend.core import GraphStorage
 from backend.service import GraphService, register_mcp_tools
@@ -48,13 +48,13 @@ def widget_dist(tmp_path):
 
 @pytest.fixture
 def server(tmp_path, widget_dist):
-    mcp = FastMCP("widget-test")
+    mcp = MCPServer("widget-test")
     register_mcp_tools(mcp, _service(tmp_path), widget_dist_path=widget_dist)
     return mcp
 
 
 async def _session(server):
-    return create_connected_server_and_client_session(server._mcp_server)
+    return Client(server, mode="legacy")
 
 
 @pytest.mark.asyncio
@@ -89,9 +89,9 @@ async def test_ui_resource_is_listed_and_read_as_mcp_app_html(server):
 
     # The literal, not the constant: hosts match this exact profile string.
     assert MCP_APP_MIME_TYPE == "text/html;profile=mcp-app"
-    assert listed[WIDGET_RESOURCE_URI].mimeType == "text/html;profile=mcp-app"
+    assert listed[WIDGET_RESOURCE_URI].mime_type == "text/html;profile=mcp-app"
     (content,) = read.contents
-    assert content.mimeType == "text/html;profile=mcp-app"
+    assert content.mime_type == "text/html;profile=mcp-app"
     assert content.meta["ui"]["csp"] == {"connectDomains": [], "resourceDomains": []}
     assert content.meta["ui"]["prefersBorder"] is True
     assert content.text.startswith("<!DOCTYPE html>")
@@ -105,10 +105,10 @@ async def test_render_tool_returns_nodes_and_edges_as_structured_content(server)
     async with await _session(server) as client:
         result = await client.call_tool("show_graph_widget", {"query": "Alpha"})
 
-    assert not result.isError
-    # FastMCP wraps a Dict-annotated return under "result"; the widget's
+    assert not result.is_error
+    # MCPServer wraps a Dict-annotated return under "result"; the widget's
     # unwrapToolResult (frontend/widget/src/mcpClient.js) relies on this shape.
-    payload = result.structuredContent["result"]
+    payload = result.structured_content["result"]
     assert payload["query"] == "Alpha"
     assert {n["id"] for n in payload["nodes"]} == {"a1", "i1"}
     assert [(e["source"], e["target"]) for e in payload["edges"]] == [("a1", "i1")]
@@ -118,7 +118,7 @@ async def test_render_tool_returns_nodes_and_edges_as_structured_content(server)
 async def test_render_tool_passes_its_arguments_to_the_search(widget_dist):
     service = Mock()
     service.search_graph.return_value = {"nodes": [], "edges": []}
-    mcp = FastMCP("widget-args")
+    mcp = MCPServer("widget-args")
     register_mcp_tools(mcp, service, widget_dist_path=widget_dist)
 
     async with await _session(mcp) as client:
@@ -130,7 +130,7 @@ async def test_render_tool_passes_its_arguments_to_the_search(widget_dist):
     service.search_graph.assert_called_once_with(
         query="data strategy", node_types=["Actor"], limit=7
     )
-    assert result.structuredContent["result"]["query"] == "data strategy"
+    assert result.structured_content["result"]["query"] == "data strategy"
 
 
 @pytest.mark.asyncio
@@ -143,15 +143,15 @@ async def test_render_tool_reports_an_access_denial_like_search_graph(widget_dis
     }
     service = Mock()
     service.search_graph.return_value = denial
-    mcp = FastMCP("widget-denied")
+    mcp = MCPServer("widget-denied")
     register_mcp_tools(mcp, service, widget_dist_path=widget_dist)
 
     async with await _session(mcp) as client:
         widget = await client.call_tool("show_graph_widget", {"query": "x"})
         search = await client.call_tool("search_graph", {"query": "x"})
 
-    assert widget.structuredContent["result"] == denial
-    assert widget.structuredContent == search.structuredContent
+    assert widget.structured_content["result"] == denial
+    assert widget.structured_content == search.structured_content
 
 
 def test_render_tool_stays_off_the_in_app_tools_map(tmp_path, widget_dist):

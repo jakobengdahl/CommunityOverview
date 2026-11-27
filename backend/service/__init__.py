@@ -18,7 +18,7 @@ Key design principles:
 Usage:
     from backend.service import GraphService, create_rest_router, register_mcp_tools
     from backend.core import GraphStorage
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from fastapi import FastAPI
 
     # Initialize storage and service
@@ -31,7 +31,7 @@ Usage:
     app.include_router(router, prefix="/api/graph")
 
     # MCP setup
-    mcp = FastMCP("community-knowledge-graph")
+    mcp = MCPServer("community-knowledge-graph")
     tools_map = register_mcp_tools(mcp, service)
 """
 

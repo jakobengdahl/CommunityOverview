@@ -477,12 +477,12 @@ def save_view(test_app, session_id, body, transport):
     if transport == "rest":
         response = test_app.post(f"/api/sessions/{session_id}/save-view", json=body)
         return response.status_code, response.json()
-    _, structured = asyncio.run(
+    response = asyncio.run(
         test_app.app.state.mcp.call_tool(
             "save_session_view", {"session_id": session_id, **body}
         )
     )
-    result = structured["result"]
+    result = response.structured_content["result"]
     return 200 if result["success"] else None, result
 
 
@@ -793,7 +793,7 @@ def test_save_view_mcp_arguments_reach_the_tool_raw_as_rest_does(test_app):
         for t in asyncio.run(test_app.app.state.mcp.list_tools())
         if t.name == "save_session_view"
     ]
-    assert set(tool.inputSchema["required"]) == {
+    assert set(tool.input_schema["required"]) == {
         "session_id",
         "name",
         "expected_revision",

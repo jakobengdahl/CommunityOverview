@@ -7,6 +7,7 @@ invalid ID validation, and TTL eviction.
 
 import asyncio
 import time
+from unittest.mock import Mock
 import pytest
 
 from backend.core.session_registry import SessionRegistry, _MAX_QUEUE_SIZE
@@ -114,31 +115,27 @@ class TestPushCommandSync:
         assert cmd == {"type": "hello", "value": 42}
 
     @pytest.mark.asyncio
-    async def test_push_delivers_via_threadsafe_path(self):
-        """call_soon_threadsafe fallback: push from a real OS thread."""
+    @pytest.mark.parametrize("enqueue_fails", [False, True])
+    async def test_push_delivers_via_threadsafe_path(self, monkeypatch, enqueue_fails):
+        """A worker reports the actual enqueue result, including failures."""
         reg = SessionRegistry()
-        loop = asyncio.get_running_loop()
-        reg.set_event_loop(loop)
+        reg.set_event_loop(asyncio.get_running_loop())
         queue = reg.get_or_create("1234-5678")
+        if enqueue_fails:
+            monkeypatch.setattr(
+                reg, "_enqueue_drop_oldest", Mock(side_effect=RuntimeError)
+            )
 
-        delivered = asyncio.Event()
-        thread_result = {}
-
-        def _thread_push():
-            # Running outside the event loop: get_running_loop() will raise
-            # RuntimeError, triggering the call_soon_threadsafe path.
-            ok = reg.push_command_sync("1234-5678", {"type": "from-thread"})
-            thread_result["ok"] = ok
-            loop.call_soon_threadsafe(delivered.set)
-
-        thread = __import__("threading").Thread(target=_thread_push)
-        thread.start()
-        await asyncio.wait_for(delivered.wait(), timeout=2.0)
-        thread.join()
-
-        assert thread_result["ok"] is True
-        assert not queue.empty()
-        assert queue.get_nowait() == {"type": "from-thread"}
+        push = asyncio.to_thread(
+            reg.push_command_sync, "1234-5678", {"type": "from-thread"}
+        )
+        ok = await asyncio.wait_for(push, timeout=2.0)
+        assert ok is not enqueue_fails
+        if enqueue_fails:
+            assert queue.empty()
+        else:
+            assert not queue.empty()
+            assert queue.get_nowait() == {"type": "from-thread"}
 
 
 class TestPushCommandAsync:
@@ -411,6 +408,17 @@ class TestConsumerRefCount:
         assert reg.has_consumer("1234-5678") is False
 
     @pytest.mark.asyncio
+    async def test_disconnect_during_delivery_releases_consumer(self):
+        reg = SessionRegistry()
+        gen, task = await self._attach(reg, "1234-5678", [])
+        assert reg.push_command_sync("1234-5678", {"type": "command"})
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        await gen.aclose()
+        assert reg.consumer_count("1234-5678") == 0
+
+    @pytest.mark.asyncio
     async def test_idle_keepalive_ping_keeps_the_consumer_counted(self, monkeypatch):
         """An idle tab is still an attached tab.
 
@@ -419,14 +427,12 @@ class TestConsumerRefCount:
         would make every push to a quiet but genuinely open canvas report
         not delivered. The timeout is shortened so the branch runs here.
         """
-        real_wait_for = asyncio.wait_for
+        real_timeout = asyncio.timeout
 
-        async def fast_wait_for(awaitable, timeout):
-            return await real_wait_for(
-                awaitable, timeout=0.01 if timeout == 25.0 else timeout
-            )
+        def fast_timeout(delay):
+            return real_timeout(0.01 if delay == 25.0 else delay)
 
-        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+        monkeypatch.setattr(asyncio, "timeout", fast_timeout)
 
         reg = SessionRegistry()
         items = []

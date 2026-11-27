@@ -5,11 +5,11 @@ This module registers all GraphService methods as MCP tools that can be
 called by LLMs through the MCP protocol.
 
 Usage:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from backend.service import GraphService, register_mcp_tools
     from backend.core import GraphStorage
 
-    mcp = FastMCP("community-knowledge-graph")
+    mcp = MCPServer("community-knowledge-graph")
     storage = GraphStorage("graph.json")
     service = GraphService(storage)
     tools_map = register_mcp_tools(mcp, service)
@@ -25,7 +25,9 @@ import math
 import secrets
 from typing import List, Optional, Dict, Any, Callable, Tuple
 
-from mcp.shared.context import RequestContext
+from contextvars import ContextVar
+
+from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request as StarletteRequest
 
 from backend.core.session_auto_add import AutoAddRuleError
@@ -225,26 +227,23 @@ _RAW_SESSION_TOOLS = frozenset(
 )
 
 
-def _message_request(mcp) -> Tuple[bool, Any]:
-    """``(in_message, request)`` for the MCP message being handled, if any.
+_NO_MCP_MESSAGE = object()
+_mcp_message_request = ContextVar("mcp_message_request", default=_NO_MCP_MESSAGE)
 
-    A tool call runs in the MCP server's own task, created when the client's
-    MCP session began, so a binding made around a later HTTP request does not
-    reach it. The server sets a request context per message instead, carrying
-    that message's own HTTP request (None over stdio). Outside a message - a
-    tool called through ``tools_map`` by ``/execute_tool`` or the chat - there
-    is none, and the caller's own binding stands.
-    """
-    get_context = getattr(mcp, "get_context", None)
-    if get_context is None:
-        return False, None
+
+async def _bind_mcp_message_request(context, call_next):
+    token = _mcp_message_request.set(context.request)
     try:
-        context = get_context().request_context
-    except (LookupError, ValueError):
+        return await call_next(context)
+    finally:
+        _mcp_message_request.reset(token)
+
+
+def _message_request(mcp) -> Tuple[bool, Any]:
+    """Return the current MCP message's HTTP request, if any."""
+    request = _mcp_message_request.get()
+    if request is _NO_MCP_MESSAGE:
         return False, None
-    if not isinstance(context, RequestContext):
-        return False, None
-    request = context.request
     return True, request if isinstance(request, StarletteRequest) else None
 
 
@@ -335,6 +334,8 @@ def _session_aware(
         try:
             in_message, request = message_request()
             inherited = session_context.current_session_id()
+            if isinstance(request, StarletteRequest):
+                inherited = request.scope.get("mcp_opening_session") or inherited
             if not in_message:
                 return run(inherited, args, kwargs)
             # This message's own headers, for the session and for the
@@ -480,7 +481,7 @@ def register_mcp_tools(
     Register all GraphService methods as MCP tools.
 
     Args:
-        mcp: FastMCP instance to register tools with
+        mcp: MCPServer instance to register tools with
         service: GraphService instance to use for operations
         session_registry: legacy single-consumer visualization push registry
         session_manager: new shared-session manager; pushes are additionally
@@ -503,6 +504,9 @@ def register_mcp_tools(
         attachment_tool_refusal,
         validate_attachment_setting,
     )
+
+    if isinstance(mcp, MCPServer):
+        mcp.middleware.append(_bind_mcp_message_request)
 
     validate_attachment_setting(attachment_access, "MCP_ATTACHMENT_TOOLS")
     tools_map = {}
@@ -688,73 +692,61 @@ def register_mcp_tools(
 
             mcp.tool()(async_tool)
             # Keep the public schema, but handle validation refusals before
-            # FastMCP can turn a ValidationError (including inputs) into ToolError.
-            from mcp.server.fastmcp import FastMCP
-            from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+            # MCPServer can turn a ValidationError (including inputs) into ToolError.
+            from mcp.server.mcpserver import MCPServer
+            from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
             from pydantic import ValidationError
 
-            if isinstance(mcp, FastMCP):
+            if isinstance(mcp, MCPServer):
 
                 class AttachmentMetadata(FuncMetadata):
-                    async def call_fn_with_arg_validation(
+                    def validate_arguments(self, arguments):
+                        try:
+                            return super().validate_arguments(arguments)
+                        except ValidationError:
+                            return {"__invalid_attachment_arguments__": True}
+
+                    async def call_fn(
                         self,
                         fn,
                         fn_is_async,
-                        arguments_to_validate,
-                        arguments_to_pass_directly,
+                        arguments,
+                        arguments_to_pass_directly=None,
                     ):
-                        from .attachment_tools import (
-                            audit_attachment_refusal,
-                            error,
-                            tool_caller,
-                        )
-
-                        try:
-                            self.arg_model.model_validate(
-                                self.pre_parse_json(arguments_to_validate)
+                        if "__invalid_attachment_arguments__" in arguments:
+                            from .attachment_tools import (
+                                audit_attachment_refusal,
+                                error,
+                                tool_caller,
                             )
-                        except ValidationError:
+
                             with tool_caller("mcp"):
                                 audit_attachment_refusal(
                                     fn.__name__, "invalid_arguments"
                                 )
                             return error("invalid_arguments")
-                        return await super().call_fn_with_arg_validation(
-                            fn,
-                            fn_is_async,
-                            arguments_to_validate,
-                            arguments_to_pass_directly,
+                        return await super().call_fn(
+                            fn, fn_is_async, arguments, arguments_to_pass_directly
                         )
 
                 tool = mcp._tool_manager.get_tool(func.__name__)
                 tool.fn_metadata = AttachmentMetadata(**tool.fn_metadata.__dict__)
         else:
             mcp.tool()(wrapped)
-            from mcp.server.fastmcp import FastMCP
+            from mcp.server.mcpserver import MCPServer
 
-            if func.__name__ in _RAW_SESSION_TOOLS and isinstance(mcp, FastMCP):
-                from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+            if func.__name__ in _RAW_SESSION_TOOLS and isinstance(mcp, MCPServer):
+                from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 
                 class RawArgumentMetadata(FuncMetadata):
                     # The tool validates its own arguments, as REST does, so a
                     # wrong type answers `invalid_request`, not a ToolError.
-                    async def call_fn_with_arg_validation(
-                        self,
-                        fn,
-                        fn_is_async,
-                        arguments_to_validate,
-                        arguments_to_pass_directly,
-                    ):
-                        fields = self.arg_model.model_fields
-                        arguments = {
+                    def validate_arguments(self, arguments):
+                        return {
                             k: v
-                            for k, v in arguments_to_validate.items()
-                            if k in fields
+                            for k, v in arguments.items()
+                            if k in self.arg_model.model_fields
                         }
-                        arguments |= arguments_to_pass_directly or {}
-                        if fn_is_async:
-                            return await fn(**arguments)
-                        return fn(**arguments)
 
                 tool = mcp._tool_manager.get_tool(func.__name__)
                 tool.fn_metadata = RawArgumentMetadata(**tool.fn_metadata.__dict__)
@@ -3364,7 +3356,7 @@ def register_mcp_tools(
 
     @register_tool
     def save_session_view(
-        # Schema only, all required: FastMCP passes the raw arguments through
+        # Schema only, all required: MCPServer passes the raw arguments through
         # unvalidated (``_RAW_SESSION_TOOLS``) and the tool validates them as
         # REST does.
         session_id: str = None,  # type: ignore[assignment]

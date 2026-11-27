@@ -1,20 +1,23 @@
 """MCP HTTP transport mounting for the api_host application.
 
-Builds the dynamic MCP instructions from the loaded schema, wraps the FastMCP
+Builds the dynamic MCP instructions from the loaded schema, wraps the MCPServer
 SSE / Streamable-HTTP transports so browser requests are routed correctly, and
 mounts them at ``/mcp``.
 """
 
 import contextlib
 import logging
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
+from mcp.server.transport_security import TransportSecuritySettings
 
 from backend.config import config_loader
 from backend.llm.language_policy import format_language_policy_for_prompt
 from backend.runtime.authorization import use_request_authorization
+from backend.runtime.session_context import current_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,74 @@ def bind_request_authorization_to_asgi_app(asgi_app):
             await asgi_app(scope, receive, send)
 
     return request_bound_app
+
+
+def bind_connection_sessions(sse_app, streamable_app, manager):
+    """Carry the opening visualization session across MCP transport requests."""
+    sse_sessions = {}
+    streamable_sessions = {}
+
+    async def sse(scope, receive, send):
+        if scope.get("type") != "http":
+            return await sse_app(scope, receive, send)
+        opening = scope.get("method") == "GET"
+        bound = current_session_id()
+        session_ids = []
+        pending = b""
+        if not opening:
+            query = parse_qs(scope.get("query_string", b"").decode("ascii", "ignore"))
+            scope["mcp_opening_session"] = sse_sessions.get(
+                query.get("session_id", [""])[0]
+            )
+
+        async def capture(message):
+            nonlocal pending
+            if opening and not session_ids and message["type"] == "http.response.body":
+                pending += message.get("body", b"")
+                lines = pending.split(b"\n")
+                pending = lines.pop()[-8192:]
+                for raw_line in lines:
+                    line = raw_line.decode("utf-8", "replace").rstrip("\r")
+                    if line.startswith("data: "):
+                        query = parse_qs(urlsplit(line[6:]).query)
+                        for sid in query.get("session_id", []):
+                            sse_sessions[sid] = bound
+                            session_ids.append(sid)
+            await send(message)
+
+        try:
+            await sse_app(scope, receive, capture)
+        finally:
+            for sid in session_ids:
+                sse_sessions.pop(sid, None)
+
+    async def streamable(scope, receive, send):
+        if scope.get("type") != "http":
+            return await streamable_app(scope, receive, send)
+        headers = Headers(scope=scope)
+        sid = headers.get("mcp-session-id")
+        scope["mcp_opening_session"] = streamable_sessions.get(sid)
+        bound = current_session_id()
+
+        async def capture(message):
+            if message["type"] == "http.response.start" and sid is None:
+                response_headers = Headers(raw=message.get("headers", []))
+                opened = response_headers.get("mcp-session-id")
+                if opened and bound is not None:
+                    streamable_sessions[opened] = bound
+            await send(message)
+
+        try:
+            await streamable_app(scope, receive, capture)
+        finally:
+            # The SDK owns session expiry and termination; discard our bindings
+            # when its transport no longer exists.
+            active = manager._server_instances
+            for key in list(streamable_sessions):
+                if key not in active:
+                    streamable_sessions.pop(key, None)
+
+    return sse, streamable
 
 
 def drop_response_after_sse_disconnect(asgi_app):
@@ -276,17 +347,29 @@ def mount_mcp(app: FastAPI, mcp, tools_map):
     """
     _install_mcp_no_redirect_rewrite(app)
 
+    # Authentication is enforced by the host; accept its public Host header.
+    # These are mounted ASGI apps and do not bind a socket.
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
     mcp_sse_app = bind_request_authorization_to_asgi_app(
-        drop_response_after_sse_disconnect(mcp.sse_app())
+        drop_response_after_sse_disconnect(
+            mcp.sse_app(transport_security=transport_security)
+        )
     )
 
-    # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
+    # MCPServer mounts its Streamable HTTP handler at streamable_http_path
     # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
     # handler sees the already-stripped path "/" and the default would never
     # match — every POST /mcp answered 404. Serve it from the mount root.
-    mcp.settings.streamable_http_path = "/"
     mcp_streamable_app = bind_request_authorization_to_asgi_app(
-        mcp.streamable_http_app()
+        mcp.streamable_http_app(
+            streamable_http_path="/", transport_security=transport_security
+        )
+    )
+
+    mcp_sse_app, mcp_streamable_app = bind_connection_sessions(
+        mcp_sse_app, mcp_streamable_app, mcp.session_manager
     )
 
     streamable_state = {"started": False}
@@ -307,7 +390,7 @@ def mount_mcp(app: FastAPI, mcp, tools_map):
 def _streamable_session_lifecycle(mcp, state: dict):
     """Run the Streamable HTTP session manager for the lifetime of the host app.
 
-    FastMCP starts that manager from its own app's lifespan. We mount the app
+    MCPServer starts that manager from its own app's lifespan. We mount the app
     instead of running it, so that lifespan never fires and the first request
     fails with "Task group is not initialized". The host app's lifespan enters
     the returned context manager instead.
