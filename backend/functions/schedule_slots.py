@@ -326,10 +326,15 @@ class ScheduleSlots:
                 agent_id=job.agent_id, kind=ExecutionKind.FUNCTION
             )
             run = next(
-                (run for run in runs if run.idempotency_key == key or (
-                    run.idempotency_key == legacy_key
-                    and (run.payload or {}).get("trigger") == "schedule"
-                )),
+                (
+                    run
+                    for run in runs
+                    if run.idempotency_key == key
+                    or (
+                        run.idempotency_key == legacy_key
+                        and (run.payload or {}).get("trigger") == "schedule"
+                    )
+                ),
                 None,
             )
             if run is None:

@@ -70,6 +70,7 @@ def _configure_function(tmp_path, monkeypatch, trigger):
 
 def test_invalid_schedule_ledger_is_not_modified(tmp_path, monkeypatch):
     import sqlite3
+
     private = tmp_path / "private"
     private.mkdir()
     monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
@@ -83,7 +84,9 @@ def test_invalid_schedule_ledger_is_not_modified(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("initial", ["manual", "invalid"])
-def test_scheduler_discovers_manifest_fixed_after_startup(tmp_path, monkeypatch, initial):
+def test_scheduler_discovers_manifest_fixed_after_startup(
+    tmp_path, monkeypatch, initial
+):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -105,7 +108,9 @@ def test_scheduler_discovers_manifest_fixed_after_startup(tmp_path, monkeypatch,
     scheduler.service.invoke.assert_not_called()
     manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
     manifest_path.write_text(json.dumps(manifest))
-    scheduler.service.invoke.return_value = SimpleNamespace(state=ExecutionState.SUCCEEDED)
+    scheduler.service.invoke.return_value = SimpleNamespace(
+        state=ExecutionState.SUCCEEDED
+    )
     scheduler.tick(now)
     assert scheduler.service.invoke.call_count == 1
     scheduler.stop()

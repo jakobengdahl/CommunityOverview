@@ -781,7 +781,8 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_sch
     service, execute, manifest, directory = host
     manifest["contract_version"] = "5"
     manifest["triggers"] = [
-        {"kind": "schedule", "interval_seconds": 60}, {"kind": "manual"}
+        {"kind": "schedule", "interval_seconds": 60},
+        {"kind": "manual"},
     ]
     (directory / "function.json").write_text(json.dumps(manifest))
     now = datetime.now(timezone.utc)
