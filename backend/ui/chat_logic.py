@@ -678,17 +678,18 @@ def _chat_completion(provider, **kwargs):
     if progress is not None:
         progress["round"] += 1
         _report_step("llm_started", round=progress["round"])
+    timeout_seconds = positive_int_setting(
+        "LLM_TIMEOUT_SECONDS", DEFAULT_LLM_TIMEOUT_SECONDS, MAX_LLM_TIMEOUT_SECONDS
+    )
     try:
         response = provider.create_completion(
             **kwargs,
-            timeout_seconds=positive_int_setting(
-                "LLM_TIMEOUT_SECONDS",
-                DEFAULT_LLM_TIMEOUT_SECONDS,
-                MAX_LLM_TIMEOUT_SECONDS,
-            ),
+            timeout_seconds=timeout_seconds,
         )
     except (TimeoutError, ClaudeTimeoutError, OpenAITimeoutError):
         response = LLMResponse(content=[], stop_reason="timeout")
+    if response.stop_reason == "timeout":
+        response._chat_timeout_seconds = timeout_seconds
     if progress is not None:
         raw = getattr(response, "raw_response", None)
         choices = getattr(raw, "choices", None)
@@ -750,6 +751,7 @@ _NO_ANSWER_MESSAGE = (
     "those actions may already have been carried out, so check the result before "
     "trying again."
 )
+_TIMEOUT_MESSAGE = "The AI model did not respond within {seconds} seconds."
 _NO_TEXT_WITH_TOOL_CALLS_MESSAGE = "No text response from AI"
 
 
@@ -846,11 +848,13 @@ def _answer_after_empty_reply(
     stage: str = "tool chain",
     retry_allowed: bool = True,
 ) -> str:
-    """Retry once without tools; never returns blank, even if the retry fails.
+    """Retry a non-timeout empty reply once without tools; never return blank.
 
     The instruction is sent on a copy so it stays out of the caller's history.
     """
     _log_empty_reply(response, stage)
+    if response.stop_reason == "timeout":
+        return _TIMEOUT_MESSAGE.format(seconds=response._chat_timeout_seconds)
     if not retry_allowed:
         return _NO_ANSWER_MESSAGE
     try:
@@ -1691,6 +1695,19 @@ class ChatProcessor:
                 max_tokens=provider_max_tokens(llm_provider),
             )
 
+            if response.stop_reason == "timeout":
+                return {
+                    "content": _answer_after_empty_reply(
+                        messages,
+                        response,
+                        llm_provider,
+                        active_system_prompt,
+                        stage="first turn",
+                    ),
+                    "toolUsed": None,
+                    "toolResult": None,
+                }
+
             if _tool_calls_cut_off(response):
                 return {
                     "content": _tool_calls_not_run(response),
@@ -2115,7 +2132,7 @@ class ChatProcessor:
             )
 
         # Check if LLM wants to use another tool (tool chaining)
-        if _wants_tools(final_response):
+        if final_response.stop_reason != "timeout" and _wants_tools(final_response):
             # LLM wants to use another tool - continue recursively with accumulated data
             return self._handle_tool_use(
                 messages,
@@ -2142,7 +2159,7 @@ class ChatProcessor:
             if _tool_calls_cut_off(final_response)
             else _response_text(final_response)
         )
-        if not final_text.strip():
+        if final_response.stop_reason == "timeout" or not final_text.strip():
             final_text = _answer_after_empty_reply(
                 messages,
                 final_response,
