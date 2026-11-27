@@ -76,10 +76,15 @@ class FunctionScheduler:
                         for snapshot_type in (snapshot.get("type"),)
                         if isinstance(snapshot_type, str)
                     )
+                    schema = (
+                        self.sensitive_fields()
+                        if callable(self.sensitive_fields)
+                        else self.sensitive_fields
+                    )
                     sensitive = {
                         path
                         for node_type in types
-                        for path in self.sensitive_fields.get(node_type, [])
+                        for path in schema.get(node_type, [])
                     }
                     projected = filtered_entity(entity, fields, sensitive)
                     retry = manifest.get("retry")
@@ -88,6 +93,8 @@ class FunctionScheduler:
                         event,
                         projected,
                         RetryPolicy(**retry) if retry else None,
+                        graph_id=bound_graph,
+                        node_types=sorted(types),
                     )
             except (OSError, ValueError, TypeError):
                 logger.warning(
@@ -125,6 +132,7 @@ class FunctionScheduler:
                 "function-scheduler",
                 now=datetime.now(timezone.utc),
                 lease_seconds=3600,
+                graph_event_filter=self._filter_graph_event,
                 actor_binding=lambda function_id: (
                     {
                         "actor_id": f"function_schedule:{function_id}",
@@ -137,6 +145,49 @@ class FunctionScheduler:
                     else None
                 ),
             )
+
+    def _filter_graph_event(self, job):
+        from types import SimpleNamespace
+        from backend.functions.graph_change import filtered_entity, matches
+
+        entity = job.payload["entity"]
+        event = SimpleNamespace(to_webhook_payload=lambda: {"entity": entity})
+        try:
+            manifest, _ = load_manifest(self.service.root, job.agent_id)
+            matching = [
+                trigger
+                for trigger in manifest["triggers"]
+                if trigger["kind"] == "graph_change" and matches(trigger, event)
+            ]
+            if not matching:
+                return None
+            fields = {
+                field
+                for trigger in matching
+                for field in (
+                    trigger["fields"]
+                    + list(trigger.get("before", {}))
+                    + list(trigger.get("after", {}))
+                )
+            }
+            schema = (
+                self.sensitive_fields()
+                if callable(self.sensitive_fields)
+                else self.sensitive_fields
+            )
+            sensitive = {
+                field
+                for node_type in (job.payload.get("node_types") or [entity["type"]])
+                for field in schema.get(node_type, [])
+            }
+            projected = filtered_entity(entity, fields, sensitive)
+            projected["changed_fields"] = entity["changed_fields"]
+            return projected
+        except (OSError, ValueError, TypeError, KeyError):
+            logger.warning(
+                "Cannot filter graph event for function %s", job.agent_id, exc_info=True
+            )
+            return None
 
     def start(self):
         if self.thread and self.thread.is_alive():

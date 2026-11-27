@@ -185,7 +185,16 @@ class ScheduleSlots:
             )
         )
 
-    def enqueue_event(self, function_id, event, entity, retry_policy=None):
+    def enqueue_event(
+        self,
+        function_id,
+        event,
+        entity,
+        retry_policy=None,
+        *,
+        graph_id=None,
+        node_types=None,
+    ):
         payload = event.to_webhook_payload()
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
         key = "function-graph:" + hashlib.sha256(identity.encode()).hexdigest()
@@ -205,6 +214,8 @@ class ScheduleSlots:
                     "retry_policy": policy.to_dict(),
                     "entity": entity,
                     "chain_depth": depth,
+                    "graph_id": graph_id,
+                    "node_types": node_types,
                 },
             )
         )
@@ -406,6 +417,7 @@ class ScheduleSlots:
         actor_binding,
         now: datetime,
         lease_seconds: float,
+        graph_event_filter=None,
     ):
         """Claim one slot and invoke it through the shared admission service.
 
@@ -414,20 +426,34 @@ class ScheduleSlots:
         job = self.claim_next(worker_id, now=now, lease_seconds=lease_seconds)
         if job is None:
             return None
+        graph_event = job.idempotency_key.startswith("function-graph:")
+        if callable(actor_binding):
+            actor_binding = actor_binding(job.agent_id)
+        if graph_event and (
+            actor_binding is None
+            or not job.payload.get("graph_id")
+            or job.payload["graph_id"] != actor_binding.get("graph_id")
+        ):
+            self._skip(job, now, "binding_changed")
+            return None
         if job.attempts > 1 and not self._retry_declared(service, job):
             self._finish(
                 job.id, attempt=job.attempts, now=now, success=False, retry=False
             )
             return None
-        if callable(actor_binding):
-            actor_binding = actor_binding(job.agent_id)
         if actor_binding is None:
             self._finish(
                 job.id, attempt=job.attempts, now=now, success=False, retry=False
             )
             return None
-        graph_event = job.idempotency_key.startswith("function-graph:")
-        extra = {"entity": job.payload["entity"]} if graph_event else {}
+        if graph_event:
+            entity = graph_event_filter(job) if graph_event_filter else None
+            if entity is None:
+                self._skip(job, now, "trigger_changed")
+                return None
+            extra = {"entity": entity}
+        else:
+            extra = {}
         result = service.invoke(
             job.agent_id,
             {},
@@ -440,6 +466,24 @@ class ScheduleSlots:
         )
         self._finish_result(service, job, result, datetime.now(timezone.utc))
         return result
+
+    def _skip(self, job, now, reason):
+        with self._store._lock:
+            self._store._conn.execute(
+                "UPDATE schedule_jobs SET state = ?, dead_letter_reason = ?, "
+                "lease_owner = NULL, lease_expiry = NULL, updated_at = ?, finished_at = ? "
+                "WHERE id = ? AND state = ? AND attempts = ?",
+                (
+                    ExecutionState.CANCELLED.value,
+                    reason,
+                    now.timestamp(),
+                    now.timestamp(),
+                    job.id,
+                    ExecutionState.RUNNING.value,
+                    job.attempts,
+                ),
+            )
+            self._store._conn.commit()
 
     @staticmethod
     def _retry_declared(service, job):

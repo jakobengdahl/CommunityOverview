@@ -425,3 +425,128 @@ def test_untagged_graph_nodes_never_reach_bound_function(tmp_path, monkeypatch):
         == 0
     )
     scheduler.stop()
+
+
+def test_queued_graph_event_is_skipped_when_binding_changes(tmp_path, monkeypatch):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    manifest = {
+        "triggers": [
+            {"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}
+        ]
+    }
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest", lambda *args: (manifest, None)
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(),
+    )
+    bindings = {"example": "g"}
+    slots = ScheduleSlots(tmp_path / "binding.db")
+    scheduler = FunctionScheduler(service, slots, bindings)
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={"name": "old", "metadata": {"origin_graph_id": "g"}},
+            after={"name": "new", "metadata": {"origin_graph_id": "g"}},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    bindings["example"] = "other"
+    scheduler.tick(datetime.now(timezone.utc))
+    row = slots._store._conn.execute(
+        "SELECT state, dead_letter_reason FROM schedule_jobs"
+    ).fetchone()
+    assert (row["state"], row["dead_letter_reason"]) == (
+        ExecutionState.CANCELLED.value,
+        "binding_changed",
+    )
+    service.invoke.assert_not_called()
+    scheduler.stop()
+
+
+def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monkeypatch):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["name", "metadata"],
+    }
+    manifest = {"triggers": [trigger]}
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest", lambda *args: (manifest, None)
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    schema = {"Task": []}
+    slots = ScheduleSlots(tmp_path / "manifest.db")
+    scheduler = FunctionScheduler(
+        service, slots, {"example": "g"}, sensitive_fields=schema
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={
+                "name": "old",
+                "metadata": {"origin_graph_id": "g", "secret": "a", "visible": "x"},
+            },
+            after={
+                "name": "new",
+                "metadata": {"origin_graph_id": "g", "secret": "b", "visible": "y"},
+            },
+            patch={"name": "new", "metadata": {"secret": "b", "visible": "y"}},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    event2 = event.model_copy(deep=True)
+    event2.event_id = "second"
+    scheduler.on_graph_event(event2)
+    trigger["fields"] = ["name", "metadata.secret"]
+    schema["Task"] = ["metadata.secret"]
+    scheduler.tick(datetime.now(timezone.utc))
+    entity = service.invoke.call_args.kwargs["entity"]
+    assert entity["data"] == {
+        "before": {"name": "old"},
+        "after": {"name": "new"},
+        "patch": {"name": "new"},
+    }
+    assert service.invoke.call_count == 2
+    event3 = event.model_copy(deep=True)
+    event3.event_id = "third"
+    scheduler.on_graph_event(event3)
+    trigger["after"] = {"name": "different"}
+    scheduler.tick(datetime.now(timezone.utc))
+    assert service.invoke.call_count == 2
+    row = slots._store._conn.execute(
+        "SELECT state, dead_letter_reason FROM schedule_jobs WHERE dead_letter_reason = 'trigger_changed'"
+    ).fetchone()
+    assert row["state"] == ExecutionState.CANCELLED.value
+    scheduler.stop()

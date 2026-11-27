@@ -555,7 +555,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             ScheduleSlots(ledger_path),
             schedule_graphs,
             local_graph_id=graph_storage.get_graph_name(),
-            sensitive_fields={
+            sensitive_fields=lambda: {
                 name: node.get("sensitive_fields", [])
                 for name, node in get_schema()["node_types"].items()
             },
