@@ -725,7 +725,8 @@ def test_refresh_and_fallback_share_authorized_snapshot():
 
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(
-                read, lambda: ext.list_skills(read_request, SimpleNamespace(cursor=None))
+                read,
+                lambda: ext.list_skills(read_request, SimpleNamespace(cursor=None)),
             )
             tasks.start_soon(
                 read, lambda: ext.get_skill(read_request, SimpleNamespace(uri=uri))
@@ -737,9 +738,7 @@ def test_refresh_and_fallback_share_authorized_snapshot():
             resume.set()
         provider.can_read = original_check
         assert len(results) == 4 and len(events) == len(other_events) == 1
-        assert any(
-            result.get("file", {}).get("text") == "second" for result in results
-        )
+        assert any(result.get("file", {}).get("text") == "second" for result in results)
 
         assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
         hook.read = False
@@ -769,13 +768,13 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         read_ctx = SimpleNamespace(method="resources/read", params={"uri": uri})
         errors = []
 
-        async def call_next(ctx):
+        async def call_next_after_refresh(ctx):
             resource = await server._resource_manager.get_resource(uri, None)
             return {"text": resource.text}
 
         async def read():
             try:
-                await ext.resource_access(read_ctx, call_next)
+                await ext.resource_access(read_ctx, call_next_after_refresh)
             except Exception as exc:
                 errors.append(exc)
 
@@ -803,6 +802,6 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         with pytest.raises(Exception):
             await ext.get_skill(request, SimpleNamespace(uri=uri))
         with pytest.raises(Exception):
-            await ext.resource_access(read_ctx, call_next)
+            await ext.resource_access(read_ctx, call_next_after_refresh)
 
     anyio.run(check)
