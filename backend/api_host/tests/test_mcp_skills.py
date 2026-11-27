@@ -241,6 +241,14 @@ def test_decoded_frontmatter_injection_is_refused():
         SkillsExtension([Provider({"SKILL.md": text})], 0, "private")
 
 
+def test_literal_html_in_frontmatter_is_refused():
+    text = skill().replace(
+        "description: Example", "description: Example <script>bad</script>"
+    )
+    with pytest.raises(ValueError, match="Skill frontmatter rejected"):
+        SkillsExtension([Provider({"SKILL.md": text})], 0, "private")
+
+
 @pytest.mark.parametrize(
     "name, description", [("a" * 65, "Example"), ("extra", "x" * 1025)]
 )

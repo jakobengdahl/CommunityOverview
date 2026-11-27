@@ -103,38 +103,14 @@ class SkillsExtension(Extension):
                 if "SKILL.md" not in skill.files:
                     raise ValueError("Skill requires SKILL.md")
                 root = f"skill://{skill.name}"
-                manifest = []
-                total = 0
-                for path, content in sorted(skill.files.items()):
-                    if not _PATH.fullmatch(path) or any(
-                        p in (".", "..") for p in path.split("/")
-                    ):
-                        raise ValueError("Invalid skill file path")
-                    if not isinstance(content, str):
-                        raise ValueError("Skill files must be UTF-8 text")
-                    total += len(content.encode("utf-8"))
-                    if total > MAX_BYTES:
-                        raise ValueError("Skill exceeds size limit")
-                    clean = sanitizer._sanitize(content)
-                    if content.strip() and not clean:
-                        raise ValueError("Skill content rejected")
-                    uri = f"{root}/{path}"
-                    data = clean.encode("utf-8")
-                    self.files[uri] = clean
-                    self.owners[uri] = (provider, skill.name)
-                    manifest.append(
-                        {
-                            "uri": uri,
-                            "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
-                            "size": len(data),
-                        }
-                    )
+                if not isinstance(skill.files["SKILL.md"], str):
+                    raise ValueError("Skill files must be UTF-8 text")
                 uri = f"{root}/SKILL.md"
                 if uri in self.entries:
                     raise ValueError("Duplicate skill")
                 match = re.match(
                     r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)",
-                    self.files[uri],
+                    skill.files["SKILL.md"],
                     re.MULTILINE | re.DOTALL,
                 )
                 if not match:
@@ -172,6 +148,33 @@ class SkillsExtension(Extension):
                 values.extend(metadata.values())
                 if any(sanitizer._sanitize(value) != value.strip() for value in values):
                     raise ValueError("Skill frontmatter rejected")
+                manifest = []
+                total = 0
+                for path, content in sorted(skill.files.items()):
+                    if not _PATH.fullmatch(path) or any(
+                        p in (".", "..") for p in path.split("/")
+                    ):
+                        raise ValueError("Invalid skill file path")
+                    if not isinstance(content, str):
+                        raise ValueError("Skill files must be UTF-8 text")
+                    total += len(content.encode("utf-8"))
+                    if total > MAX_BYTES:
+                        raise ValueError("Skill exceeds size limit")
+                    clean = sanitizer._sanitize(content)
+                    if content.strip() and not clean:
+                        raise ValueError("Skill content rejected")
+                    uri = f"{root}/{path}"
+                    data = clean.encode("utf-8")
+                    self.files[uri] = clean
+                    self.owners[uri] = (provider, skill.name)
+                    manifest.append(
+                        {
+                            "uri": uri,
+                            "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                            "size": len(data),
+                        }
+                    )
+                uri = f"{root}/SKILL.md"
                 self.entries[uri] = {
                     "uri": uri,
                     "frontmatter": frontmatter,
