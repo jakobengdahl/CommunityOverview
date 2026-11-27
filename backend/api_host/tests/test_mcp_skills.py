@@ -1,4 +1,4 @@
-# covers: backend/skills/mcp.py, backend/api_host/server.py, backend/skills/loader.py
+# covers: backend/skills/mcp.py, backend/api_host/server.py, backend/skills/loader.py, backend/service/graph_profile.py
 """MCP skills catalog and opt-in server behavior."""
 
 import hashlib
@@ -208,6 +208,15 @@ def snapshot(app_config, mock_llm_provider, enabled):
         headers["Mcp-Protocol-Version"] = "2025-03-26"
         tools = rpc(client, "tools/list", {}, headers)["result"]["tools"]
         resources = rpc(client, "resources/list", {}, headers)["result"]["resources"]
+        profile_result = rpc(
+            client, "tools/call", {"name": "describe_graph", "arguments": {}}, headers
+        )["result"]
+        resource = rpc(client, "resources/read", {"uri": "graph://profile"}, headers)[
+            "result"
+        ]
+        assert json.loads(profile_result["content"][0]["text"]) == json.loads(
+            resource["contents"][0]["text"]
+        )
         listing = rpc(client, "skills/list", {}, headers)
         if enabled:
             fallback = rpc(
@@ -803,5 +812,113 @@ def test_refresh_and_fallback_share_authorized_snapshot():
             await ext.get_skill(request, SimpleNamespace(uri=uri))
         with pytest.raises(Exception):
             await ext.resource_access(read_ctx, call_next_after_refresh)
+
+    anyio.run(check)
+
+
+def test_profile_counts_visibility_order_and_freshness():
+    from backend.core import Edge, Node
+    from backend.runtime.authorization import GraphAccessNarrowing
+    from backend.service.graph_profile import profile
+
+    nodes = [
+        Node(id="a", name="A", type="Person", tags=["x", "x"], subtypes=["staff"]),
+        Node(id="b", name="B", type="Person", tags=["x"]),
+        Node(id="c", name="C", type="Team"),
+        Node(
+            id="d",
+            name="D",
+            type="Team",
+            tags=["secret"],
+            metadata={"origin_graph_id": "hidden"},
+        ),
+        Node(id="e", name="E", type="Team", archived=True),
+    ]
+    edges = [
+        Edge(source="a", target="c", type="MEMBER"),
+        Edge(source="a", target="d", type="MEMBER"),
+        Edge(source="b", target="e", type="MEMBER"),
+        Edge(source="b", target="c", type="OTHER", archived=True),
+    ]
+    storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: edges)
+    narrowing = GraphAccessNarrowing(enabled=True, allow_local_graph=True)
+    result = profile(storage, narrowing)
+    assert result["node_count"] == 3
+    assert result["node_types"] == [
+        {"type": "Person", "count": 2},
+        {"type": "Team", "count": 1},
+    ]
+    assert result["subtypes"] == [{"type": "Person", "subtype": "staff", "count": 1}]
+    assert result["tags"] == [{"tag": "x", "count": 2}]
+    assert result["relationships"] == [
+        {
+            "source_type": "Person",
+            "relationship_type": "MEMBER",
+            "target_type": "Team",
+            "source_count": 1,
+            "share": 0.5,
+        }
+    ]
+    assert [n["id"] for n in result["central_nodes"]] == ["a", "c", "b"]
+    nodes.reverse()
+    edges.reverse()
+    assert profile(storage, narrowing) == result
+    nodes.append(Node(id="f", name="F", type="Person"))
+    assert profile(storage, narrowing)["node_count"] == 4
+    assert profile(storage, GraphAccessNarrowing())["node_count"] == 5
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.service.graph_profile import describe
+
+    class Hook:
+        def __init__(self, allowed, scope):
+            self.allowed, self.scope = allowed, scope
+
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=self.allowed, graph_access=self.scope
+            )
+
+    assert describe(storage, Hook(True, narrowing))["node_count"] == 4
+    assert describe(storage, Hook(False, narrowing))["error_code"] == "access_denied"
+
+
+def test_profile_change_publishes_only_for_changed_profile():
+    import asyncio
+    from backend.core import Node
+    from backend.service.graph_profile import ProfileChangePublisher
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    async def check():
+        nodes = [Node(id="a", name="A", type="Person")]
+        storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
+        bus = InMemorySubscriptionBus()
+        received = asyncio.Event()
+        events = []
+
+        def record(event):
+            events.append(event)
+            received.set()
+
+        bus.subscribe(record)
+        publisher = ProfileChangePublisher(storage, bus)
+        publisher.loop = asyncio.get_running_loop()
+        publisher.on_event(None)
+        assert events == []
+        nodes.append(Node(id="b", name="B", type="Person"))
+        publisher.on_event(None)
+        await asyncio.wait_for(received.wait(), 2)
+        assert events == [ResourceUpdated(uri="graph://profile")]
+        publisher.on_event(None)
+        assert len(events) == 1
+        from backend.runtime.authorization import GraphAccessNarrowing
+        from backend.service.graph_profile import profile
+
+        scope = GraphAccessNarrowing(enabled=True, allow_local_graph=True)
+        publisher.observe(scope, profile(storage, scope))
+        received.clear()
+        nodes[0].metadata["origin_graph_id"] = "hidden"
+        publisher.on_event(None)
+        await asyncio.wait_for(received.wait(), 2)
+        assert events == [ResourceUpdated(uri="graph://profile")] * 2
 
     anyio.run(check)

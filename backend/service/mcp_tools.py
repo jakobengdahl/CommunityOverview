@@ -476,6 +476,7 @@ def register_mcp_tools(
     widget_dist_path=None,
     *,
     attachment_access: str = "off",
+    profile_publisher=None,
 ) -> Dict[str, Callable]:
     """
     Register all GraphService methods as MCP tools.
@@ -1578,6 +1579,25 @@ def register_mcp_tools(
         )
 
     # ==================== Statistics & Metadata Tools ====================
+
+    @register_tool
+    def describe_graph() -> dict:
+        """Describe visible graph content with deterministic aggregate statistics."""
+        from .graph_profile import describe
+
+        return service._read(
+            "describe_graph",
+            lambda storage: describe(
+                storage, service.authorization_hook, profile_publisher
+            ),
+        )
+
+    @mcp.resource("graph://profile", mime_type="application/json")
+    def graph_profile_resource() -> str:
+        """Read the same access-filtered profile as describe_graph."""
+        import json
+
+        return json.dumps(describe_graph(), sort_keys=True, ensure_ascii=False)
 
     @register_tool
     def get_graph_stats(

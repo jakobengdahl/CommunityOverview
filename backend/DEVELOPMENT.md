@@ -1362,6 +1362,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
+| `describe_graph` | Describe visible graph content and relationship patterns |
 | `get_graph_stats` | Get graph statistics |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 membership records plus 500 other records / 7 days. New records can shift offset pages. |

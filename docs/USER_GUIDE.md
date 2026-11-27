@@ -1435,6 +1435,7 @@ interface.
 | `create_collection_response` | Store answers linked to a collection by ID |
 | `update_node` | Update node properties |
 | `delete_nodes` | Delete nodes by ID |
+| `describe_graph` | Describe visible graph content and relationship patterns |
 | `get_graph_stats` | Get summary statistics about the graph |
 | `preview_graph_merge` | Preview what merging a small graph document into the graph would add, overwrite, skip or reject — writes nothing (see [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#previewing-a-merge-import)) |
 | `save_session_view` | Save a session at a specified revision and return its link |

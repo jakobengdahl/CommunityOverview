@@ -320,6 +320,10 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     # Startup failing before the try skips shutdown, as with on_startup hooks.
     @contextlib.asynccontextmanager
     async def lifespan(app):
+        if profile_publisher is not None:
+            import asyncio
+
+            profile_publisher.loop = asyncio.get_running_loop()
         await start_session_registry()
         if function_scheduler is not None:
             function_scheduler.start()
@@ -671,7 +675,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             SkillsExtension,
         )
 
-        enabled_tools = set()
+        enabled_tools = {"describe_graph"}
         if (
             attachment_tool_allowed("read_node_attachment", config.mcp_attachment_tools)
             and graph_service.attachment_settings is not None
@@ -715,6 +719,13 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     )
     if mcp_extensions:
         mcp.middleware.append(mcp_extensions[0].resource_access)
+    profile_publisher = None
+    if mcp_extensions:
+        from backend.service.graph_profile import ProfileChangePublisher
+
+        profile_publisher = ProfileChangePublisher(graph_storage, mcp._subscriptions)
+        graph_storage.add_system_listener(profile_publisher.on_event)
+
     tools_map = register_mcp_tools(
         mcp,
         graph_service,
@@ -723,6 +734,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         auto_add_registry=auto_add_registry,
         widget_dist_path=config.widget_static_path,
         attachment_access=config.mcp_attachment_tools,
+        profile_publisher=profile_publisher,
     )
 
     if mcp_extensions:
@@ -782,6 +794,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             merge_record_retention.stop()
         if function_scheduler is not None:
             function_scheduler.stop()
+        if profile_publisher is not None:
+            profile_publisher.loop = None
         runtime.stop()
 
     return app

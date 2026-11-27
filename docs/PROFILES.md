@@ -347,7 +347,7 @@ version: "1.0"
 
 The optional `skills_config.mcp` section controls the MCP skills extension.
 `enabled` defaults to `false`; when enabled, clients can discover the core
-working-method skill and a graph-semantics skill and read their files through MCP resources. The latter describes the loaded schema: node types, fields, declared subtypes, relationships, vocabularies, language policy and prompt prefix. It contains no graph data. Its snapshot date is a deterministic identifier derived from the schema, not a modification time; content statistics are planned through `describe_graph`. `ttlMs` is a
+working-method skill and a graph-semantics skill and read their files through MCP resources. The latter describes the loaded schema: node types, fields, declared subtypes, relationships, vocabularies, language policy and prompt prefix. It contains no graph data. Its snapshot date is a deterministic identifier derived from the schema, not a modification time; content statistics are available through `describe_graph`. `ttlMs` is a
 non-negative freshness hint in milliseconds (default `0`), and `cacheScope` is
 `private` (the default) or `public`. Use `private` whenever content or access
 can vary between callers. This slice serves only the built-in provider;
@@ -548,3 +548,28 @@ The toolbar uses a two-column grid layout to accommodate many node types.
 ### Profile templates
 
 Place individual v1 template JSON documents in `config/<profile>/templates/` alongside the active schema configuration. Valid documents load at startup and appear as read-only templates; invalid documents are logged and skipped. IDs already used by another profile or stored template or session (including deleted records) prevent startup; resolve the ID collision before restarting. See [Templates contract](TEMPLATES_CONTRACT.md) for the document format.
+
+
+### MCP graph content profile
+
+The `describe_graph` tool and read-only `graph://profile` resource return the
+same deterministic statistics for the local graph. Each read recomputes the
+profile; there is no cache or TTL. The caller's graph read access filters nodes
+and both endpoints of edges, and archived nodes and edges are excluded.
+
+`node_count` is the visible total. `node_types` and `subtypes` contain counts;
+`tags` counts nodes carrying each tag. `relationships` reports each directed
+source type, relationship type and target type, the number of distinct source
+nodes with at least one matching edge, and that count divided by the visible
+source-type count. `central_nodes` ranks nodes by visible incident edge count,
+including zero-degree nodes, with ties ordered by ID. Each list is capped at 100
+entries. Types, subtypes and relationships are ordered by name; tags are ordered
+by descending count then name. A self-loop contributes two to degree.
+
+When MCP skills are enabled, changes to the unrestricted profile or to a
+previously read access scope publish the standard `notifications/resources/updated` notification for `graph://profile`
+on the in-process subscription bus. A change visible only to a scope that has
+not yet read the profile may not produce a notification. It carries no profile
+content. With skills
+disabled the bus is absent and no notification is published. Graph content does
+not change skill files or their digests.
