@@ -27,10 +27,27 @@ from backend.agents.execution.store import JobNotFoundError
 
 
 def _valid_retry_policy(policy: RetryPolicy) -> bool:
-    return type(policy.max_attempts) is int and all(
-        math.isfinite(value)
-        for value in (policy.base_seconds, policy.factor, policy.max_seconds)
+    return (
+        type(policy.max_attempts) is int
+        and 1 <= policy.max_attempts <= 10
+        and 0 <= policy.base_seconds <= 86400
+        and 1 <= policy.factor <= 10
+        and 0 <= policy.max_seconds <= 86400
+        and all(
+            math.isfinite(value)
+            for value in (policy.base_seconds, policy.factor, policy.max_seconds)
+        )
     )
+
+
+def _retry_at(policy: RetryPolicy, attempts: int, ts: float) -> float:
+    delay = min(policy.base_seconds, policy.max_seconds)
+    for _ in range(attempts - 1):
+        delay = min(delay * policy.factor, policy.max_seconds)
+    run_at = ts + delay
+    # The store converts this timestamp back to a datetime when reading it.
+    datetime.fromtimestamp(run_at, timezone.utc)
+    return run_at
 
 
 class _LedgerStore:
@@ -287,11 +304,15 @@ class ScheduleSlots:
                         "attempts exhausted",
                     )
                 else:
-                    state, run_at, reason = (
-                        ExecutionState.PENDING,
-                        ts + policy.backoff_seconds(job.attempts),
-                        None,
-                    )
+                    try:
+                        run_at = _retry_at(policy, job.attempts, ts)
+                        state, reason = ExecutionState.PENDING, None
+                    except (OverflowError, ValueError, OSError):
+                        state, run_at, reason = (
+                            ExecutionState.DEAD_LETTER,
+                            job.run_at.timestamp(),
+                            "invalid retry policy",
+                        )
                 conn.execute(
                     """
                     UPDATE schedule_jobs SET state = ?, run_at = ?,

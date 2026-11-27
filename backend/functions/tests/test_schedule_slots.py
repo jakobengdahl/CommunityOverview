@@ -144,6 +144,23 @@ def test_rejects_invalid_inputs(tmp_path, field, value):
         slots.close()
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RetryPolicy(max_attempts=3, factor=1e200),
+        RetryPolicy(max_attempts=3, base_seconds=1e20, max_seconds=1e20),
+    ],
+    ids=["exponent-overflow", "timestamp-overflow"],
+)
+def test_rejects_overflowing_retry_policies(tmp_path, policy):
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        with pytest.raises(ValueError, match="Invalid retry policy"):
+            slots.enqueue("example", TIMEPOINT, retry_policy=policy)
+    finally:
+        slots.close()
+
+
 def test_persisted_per_slot_retry_and_catchup(tmp_path):
     path = tmp_path / "slots.db"
     slots = ScheduleSlots(path)
