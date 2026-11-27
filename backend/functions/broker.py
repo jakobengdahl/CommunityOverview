@@ -321,7 +321,7 @@ class FunctionBroker:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
         if name == "graph.attach_run_file" and ctx.session_id:
             raise BrokerError(ERR_ACCESS_DENIED, "Attachments cannot be staged.")
-        if name == "graph.attach_run_file" and ctx.contract_version not in {"3", "4"}:
+        if name == "graph.attach_run_file" and ctx.contract_version not in {"3", "4", "5"}:
             raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
         if spec.grant is not None and (

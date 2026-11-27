@@ -316,6 +316,18 @@ class ScheduleSlots:
         job = self.claim_next(worker_id, now=now, lease_seconds=lease_seconds)
         if job is None:
             return None
+        if job.attempts > 1 and not self._retry_declared(service, job):
+            self._finish(
+                job.id, attempt=job.attempts, now=now, success=False, retry=False
+            )
+            return None
+        if callable(actor_binding):
+            actor_binding = actor_binding(job.agent_id)
+        if actor_binding is None:
+            self._finish(
+                job.id, attempt=job.attempts, now=now, success=False, retry=False
+            )
+            return None
         result = service.invoke(
             job.agent_id,
             {},
@@ -329,18 +341,7 @@ class ScheduleSlots:
         if result.state == ExecutionState.SUCCEEDED:
             self.complete(job.id, attempt=job.attempts, now=finished)
         elif result.state == ExecutionState.DEAD_LETTER:
-            # The ledger is durable, but it is not authority to enable retry.
-            # Require the current validated manifest to declare the same policy.
-            from backend.functions.invocation import load_manifest
-
-            try:
-                manifest, _ = load_manifest(service.root, job.agent_id)
-                declared = manifest.get("retry")
-                retry = bool(declared) and RetryPolicy(
-                    **declared
-                ).to_dict() == job.payload.get("retry_policy")
-            except (OSError, ValueError, TypeError):
-                retry = False
+            retry = self._retry_declared(service, job)
             self._finish(
                 job.id, attempt=job.attempts, now=finished, success=False, retry=retry
             )
@@ -349,6 +350,19 @@ class ScheduleSlots:
                 job.id, attempt=job.attempts, now=finished, success=False, retry=False
             )
         return result
+
+    @staticmethod
+    def _retry_declared(service, job):
+        from backend.functions.invocation import load_manifest
+
+        try:
+            manifest, _ = load_manifest(service.root, job.agent_id)
+            declared = manifest.get("retry")
+            return bool(declared) and RetryPolicy(
+                **declared
+            ).to_dict() == job.payload.get("retry_policy")
+        except (OSError, ValueError, TypeError):
+            return False
 
     def _finish(
         self,

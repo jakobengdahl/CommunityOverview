@@ -316,3 +316,23 @@ def test_enqueue_lock_failure_rolls_back(tmp_path):
     finally:
         other.close()
         slots.close()
+
+
+def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from backend.functions import invocation
+
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    policy = RetryPolicy(max_attempts=2, base_seconds=0)
+    job = slots.enqueue("example", TIMEPOINT, retry_policy=policy)
+    slots.claim_next("w", now=TIMEPOINT, lease_seconds=10)
+    slots.fail(job.id, attempt=1, now=TIMEPOINT)
+    monkeypatch.setattr(invocation, "load_manifest", lambda *args: ({}, None))
+    service = SimpleNamespace(root=tmp_path, invoke=Mock())
+    try:
+        slots.dispatch(service, "w", actor_binding={}, now=TIMEPOINT, lease_seconds=10)
+        service.invoke.assert_not_called()
+        assert slots.enqueue("example", TIMEPOINT).state == ExecutionState.DEAD_LETTER
+    finally:
+        slots.close()

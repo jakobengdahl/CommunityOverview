@@ -801,6 +801,22 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path):
             slots.enqueue_manifest(tmp_path, "example", now).state
             == ExecutionState.SUCCEEDED
         )
+        service.graph_service.authorization_hook.evaluate.return_value = (
+            GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=False, include_graph_ids=("other",)
+                ),
+            )
+        )
+        denied = service.invoke(
+            "example",
+            {},
+            trigger="schedule",
+            actor_binding={"actor_id": "scheduler", "graph_id": "graph"},
+        )
+        assert denied.result["error"]["code"] == "access_denied"
+        assert execute.call_count == 1
         for version in ("1", "2", "3", "4"):
             manifest["contract_version"] = version
             (directory / "function.json").write_text(json.dumps(manifest))

@@ -585,7 +585,7 @@ class FunctionInvocationService:
                         target="invoke_function",
                     )
                     if not decision.allowed or (
-                        trigger == "webhook"
+                        trigger in {"webhook", "schedule"}
                         and not decision.graph_access.matches(
                             graph_id=binding["graph_id"]
                         )

@@ -321,6 +321,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await start_session_registry()
+        function_scheduler.start()
         try:
             async with streamable_session_lifecycle():
                 yield
@@ -521,6 +522,24 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     ):
         raise ValueError("Invalid webhook graph bindings")
     app.state.function_invocation_service = function_invocation_service
+    from backend.functions.schedule_slots import ScheduleSlots
+    from backend.functions.scheduler import FunctionScheduler
+
+    schedule_graphs = json.loads(
+        os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", "{}")
+    )
+    if not isinstance(schedule_graphs, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in schedule_graphs.items()
+    ):
+        raise ValueError("Invalid schedule graph bindings")
+    Path(token_path).parent.mkdir(parents=True, exist_ok=True)
+    function_scheduler = FunctionScheduler(
+        function_invocation_service,
+        ScheduleSlots(Path(token_path).with_name("function-schedule-slots.db")),
+        schedule_graphs,
+    )
+    app.state.function_scheduler = function_scheduler
     from backend.functions.token_store import WebhookTokenStore
 
     function_invocation_service.webhook_token_store = WebhookTokenStore(token_path)
@@ -685,6 +704,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             app.state.session_cleanup_task.cancel()
         if merge_record_retention is not None:
             merge_record_retention.stop()
+        function_scheduler.stop()
         runtime.stop()
 
     return app

@@ -1161,8 +1161,9 @@ def test_run_file_read_applies_type_policy_and_extraction_limits(
         files.close()
 
 
+@pytest.mark.parametrize("version", ["3", "4", "5"])
 def test_attach_run_file_uses_upload_authorization_and_audits(
-    service, hook, tmp_path, monkeypatch, caplog
+    service, hook, tmp_path, monkeypatch, caplog, version
 ):
     from backend.config import config_loader
     from backend.core.attachment_store import FileAttachmentStore
@@ -1192,7 +1193,7 @@ def test_attach_run_file_uses_upload_authorization_and_audits(
     files.append(file_id, b"untrusted input")
     other.add("first.txt", "text/plain")
     other_id = other.add("other.txt", "text/plain")
-    broker = make_broker(service, run_files=files, contract_version="3")
+    broker = make_broker(service, run_files=files, contract_version=version)
     try:
         node_id = call(
             broker, "graph.add", {"nodes": [{"name": "Doc", "type": "Document"}]}
@@ -1209,13 +1210,15 @@ def test_attach_run_file_uses_upload_authorization_and_audits(
         disabled = make_broker(
             service,
             run_files=files,
-            contract_version="3",
+            contract_version=version,
             grant_enabled=lambda grant: False,
         )
         assert (
             error_code(call(disabled, "graph.attach_run_file", args)) == "grant_denied"
         )
-        denied = make_broker(service, grants=(), run_files=files, contract_version="3")
+        denied = make_broker(
+            service, grants=(), run_files=files, contract_version=version
+        )
         assert error_code(call(denied, "graph.attach_run_file", args)) == "grant_denied"
         hook.deny_mutate = True
         assert (

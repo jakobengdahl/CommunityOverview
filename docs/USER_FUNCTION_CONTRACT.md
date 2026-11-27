@@ -683,9 +683,10 @@ this budget. On recovery the latest due initial slot per function is selected,
 and older due slots, including those subsequently queued through the recovery
 time, are recorded as skipped. Pending retries remain independent.
 
-The slot ledger and dispatch seam implement these policies; a scheduler that
-discovers manifests, generates fire times and supplies a graph-bound system
-actor is not yet wired into application startup.
+The application scheduler discovers enabled functions with configured graph bindings.
+Fire times are aligned to the Unix epoch at the declared interval; each poll
+generates only the latest due slot. The scheduler starts and stops with the
+application and uses a graph-bound `function_schedule` system actor.
 
 ## 13. Reserved for later versions
 
