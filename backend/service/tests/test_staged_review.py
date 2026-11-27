@@ -16,7 +16,7 @@ import pytest
 from backend.core import Edge, Node
 from backend.core.events.models import EventContext
 from backend.core.layer_store import utc_now
-from backend.runtime.session_context import bind_session
+from backend.runtime.session_context import bind_function_origin, bind_session
 from backend.service import staged_review as sr
 from backend.service.staging import _apply_staged, _edge, _node, compose
 from backend.service.tests.test_composed_reads import REMOTE, make_world
@@ -91,6 +91,24 @@ def test_the_diff_shows_base_staged_and_main_per_field_and_flags_only_real_confl
     # b's revision moved, but no field it stages: clean.
     assert b["status"] == "clean"
     assert "base" not in a and a["staged_by"] == "anonymous"
+
+
+def test_review_exposes_only_recorded_function_identifiers(world):
+    svc, sid = world.service, world.staged_session()
+    origin = {
+        "function_id": "fn",
+        "function_version": "4",
+        "run_id": "run",
+        "correlation_id": "corr",
+    }
+    with bind_function_origin({**origin, "secret": "hidden"}):
+        _stage(
+            world, sid, ("update_node", ("a",), {"updates": {"description": "mine"}})
+        )
+    _stage(world, sid, ("update_node", ("b",), {"updates": {"description": "other"}}))
+    items = _items(svc.get_staged_changes(sid))
+    assert items[("node", "a")]["function_origin"] == origin
+    assert "function_origin" not in items[("node", "b")]
 
 
 def test_each_status_is_reported_where_the_contract_puts_it(world):

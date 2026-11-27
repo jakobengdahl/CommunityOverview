@@ -80,6 +80,41 @@ describe('StagedReviewDialog', () => {
     expect(row.textContent).toContain('staged.status.conflict');
   });
 
+  it.each(['merge', 'discard'])('selects a run through the existing %s path', async (action) => {
+    const origin = { function_id: 'fn', function_version: '4', run_id: 'run' };
+    const items = [
+      { ...CREATE, function_origin: origin },
+      { ...EDGE, function_origin: origin },
+      CONFLICT,
+    ];
+    api.mergeStagedChanges.mockResolvedValue({ merged: [] });
+    api.discardStagedChanges.mockResolvedValue({ removed_entries: [] });
+    renderDialog({ items });
+    expect(screen.getByTestId('staged-item-node:n1').textContent).toContain('fn@4');
+    expect(screen.getByTestId('staged-item-edge:e1').textContent).toContain('run');
+    const run = screen.getByRole('checkbox', { name: /staged.select_run/ });
+    fireEvent.click(run);
+    expect(checkbox('node:n1').checked).toBe(true);
+    expect(checkbox('edge:e1').checked).toBe(true);
+    expect(checkbox('node:n2').checked).toBe(false);
+    fireEvent.click(run);
+    expect(checkbox('node:n1').checked).toBe(false);
+    expect(checkbox('edge:e1').checked).toBe(false);
+    fireEvent.click(run);
+    if (action === 'merge') fireEvent.click(screen.getByTestId('staged-merge'));
+    else {
+      fireEvent.click(screen.getByText('staged.discard_selected'));
+      fireEvent.click(screen.getByText('staged.discard_confirm'));
+    }
+    const call = action === 'merge' ? api.mergeStagedChanges : api.discardStagedChanges;
+    await waitFor(() => expect(call).toHaveBeenCalled());
+    const payload = call.mock.calls[0][1];
+    expect(action === 'merge' ? payload.entries : payload).toEqual([
+      { kind: 'node', entity_id: 'n1' },
+      { kind: 'edge', entity_id: 'e1' },
+    ]);
+  });
+
   it('ticking an edge ticks the node it needs', () => {
     renderDialog();
     fireEvent.click(checkbox('edge:e1'));

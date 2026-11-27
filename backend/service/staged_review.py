@@ -396,6 +396,18 @@ class Review:
             "staged_by": entry.get("staged_by"),
             "staged_at": entry.get("staged_at"),
         }
+        if entry.get("function_origin") is not None:
+            origin = entry["function_origin"]
+            item["function_origin"] = {
+                field: origin[field]
+                for field in (
+                    "function_id",
+                    "function_version",
+                    "run_id",
+                    "correlation_id",
+                )
+                if field in origin
+            }
         if key[0] == "node" and entry["action"] == "delete" and main is not None:
             item["unstaged_edges"] = [
                 edge_id
