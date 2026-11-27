@@ -110,6 +110,29 @@ def matches(trigger, event):
     )
 
 
+def projection_covers(trigger, projection):
+    """Whether every path the trigger reads survives the stored projection whole.
+
+    A partial object (a declared child, an omitted sensitive descendant) could
+    match where the original event would not, so such a trigger is not rematched.
+    """
+    if not isinstance(projection, dict):
+        return False
+    stored = [tuple(path.split(".")) for path in projection.get("fields", [])]
+    omitted = [tuple(path.split(".")) for path in projection.get("sensitive", [])]
+    paths = trigger["fields"] + [
+        key for side in ("before", "after") for key in trigger.get(side, {})
+    ]
+    for path in paths:
+        parts = tuple(path.split("."))
+        if not any(parts[: len(field)] == field for field in stored) or any(
+            parts[: len(secret)] == secret or secret[: len(parts)] == parts
+            for secret in omitted
+        ):
+            return False
+    return True
+
+
 def filtered_entity(entity, fields, sensitive_fields):
     """Project declared paths before persisting an event; omit sensitive subtrees."""
     from copy import deepcopy
