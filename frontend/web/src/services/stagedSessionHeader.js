@@ -25,6 +25,7 @@ export const SESSION_ID_HEADER = 'x-communityoverview-session-id';
 // [method, path below the deployment root]. Kept in step with
 // backend/api_host/session_binding.py's _API_SESSION_AWARE/_HOST_SESSION_AWARE.
 export const SESSION_AWARE = [
+  ['POST', /^\/api\/functions\/[^/]+\/invoke$/],
   ['POST', /^\/api\/search$/],
   ['GET', /^\/api\/nodes\/[^/]+$/],
   ['POST', /^\/api\/nodes\/[^/]+\/related$/],

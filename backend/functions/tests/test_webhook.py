@@ -347,6 +347,31 @@ def test_files_are_run_inputs_outside_envelope_and_deleted(files_host, fails):
     assert seen["present"] and not os.path.exists(host.created[0])
 
 
+def test_invalid_graph_manifest_webhook_replays_rejection(files_host):
+    host = files_host
+    path = host.service.root / "example" / "function.json"
+    manifest = json.loads(path.read_text())
+    manifest.update(write_target="graph", limits={"timeout_seconds": 121})
+    path.write_text(json.dumps(manifest))
+    first = host.service.invoke(
+        "example",
+        {"value": 1},
+        trigger="webhook",
+        actor_binding={
+            "actor_id": "function_webhook:example",
+            "actor_type": "function_webhook",
+            "auth_source": "webhook",
+            "graph_id": "graph-a",
+        },
+        idempotency_key="invalid",
+    )
+    replay = host.post("invalid")
+    assert first.result["error"]["code"] == "invalid_manifest"
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.id
+    host.execute.assert_not_called()
+
+
 def test_concurrent_replays_claim_once_and_refusals_store_nothing(
     files_host, monkeypatch
 ):

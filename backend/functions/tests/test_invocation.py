@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "4"),
+        ("contract_version", "5"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -335,6 +335,49 @@ def test_invalid_manifest_is_rejected_and_its_delivery_key_is_retained(
     (directory / "function.json").write_text(json.dumps(manifest))
     assert invoke(service, idempotency_key="delivery").id == rejected.id
     assert invoke(service, idempotency_key="fixed").state == ExecutionState.SUCCEEDED
+
+
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+@pytest.mark.parametrize("target", [None, "graph"])
+def test_invalid_graph_manifest_replays_before_validation(host, version, target):
+    service, execute, manifest, directory = host
+    manifest.update(contract_version=version, limits={"timeout_seconds": 121})
+    if target is not None:
+        manifest["write_target"] = target
+    (directory / "function.json").write_text(json.dumps(manifest))
+    rejected = invoke(service, idempotency_key="delivery")
+    assert rejected.result["error"]["code"] == "invalid_manifest"
+    assert invoke(service, idempotency_key="delivery").id == rejected.id
+    binding = {"actor_id": "operator"}
+    assert service.replay_webhook("example", "delivery", binding).id == rejected.id
+    assert (
+        service.refuse(
+            "example",
+            "invalid_manifest",
+            actor_binding=binding,
+            idempotency_key="delivery",
+        ).id
+        == rejected.id
+    )
+    execute.assert_not_called()
+
+
+def test_write_target_change_during_admission_is_refused(host, monkeypatch):
+    service, execute, manifest, directory = host
+    manifest.update(contract_version="4", write_target="graph")
+    path = directory / "function.json"
+    path.write_text(json.dumps(manifest))
+    refusal = service._refusal
+
+    def change_target(*args):
+        path.write_text(json.dumps({**manifest, "write_target": "session"}))
+        return refusal(*args)
+
+    monkeypatch.setattr(service, "_refusal", change_target)
+    with pytest.raises(PermissionError, match="binding changed"):
+        invoke(service, idempotency_key="delivery")
+    assert not service.store.list_jobs(kind=ExecutionKind.FUNCTION)
+    execute.assert_not_called()
 
 
 @pytest.mark.parametrize("target", ["directory", "manifest", "entry", "package"])
@@ -529,6 +572,167 @@ def test_webhook_version_and_write_switch_use_bound_actor(host):
     assert context.grant_enabled("graph:write")
     service.webhook_policy.get.return_value = (False, True)
     assert not context.grant_enabled("graph:write")
+
+
+def test_session_binding_stages_and_replay_requires_the_same_target_and_session(
+    host, tmp_path
+):
+    from backend.core import GraphStorage
+    from backend.core.storage_backends import FileGraphPersistenceBackend
+    from backend.runtime.session_context import SessionRefused, bind_session
+    from backend.service.tests.test_staged_writes import World, _seed
+
+    service, execute, manifest, directory = host
+    storage = GraphStorage(
+        str(tmp_path / "graph.json"),
+        persistence_backend=FileGraphPersistenceBackend(
+            tmp_path / "graph.json", staged_sessions=True
+        ),
+    )
+    _seed(storage)
+    world = World(storage)
+    service.graph_service = world.service
+    sid, other = world.staged_session(), world.staged_session()
+    manifest.update(contract_version="4", write_target="session")
+    (directory / "function.json").write_text(json.dumps(manifest))
+
+    def run(_runner, _spec, broker, _envelope):
+        def call(arguments):
+            return broker.handle_request(
+                {
+                    "id": 1,
+                    "params": {"name": "graph.update_node", "arguments": arguments},
+                }
+            )
+
+        assert "error" in call(
+            {"node_id": "a", "updates": {"name": "Bad"}, "session_id": other}
+        )
+        assert "result" in call({"node_id": "a", "updates": {"name": "Staged"}})
+        return FunctionRunResult("succeeded", output={}, wall_ms=1)
+
+    execute.side_effect = run
+    with bind_session(sid):
+        job = invoke(service, idempotency_key="one", correlation_id="corr")
+        assert invoke(service, idempotency_key="one").id == job.id
+    assert storage.get_node("a").name == "Alpha"
+    assert world.layer(other) == {}
+    assert world.layer(sid)[("node", "a")]["function_origin"] == {
+        "function_id": "example",
+        "function_version": "1.0.0",
+        "run_id": job.id,
+        "correlation_id": "corr",
+    }
+    with bind_session(other), pytest.raises(PermissionError):
+        invoke(service, idempotency_key="one")
+    with pytest.raises(ValueError):
+        invoke(service, idempotency_key="one")
+    assert service.store.redact([job.id]) == 1
+    manifest["write_target"] = "graph"
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(PermissionError):
+        invoke(service, idempotency_key="one")
+    with bind_session(sid), pytest.raises(SessionRefused):
+        invoke(service, idempotency_key="new")
+    assert len(service.store.list_jobs(kind=ExecutionKind.FUNCTION)) == 1
+    assert world.service.merge_staged_changes(sid, "merge")["success"]
+    assert storage.get_node("a").name == "Staged"
+    storage.shutdown_events()
+
+
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+def test_session_target_requires_version_four(host, version):
+    service, execute, manifest, directory = host
+    original = invoke(service, idempotency_key="existing")
+    manifest.update(contract_version=version, write_target="session")
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(PermissionError):
+        invoke(service, idempotency_key="existing")
+    with pytest.raises(PermissionError):
+        service.replay_webhook("example", "existing", {"actor_id": "operator"})
+    with pytest.raises(PermissionError):
+        service.refuse(
+            "example",
+            "invalid_manifest",
+            actor_binding={"actor_id": "operator"},
+            idempotency_key="existing",
+        )
+    assert invoke(service).result["error"]["code"] == "invalid_manifest"
+    assert execute.call_count == 1
+    assert service.store.get(original.id).state == ExecutionState.SUCCEEDED
+
+
+def test_session_admission_refuses_unauthorized_or_direct_sessions(host):
+    from backend.runtime.session_context import bind_session
+
+    service, execute, manifest, directory = host
+    manifest.update(contract_version="4", write_target="session")
+    (directory / "function.json").write_text(json.dumps(manifest))
+    service.graph_service.session_gate = Mock()
+    service.graph_service.session_gate.named_mode.return_value = "direct"
+    with bind_session("session"), pytest.raises(ValueError):
+        invoke(service, idempotency_key="key")
+    service.graph_service.session_gate.named_mode.return_value = "staged"
+    service.graph_service.authorization_hook.evaluate.side_effect = lambda context: (
+        GraphAuthorizationDecision(allowed=context.graph_operation != "stage")
+    )
+    with bind_session("session"), pytest.raises(PermissionError):
+        invoke(service, idempotency_key="key")
+    context = service.graph_service.authorization_hook.evaluate.call_args.args[0]
+    assert (
+        context.action,
+        context.target,
+        context.graph_operation,
+        context.session_id,
+    ) == ("mutate", "invoke_function", "stage", "session")
+    assert service.store.list_jobs(kind=ExecutionKind.FUNCTION) == []
+    execute.assert_not_called()
+
+
+def test_http_session_refusal_does_not_consume_graph_delivery_key(host):
+    from backend.api_host.session_binding import add_session_binding_middleware
+    from backend.runtime.session_context import SESSION_ID_HEADER
+
+    service, execute, manifest, directory = host
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def bind_actor(request, call_next):
+        request.scope["communityoverview.authenticated_actor"] = {
+            "actor_id": "operator"
+        }
+        return await call_next(request)
+
+    router = APIRouter()
+    register_function_routes(router, service)
+    app.include_router(router, prefix="/api")
+    add_session_binding_middleware(app, api_prefix="/api", is_retired=lambda _: False)
+    headers = {SESSION_ID_HEADER: "session", "Idempotency-Key": "delivery"}
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/functions/example/invoke", json={}, headers=headers
+            ).status_code
+            == 400
+        )
+        assert service.store.list_jobs(kind=ExecutionKind.FUNCTION) == []
+        headers.pop(SESSION_ID_HEADER)
+        response = client.post(
+            "/api/functions/example/invoke", json={}, headers=headers
+        )
+        assert response.status_code == 200
+        manifest.update(contract_version="4", write_target="session")
+        (directory / "function.json").write_text(json.dumps(manifest))
+        service.graph_service.session_gate = Mock()
+        service.graph_service.session_gate.named_mode.return_value = "staged"
+        response = client.post(
+            "/api/functions/example/invoke",
+            json={},
+            headers={SESSION_ID_HEADER: "session", "Idempotency-Key": "staged"},
+        )
+        assert response.status_code == 200
+        assert execute.call_args.args[2].context.session_id == "session"
+    assert execute.call_count == 2
 
 
 def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypatch):

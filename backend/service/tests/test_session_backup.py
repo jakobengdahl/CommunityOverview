@@ -73,6 +73,8 @@ def backend(request, tmp_path):
         ("data:image/png;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
         ("DaTa:ImAgE/PNG;BaSe64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
         ("DATA:IMAGE/svg+xml,%3Csvg%3E", b"<svg>"),
+        ("data:application/octet-stream;base64,bGVnYWN5IHBpeGVscw==", b"legacy pixels"),
+        ("DaTa:text/plain;charset=utf-8,legacy%20pixels", b"legacy pixels"),
         (
             "data:image/svg+xml;charset=utf-8,%3Csvg%3E%00%FF+%3C/svg%3E",
             b"<svg>\x00\xff+</svg>",
@@ -91,6 +93,11 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
         hidden_edge_ids=["edge"],
         annotations=[
             {"id": "image", "type": "image", "image": {"url": url}},
+            {
+                "id": "same-bytes",
+                "kind": "image",
+                "image": {"url": "data:text/plain;charset=utf-8,pixels"},
+            },
             {"id": "legacy-image", "kind": "image", "image": {"url": legacy_url}},
             {"id": "note", "type": "text", "text": "data:image/ ordinary text"},
             {"id": "note2", "type": "text", "text": "data:image/png;base64,YQ=="},
@@ -134,7 +141,10 @@ def test_backup_keeps_persistent_state_and_checks_integrity(
     assert backup["import_mappings"] == backup["import_reports"] == []
     expected_assets = [
         {"sha256": hashlib.sha256(data).hexdigest(), "data_url": data_url}
-        for data, data_url in ((payload, url), (legacy_payload, legacy_url))
+        for data, data_url in (
+            (payload, "data:text/plain;charset=utf-8,pixels"),
+            (legacy_payload, legacy_url),
+        )
     ]
     assert backup["assets"] == sorted(
         expected_assets, key=lambda asset: asset["sha256"]
@@ -225,7 +235,7 @@ def test_backup_refuses_session_list_changes_before_reading_records(backend):
 
 
 @pytest.mark.parametrize(
-    "failure", ["session", "references", "staged", "asset", "mode"]
+    "failure", ["session", "references", "staged", "asset", "legacy_asset", "mode"]
 )
 def test_backup_refuses_the_whole_snapshot(backend, failure):
     first = Session("1234-5678")
@@ -233,6 +243,10 @@ def test_backup_refuses_the_whole_snapshot(backend, failure):
     if failure == "asset":
         second.state["annotations"] = [
             {"type": "image", "image": {"url": "data:image/webp;base64,%%%"}}
+        ]
+    if failure == "legacy_asset":
+        second.state["annotations"] = [
+            {"kind": "image", "image": {"url": "data:text/plain;base64,%%%"}}
         ]
     if failure == "mode":
         second.write_mode = "staged"
