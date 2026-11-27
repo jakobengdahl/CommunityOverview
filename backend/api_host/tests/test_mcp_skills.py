@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -227,6 +228,9 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
     } == {"skill://graph-working-method/SKILL.md"}
     with pytest.raises(TypeError):
         create_app(app_config, skill_providers=[Provider({"SKILL.md": skill()})])
+    profiles = (Path(__file__).resolve().parents[3] / "docs/PROFILES.md").read_text()
+    assert "`create_app` does not accept additional providers" in profiles
+    assert "it is not automatically changed for additional providers" in profiles
 
 
 def test_decoded_frontmatter_injection_is_refused():
