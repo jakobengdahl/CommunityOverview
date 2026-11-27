@@ -103,7 +103,7 @@ class GraphSemanticsProvider:
                     result[sanitized_key] = clean(item)
                 return result
             if isinstance(value, list):
-                return sorted((clean(item) for item in value), key=canonical)
+                return [clean(item) for item in value]
             return value
 
         def canonical(value):
@@ -111,17 +111,9 @@ class GraphSemanticsProvider:
                 value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
 
-        nodes = {
-            name: {
-                key: value
-                for key, value in config.items()
-                if key in {"fields", "subtypes", "description", "labels"}
-            }
-            for name, config in self.schema["node_types"].items()
-        }
         snapshot = clean(
             {
-                "node_types": nodes,
+                "node_types": self.schema["node_types"],
                 "relationship_types": self.schema["relationship_types"],
                 "vocabularies": self.schema.get("vocabularies", {}),
                 "default_language": self.presentation["default_language"],
@@ -129,6 +121,19 @@ class GraphSemanticsProvider:
                 "prompt_prefix": self.presentation["prompt_prefix"],
             }
         )
+        # Only normalize fields whose order has set semantics. Other lists,
+        # including nested vocabulary values and UI settings, retain their order.
+        def sort_field(obj, key):
+            if isinstance(obj, dict) and isinstance(obj.get(key), list):
+                obj[key].sort(key=canonical)
+
+        for node in snapshot["node_types"].values():
+            for key in ("fields", "subtypes"):
+                sort_field(node, key)
+        for relationship in snapshot["relationship_types"].values():
+            for key in ("source_types", "target_types"):
+                sort_field(relationship, key)
+        sort_field(snapshot["language_policy"], "allowed_languages")
         data = canonical(snapshot)
         # A reproducible date identifier, not the time the schema was modified.
         days = int(hashlib.sha256(data.encode()).hexdigest()[:8], 16) % 36525

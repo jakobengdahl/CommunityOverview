@@ -59,13 +59,16 @@ class TestConfigLoader:
             assert loaded["color"] == type_config["color"]
             assert loaded["icon"] == type_config["icon"]
 
-    def test_system_node_types_in_config_are_stripped_not_doubled(self, tmp_path):
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_system_node_types_in_config_are_stripped_not_doubled(self, tmp_path, enabled):
         """System node types defined in a config file must not produce duplicates."""
         import json
         from backend.config import config_loader
 
         config_with_system_types = {
+            "presentation": {"skills_config": {"mcp": {"enabled": enabled}}},
             "schema": {
+                "vocabularies": ["legacy value"],
                 "node_types": {
                     "SavedView": {
                         "fields": ["name"],
@@ -84,6 +87,7 @@ class TestConfigLoader:
                         "icon": "OldIcon",
                     },
                     "MyDomain": {
+                        "subtypes": {"legacy": "value"},
                         "fields": ["name", "description"],
                         "category": "domain",
                         "description": "A domain type",
@@ -101,6 +105,9 @@ class TestConfigLoader:
 
         # Domain type must be present
         assert "MyDomain" in schema["node_types"]
+        loaded = config_loader._get_loader().config.schema_
+        assert loaded.vocabularies == ["legacy value"]
+        assert loaded.node_types["MyDomain"].subtypes == {"legacy": "value"}
         # System types must come from code, not from the stale config entries
         assert (
             schema["node_types"]["SavedView"]["color"]

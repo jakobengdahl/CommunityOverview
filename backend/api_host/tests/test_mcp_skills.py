@@ -308,10 +308,12 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
                 "subtypes": ["Two", "One"],
                 "description": "<script>bad</script><example>safe</example>",
                 "labels": {},
+                "static": False,
+                "context_menu": [{"items": ["first", "second"]}],
             }
         },
         "relationship_types": {"LINK": {"source_types": ["Z"], "target_types": ["Z"]}},
-        "vocabularies": {"terms": {"item": "Label"}},
+        "vocabularies": {"terms": {"item": "Label", "ordered": ["first", "second"]}},
     }
     presentation = {
         "default_language": "en",
@@ -326,6 +328,8 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     assert data["node_types"]["Z"]["fields"] == ["a", "b"]
     assert data["node_types"]["Z"]["subtypes"] == ["One", "Two"]
     assert data["node_types"]["Z"]["description"] == "<example>safe</example>"
+    assert data["node_types"]["Z"]["static"] is False
+    assert data["node_types"]["Z"]["context_menu"][0]["items"] == ["first", "second"]
     assert data["relationship_types"]["LINK"]["source_types"] == ["Z"]
     assert data["vocabularies"]["terms"]["item"] == "Label"
     assert data["language_policy"] == {"allowed_languages": ["en", "sv"]}
@@ -342,6 +346,18 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
         [GraphSemanticsProvider(reordered, presentation)], 0, "private"
     )
     assert changed.entries[uri]["resources"] != ext.entries[uri]["resources"]
+
+    for change in ("static", "vocabulary_order"):
+        modified = json.loads(json.dumps(schema))
+        if change == "static":
+            modified["node_types"]["Z"]["static"] = True
+        else:
+            modified["vocabularies"]["terms"]["ordered"].reverse()
+        changed = SkillsExtension(
+            [GraphSemanticsProvider(modified, presentation)], 0, "private"
+        )
+        assert changed.files[uri] != content
+        assert changed.entries[uri]["resources"] != ext.entries[uri]["resources"]
 
     async def check():
         ctx = SimpleNamespace(protocol_version="2026-07-28")
