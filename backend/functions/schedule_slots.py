@@ -225,14 +225,26 @@ class ScheduleSlots:
                         ts,
                     ),
                 )
+                conn.execute(
+                    "DELETE FROM schedule_rate WHERE admitted_at <= ?", (ts - 60,)
+                )
                 row = conn.execute(
                     """
                     SELECT * FROM schedule_jobs WHERE kind = ?
                       AND idempotency_key GLOB 'function-schedule:*'
                       AND state = ? AND run_at <= ?
+                      AND (attempts = 0 OR (SELECT COUNT(*) FROM schedule_rate AS r
+                           WHERE r.function_id = schedule_jobs.agent_id
+                             AND r.admitted_at > ?) < ?)
                     ORDER BY run_at, created_at LIMIT 1
                 """,
-                    (ExecutionKind.SCHEDULED.value, ExecutionState.PENDING.value, ts),
+                    (
+                        ExecutionKind.SCHEDULED.value,
+                        ExecutionState.PENDING.value,
+                        ts,
+                        ts - 60,
+                        self.rate_limit,
+                    ),
                 ).fetchone()
                 if row is None:
                     conn.commit()
@@ -245,9 +257,6 @@ class ScheduleSlots:
                             MAX(fire_time, excluded.fire_time)
                     """,
                         (row["agent_id"], ts),
-                    )
-                    conn.execute(
-                        "DELETE FROM schedule_rate WHERE admitted_at <= ?", (ts - 60,)
                     )
                     count = conn.execute(
                         "SELECT COUNT(*) FROM schedule_rate WHERE function_id = ? AND admitted_at > ?",
@@ -267,9 +276,9 @@ class ScheduleSlots:
                         )
                         conn.commit()
                         return None
-                    conn.execute(
-                        "INSERT INTO schedule_rate VALUES (?, ?)", (row["agent_id"], ts)
-                    )
+                conn.execute(
+                    "INSERT INTO schedule_rate VALUES (?, ?)", (row["agent_id"], ts)
+                )
                 conn.execute(
                     """
                     UPDATE schedule_jobs SET state = ?, attempts = attempts + 1,

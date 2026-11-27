@@ -258,6 +258,10 @@ def load_manifest(root, function_id):
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
         or not _valid_triggers(manifest)
+        or (
+            manifest.get("write_target", "graph") == "session"
+            and any(t["kind"] == "schedule" for t in manifest["triggers"])
+        )
         or manifest.get("write_target", "graph")
         not in (
             ("graph", "session")
@@ -658,7 +662,11 @@ class FunctionInvocationService:
         old_session_target = declared_target == "session" and (
             current_manifest or {}
         ).get("contract_version") in ("1", "2", "3")
-        write_target = "graph" if old_session_target else declared_target
+        # Scheduled invocations have no staged session. Treat a changed or
+        # invalid session target as graph-bound so admission records its refusal.
+        write_target = (
+            "graph" if old_session_target or trigger == "schedule" else declared_target
+        )
         if write_target == "graph" and session_id is not None:
             raise not_supported("Function invocation")
         if write_target == "session":
@@ -733,6 +741,7 @@ class FunctionInvocationService:
             if (
                 manifest is not None
                 and manifest.get("write_target", "graph") != write_target
+                and not (trigger == "schedule" and code is not None)
             ):
                 raise PermissionError("Invocation binding changed")
             if code is None and chain_depth > self.chain_depth_limit:

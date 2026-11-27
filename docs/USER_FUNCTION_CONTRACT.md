@@ -676,10 +676,12 @@ are eligible for retry; rejected attempts are terminal. Each attempt is a
 separate run, with the slot correlation id and depth zero. A successful slot
 never runs again. Slot identities are retained separately from run history.
 An attempt with an uncertain outcome after a crash is not automatically reclaimed.
+Schedule triggers require the graph write target; a session-targeted manifest
+cannot declare a schedule trigger.
 
-The ledger admits at most 60 initial slots per function per rolling minute by
-default; a rate-limited slot is recorded as skipped. Retries do not consume
-this budget. On recovery the latest due initial slot per function is selected,
+The ledger admits at most 60 scheduled attempts per function per rolling minute by
+default; a rate-limited initial slot is recorded as skipped. A retry waits pending
+until budget is available. On recovery the latest due initial slot per function is selected,
 and older due slots, including those subsequently queued through the recovery
 time, are recorded as skipped. Pending retries remain independent.
 

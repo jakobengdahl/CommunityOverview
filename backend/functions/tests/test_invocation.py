@@ -773,8 +773,9 @@ def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypa
     assert execute.call_count == 1
 
 
-def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path):
-    from datetime import datetime, timezone
+@pytest.mark.parametrize("remove_schedule", [False, True])
+def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_schedule):
+    from datetime import datetime, timedelta, timezone
     from backend.functions.schedule_slots import ScheduleSlots
 
     service, execute, manifest, directory = host
@@ -817,6 +818,29 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path):
         )
         assert denied.result["error"]["code"] == "access_denied"
         assert execute.call_count == 1
+        # A queued slot must be refused and finished if its manifest changes
+        # to a session target after enqueue, and new slots must be rejected.
+        next_time = now + timedelta(seconds=1)
+        slots.enqueue_manifest(tmp_path, "example", next_time)
+        manifest["write_target"] = "session"
+        if remove_schedule:
+            manifest["triggers"] = [{"kind": "manual"}]
+        (directory / "function.json").write_text(json.dumps(manifest))
+        with pytest.raises(ValueError):
+            slots.enqueue_manifest(tmp_path, "example", next_time)
+        refused = slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=next_time,
+            lease_seconds=10,
+        )
+        assert refused.state == ExecutionState.CANCELLED
+        assert refused.result["error"]["code"] == "invalid_manifest"
+        assert slots.enqueue("example", next_time).state == ExecutionState.DEAD_LETTER
+        assert execute.call_count == 1
+        del manifest["write_target"]
+        manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
         for version in ("1", "2", "3", "4"):
             manifest["contract_version"] = version
             (directory / "function.json").write_text(json.dumps(manifest))

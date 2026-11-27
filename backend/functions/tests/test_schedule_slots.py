@@ -289,10 +289,24 @@ def test_rate_limit_skips_initial_slot_but_not_retry(tmp_path):
         slots.fail(first.id, attempt=1, now=TIMEPOINT)
         later = TIMEPOINT + timedelta(seconds=2)
         skipped = slots.enqueue("example", later)
-        assert slots.claim_next("w", now=later, lease_seconds=10).id == first.id
         assert slots.claim_next("w", now=later, lease_seconds=10) is None
         assert slots.enqueue("example", later).dead_letter_reason == "rate limited"
         assert slots.enqueue("example", later).id == skipped.id
+        pending = slots.enqueue("example", TIMEPOINT)
+        assert pending.state == ExecutionState.PENDING
+        assert pending.attempts == 1
+        other = slots.enqueue("another", later)
+        assert slots.claim_next("w", now=later, lease_seconds=10).id == other.id
+        slots.close()
+        slots = ScheduleSlots(tmp_path / "slots.db", rate_limit=1)
+        assert slots.claim_next("w", now=later, lease_seconds=10) is None
+        available = TIMEPOINT + timedelta(seconds=60)
+        retry = slots.claim_next("w", now=available, lease_seconds=10)
+        assert retry.id == first.id and retry.attempts == 2
+        assert (
+            slots.complete(first.id, attempt=2, now=available).state
+            == ExecutionState.SUCCEEDED
+        )
     finally:
         slots.close()
 
