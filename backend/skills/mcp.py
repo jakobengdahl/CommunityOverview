@@ -18,7 +18,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, RequestParams
 
 from backend import __version__
-from backend.skills.loader import SkillsLoader
+from backend.skills.loader import _DANGEROUS_TAG_RE, _INJECTION_RE, SkillsLoader
 
 MAX_FILES = 512
 MAX_BYTES = 16 * 1024 * 1024
@@ -38,6 +38,10 @@ _PATH = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 class SkillFiles:
     name: str
     files: Mapping[str, str]
+
+
+class _GraphSemanticsFiles(SkillFiles):
+    """A snapshot whose schema strings have already been sanitized."""
 
 
 class SkillProvider(Protocol):
@@ -86,19 +90,18 @@ class GraphSemanticsProvider:
         return True
 
     def skills(self) -> Sequence[SkillFiles]:
-        sanitizer = SkillsLoader()
-
         def clean(value):
             if isinstance(value, str):
-                result = sanitizer._sanitize(value)
-                if value.strip() and not result:
-                    raise ValueError("Schema content rejected")
-                if not value.strip():
-                    return value
-                # The loader strips outer whitespace; it is meaningful schema data.
-                leading = value[: len(value) - len(value.lstrip())]
-                trailing = value[len(value.rstrip()) :]
-                return leading + result + trailing
+                result = value
+                while True:
+                    cleaned = _DANGEROUS_TAG_RE.sub("", result)
+                    if _INJECTION_RE.search(cleaned) or (
+                        value.strip() and not cleaned.strip()
+                    ):
+                        raise ValueError("Schema content rejected")
+                    if cleaned == result:
+                        return cleaned
+                    result = cleaned
             if isinstance(value, dict):
                 result = {}
                 for key, item in value.items():
@@ -154,7 +157,7 @@ class GraphSemanticsProvider:
             "describe_graph when layer 3 is available.\n\n"
             f"```json\n{data}\n```\n"
         )
-        return [SkillFiles("graph-semantics", {"SKILL.md": text})]
+        return [_GraphSemanticsFiles("graph-semantics", {"SKILL.md": text})]
 
 
 class ListSkillParams(RequestParams):
@@ -247,7 +250,14 @@ class SkillsExtension(Extension):
                     total += len(content.encode("utf-8"))
                     if total > MAX_BYTES:
                         raise ValueError("Skill exceeds size limit")
-                    clean = sanitizer._sanitize(content)
+                    # The graph snapshot was sanitized value by value before JSON
+                    # serialization; stripping across JSON strings corrupts it.
+                    clean = (
+                        content
+                        if isinstance(skill, _GraphSemanticsFiles)
+                        and path == "SKILL.md"
+                        else sanitizer._sanitize(content)
+                    )
                     if content.strip() and not clean:
                         raise ValueError("Skill content rejected")
                     uri = f"{root}/{path}"
