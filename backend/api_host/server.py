@@ -549,7 +549,10 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             raise ValueError("Schedule ledger and execution databases must be separate")
         ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         function_scheduler = FunctionScheduler(
-            function_invocation_service, ScheduleSlots(ledger_path), schedule_graphs
+            function_invocation_service,
+            ScheduleSlots(ledger_path),
+            schedule_graphs,
+            local_graph_id=graph_storage.get_graph_name(),
         )
         graph_storage.add_system_listener(function_scheduler.on_graph_event)
     app.state.function_scheduler = function_scheduler

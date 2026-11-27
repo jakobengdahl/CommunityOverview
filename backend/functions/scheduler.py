@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class FunctionScheduler:
-    def __init__(self, service, slots, graph_bindings):
+    def __init__(self, service, slots, graph_bindings, *, local_graph_id=None):
         self.service = service
         self.slots = slots
         self.graph_bindings = graph_bindings
+        self.local_graph_id = local_graph_id
         self.extensions = get_runtime_extensions()
         self.stop_event = threading.Event()
         self.thread = None
@@ -27,14 +28,19 @@ class FunctionScheduler:
         origin = event.origin.event_origin or ""
         entity = event.to_webhook_payload()["entity"]
         data = entity["data"]
-        snapshot = data["after"] or data["before"] or {}
-        graph_id = (snapshot.get("metadata") or {}).get("origin_graph_id")
-        if not graph_id and event.origin.attribution:
-            graph_id = event.origin.attribution.scope.graph_id
+        # Both snapshots must be visible; attribution describes the writer,
+        # not the node. Untagged nodes belong to the host's local graph.
+        graph_ids = [
+            (snapshot.get("metadata") or {}).get("origin_graph_id")
+            or self.local_graph_id
+            for snapshot in (data["before"], data["after"])
+            if snapshot is not None
+        ]
         for function_id, bound_graph in self.graph_bindings.items():
             if (
                 function_id not in self.service.enabled
-                or graph_id != bound_graph
+                or not graph_ids
+                or any(graph_id != bound_graph for graph_id in graph_ids)
                 or origin.startswith(f"function:{function_id}@")
             ):
                 continue

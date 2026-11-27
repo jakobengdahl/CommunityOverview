@@ -50,6 +50,23 @@ def _get(snapshot, path):
     return value
 
 
+def _json_equal(left, right):
+    # JSON booleans are distinct from numbers, including inside containers.
+    if left is _MISSING or right is _MISSING:
+        return left is right
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right)
+        )
+    return left == right
+
+
 def matches(trigger, event):
     entity = event.to_webhook_payload()["entity"]
     if entity["kind"] != "node" or entity["type"] not in trigger["node_types"]:
@@ -57,11 +74,12 @@ def matches(trigger, event):
     data = entity["data"]
     before, after = data["before"], data["after"]
     if not any(
-        _get(before, field) != _get(after, field) for field in trigger["fields"]
+        not _json_equal(_get(before, field), _get(after, field))
+        for field in trigger["fields"]
     ):
         return False
     return all(
-        _get(data[side], path) == value
+        _json_equal(_get(data[side], path), value)
         for side in ("before", "after")
         for path, value in trigger.get(side, {}).items()
     )

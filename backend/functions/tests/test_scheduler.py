@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from backend.agents.execution import ExecutionState
 from backend.functions.schedule_slots import ScheduleSlots
 from backend.functions.scheduler import FunctionScheduler
@@ -178,4 +180,108 @@ def test_graph_events_match_exclude_origin_and_survive_restart(tmp_path, monkeyp
     scheduler.on_graph_event(event)
     scheduler.tick(datetime.now(timezone.utc))
     assert service.invoke.call_count == 1
+    scheduler.stop()
+
+
+@pytest.mark.parametrize(
+    "before,after,predicate,expected",
+    [
+        (False, 0, {}, True),
+        (True, 1, {}, True),
+        ({"x": [False]}, {"x": [0]}, {}, True),
+        (1, 1.0, {}, False),
+        (0, 1, {"before": {"value": False}}, False),
+        (False, 1, {"before": {"value": 0}}, False),
+        (None, False, {"after": {"value": False}}, True),
+    ],
+)
+def test_graph_json_transitions(before, after, predicate, expected):
+    from backend.functions.graph_change import matches
+
+    event = Mock()
+    event.to_webhook_payload.return_value = {
+        "entity": {
+            "kind": "node",
+            "type": "Task",
+            "data": {"before": {"value": before}, "after": {"value": after}},
+        }
+    }
+    trigger = {"node_types": ["Task"], "fields": ["value"], **predicate}
+    assert matches(trigger, event) is expected
+
+
+@pytest.mark.parametrize(
+    "before_graph,after_graph,local,expected",
+    [
+        ("g", "other", "local", False),
+        ("other", "g", "local", False),
+        (None, None, "g", True),
+        (None, "g", "g", True),
+        (None, "g", "other", False),
+        (None, None, None, False),
+        ("g", "g", "other", True),
+    ],
+)
+def test_graph_scope_and_sensitive_entity(
+    tmp_path, monkeypatch, before_graph, after_graph, local, expected
+):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    trigger = {"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest",
+        lambda *args: ({"triggers": [trigger]}, None),
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    slots = ScheduleSlots(tmp_path / "scope.db")
+    scheduler = FunctionScheduler(
+        service, slots, {"example": "g"}, local_graph_id=local
+    )
+
+    def snapshot(name, graph):
+        return {
+            "name": name,
+            "metadata": {
+                "origin_graph_id": graph,
+                "delivery": {"webhook_url": "https://example.test/hook?token=secret"},
+                "nested": [{"api_key": "secret"}],
+            },
+        }
+
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before=snapshot("old", before_graph),
+            after=snapshot("new", after_graph),
+            patch={"url": "https://example.test/secret"},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    rows = slots._store._conn.execute("SELECT payload FROM schedule_jobs").fetchall()
+    assert bool(rows) is expected
+    if expected:
+        assert "secret" not in rows[0][0]
+        scheduler.tick(datetime.now(timezone.utc))
+        entity = service.invoke.call_args.kwargs["entity"]
+        assert entity["data"]["before"]["name"] == "old"
+        assert (
+            entity["data"]["after"]["metadata"]["delivery"]["webhook_url"]
+            == "[REDACTED]"
+        )
+        assert entity["data"]["patch"]["url"] == "[REDACTED]"
     scheduler.stop()

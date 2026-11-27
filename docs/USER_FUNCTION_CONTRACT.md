@@ -274,7 +274,7 @@ block:
 ```
 
 - `entity` is `null` for a manual invocation. Graph-change triggers (§12) fill
-  it with the triggering entity's `before`, `after` and `patch`, unchanged from
+  it with the triggering entity's `before`, `after` and `patch`, subject to credential filtering, from
   the event payload.
 - `origin` describes **who started the run**. The origin the run's own writes
   carry is defined in §9.
@@ -700,8 +700,12 @@ node snapshots. At least one listed field must change, and all optional
 from null. Creates and deletes match when a listed field changes between absent
 and present; edge events do not match. The trigger requires a graph target.
 
-The invocation entity is the event entity, including its unchanged `data.before`,
-`data.after` and `data.patch`. Self-originated writes are excluded across all
+The invocation entity contains the event `data.before`, `data.after` and
+`data.patch`, with credential-like fields, URLs and bearer values redacted before
+persistence. This filtering cannot identify arbitrary secrets in free text; graph
+data must not contain unmarked secrets. Both present snapshots must belong to the
+bound graph; snapshots without an origin graph belong to the host local graph.
+Self-originated writes are excluded across all
 versions of the same function. A function-origin event forwards its correlation
 id and increases the causing run's depth by one; other events start at depth zero.
 Admission records refusals above the configured depth limit. One event has one
