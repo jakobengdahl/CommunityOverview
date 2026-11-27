@@ -1,4 +1,4 @@
-# covers: backend/skills/mcp.py, backend/api_host/server.py, backend/skills/loader.py
+# covers: backend/skills/mcp.py, backend/api_host/server.py, backend/skills/loader.py, backend/service/graph_profile.py
 """MCP skills catalog and opt-in server behavior."""
 
 import hashlib
@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend import __version__
 from backend.api_host.server import create_app
+from backend.runtime.session_context import SESSION_ID_HEADER
 from backend.skills.loader import _DANGEROUS_TAG_RE, MCPSkillsConfig, SkillsConfig
 from backend.skills.mcp import (
     CoreSkillProvider,
@@ -208,6 +209,16 @@ def snapshot(app_config, mock_llm_provider, enabled):
         headers["Mcp-Protocol-Version"] = "2025-03-26"
         tools = rpc(client, "tools/list", {}, headers)["result"]["tools"]
         resources = rpc(client, "resources/list", {}, headers)["result"]["resources"]
+        # A session-bound client gets the profile as other composing reads do.
+        session = client.post("/api/sessions", json={"name": "p"}, headers=headers)
+        bound = dict(headers, **{SESSION_ID_HEADER: session.json()["id"]})
+        profile_result = rpc(
+            client, "tools/call", {"name": "describe_graph", "arguments": {}}, bound
+        )["result"]
+        resource = rpc(client, "resources/read", {"uri": "graph://profile"}, bound)
+        described = json.loads(profile_result["content"][0]["text"])
+        assert "node_count" in described
+        assert described == json.loads(resource["result"]["contents"][0]["text"])
         listing = rpc(client, "skills/list", {}, headers)
         if enabled:
             fallback = rpc(
@@ -804,5 +815,373 @@ def test_refresh_and_fallback_share_authorized_snapshot():
             await ext.get_skill(request, SimpleNamespace(uri=uri))
         with pytest.raises(Exception):
             await ext.resource_access(read_ctx, call_next_after_refresh)
+
+    anyio.run(check)
+
+
+def test_profile_counts_visibility_order_and_freshness(monkeypatch):
+    from backend.core import Edge, Node
+    from backend.runtime.authorization import GraphAccessNarrowing
+    from backend.service.graph_profile import profile
+
+    nodes = [
+        Node(id="a", name="A", type="Person", tags=["x", "x"], subtypes=["staff"]),
+        Node(id="b", name="B", type="Person", tags=["x"]),
+        Node(id="c", name="C", type="Team"),
+        Node(
+            id="d",
+            name="D",
+            type="Team",
+            tags=["secret"],
+            metadata={"origin_graph_id": "hidden"},
+        ),
+        Node(id="e", name="E", type="Team", archived=True),
+    ]
+    edges = [
+        Edge(source="a", target="c", type="MEMBER"),
+        Edge(source="a", target="d", type="MEMBER"),
+        Edge(source="b", target="e", type="MEMBER"),
+        Edge(source="b", target="c", type="OTHER", archived=True),
+    ]
+    storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: edges)
+    narrowing = GraphAccessNarrowing(enabled=True, allow_local_graph=True)
+    result = profile(storage, narrowing)
+    assert result["node_count"] == 3
+    assert result["node_types"] == [
+        {"type": "Person", "count": 2},
+        {"type": "Team", "count": 1},
+    ]
+    assert result["subtypes"] == [{"type": "Person", "subtype": "staff", "count": 1}]
+    assert result["tags"] == [{"tag": "x", "count": 2}]
+    assert result["relationships"] == [
+        {
+            "source_type": "Person",
+            "relationship_type": "MEMBER",
+            "target_type": "Team",
+            "source_count": 1,
+            "share": 0.5,
+        }
+    ]
+    assert [n["id"] for n in result["central_nodes"]] == ["a", "c", "b"]
+    nodes.reverse()
+    edges.reverse()
+    assert profile(storage, narrowing) == result
+    nodes.append(Node(id="f", name="F", type="Person"))
+    assert profile(storage, narrowing)["node_count"] == 4
+    assert profile(storage, GraphAccessNarrowing())["node_count"] == 5
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.service.graph_profile import describe
+
+    class Hook:
+        def __init__(self, allowed, scope):
+            self.allowed, self.scope = allowed, scope
+
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=self.allowed, graph_access=self.scope
+            )
+
+    assert describe(storage, Hook(True, narrowing))["node_count"] == 4
+    assert describe(storage, Hook(False, narrowing))["error_code"] == "access_denied"
+
+    class TargetHook(Hook):
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=context.target != "get_node_details" or self.allowed,
+                graph_access=self.scope
+                if context.target == "get_node_details"
+                else GraphAccessNarrowing(),
+            )
+
+    assert (
+        describe(storage, TargetHook(False, narrowing))["error_code"] == "access_denied"
+    )
+    assert describe(storage, TargetHook(True, narrowing))["node_count"] == 4
+    from backend.service import access
+
+    original_filter = access.filter_nodes_and_edges
+
+    def mutate_after_snapshot(**kwargs):
+        next(n for n in nodes if n.id == "a").metadata["origin_graph_id"] = "hidden"
+        return original_filter(**kwargs)
+
+    monkeypatch.setattr(access, "filter_nodes_and_edges", mutate_after_snapshot)
+    assert profile(storage, narrowing)["node_count"] == 4
+    monkeypatch.setattr(access, "filter_nodes_and_edges", original_filter)
+    long = "z" * 10000
+    nodes[:] = [Node(id=long, name="Name", type=long, tags=["tag"], subtypes=[long])]
+    bounded = profile(storage, GraphAccessNarrowing())
+    assert len(json.dumps(bounded)) < 2000
+    assert len(bounded["central_nodes"][0]["id"]) == 256
+
+
+def test_profile_change_publishes_only_for_changed_profile():
+    import asyncio
+    from backend.core import Node
+    from backend.service.graph_profile import (
+        _LISTEN_URIS,
+        PROFILE_URI,
+        ProfileChangePublisher,
+    )
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    async def check():
+        _LISTEN_URIS.set(frozenset({PROFILE_URI}))
+        nodes = [Node(id="a", name="A", type="Person")]
+        storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
+        from contextvars import ContextVar
+        from backend.runtime.authorization import (
+            GraphAccessNarrowing,
+            GraphAuthorizationDecision,
+        )
+
+        current_scope = ContextVar("profile_scope", default=GraphAccessNarrowing())
+        gate = ContextVar("profile_gate", default={"allowed": True})
+
+        class Hook:
+            def evaluate(self, context):
+                if gate.get().get("raise"):
+                    raise RuntimeError("hook failure")
+                return GraphAuthorizationDecision(
+                    allowed=gate.get()["allowed"], graph_access=current_scope.get()
+                )
+
+        publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
+        publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0
+
+        async def settle():
+            while publisher.scheduled:
+                await asyncio.sleep(0.01)
+
+        public, restricted = [], []
+        publisher.subscribe(public.append)
+        current_scope.set(GraphAccessNarrowing(enabled=True, allow_local_graph=True))
+        publisher.subscribe(restricted.append)  # No prior resource read.
+        revoked = {"allowed": False}
+        reset = gate.set(revoked)
+        restored = []
+        publisher.subscribe(restored.append)
+        gate.reset(reset)
+        nodes.append(
+            Node(
+                id="h",
+                name="Hidden",
+                type="Person",
+                metadata={"origin_graph_id": "hidden"},
+            )
+        )
+        publisher.on_event(None)
+        await settle()
+        assert public == [ResourceUpdated(uri="graph://profile")]
+        assert restricted == [] and restored == []
+        revoked["allowed"] = True
+        nodes.append(Node(id="b", name="B", type="Person"))
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
+        nodes[0].metadata["origin_graph_id"] = "hidden"
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 2 and len(restricted) == 2 and len(restored) == 2
+
+        # Access returning to an unchanged profile announces nothing.
+        revoked["allowed"] = False
+        publisher.on_event(None)
+        await settle()
+        revoked["allowed"] = True
+        publisher.on_event(None)
+        await settle()
+        assert len(restored) == 2
+        # A failing hook for one stream neither blocks the others nor loses
+        # that stream's change.
+        revoked["raise"] = True
+        nodes.append(Node(id="c", name="C", type="Person"))
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 3 and len(restricted) == 3 and len(restored) == 2
+        del revoked["raise"]
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 3 and len(restricted) == 3 and len(restored) == 3
+        # Access lost between recompute and delivery keeps the baseline, so
+        # the change is still announced once access returns.
+        publish = publisher.bus.publish
+
+        async def revoke_then_publish(event):
+            revoked["allowed"] = False
+            await publish(event)
+            revoked["allowed"] = True
+
+        publisher.bus.publish = revoke_then_publish
+        nodes.append(Node(id="d", name="D", type="Person"))
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 4 and len(restored) == 3
+        publisher.bus.publish = publish
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 4 and len(restored) == 4
+
+        # Changes hidden by the unrestricted cap still reach an unobserved scope.
+        nodes[:] = [Node(id=str(i), name=str(i), type=f"A{i:03}") for i in range(101)]
+        nodes.append(
+            Node(
+                id="private",
+                name="Private",
+                type="Z",
+                metadata={"origin_graph_id": "hidden"},
+            )
+        )
+        publisher.on_event(None)
+        await settle()
+        public.clear()
+        restricted.clear()
+        current_scope.set(
+            GraphAccessNarrowing(
+                enabled=True, allow_local_graph=False, include_graph_ids=("hidden",)
+            )
+        )
+        private = []
+        publisher.subscribe(private.append)
+        nodes[-1].name = "Changed"
+        publisher.on_event(None)
+        await settle()
+        assert public == [] and restricted == []
+        assert private == [ResourceUpdated(uri="graph://profile")]
+
+    anyio.run(check)
+
+
+@pytest.mark.parametrize("change", ["reload", "replace"])
+def test_profile_change_from_storage_reload_is_announced(tmp_path, change):
+    import asyncio
+    from backend.core import GraphStorage, Node
+    from backend.runtime.authorization import (
+        GraphAccessNarrowing,
+        GraphAuthorizationDecision,
+    )
+    from backend.service import graph_profile
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing()
+            )
+
+    paths = {"json_path": str(tmp_path / "g.json")}
+    storage = GraphStorage(**paths, embeddings_path=str(tmp_path / "a.pkl"))
+    writer = GraphStorage(**paths, embeddings_path=str(tmp_path / "b.pkl"))
+
+    async def check():
+        graph_profile._LISTEN_URIS.set(frozenset({graph_profile.PROFILE_URI}))
+        publisher = graph_profile.ProfileChangePublisher(
+            storage, InMemorySubscriptionBus(), Hook()
+        )
+        publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0
+        storage.add_reload_listener(publisher.on_event)
+        received = []
+        publisher.subscribe(received.append)
+        node = Node(id="n", name="N", type="Actor")
+        if change == "replace":
+            await asyncio.to_thread(storage.replace_all_nodes_and_edges, [node], [])
+        else:
+            writer.add_nodes([node], [])
+            writer.flush()
+            await asyncio.to_thread(storage.reload)
+        while publisher.scheduled:
+            await asyncio.sleep(0.01)
+        assert received == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
+
+    try:
+        anyio.run(check)
+    finally:
+        storage.flush()
+        writer.flush()
+
+
+def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
+    monkeypatch,
+):
+    import asyncio
+    from backend.core import Node
+    from backend.runtime.authorization import (
+        GraphAccessNarrowing,
+        GraphAuthorizationDecision,
+    )
+    from backend.service import graph_profile
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    computed = []
+    original_profile = graph_profile.profile
+    monkeypatch.setattr(
+        graph_profile,
+        "profile",
+        lambda storage, scope: (
+            computed.append(scope) or original_profile(storage, scope)
+        ),
+    )
+
+    from backend.runtime.authorization import get_current_request_authorization_inputs
+    from starlette.requests import Request
+
+    seen = []
+
+    class Hook:
+        def evaluate(self, context):
+            seen.append(get_current_request_authorization_inputs().get("headers"))
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing()
+            )
+
+    async def listen(publisher, listener, uri):
+        # The listen message's own headers, not the opening request's.
+        request = Request({"type": "http", "headers": [(b"x-listen", uri.encode())]})
+        ctx = SimpleNamespace(
+            method="subscriptions/listen",
+            params={"notifications": {"resourceSubscriptions": [uri]}},
+            request=request,
+        )
+
+        async def call_next(ctx):
+            return publisher.subscribe(listener)
+
+        await publisher.listen_filter(ctx, call_next)
+
+    async def check():
+        nodes = [Node(id="a", name="A", type="Person")]
+        storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
+        publisher = graph_profile.ProfileChangePublisher(
+            storage, InMemorySubscriptionBus(), Hook()
+        )
+        publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0.1
+        other, tracked = [], []
+        await listen(publisher, other.append, "skill://other")
+        for i in range(20):
+            nodes.append(Node(id=f"u{i}", name="U", type="Person"))
+            publisher.on_event(None)
+        await asyncio.sleep(0.3)
+        assert computed == []
+
+        await listen(publisher, tracked.append, graph_profile.PROFILE_URI)
+        computed.clear()
+        for i in range(20):
+            nodes.append(Node(id=f"t{i}", name="T", type="Person"))
+            publisher.on_event(None)
+        assert computed == []  # Nothing is computed inside the event callback.
+        await asyncio.sleep(0.3)
+        assert len(computed) == 1
+        assert tracked == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
+        assert other == []
+        assert seen and all(
+            h is not None and h.get("x-listen") == graph_profile.PROFILE_URI
+            for h in seen
+        )
 
     anyio.run(check)

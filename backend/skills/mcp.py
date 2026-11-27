@@ -73,6 +73,11 @@ class CoreSkillProvider:
             "Search broadly first and inspect existing nodes before creating new ones. "
             "Use the available graph tools to inspect relationships and verify changes.\n"
         )
+        if "describe_graph" in self.enabled_tools:
+            text += (
+                "\n## Graph profile\n\n"
+                "Fetch describe_graph first to understand the graph's content.\n"
+            )
         if "read_node_attachment" in self.enabled_tools:
             text += (
                 "\n## Attachments\n\n"

@@ -1035,7 +1035,8 @@ entity main no longer holds) or `none`; `revision` is main's, or `0` for
 `POST /api/similar` and `/api/similar/batch`, `GET /api/stats`,
 `GET /api/meta/subtypes`, `GET /api/meta/relationship-applicability/audit`,
 `GET /api/export` and `/export_graph`,
-the config-driven typed interfaces, their MCP tools (`show_graph_widget` included)
+the config-driven typed interfaces, their MCP tools (`show_graph_widget` and
+`describe_graph` with `graph://profile` included)
 and the chat assistant's graph tools. A session's
 own canvas resolves its node ids in its composed view too:
 `GET /api/sessions/{id}?resolve=true`, `add_nodes_to_session` (which accepts a
@@ -1362,6 +1363,7 @@ generic mutation tools remain available for editing and legacy configurations.
 | `delete_nodes` | Delete nodes by ID |
 | `archive_nodes` / `unarchive_nodes` | Hide/restore nodes via the `archived` flag (see Archived lifecycle) |
 | `archive_edges` / `unarchive_edges` | Hide/restore edges via the `archived` flag |
+| `describe_graph` | Describe visible graph content and relationship patterns |
 | `get_graph_stats` | Get graph statistics |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_session_activity` | Read retained session annotation/canvas activity, newest first, with the same read authorization as session state. `session_id`, `limit` (1–500, default 50), `offset` (nonnegative, default 0), optional `action` (exact op name, filtered before paging). Returns `activity` with prior annotation/inverse data, `total` matches and nullable `next_offset`. No writes; retention is 500 membership records plus 500 other records / 7 days. New records can shift offset pages. |
