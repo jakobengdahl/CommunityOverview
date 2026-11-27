@@ -951,6 +951,8 @@
     "nothing_pending": "Inget väntar — alla ändringar i sessionen har slagits ihop eller kastats.",
     "select_all": "Markera alla",
     "select_none": "Avmarkera alla",
+    "function_origin": "Funktionskörning",
+    "select_run": "Välj funktionskörning",
     "select_entry": "Markera {name}",
     "merge_selected": "Slå ihop {count} med grafen",
     "discard_selected": "Kasta {count}",

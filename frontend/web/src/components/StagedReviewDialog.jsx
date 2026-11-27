@@ -83,6 +83,17 @@ function StagedReviewDialog({
   const byKey = useMemo(() => new Map(items.map((item) => [itemKey(item), item])), [items]);
   // What resolutions are judged against; fingerprints stay on `items`.
   const judged = useMemo(() => withStatuses(items, blockedStatus), [items, blockedStatus]);
+  const runs = useMemo(() => {
+    const groups = new Map();
+    for (const item of items) {
+      const origin = item.function_origin;
+      if (!origin) continue;
+      const key = JSON.stringify([origin.function_id, origin.function_version, origin.run_id]);
+      if (!groups.has(key)) groups.set(key, { origin, keys: [] });
+      groups.get(key).keys.push(itemKey(item));
+    }
+    return [...groups.entries()];
+  }, [items]);
 
   // A tick holds only while the entry is still what was ticked: one merged,
   // discarded or restaged since (by anyone) drops out, and must be looked at
@@ -164,6 +175,27 @@ function StagedReviewDialog({
   };
 
   const selectAll = () => changeSelection(ticked(items.map(itemKey)));
+  const toggleRun = (keys) => {
+    if (keys.every((key) => liveSelected.has(key))) {
+      const drop = new Set(keys.flatMap((key) => [key, ...dependants(items, key)]));
+      changeSelection(ticked([...liveSelected].filter((key) => !drop.has(key))));
+      return;
+    }
+    const closure = dependencyClosure(items, [...liveSelected, ...keys]);
+    const stale = [...closure].filter(
+      (key) => !keys.includes(key) && selected.has(key) && !liveSelected.has(key)
+    );
+    if (stale.length) {
+      setMessage({
+        kind: 'warning',
+        text: t('staged.recheck_first', {
+          names: stale.map((k) => labelOf(byKey.get(k))).join(', '),
+        }),
+      });
+      return;
+    }
+    changeSelection(ticked(closure));
+  };
   const selectNone = () => {
     setBlockedStatus(new Map());
     setSelected(new Map());
@@ -518,6 +550,12 @@ function StagedReviewDialog({
                 {t('staged.depends_on')} {item.depends_on.map(labelOfRef).join(', ')}
               </p>
             )}
+            {item.function_origin && (
+              <p className="staged-review-meta">
+                {t('staged.function_origin')}: {item.function_origin.function_id}@
+                {item.function_origin.function_version} · {item.function_origin.run_id}
+              </p>
+            )}
             {item.unstaged_edges?.length > 0 && (
               <p className="staged-review-deps">
                 {t('staged.unstaged_edges', { count: item.unstaged_edges.length })}{' '}
@@ -587,6 +625,18 @@ function StagedReviewDialog({
                   {t('staged.select_none')}
                 </button>
               </div>
+              {runs.map(([key, { origin, keys }]) => (
+                <label key={key} className="staged-review-select">
+                  <input
+                    type="checkbox"
+                    checked={keys.every((entry) => liveSelected.has(entry))}
+                    onChange={() => toggleRun(keys)}
+                    disabled={busy}
+                  />
+                  {t('staged.select_run')}: {origin.function_id}@{origin.function_version} ·{' '}
+                  {origin.run_id}
+                </label>
+              ))}
               <ul className="staged-review-list">{judged.map(renderItem)}</ul>
             </>
           )}

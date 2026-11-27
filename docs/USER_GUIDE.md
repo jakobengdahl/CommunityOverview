@@ -1304,6 +1304,16 @@ conflicting change, **Enter the values** yourself.
 *The review: a change ready to merge, and a conflict with the graph's newer
 value shown beside yours.*
 
+**Running a function into a staged session.** Invoke a version 4 function whose
+`write_target` is `session` using a manual invocation bound to an existing staged
+session, as described in the [function contract](USER_FUNCTION_CONTRACT.md#version-4-session-staged-writes).
+Its graph changes stay in that session, including changes made before a failed run.
+The review identifies each function change by function id, version and run id.
+Use the run checkbox to select or deselect its changes together; dependencies may
+also be selected or deselected. Review conflicts and merge or discard the selection
+as usual. Merging remains a reviewer action. Webhooks cannot bind a session, and
+session-targeted runs cannot attach run files.
+
 **Merging and discarding.** Tick the changes to merge or discard. Ticking a
 connection also ticks the new nodes it needs; unticking a node unticks what
 depends on it. **Merge** applies the ticked changes to the graph as one step —

@@ -951,6 +951,8 @@
     "nothing_pending": "Nothing is pending — every edit in this session has been merged or discarded.",
     "select_all": "Select all",
     "select_none": "Select none",
+    "function_origin": "Function run",
+    "select_run": "Select function run",
     "select_entry": "Select {name}",
     "merge_selected": "Merge {count} into graph",
     "discard_selected": "Discard {count}",

@@ -207,6 +207,7 @@ export function itemFingerprint(item) {
     item.unstaged_edges || null,
     item.session_seq,
     item.version ?? null,
+    item.function_origin ?? null,
   ]);
 }
 
