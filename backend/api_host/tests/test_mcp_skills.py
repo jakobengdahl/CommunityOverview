@@ -569,7 +569,8 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         hook.admin = True
         result = await refresh(ctx)
         assert result == await ext.list_skills(request, SimpleNamespace(cursor=None))
-        assert result["skills"][0]["cacheScope"] == "private"
+        assert result["skills"][0]["cacheScope"] == "public"
+        assert result["cacheScope"] == "private"
         assert len(events) == len(other_events) == 1
         assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "second"
         assert (
@@ -579,7 +580,8 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         assert len(events) == 1
         assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
         hook.read = False
-        assert (await listing(ctx))["skills"] == []
+        hidden = await listing(ctx)
+        assert hidden["skills"] == [] and hidden["cacheScope"] == "private"
         assert (await refresh(ctx))["skills"] == []
         assert (await get(uri, ctx))["error_code"] == "not_found"
         assert len(events) == 1
@@ -587,5 +589,38 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         await refresh(ctx)
         assert len(events) == 2
         assert "skill://extra/ref.md" not in server._resource_manager._resources
+
+        # A refresh must not substitute a different owner's content after the
+        # original owner has authorized a resource read.
+        hook.read = True
+        started, resume = anyio.Event(), anyio.Event()
+
+        async def delayed_read(ctx, name):
+            started.set()
+            await resume.wait()
+            return True
+
+        provider.can_read = delayed_read
+        replacement = Provider({"SKILL.md": skill("replacement")})
+        read_ctx = SimpleNamespace(method="resources/read", params={"uri": uri})
+        errors = []
+
+        async def call_next(ctx):
+            resource = await server._resource_manager.get_resource(uri, None)
+            return {"text": resource.text}
+
+        async def read():
+            try:
+                await ext.resource_access(read_ctx, call_next)
+            except Exception as exc:
+                errors.append(exc)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(read)
+            await started.wait()
+            ext.providers = [replacement]
+            await refresh(ctx)
+            resume.set()
+        assert len(errors) == 1 and errors[0].code == -32602
 
     anyio.run(check)

@@ -315,7 +315,11 @@ class SkillsExtension(Extension):
         return {
             "ttlMs": min((hint["ttlMs"] for hint in hints), default=self.ttl_ms),
             "cacheScope": "private"
-            if any(hint["cacheScope"] == "private" for hint in hints)
+            if self.authorization_hook is not None
+            or any(type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
+                   for provider in self.providers)
+            or len(uris) != len(self.entries)
+            or any(hint["cacheScope"] == "private" for hint in hints)
             else self.cache_scope,
         }
 
@@ -328,14 +332,22 @@ class SkillsExtension(Extension):
     async def list_skills(self, ctx, params):
         if params.cursor is not None:
             raise MCPError(code=INVALID_PARAMS, message="Unknown cursor")
-        uris = [uri for uri in self.entries if await self.allowed(ctx, uri)]
+        entries = self.entries
+        uris = [uri for uri in entries if await self.allowed(ctx, uri)]
+        if self.entries is not entries:
+            raise MCPError(code=INVALID_PARAMS, message="Catalog changed")
         return {
             "skills": [self.entry(ctx, uri) for uri in uris],
             **self.hints(ctx, uris),
         }
 
     async def get_skill(self, ctx, params):
-        if params.uri not in self.entries or not await self.allowed(ctx, params.uri):
+        entries = self.entries
+        if (
+            params.uri not in entries
+            or not await self.allowed(ctx, params.uri)
+            or self.entries is not entries
+        ):
             raise MCPError(code=INVALID_PARAMS, message="Unknown skill")
         return {
             "skill": self.entry(ctx, params.uri),
@@ -347,7 +359,10 @@ class SkillsExtension(Extension):
         }
 
     async def allowed(self, ctx, uri):
-        provider, name = self.owners[uri]
+        owner = self.owners.get(uri)
+        if owner is None:
+            return False
+        provider, name = owner
         if self.authorization_hook is not None:
             from backend.runtime.authorization import GRAPH_ACTION_READ
             from backend.service.access import evaluate_graph_access
@@ -369,6 +384,7 @@ class SkillsExtension(Extension):
         return check is not None and await check(ctx, name) is True
 
     async def resource_access(self, ctx, call_next):
+        entries = self.entries
         if ctx.method == "resources/read":
             uri = str((ctx.params or {}).get("uri", ""))
             if uri in self.owners and not await self.allowed(ctx, uri):
@@ -381,7 +397,12 @@ class SkillsExtension(Extension):
                 if resource["uri"] not in self.owners
                 or await self.allowed(ctx, resource["uri"])
             ]
-            return {**result, "resources": resources}
+            result = {**result, "resources": resources}
+        if (
+            ctx.method in ("resources/read", "resources/list")
+            and self.entries is not entries
+        ):
+            raise MCPError(code=INVALID_PARAMS, message="Catalog changed")
         return result
 
 
@@ -391,9 +412,6 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
     from backend.service.access import authorize_graph_access
 
     extension.authorization_hook = authorization_hook
-    # Access can vary with the request even for the built-in providers.
-    for hint in extension.skill_hints.values():
-        hint["cacheScope"] = "private"
     publisher: SkillChangePublisher = InProcessSkillChangePublisher(mcp._subscriptions)
     lock = anyio.Lock()
 
@@ -412,8 +430,6 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
             updated = SkillsExtension(
                 extension.providers, extension.ttl_ms, extension.cache_scope
             )
-            for hint in updated.skill_hints.values():
-                hint["cacheScope"] = "private"
             old = {uri: entry["resources"] for uri, entry in extension.entries.items()}
             new = {uri: entry["resources"] for uri, entry in updated.entries.items()}
             if old != new:
@@ -447,11 +463,14 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
         async def get_skill(uri: str, ctx: Context, file: str = "") -> dict:
             """Get a skill manifest and optionally one of its files."""
             request = ctx.request_context
+            entries = extension.entries
             if uri not in extension.entries or not await extension.allowed(
                 request, uri
             ):
                 return {"error_code": "not_found"}
             result = await extension.get_skill(request, GetSkillParams(uri=uri))
+            if extension.entries is not entries:
+                return {"error_code": "not_found"}
             if file:
                 file_uri = uri.rsplit("/", 1)[0] + "/" + file
                 if (
