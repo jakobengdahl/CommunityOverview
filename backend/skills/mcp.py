@@ -23,6 +23,7 @@ from mcp_types import INVALID_PARAMS, RequestParams
 
 from backend import __version__
 from backend.skills.loader import _DANGEROUS_TAG_RE, _INJECTION_RE, SkillsLoader
+from backend.runtime.authorization import DefaultGraphAuthorizationHook
 
 MAX_FILES = 512
 MAX_BYTES = 16 * 1024 * 1024
@@ -154,6 +155,9 @@ class GraphSemanticsProvider:
             f"```json\n{data}\n```\n"
         )
         return [_GraphSemanticsFiles("graph-semantics", {"SKILL.md": text})]
+
+
+_BUILTIN_PROVIDERS = (CoreSkillProvider, GraphSemanticsProvider)
 
 
 class ListSkillParams(RequestParams):
@@ -315,10 +319,12 @@ class SkillsExtension(Extension):
         return {
             "ttlMs": min((hint["ttlMs"] for hint in hints), default=self.ttl_ms),
             "cacheScope": "private"
-            if self.authorization_hook is not None
+            if (
+                self.authorization_hook is not None
+                and type(self.authorization_hook) is not DefaultGraphAuthorizationHook
+            )
             or any(
-                type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
-                for provider in self.providers
+                type(provider) not in _BUILTIN_PROVIDERS for provider in self.providers
             )
             or len(uris) != len(self.entries)
             or any(hint["cacheScope"] == "private" for hint in hints)
@@ -327,9 +333,11 @@ class SkillsExtension(Extension):
 
     def entry(self, ctx, uri):
         hints = dict(self.skill_hints[uri])
-        if self.authorization_hook is not None or any(
-            type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
-            for provider in self.providers
+        if (
+            self.authorization_hook is not None
+            and type(self.authorization_hook) is not DefaultGraphAuthorizationHook
+        ) or any(
+            type(provider) not in _BUILTIN_PROVIDERS for provider in self.providers
         ):
             hints["cacheScope"] = "private"
         return {
@@ -460,7 +468,16 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
             )
             if old != new:
                 await publisher.publish()
-            return await extension.list_skills(ctx.request_context, ListSkillParams())
+            result = await extension.list_skills(ctx.request_context, ListSkillParams())
+            for entry in result["skills"]:
+                manifest = json.dumps(
+                    entry["resources"], sort_keys=True, separators=(",", ":")
+                )
+                entry["version"] = (
+                    entry["frontmatter"].get("metadata", {}).get("version")
+                    or "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+                )
+            return result
 
     if fallback:
 

@@ -354,13 +354,16 @@ can vary between callers. This slice serves only the built-in provider;
 `create_app` does not accept additional providers. Third-party and remote
 providers are planned for a follow-up slice. The configured cache scope is used
 as supplied; it is not automatically changed for additional providers. `graphSemantics.ttlMs` and `graphSemantics.cacheScope` independently configure the schema skill, with the same defaults and validation as the working-method hints. Modern clients receive per-skill hints in the list and get results.
-The host uses private cache scope for these skills because graph access can vary
+The default authorization hook permits configured public cache scopes; custom
+authorization hooks and additional providers use private scope because access may vary
 between callers. The extension, resources and fallback tools check graph read
 access on every request. These cache hints do not replace authorization or
 verification of file digests.
 
 With MCP skills enabled, `refresh_skills` rebuilds the catalog after an admin
-authorization check. A change in file names or digests publishes one standard
+authorization check. Its per-skill results include the frontmatter metadata version,
+or a SHA-256 version derived from the sorted file manifest when none is supplied.
+The manifest includes the file digests. A change in file names or digests publishes one standard
 `notifications/resources/list_changed` event to each `subscriptions/listen`
 subscriber. The publisher uses an in-process bus; clients must refresh their
 catalog and cannot assume every host reacts to changes. The `fallback` setting

@@ -101,6 +101,15 @@ def test_get_list_and_cache_hints():
         result = await extension.get_skill(ctx, SimpleNamespace(uri=uri))
         assert result["skill"] == listing["skills"][0]
         assert result["cacheScope"] == result["skill"]["cacheScope"] == "public"
+        from backend.runtime.authorization import DefaultGraphAuthorizationHook
+
+        extension.authorization_hook = DefaultGraphAuthorizationHook()
+        assert (await extension.list_skills(ctx, SimpleNamespace(cursor=None)))[
+            "cacheScope"
+        ] == "public"
+        assert (await extension.get_skill(ctx, SimpleNamespace(uri=uri)))[
+            "cacheScope"
+        ] == "public"
         extension.authorization_hook = object()
         assert extension.entry(ctx, uri)["cacheScope"] == "private"
         extension.authorization_hook = None
@@ -252,6 +261,12 @@ def snapshot(app_config, mock_llm_provider, enabled):
             ]
             assert modern_list["ttlMs"] == 0
             assert modern_list["cacheScope"] == "private"
+            core = next(
+                entry
+                for entry in modern_list["skills"]
+                if "graph-working-method" in entry["uri"]
+            )
+            assert core["cacheScope"] == "public"
         return result, tools, resources, listing, discover, content if enabled else None
 
 
@@ -561,6 +576,33 @@ def test_refresh_replaces_owner_when_manifest_is_unchanged():
             return GraphAuthorizationDecision(allowed=True)
 
     async def check():
+        schema = {"node_types": {}, "relationship_types": {}}
+        presentation = {
+            "default_language": "en",
+            "language_policy": {},
+            "prompt_prefix": "",
+        }
+        builtins = SkillsExtension(
+            [CoreSkillProvider(set()), GraphSemanticsProvider(schema, presentation)],
+            10,
+            "public",
+        )
+        builtin_server = MCPServer("builtins", extensions=[builtins])
+        register_skill_tools(builtin_server, builtins, Hook(), False)
+        request = SimpleNamespace(protocol_version="2026-07-28")
+        refresh_builtins = builtin_server._tool_manager.get_tool("refresh_skills").fn
+        first = await refresh_builtins(SimpleNamespace(request_context=request))
+        versions = {entry["uri"]: entry["version"] for entry in first["skills"]}
+        assert versions["skill://graph-working-method/SKILL.md"] == __version__
+        assert versions["skill://graph-semantics/SKILL.md"].startswith("sha256:")
+        assert first == await refresh_builtins(SimpleNamespace(request_context=request))
+        schema["node_types"]["New"] = {}
+        changed = await refresh_builtins(SimpleNamespace(request_context=request))
+        assert (
+            changed["skills"][1]["version"]
+            != versions["skill://graph-semantics/SKILL.md"]
+        )
+
         original = Provider({"SKILL.md": skill(), "ref.md": "reference"})
         replacement = Provider(dict(original.files))
 
@@ -637,6 +679,9 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "first"
         hook.admin = True
         result = await refresh(ctx)
+        entry = result["skills"][0]
+        version = entry.pop("version")
+        assert version.startswith("sha256:")
         assert result == await ext.list_skills(request, SimpleNamespace(cursor=None))
         assert result["skills"][0]["cacheScope"] == "private"
         assert result["cacheScope"] == "private"
@@ -647,7 +692,7 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         assert (
             await server._resource_manager.get_resource("skill://extra/ref.md", None)
         ).text == "second"
-        await refresh(ctx)
+        assert (await refresh(ctx))["skills"][0]["version"] == version
         assert len(events) == 1
         assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
         hook.read = False
@@ -657,7 +702,8 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         assert (await get(uri, ctx))["error_code"] == "not_found"
         assert len(events) == 1
         del provider.files["ref.md"]
-        await refresh(ctx)
+        hook.read = True
+        assert (await refresh(ctx))["skills"][0]["version"] != version
         assert len(events) == 2
         assert "skill://extra/ref.md" not in server._resource_manager._resources
 
