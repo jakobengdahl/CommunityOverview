@@ -21,6 +21,14 @@ from backend.skills.loader import SkillsLoader
 MAX_FILES = 512
 MAX_BYTES = 16 * 1024 * 1024
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_FRONTMATTER_FIELDS = {
+    "name",
+    "description",
+    "license",
+    "compatibility",
+    "metadata",
+    "allowed-tools",
+}
 _PATH = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 
 
@@ -86,7 +94,9 @@ class SkillsExtension(Extension):
         for provider in providers:
             for skill in provider.skills():
                 if (
-                    not _NAME.fullmatch(skill.name)
+                    not isinstance(skill.name, str)
+                    or len(skill.name) > 64
+                    or not _NAME.fullmatch(skill.name)
                     or not 0 < len(skill.files) <= MAX_FILES
                 ):
                     raise ValueError("Invalid skill name or file count")
@@ -132,11 +142,36 @@ class SkillsExtension(Extension):
                 frontmatter = yaml.safe_load(match.group(1))
                 if (
                     not isinstance(frontmatter, dict)
+                    or not set(frontmatter).issubset(_FRONTMATTER_FIELDS)
                     or frontmatter.get("name") != skill.name
                     or not isinstance(frontmatter.get("description"), str)
-                    or not frontmatter["description"].strip()
+                    or not 0 < len(frontmatter["description"].strip()) <= 1024
+                    or len(frontmatter["description"]) > 1024
                 ):
                     raise ValueError("Invalid skill frontmatter")
+                for field in ("license", "compatibility", "allowed-tools"):
+                    if field in frontmatter and not isinstance(frontmatter[field], str):
+                        raise ValueError("Invalid skill frontmatter")
+                if "compatibility" in frontmatter and not (
+                    0 < len(frontmatter["compatibility"].strip())
+                    and len(frontmatter["compatibility"]) <= 500
+                ):
+                    raise ValueError("Invalid skill frontmatter")
+                metadata = frontmatter.get("metadata", {})
+                if not isinstance(metadata, dict) or any(
+                    not isinstance(key, str) or not isinstance(value, str)
+                    for key, value in metadata.items()
+                ):
+                    raise ValueError("Invalid skill frontmatter")
+                # Reject decoded values that would be changed by the sanitizer: the
+                # original YAML is also served, so escaped HTML must not survive there.
+                values = [
+                    value for key, value in frontmatter.items() if key != "metadata"
+                ]
+                values.extend(metadata.keys())
+                values.extend(metadata.values())
+                if any(sanitizer._sanitize(value) != value.strip() for value in values):
+                    raise ValueError("Skill frontmatter rejected")
                 self.entries[uri] = {
                     "uri": uri,
                     "frontmatter": frontmatter,

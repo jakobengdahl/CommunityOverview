@@ -287,7 +287,6 @@ def create_app(
     *,
     authorization_hook: Optional[GraphAuthorizationHook] = None,
     runtime_extensions: Optional[RuntimeExtensions] = None,
-    skill_providers=(),
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -299,7 +298,6 @@ def create_app(
                       already carry runtime_extensions when both are supplied.
         authorization_hook: Graph access decisions for the constructed GraphService.
         runtime_extensions: Fixed collaborators selected before any construction.
-        skill_providers: Additional MCP skill snapshots with per-request access checks.
 
     Returns:
         Configured FastAPI application with REST API, MCP tools, and static file serving.
@@ -314,14 +312,10 @@ def create_app(
     # Bind only for construction; do not change the process default. Background
     # work retains the explicit instance via storage or AppRuntime.run_function().
     with bind_runtime_extensions(extensions):
-        return _create_app(
-            config, graph_storage, authorization_hook, extensions, skill_providers
-        )
+        return _create_app(config, graph_storage, authorization_hook, extensions)
 
 
-def _create_app(
-    config, graph_storage, authorization_hook, runtime_extensions, skill_providers
-):
+def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     # The hooks it runs are bound further down, once their services exist.
     # Startup failing before the try skips shutdown, as with on_startup hooks.
     @contextlib.asynccontextmanager
@@ -639,10 +633,9 @@ def _create_app(
             enabled_tools.add("read_node_attachment")
         mcp_extensions.append(
             SkillsExtension(
-                [CoreSkillProvider(enabled_tools), *skill_providers],
+                [CoreSkillProvider(enabled_tools)],
                 skills_config.ttlMs,
-                # Additional providers may expose content that varies by caller.
-                "private" if skill_providers else skills_config.cacheScope,
+                skills_config.cacheScope,
             )
         )
 
