@@ -7,6 +7,7 @@ invalid ID validation, and TTL eviction.
 
 import asyncio
 import time
+from unittest.mock import Mock
 import pytest
 
 from backend.core.session_registry import SessionRegistry, _MAX_QUEUE_SIZE
@@ -118,23 +119,17 @@ class TestPushCommandSync:
     async def test_push_delivers_via_threadsafe_path(self, monkeypatch, enqueue_fails):
         """A worker reports the actual enqueue result, including failures."""
         reg = SessionRegistry()
-        loop = asyncio.get_running_loop()
-        reg.set_event_loop(loop)
+        reg.set_event_loop(asyncio.get_running_loop())
         queue = reg.get_or_create("1234-5678")
-
         if enqueue_fails:
+            monkeypatch.setattr(
+                reg, "_enqueue_drop_oldest", Mock(side_effect=RuntimeError)
+            )
 
-            def fail_enqueue(*args):
-                raise RuntimeError("enqueue failed")
-
-            monkeypatch.setattr(reg, "_enqueue_drop_oldest", fail_enqueue)
-
-        ok = await asyncio.wait_for(
-            asyncio.to_thread(
-                reg.push_command_sync, "1234-5678", {"type": "from-thread"}
-            ),
-            timeout=2.0,
+        push = asyncio.to_thread(
+            reg.push_command_sync, "1234-5678", {"type": "from-thread"}
         )
+        ok = await asyncio.wait_for(push, timeout=2.0)
         assert ok is not enqueue_fails
         if enqueue_fails:
             assert queue.empty()
@@ -416,8 +411,6 @@ class TestConsumerRefCount:
     async def test_disconnect_during_delivery_releases_consumer(self):
         reg = SessionRegistry()
         gen, task = await self._attach(reg, "1234-5678", [])
-        # Wake the queue reader and cancel before it resumes. Cancellation must
-        # not be swallowed when delivery and disconnect happen together.
         assert reg.push_command_sync("1234-5678", {"type": "command"})
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
