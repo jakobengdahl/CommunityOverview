@@ -350,7 +350,7 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     assert "Content statistics are available through describe_graph" in content
     data = json.loads(content.split("```json\n")[1].split("\n```")[0])
     assert data["node_types"]["Z"]["fields"] == ["b", "a"]
-    assert data["node_types"]["Z"]["subtypes"] == ["One", "Two"]
+    assert data["node_types"]["Z"]["subtypes"] == ["Two", "One"]
     assert data["node_types"]["Z"]["description"] == "<example>safe</example>"
     assert data["node_types"]["Z"]["static"] is False
     assert (
@@ -360,7 +360,7 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     assert data["node_types"]["Z"]["context_menu"][0]["items"] == ["first", "second"]
     assert data["relationship_types"]["LINK"]["source_types"] == ["Z"]
     assert data["vocabularies"]["terms"]["item"] == "Label"
-    assert data["language_policy"] == {"allowed_languages": ["en", "sv"]}
+    assert data["language_policy"] == {"allowed_languages": ["sv", "en"]}
     assert data["prompt_prefix"] == "Profile prompt"
     reordered = json.loads(json.dumps(schema, sort_keys=True))
     other = SkillsExtension(
@@ -377,6 +377,7 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     for change in (
         "static",
         "field_order",
+        "subtype_order",
         "vocabulary_order",
         "shape",
         "leading",
@@ -389,6 +390,8 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
             modified["node_types"]["Z"]["static"] = True
         elif change == "field_order":
             modified["node_types"]["Z"]["fields"].reverse()
+        elif change == "subtype_order":
+            modified["node_types"]["Z"]["subtypes"].reverse()
         elif change == "vocabulary_order":
             modified["vocabularies"]["terms"]["ordered"].reverse()
         elif change == "shape":

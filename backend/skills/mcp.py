@@ -134,20 +134,7 @@ class GraphSemanticsProvider:
             }
         )
 
-        # Only normalize fields whose order has set semantics. Other lists,
-        # including node fields, nested vocabulary values and UI settings, retain order.
-        def sort_field(obj, key):
-            if isinstance(obj, dict) and isinstance(obj.get(key), list):
-                obj[key].sort(key=canonical)
-
         snapshot = clean(source)
-        for obj in (source, snapshot):
-            for node in obj["node_types"].values():
-                sort_field(node, "subtypes")
-            for relationship in obj["relationship_types"].values():
-                for key in ("source_types", "target_types"):
-                    sort_field(relationship, key)
-            sort_field(obj["language_policy"], "allowed_languages")
         data = canonical(snapshot)
         source_digest = hashlib.sha256(canonical(source).encode()).hexdigest()
         # A reproducible date identifier, not the time the schema was modified.
