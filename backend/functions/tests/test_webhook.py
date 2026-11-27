@@ -315,9 +315,14 @@ def files_host(tmp_path, monkeypatch):
     history.close()
 
 
+@pytest.mark.parametrize("version", ["3", "4", "5"])
 @pytest.mark.parametrize("fails", [False, True])
-def test_files_are_run_inputs_outside_envelope_and_deleted(files_host, fails):
+def test_files_are_run_inputs_outside_envelope_and_deleted(files_host, fails, version):
     host = files_host
+    path = host.service.root / "example" / "function.json"
+    manifest = json.loads(path.read_text())
+    manifest["contract_version"] = version
+    path.write_text(json.dumps(manifest))
     seen = {}
 
     def run(runner, spec, broker, envelope):

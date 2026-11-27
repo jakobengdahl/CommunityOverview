@@ -21,6 +21,7 @@ is a historical archive.
 
 | Document | Covers |
 |---|---|
+| [Threat models](governance/threat-models/README.md) | Trust boundaries, security review template and surface models |
 | [USER_GUIDE.md](USER_GUIDE.md) | End-user walkthrough of every user-facing feature |
 | [PROFILES.md](PROFILES.md) | Configuration profiles: node types, presentation, env |
 | [ICONS.md](ICONS.md) | Icon-name reference for node-type definitions |

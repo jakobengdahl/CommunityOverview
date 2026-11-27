@@ -474,6 +474,28 @@ def test_stream_reports_rounds_and_tools_without_intermediate_content(
     assert steps[-1]["response"]["toolUsed"] == "search_graph"
 
 
+def test_stream_finishes_after_one_provider_timeout(fastapi_test_client, monkeypatch):
+    """A timed-out first round ends the stream without another provider call."""
+    import json
+    from unittest.mock import Mock
+    from backend.ui.chat_logic import _TIMEOUT_MESSAGE
+
+    client, llm, _ = fastapi_test_client
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "12")
+    llm.create_completion = Mock(side_effect=TimeoutError())
+    response = client.post(
+        "/ui/chat/stream", json={"messages": [{"role": "user", "content": "hello"}]}
+    )
+    steps = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert llm.create_completion.call_count == 1
+    assert [step["kind"] for step in steps] == ["llm_started", "chat_finished"]
+    assert steps[-1]["response"]["content"] == _TIMEOUT_MESSAGE.format(seconds=12)
+
+
 def test_stream_encodes_tool_results_like_non_streaming_chat():
     """Nested datetime and UUID tool values retain the ordinary JSON encoding."""
     import json
@@ -664,14 +686,16 @@ def test_reasoning_is_capped_request_local_display_metadata(reasoning, monkeypat
     """Only separate reasoning reaches progress; response and prompts stay intact."""
     from types import SimpleNamespace
     from unittest.mock import Mock
+    from backend.llm.llm_providers import LLMResponse
     from backend.ui.chat_logic import (
         MAX_REASONING_CHARS_PER_ROUND,
         _chat_completion,
         report_chat_progress,
     )
 
-    response = SimpleNamespace(
+    response = LLMResponse(
         content=[{"type": "text", "text": "<think>ordinary answer</think>"}],
+        stop_reason="end_turn",
         raw_response=SimpleNamespace(
             choices=[
                 SimpleNamespace(message=SimpleNamespace(reasoning_content=reasoning))

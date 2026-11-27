@@ -2956,28 +2956,35 @@ def test_chat_round_cap_keeps_completed_writes_and_results(
 
 
 @pytest.mark.parametrize("first_turn", [False, True])
-@pytest.mark.parametrize("recovered", [False, True])
-@pytest.mark.parametrize("timeout_type", [TimeoutError, "claude", "openai"])
-def test_provider_timeout_uses_answer_retry(
-    chat_service, first_turn, recovered, timeout_type
+@pytest.mark.parametrize("timeout_type", [TimeoutError, "claude", "openai", "response"])
+@pytest.mark.parametrize("setting, expected", [("12", 12), ("0", 600)])
+def test_provider_timeout_finishes_without_retry(
+    chat_service, sample_nodes, monkeypatch, first_turn, timeout_type, setting, expected
 ):
-    """Timeouts retry without tools and preserve any earlier tool results."""
-    from backend.ui.chat_logic import ClaudeTimeoutError, OpenAITimeoutError
+    """Timeouts finish without another call and preserve earlier tool results."""
+    from backend.ui.chat_logic import (
+        ClaudeTimeoutError,
+        OpenAITimeoutError,
+        _TIMEOUT_MESSAGE,
+    )
 
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", setting)
     timeout = (
-        {"claude": ClaudeTimeoutError, "openai": OpenAITimeoutError}[timeout_type](
+        LLMResponse(content=[], stop_reason="timeout")
+        if timeout_type == "response"
+        else {"claude": ClaudeTimeoutError, "openai": OpenAITimeoutError}[timeout_type](
             request=MagicMock()
         )
         if isinstance(timeout_type, str)
         else timeout_type()
     )
     runner = TestEmptyFinalReplyAfterToolChain
-    reply = runner._text_reply("Recovered") if recovered else TimeoutError()
-    result, calls, _ = runner._run(chat_service, timeout, reply, first_turn=first_turn)
-    assert len(calls) == (2 if first_turn else 3)
-    assert calls[-1]["tools"] == []
-    assert result["content"] == ("Recovered" if recovered else _NO_ANSWER_MESSAGE)
+    result, calls, _ = runner._run(chat_service, timeout, first_turn=first_turn)
+    assert len(calls) == (1 if first_turn else 2)
+    assert result["content"] == _TIMEOUT_MESSAGE.format(seconds=expected)
     assert result["toolUsed"] == (None if first_turn else "search_graph")
+    if not first_turn:
+        assert result["toolResult"]["nodes"]
 
 
 @pytest.mark.parametrize("limit", [1, 2])
