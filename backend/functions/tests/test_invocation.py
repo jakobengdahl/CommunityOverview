@@ -337,6 +337,43 @@ def test_invalid_manifest_is_rejected_and_its_delivery_key_is_retained(
     assert invoke(service, idempotency_key="fixed").state == ExecutionState.SUCCEEDED
 
 
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+@pytest.mark.parametrize("target", [None, "graph"])
+def test_invalid_graph_manifest_replays_before_validation(host, version, target):
+    service, execute, manifest, directory = host
+    manifest.update(contract_version=version, limits={"timeout_seconds": 121})
+    if target is not None:
+        manifest["write_target"] = target
+    (directory / "function.json").write_text(json.dumps(manifest))
+    rejected = invoke(service, idempotency_key="delivery")
+    assert rejected.result["error"]["code"] == "invalid_manifest"
+    assert invoke(service, idempotency_key="delivery").id == rejected.id
+    binding = {"actor_id": "operator"}
+    assert service.replay_webhook("example", "delivery", binding).id == rejected.id
+    assert service.refuse(
+        "example", "invalid_manifest", actor_binding=binding, idempotency_key="delivery"
+    ).id == rejected.id
+    execute.assert_not_called()
+
+
+def test_write_target_change_during_admission_is_refused(host, monkeypatch):
+    service, execute, manifest, directory = host
+    manifest.update(contract_version="4", write_target="graph")
+    path = directory / "function.json"
+    path.write_text(json.dumps(manifest))
+    refusal = service._refusal
+
+    def change_target(*args):
+        path.write_text(json.dumps({**manifest, "write_target": "session"}))
+        return refusal(*args)
+
+    monkeypatch.setattr(service, "_refusal", change_target)
+    with pytest.raises(PermissionError, match="binding changed"):
+        invoke(service, idempotency_key="delivery")
+    assert not service.store.list_jobs(kind=ExecutionKind.FUNCTION)
+    execute.assert_not_called()
+
+
 @pytest.mark.parametrize("target", ["directory", "manifest", "entry", "package"])
 def test_package_paths_cannot_escape_the_function_directory(host, tmp_path, target):
     _, _, _, directory = host

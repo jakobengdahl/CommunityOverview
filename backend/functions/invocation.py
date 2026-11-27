@@ -173,8 +173,8 @@ def _valid_triggers(manifest):
     )
 
 
-def load_manifest(root, function_id):
-    """Read and validate a package without following paths outside its directory."""
+def _read_manifest(root, function_id):
+    """Read the declared manifest without following paths outside its directory."""
     if not isinstance(function_id, str) or not _ID.fullmatch(function_id):
         raise ValueError("Invalid function id")
     root_real = os.path.realpath(root)
@@ -198,6 +198,12 @@ def load_manifest(root, function_id):
     manifest = json.loads(Path(manifest_real).read_text())
     if not isinstance(manifest, dict):
         raise ValueError("Manifest must be an object")
+    return manifest, root_prefix, directory_real, directory
+
+
+def load_manifest(root, function_id):
+    """Read and validate a package without following paths outside its directory."""
+    manifest, root_prefix, directory_real, directory = _read_manifest(root, function_id)
     for key in ("contract_version", "id", "version", "name", "runtime", "entry_point"):
         if not isinstance(manifest.get(key), str) or not manifest[key]:
             raise ValueError("Missing or invalid required field")
@@ -406,7 +412,7 @@ class FunctionInvocationService:
     def replay_webhook(self, function_id, idempotency_key, actor_binding):
         binding = _bind(actor_binding)
         try:
-            manifest, _ = load_manifest(self.root, function_id)
+            manifest, _, _, _ = _read_manifest(self.root, function_id)
         except (OSError, ValueError):
             manifest = None
         if manifest and manifest.get("write_target", "graph") == "session":
@@ -421,9 +427,8 @@ class FunctionInvocationService:
                     and existing.idempotency_key
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
-                    if manifest is None:
-                        raise PermissionError("Invalid manifest binding")
-                    return self._replay(existing, binding)
+                    target = (manifest or {}).get("write_target", "graph")
+                    return self._replay(existing, binding, target)
             if self._busy(function_id, previous) and not self._in_progress(
                 function_id, idempotency_key
             ):
@@ -463,12 +468,13 @@ class FunctionInvocationService:
                     == f"fn:{function_id}:{idempotency_key}"
                 ):
                     try:
-                        manifest, _ = load_manifest(self.root, function_id)
-                    except (OSError, ValueError) as exc:
-                        raise PermissionError("Invalid manifest binding") from exc
-                    if manifest.get("write_target", "graph") == "session":
+                        manifest, _, _, _ = _read_manifest(self.root, function_id)
+                    except (OSError, ValueError):
+                        manifest = None
+                    target = (manifest or {}).get("write_target", "graph")
+                    if target == "session":
                         raise PermissionError("A staged session is required")
-                    return self._replay(existing, binding)
+                    return self._replay(existing, binding, target)
             return self._rejected(function_id, binding, idempotency_key, code)
 
     def _rejected(self, function_id, binding, idempotency_key, code):
@@ -592,10 +598,14 @@ class FunctionInvocationService:
         binding = _bind(actor_binding)
         session_id = current_session_id()
         try:
-            current_manifest, _ = load_manifest(self.root, function_id)
+            current_manifest, _, _, _ = _read_manifest(self.root, function_id)
         except (OSError, ValueError):
             current_manifest = None
-        write_target = (current_manifest or {}).get("write_target", "graph")
+        declared_target = (current_manifest or {}).get("write_target", "graph")
+        old_session_target = declared_target == "session" and (
+            current_manifest or {}
+        ).get("contract_version") in ("1", "2", "3")
+        write_target = "graph" if old_session_target else declared_target
         if write_target == "graph" and session_id is not None:
             raise not_supported("Function invocation")
         if write_target == "session":
@@ -651,7 +661,7 @@ class FunctionInvocationService:
             )
             for existing in previous:
                 if existing.idempotency_key == job.idempotency_key:
-                    if current_manifest is None:
+                    if old_session_target:
                         raise PermissionError("Invalid manifest binding")
                     return self._replay(existing, binding, write_target, session_id)
             if self._in_progress(function_id, idempotency_key, reservation):
@@ -691,7 +701,7 @@ class FunctionInvocationService:
                 job.started_at = utcnow()
             stored = self.store.enqueue(job)
             if stored.id != job.id:
-                if current_manifest is None:
+                if old_session_target:
                     raise PermissionError("Invalid manifest binding")
                 if (
                     stored.kind != ExecutionKind.FUNCTION
