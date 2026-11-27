@@ -1,6 +1,6 @@
 """Opt-in MCP skills catalog and provider contract.
 
-Providers return a fixed, caller-independent snapshot at server construction.
+Providers return a fixed snapshot at server construction and authorize each request.
 All files are UTF-8 text and are validated before any are published.
 """
 
@@ -31,14 +31,19 @@ class SkillFiles:
 
 
 class SkillProvider(Protocol):
-    """Supply fixed skills. Access-dependent providers must enforce access separately."""
+    """Supply fixed skills and authorize each skill for the current request."""
 
     def skills(self) -> Sequence[SkillFiles]: ...
+
+    async def can_read(self, ctx, skill_name: str) -> bool: ...
 
 
 class CoreSkillProvider:
     def __init__(self, enabled_tools: set[str]):
         self.enabled_tools = enabled_tools
+
+    async def can_read(self, ctx, skill_name: str) -> bool:
+        return True
 
     def skills(self) -> Sequence[SkillFiles]:
         text = (
@@ -76,6 +81,7 @@ class SkillsExtension(Extension):
         self.cache_scope = cache_scope
         self.entries = {}
         self.files = {}
+        self.owners = {}
         sanitizer = SkillsLoader()
         for provider in providers:
             for skill in provider.skills():
@@ -105,6 +111,7 @@ class SkillsExtension(Extension):
                     uri = f"{root}/{path}"
                     data = clean.encode("utf-8")
                     self.files[uri] = clean
+                    self.owners[uri] = (provider, skill.name)
                     manifest.append(
                         {
                             "uri": uri,
@@ -115,10 +122,14 @@ class SkillsExtension(Extension):
                 uri = f"{root}/SKILL.md"
                 if uri in self.entries:
                     raise ValueError("Duplicate skill")
-                parts = self.files[uri].split("---", 2)
-                if len(parts) != 3 or parts[0].strip():
+                match = re.match(
+                    r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)",
+                    self.files[uri],
+                    re.MULTILINE | re.DOTALL,
+                )
+                if not match:
                     raise ValueError("Skill requires frontmatter")
-                frontmatter = yaml.safe_load(parts[1])
+                frontmatter = yaml.safe_load(match.group(1))
                 if (
                     not isinstance(frontmatter, dict)
                     or frontmatter.get("name") != skill.name
@@ -156,9 +167,38 @@ class SkillsExtension(Extension):
     async def list_skills(self, ctx, params):
         if params.cursor is not None:
             raise MCPError(code=INVALID_PARAMS, message="Unknown cursor")
-        return {"skills": list(self.entries.values()), **self.hints(ctx)}
+        return {
+            "skills": [
+                entry
+                for uri, entry in self.entries.items()
+                if await self.allowed(ctx, uri)
+            ],
+            **self.hints(ctx),
+        }
 
     async def get_skill(self, ctx, params):
-        if params.uri not in self.entries:
+        if params.uri not in self.entries or not await self.allowed(ctx, params.uri):
             raise MCPError(code=INVALID_PARAMS, message="Unknown skill")
         return {"skill": self.entries[params.uri], **self.hints(ctx)}
+
+    async def allowed(self, ctx, uri):
+        provider, name = self.owners[uri]
+        # Providers without an authorization hook fail closed.
+        check = getattr(provider, "can_read", None)
+        return check is not None and await check(ctx, name) is True
+
+    async def resource_access(self, ctx, call_next):
+        if ctx.method == "resources/read":
+            uri = str((ctx.params or {}).get("uri", ""))
+            if uri in self.owners and not await self.allowed(ctx, uri):
+                raise MCPError(code=INVALID_PARAMS, message="Unknown resource")
+        result = await call_next(ctx)
+        if ctx.method == "resources/list":
+            resources = [
+                resource
+                for resource in result["resources"]
+                if resource["uri"] not in self.owners
+                or await self.allowed(ctx, resource["uri"])
+            ]
+            return {**result, "resources": resources}
+        return result

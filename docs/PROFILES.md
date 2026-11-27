@@ -350,7 +350,11 @@ working-method skill and read its files through MCP resources. `ttlMs` is a
 non-negative freshness hint in milliseconds (default `0`), and `cacheScope` is
 `private` (the default) or `public`. Use `private` whenever content or access
 can vary between callers. Additional providers passed to `create_app` supply
-caller-independent snapshots at startup and force the catalog scope to private.
+snapshots at startup and force the catalog scope to private. Each provider must
+implement `async can_read(ctx, skill_name)` and return `True` only when the
+current request may read that skill and all its files; `ctx` is the SDK's
+per-request context. Missing access checks deny access. Providers are responsible
+for applying their deployment's access rules on every request.
 These cache hints do not replace authorization or verification of file digests.
 Skills with more than 512 files, more than 16 MiB, or rejected content prevent
 startup; files are sanitized before their digests are calculated.

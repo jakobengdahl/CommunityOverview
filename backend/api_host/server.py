@@ -299,7 +299,7 @@ def create_app(
                       already carry runtime_extensions when both are supplied.
         authorization_hook: Graph access decisions for the constructed GraphService.
         runtime_extensions: Fixed collaborators selected before any construction.
-        skill_providers: Additional caller-independent MCP skill snapshots.
+        skill_providers: Additional MCP skill snapshots with per-request access checks.
 
     Returns:
         Configured FastAPI application with REST API, MCP tools, and static file serving.
@@ -653,6 +653,8 @@ def _create_app(
         subscriptions=False,
         **({"extensions": mcp_extensions} if mcp_extensions else {}),
     )
+    if mcp_extensions:
+        mcp.middleware.append(mcp_extensions[0].resource_access)
     tools_map = register_mcp_tools(
         mcp,
         graph_service,

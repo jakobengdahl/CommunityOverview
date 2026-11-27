@@ -23,6 +23,9 @@ class Provider:
     def skills(self):
         return [SkillFiles("extra", self.files)]
 
+    async def can_read(self, ctx, skill_name):
+        return ctx.request.headers.get("x-skill-user") == "allowed"
+
 
 def skill(body="hello"):
     return f"---\nname: extra\ndescription: Example\n---\n{body}"
@@ -33,7 +36,9 @@ def test_provider_manifest_matches_sanitized_resources_and_is_stable():
         CoreSkillProvider(set()),
         Provider(
             {
-                "SKILL.md": skill("<script>bad</script><example>safe</example>"),
+                "SKILL.md": skill(
+                    "<script>bad</script><example>safe</example>"
+                ).replace("description: Example", 'description: "Example --- value"'),
                 "references/a.md": "More",
             }
         ),
@@ -48,7 +53,9 @@ def test_provider_manifest_matches_sanitized_resources_and_is_stable():
             assert resource["size"] == len(data)
             assert resource["digest"] == "sha256:" + hashlib.sha256(data).hexdigest()
     content = extension.files["skill://extra/SKILL.md"]
-    assert content == skill("<example>safe</example>")
+    assert content == skill("<example>safe</example>").replace(
+        "description: Example", 'description: "Example --- value"'
+    )
     core = extension.entries["skill://graph-working-method/SKILL.md"]
     assert core["frontmatter"]["metadata"]["version"] == __version__
     assert "Attachments" not in extension.files[core["uri"]]
@@ -90,6 +97,17 @@ def test_get_list_and_cache_hints():
         assert "ttlMs" not in await extension.list_skills(
             SimpleNamespace(protocol_version="2025-03-26"), SimpleNamespace(cursor=None)
         )
+        no_hook = SimpleNamespace(
+            skills=lambda: [SkillFiles("extra", {"SKILL.md": skill()})]
+        )
+        restricted = SkillsExtension([no_hook], 0, "private")
+        assert (await restricted.list_skills(ctx, SimpleNamespace(cursor=None)))[
+            "skills"
+        ] == []
+        with pytest.raises(Exception):
+            await restricted.get_skill(
+                ctx, SimpleNamespace(uri="skill://extra/SKILL.md")
+            )
 
     anyio.run(check)
 
@@ -108,7 +126,7 @@ def rpc(client, method, params, headers):
     )
 
 
-def snapshot(app_config, mock_llm_provider, enabled):
+def snapshot(app_config, mock_llm_provider, enabled, provider=None):
     settings = SkillsConfig(
         mcp=MCPSkillsConfig(enabled=enabled, ttlMs=400, cacheScope="public")
     )
@@ -116,7 +134,7 @@ def snapshot(app_config, mock_llm_provider, enabled):
         patch("backend.config.config_loader.get_skills_config", return_value=settings),
         patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider),
     ):
-        app = create_app(app_config)
+        app = create_app(app_config, skill_providers=[provider] if provider else ())
     with TestClient(app) as client:
         headers = {"Accept": "application/json, text/event-stream"}
         init = client.post(
@@ -152,6 +170,47 @@ def snapshot(app_config, mock_llm_provider, enabled):
                 "sha256:" + hashlib.sha256(content.encode()).hexdigest()
                 == entry["resources"][0]["digest"]
             )
+            if provider:
+                extra = "skill://extra/SKILL.md"
+                headers["x-skill-user"] = "allowed"
+                assert (
+                    len(rpc(client, "skills/list", {}, headers)["result"]["skills"])
+                    == 2
+                )
+                assert (
+                    rpc(client, "skills/get", {"uri": extra}, headers)["result"][
+                        "skill"
+                    ]["uri"]
+                    == extra
+                )
+                assert rpc(client, "resources/read", {"uri": extra}, headers)["result"][
+                    "contents"
+                ]
+                assert rpc(
+                    client, "resources/read", {"uri": "skill://extra/ref.md"}, headers
+                )["result"]["contents"]
+                assert any(
+                    r["uri"] == extra
+                    for r in rpc(client, "resources/list", {}, headers)["result"][
+                        "resources"
+                    ]
+                )
+                headers["x-skill-user"] = "denied"
+                assert (
+                    len(rpc(client, "skills/list", {}, headers)["result"]["skills"])
+                    == 1
+                )
+                assert "error" in rpc(client, "skills/get", {"uri": extra}, headers)
+                assert "error" in rpc(client, "resources/read", {"uri": extra}, headers)
+                assert "error" in rpc(
+                    client, "resources/read", {"uri": "skill://extra/ref.md"}, headers
+                )
+                assert all(
+                    r["uri"] != extra
+                    for r in rpc(client, "resources/list", {}, headers)["result"][
+                        "resources"
+                    ]
+                )
         modern_headers = {
             "Accept": "application/json, text/event-stream",
             "Mcp-Protocol-Version": "2026-07-28",
@@ -170,7 +229,7 @@ def snapshot(app_config, mock_llm_provider, enabled):
                 "result"
             ]
             assert modern_list["ttlMs"] == 400
-            assert modern_list["cacheScope"] == "public"
+            assert modern_list["cacheScope"] == ("private" if provider else "public")
         return result, tools, resources, listing, discover
 
 
@@ -199,3 +258,9 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
     assert off.get("instructions") == on.get("instructions")
     assert listing_off["error"]["code"] == -32601
     assert len(listing_on["result"]["skills"]) == 1
+    snapshot(
+        app_config,
+        mock_llm_provider,
+        True,
+        Provider({"SKILL.md": skill(), "ref.md": "secret"}),
+    )
