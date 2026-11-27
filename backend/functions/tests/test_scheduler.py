@@ -564,12 +564,16 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
     assert '"secret": "a"' not in row and '"secret": "b"' not in row
     scheduler.stop()
     scheduler = FunctionScheduler(
-        service, ScheduleSlots(tmp_path / "manifest.db"), {"example": "g"},
+        service,
+        ScheduleSlots(tmp_path / "manifest.db"),
+        {"example": "g"},
         sensitive_fields=schema,
     )
     scheduler.tick(datetime.now(timezone.utc))
     assert service.invoke.call_count == 3
     assert service.invoke.call_args.kwargs["entity"]["data"] == {
-        "before": {}, "after": {}, "patch": {}
+        "before": {},
+        "after": {},
+        "patch": {},
     }
     scheduler.stop()
