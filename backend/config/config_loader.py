@@ -130,6 +130,9 @@ SYSTEM_NODE_TYPES = {
 class NodeTypeConfig(BaseModel):
     """Configuration for a single node type."""
 
+    # Preserve profile-specific schema metadata, including legacy subtypes.
+    model_config = ConfigDict(extra="allow")
+
     fields: List[str] = Field(
         default_factory=lambda: ["name", "description", "summary"]
     )
@@ -174,6 +177,7 @@ class SchemaConfig(BaseModel):
 
     node_types: Dict[str, NodeTypeConfig] = Field(default_factory=dict)
     relationship_types: Dict[str, RelationshipTypeConfig] = Field(default_factory=dict)
+    vocabularies: Any = Field(default_factory=dict)
 
     @field_validator("node_types", mode="before")
     @classmethod

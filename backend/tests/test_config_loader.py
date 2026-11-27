@@ -48,6 +48,24 @@ class TestConfigLoader:
             assert schema["node_types"][system_type]["static"] is True
             assert schema["node_types"][system_type]["category"] == "system"
 
+    @pytest.mark.parametrize(
+        "x", [{"ttlMs": -1}, {"cacheScope": "shared"}, None, "bad"]
+    )
+    @pytest.mark.parametrize("enabled", [False, None])
+    def test_disabled_mcp_invalid_graph_hints_preserve_profile(
+        self, tmp_path, x, enabled
+    ):
+        from backend.config import config_loader
+
+        mcp = {"graphSemantics": x, **({} if enabled is None else {"enabled": enabled})}
+        profile = {"presentation": {"skills_config": {"mcp": mcp}}}
+        profile["schema"] = {"node_types": {"MyDomain": {"fields": ["name"]}}}
+        (tmp_path / "s.json").write_text(json.dumps(profile), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(tmp_path / "s.json")
+        config_loader.reset_loader()
+        assert "MyDomain" in config_loader.get_schema()["node_types"]
+        assert not config_loader.get_skills_config().mcp.enabled
+
     def test_all_system_node_types_injected_from_code(self):
         """System node types must come from code, not from config."""
         from backend.config import config_loader
@@ -59,13 +77,18 @@ class TestConfigLoader:
             assert loaded["color"] == type_config["color"]
             assert loaded["icon"] == type_config["icon"]
 
-    def test_system_node_types_in_config_are_stripped_not_doubled(self, tmp_path):
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_system_node_types_in_config_are_stripped_not_doubled(
+        self, tmp_path, enabled
+    ):
         """System node types defined in a config file must not produce duplicates."""
         import json
         from backend.config import config_loader
 
         config_with_system_types = {
+            "presentation": {"skills_config": {"mcp": {"enabled": enabled}}},
             "schema": {
+                "vocabularies": ["legacy value"],
                 "node_types": {
                     "SavedView": {
                         "fields": ["name"],
@@ -84,13 +107,14 @@ class TestConfigLoader:
                         "icon": "OldIcon",
                     },
                     "MyDomain": {
+                        "subtypes": {"legacy": "value"},
                         "fields": ["name", "description"],
                         "category": "domain",
                         "description": "A domain type",
                         "color": "#123456",
                     },
-                }
-            }
+                },
+            },
         }
         config_file = tmp_path / "schema_config.json"
         config_file.write_text(json.dumps(config_with_system_types), encoding="utf-8")
@@ -101,6 +125,9 @@ class TestConfigLoader:
 
         # Domain type must be present
         assert "MyDomain" in schema["node_types"]
+        loaded = config_loader._get_loader().config.schema_
+        assert loaded.vocabularies == ["legacy value"]
+        assert loaded.node_types["MyDomain"].subtypes == {"legacy": "value"}
         # System types must come from code, not from the stale config entries
         assert (
             schema["node_types"]["SavedView"]["color"]
