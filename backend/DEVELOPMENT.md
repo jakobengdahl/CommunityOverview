@@ -190,8 +190,14 @@ uvicorn backend.api_host.server:get_app --factory --reload --port 8000
 The server will be available at:
 - REST API: http://localhost:8000/api/
 - UI Backend (chat): http://localhost:8000/ui/
-- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients)
+- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients). The same server supports protocol 2026-07-28 and legacy clients.
 - Health check: http://localhost:8000/health
+
+The backend uses the MCP 2.x SDK's `MCPServer` class. One instance registers
+the tools, resources, and schema-derived instructions shared by both protocol
+generations. Its Streamable HTTP transport serves clients including protocol
+2026-07-28 at `/mcp`; its legacy SSE transport is available at `/mcp/sse`.
+The mount routes requests to the appropriate transport on that same instance.
 
 ### Production Mode
 
@@ -1082,7 +1088,7 @@ its MCP twin (`get_staged_changes` as `read`; `merge_staged_changes` and
 
 | Method | Path | MCP tool | Description |
 |---|---|---|---|
-| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `version` (opaque; what a merge or discard names to bind itself to the reviewed entry), `staged_by`, `staged_at`; a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
+| GET | `/api/sessions/{id}/staged` | `get_staged_changes` | The diff: one item per staged entry - `kind`, `entity_id`, `action`, `base_revision`, `main_revision`, `fields` (per field, and per `metadata.<key>`: `base`, `staged`, `main`, `conflict`), `status` (`clean`, `conflict`, `orphaned`, `id_taken`, `dangling`), `depends_on`, `session_seq`, `version` (opaque; what a merge or discard names to bind itself to the reviewed entry), `staged_by`, `staged_at`, and, when recorded, `function_origin` (function id, version, run id and optional correlation id); a node delete also lists its `unstaged_edges`, the main edges to the node the layer does not tombstone (added since, or missed). A direct session answers an empty list |
 | POST | `/api/sessions/{id}/staged/merge` | `merge_staged_changes` | `{merge_id, entries: "all" \| [{kind, entity_id, version?}], resolutions?: [{kind, entity_id, choice, values?}]}`. `version` is the opaque one the diff gave the entry: an entry restaged since refuses the merge (`merge_raced`), checked in the merge unit. Applies the selected entries to the graph and removes them from the layer as one unit, or nothing. `choice` is `take_session`, `keep_main`, `as_new` (nodes) or `manual` (updates; `values` gives the final value of every conflicting field). Repeating a `merge_id` returns the first result (`replayed: true`) and writes nothing. Graph events fire as for direct writes, with `event_origin` `session-merge`, the merge id as correlation id and `staged_by` |
 | POST | `/api/sessions/{id}/staged/discard` | `discard_staged_changes` | `{entries: "all" \| [{kind, entity_id, version?}]}`. Removes entries from the layer (an entry restaged since its named `version` refuses the discard with `merge_raced`); the graph does not change and no graph event fires. Answers the keys actually removed |
 
@@ -1928,8 +1934,7 @@ Inline `image_data` is smaller over MCP than over REST. Both MCP transports
 `RequestBodyLimitMiddleware`, which answers `413` to any request body over
 4 MiB — by declared `Content-Length` or, for a chunked upload, by counted
 bytes — before the JSON-RPC message is parsed. `backend/requirements.txt`
-pins `mcp>=1.29.1` because that is the first release that guards both
-transports; there is no other body-size guard in front of `/mcp`. Base64
+requires `mcp>=2.3.0,<3`, which guards both transports; there is no other body-size guard in front of `/mcp`. Base64
 inflates bytes by 4/3, so the largest source image that fits inline in one
 tool call is roughly 3 MiB, against the 20 MiB
 (`DEFAULT_MAX_SOURCE_IMAGE_BYTES`) the REST endpoint

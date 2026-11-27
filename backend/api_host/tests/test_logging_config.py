@@ -109,9 +109,9 @@ def test_text_format_labels_app_logs_from_boot_at_info():
 
 
 def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
-    """FastMCP's constructor configures logging with basicConfig; once the
+    """MCPServer's constructor configures logging with basicConfig; once the
     text-mode handler exists that must be a no-op, not a second handler."""
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     previous_handlers = logging.root.handlers[:]
     previous_level = logging.root.level
@@ -120,7 +120,7 @@ def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
 
         configure_root_logging("text")
         installed = logging.root.handlers[:]
-        FastMCP("probe")
+        MCPServer("probe")
 
         assert logging.root.handlers == installed
         assert logging.root.level == logging.INFO

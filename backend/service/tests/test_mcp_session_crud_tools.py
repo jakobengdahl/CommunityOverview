@@ -559,11 +559,11 @@ def test_template_tools_share_crud_surface(crud_tools):
 
 def test_template_published_schemas_and_raw_validation(tmp_path):
     import asyncio
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     service = GraphService(GraphStorage(json_path=str(tmp_path / "g.json")))
     manager = SessionManager(SessionStore(InMemorySessionPersistenceBackend()))
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     register_mcp_tools(mcp, service, session_manager=manager)
     required = {
         "save_template": {"session_id", "name", "expected_revision"},

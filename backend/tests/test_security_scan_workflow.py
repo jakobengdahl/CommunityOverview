@@ -141,7 +141,6 @@ EXPECTED_NOSEC = [
     ("backend/agents/execution/sqlite_store.py", "B608"),
     ("backend/agents/governance/store.py", "B608"),
     ("backend/api_host/config.py", "B104"),
-    ("backend/api_host/server.py", "B104"),
     ("services/mcp_oauth_gateway/main.py", "B104"),
 ]
 NOSEC = re.compile(r"#\s*nosec\b(.*)", re.I)

@@ -18,15 +18,9 @@ consumers" below).
 
 Thread-safety notes
 -------------------
-asyncio.Queue is not thread-safe across threads.  FastMCP calls sync
-tools directly from the event loop thread (not via asyncio.to_thread),
-so asyncio.get_running_loop() always succeeds inside push_command_sync
-and the call_soon fast path is taken in normal operation.
-
-The call_soon_threadsafe fallback path exists as a safety net for
-callers that genuinely run in a separate thread (e.g. background workers
-or future framework changes).  In that case the loop reference injected
-at startup via set_event_loop() is used instead.
+asyncio.Queue is not thread-safe across threads. MCPServer runs synchronous
+tools in worker threads, so those callers use the loop injected at startup and
+wait for the enqueue to complete before reporting its result.
 
 Entries vs. consumers
 ---------------------
@@ -122,11 +116,10 @@ class SessionRegistry:
         return self._sessions[session_id]["queue"]
 
     @staticmethod
-    def _enqueue_drop_oldest(queue: asyncio.Queue, command: Dict[str, Any]) -> None:
+    def _enqueue_drop_oldest(queue: asyncio.Queue, command: Dict[str, Any]) -> bool:
         """Put *command* on *queue*, discarding the oldest item if it is full.
 
-        Runs in the event-loop thread (directly, or via call_soon/
-        call_soon_threadsafe), so the drop-then-put pair is atomic with respect
+        Runs in the event-loop thread, so the drop-then-put pair is atomic with respect
         to the single SSE consumer draining the queue. Bounds memory for a
         session whose browser has stopped draining the legacy stream while
         keeping the newest commands for a consumer that reconnects within the
@@ -142,7 +135,8 @@ class SessionRegistry:
             try:
                 queue.put_nowait(command)
             except asyncio.QueueFull:
-                pass
+                return False
+        return True
 
     def _touch(self, session_id: str) -> None:
         if session_id in self._sessions:
@@ -214,31 +208,31 @@ class SessionRegistry:
     def push_command_sync(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Push *command* to the session queue from a synchronous context.
 
-        FastMCP calls sync tools from the event loop thread, so
-        asyncio.get_running_loop() normally succeeds (fast path).  The
-        call_soon_threadsafe fallback handles callers that genuinely run in a
-        separate OS thread and need cross-thread delivery.
-
-        Returns True if the command was enqueued, False if the session is unknown
-        or no event loop is reachable.
+        Returns True only once the command was enqueued; unknown sessions,
+        unavailable loops and enqueue failures return False.
         """
         if session_id not in self._sessions:
             return False
-        queue = self._sessions[session_id]["queue"]
         try:
-            # Fast path: already running inside the event loop thread.
-            loop = asyncio.get_running_loop()
-            loop.call_soon(self._enqueue_drop_oldest, queue, command)
-            self._touch(session_id)
-            return True
+            asyncio.get_running_loop()
         except RuntimeError:
-            # Not in async context — use the stored loop reference for
-            # thread-safe delivery from a thread-pool worker.
             if self._loop is None or not self._loop.is_running():
                 return False
-            self._loop.call_soon_threadsafe(self._enqueue_drop_oldest, queue, command)
+            try:
+                return asyncio.run_coroutine_threadsafe(
+                    self.push_command(session_id, command), self._loop
+                ).result()
+            except Exception:
+                return False
+        try:
+            enqueued = self._enqueue_drop_oldest(
+                self._sessions[session_id]["queue"], command
+            )
+        except Exception:
+            return False
+        if enqueued:
             self._touch(session_id)
-            return True
+        return enqueued
 
     async def push_command(self, session_id: str, command: Dict[str, Any]) -> bool:
         """Push *command* from an async context.  Returns False if session unknown."""
@@ -247,9 +241,12 @@ class SessionRegistry:
         # Non-blocking drop-oldest rather than ``await queue.put`` so a full queue
         # (browser off the legacy stream, nothing draining) never blocks the
         # producer; memory stays bounded by _MAX_QUEUE_SIZE.
-        self._enqueue_drop_oldest(self._sessions[session_id]["queue"], command)
-        self._touch(session_id)
-        return True
+        enqueued = self._enqueue_drop_oldest(
+            self._sessions[session_id]["queue"], command
+        )
+        if enqueued:
+            self._touch(session_id)
+        return enqueued
 
     # ------------------------------------------------------------------
     # SSE streaming
@@ -278,7 +275,8 @@ class SessionRegistry:
                     self.get_or_create(session_id)
                 queue = self._sessions[session_id]["queue"]
                 try:
-                    command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    async with asyncio.timeout(25.0):
+                        command = await queue.get()
                     self._touch(session_id)
                     yield command
                 except asyncio.TimeoutError:

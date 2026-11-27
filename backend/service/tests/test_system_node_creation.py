@@ -4,7 +4,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from backend.agents.config import AgentConfig
 from backend.core import GraphStorage, Node
@@ -364,7 +364,7 @@ def test_system_creates_cannot_bypass_collection_mode_permissions(client):
 
 
 def test_real_mcp_and_assistant_advertise_matching_creation_models(empty_service):
-    mcp = FastMCP("system-node-tests")
+    mcp = MCPServer("system-node-tests")
     register_mcp_tools(mcp, empty_service)
     advertised = {tool.name: tool.parameters for tool in mcp._tool_manager.list_tools()}
     with patch("backend.ui.chat_logic.create_provider"):

@@ -405,10 +405,16 @@ class StagedWrite:
                 {**entry, "session_seq": seq, "stage_token": token} for entry in upserts
             ]
             origin = session_context.current_function_origin()
-            if origin is not None:
-                stamped = [
-                    {**entry, "function_origin": dict(origin)} for entry in stamped
-                ]
+            for entry in stamped:
+                previous = layer._loaded.get((entry["kind"], entry["entity_id"]))
+                # An entry can contain changes from several writes. Only label it
+                # with a function when every contributing write has that origin.
+                if origin is not None and (
+                    previous is None or previous.get("function_origin") == origin
+                ):
+                    entry["function_origin"] = dict(origin)
+                else:
+                    entry.pop("function_origin", None)
             staged_entries.extend(stamped)
             store.stage(
                 self.session_id,
