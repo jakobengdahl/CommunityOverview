@@ -685,7 +685,10 @@ def test_every_node_in_a_batch_is_scope_checked(service):
     assert service.calls == []
 
 
-def test_webhook_broker_intersects_every_service_decision_with_bound_graph(storage):
+@pytest.mark.parametrize("actor_type", ["function_webhook", "function_schedule"])
+def test_trigger_broker_intersects_every_service_decision_with_bound_graph(
+    storage, actor_type
+):
     hook = RecordingHook(
         narrowing=GraphAccessNarrowing(
             enabled=True, allow_local_graph=True, include_graph_ids=("g1", "g2")
@@ -716,7 +719,7 @@ def test_webhook_broker_intersects_every_service_decision_with_bound_graph(stora
         grant_enabled=lambda grant: grant in enabled,
         authorization_inputs={
             "actor_id": "fn",
-            "actor_type": "function_webhook",
+            "actor_type": actor_type,
             "graph_id": "g1",
         },
     )

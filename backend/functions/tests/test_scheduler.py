@@ -30,6 +30,10 @@ def test_discovery_and_restart_catchup(tmp_path, monkeypatch):
     assert service.invoke.call_count == 1
     assert service.invoke.call_args.kwargs["actor_binding"]["graph_id"] == "graph"
     assert (
+        service.invoke.call_args.kwargs["actor_binding"]["actor_type"]
+        == "function_schedule"
+    )
+    assert (
         slots.enqueue("example", now - timedelta(minutes=3)).state
         == ExecutionState.CANCELLED
     )
