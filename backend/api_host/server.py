@@ -658,12 +658,38 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         auto_add_registry=auto_add_registry,
     )
 
+    # The catalog is fixed at construction, so its resource bindings match its manifest.
+    from backend.config.config_loader import get_skills_config
+
+    skills_config = get_skills_config().mcp
+    mcp_extensions = []
+    if skills_config.enabled:
+        from backend.runtime.attachment_access import attachment_tool_allowed
+        from backend.skills.mcp import CoreSkillProvider, SkillsExtension
+
+        enabled_tools = set()
+        if (
+            attachment_tool_allowed("read_node_attachment", config.mcp_attachment_tools)
+            and graph_service.attachment_settings is not None
+        ):
+            enabled_tools.add("read_node_attachment")
+        mcp_extensions.append(
+            SkillsExtension(
+                [CoreSkillProvider(enabled_tools)],
+                skills_config.ttlMs,
+                skills_config.cacheScope,
+            )
+        )
+
     # Initialize MCPServer with dynamic instructions built from schema configuration
     mcp = MCPServer(
         config.mcp_name,
         instructions=build_mcp_instructions(),
         subscriptions=False,
+        **({"extensions": mcp_extensions} if mcp_extensions else {}),
     )
+    if mcp_extensions:
+        mcp.middleware.append(mcp_extensions[0].resource_access)
     tools_map = register_mcp_tools(
         mcp,
         graph_service,
