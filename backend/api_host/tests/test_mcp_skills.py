@@ -1056,7 +1056,8 @@ def test_profile_change_publishes_only_for_changed_profile():
     anyio.run(check)
 
 
-def test_profile_change_from_storage_reload_is_announced(tmp_path):
+@pytest.mark.parametrize("change", ["reload", "replace"])
+def test_profile_change_from_storage_reload_is_announced(tmp_path, change):
     import asyncio
     from backend.core import GraphStorage, Node
     from backend.runtime.authorization import (
@@ -1086,9 +1087,13 @@ def test_profile_change_from_storage_reload_is_announced(tmp_path):
         storage.add_reload_listener(publisher.on_event)
         received = []
         publisher.subscribe(received.append)
-        writer.add_nodes([Node(id="n", name="N", type="Actor")], [])
-        writer.flush()
-        await asyncio.to_thread(storage.reload)
+        node = Node(id="n", name="N", type="Actor")
+        if change == "replace":
+            await asyncio.to_thread(storage.replace_all_nodes_and_edges, [node], [])
+        else:
+            writer.add_nodes([node], [])
+            writer.flush()
+            await asyncio.to_thread(storage.reload)
         while publisher.scheduled:
             await asyncio.sleep(0.01)
         assert received == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
