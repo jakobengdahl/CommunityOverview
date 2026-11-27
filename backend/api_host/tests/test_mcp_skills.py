@@ -100,6 +100,19 @@ def test_get_list_and_cache_hints():
         uri = listing["skills"][0]["uri"]
         result = await extension.get_skill(ctx, SimpleNamespace(uri=uri))
         assert result["skill"] == listing["skills"][0]
+        assert result["cacheScope"] == result["skill"]["cacheScope"] == "public"
+        from backend.runtime.authorization import DefaultGraphAuthorizationHook
+
+        extension.authorization_hook = DefaultGraphAuthorizationHook()
+        assert (await extension.list_skills(ctx, SimpleNamespace(cursor=None)))[
+            "cacheScope"
+        ] == "public"
+        assert (await extension.get_skill(ctx, SimpleNamespace(uri=uri)))[
+            "cacheScope"
+        ] == "public"
+        extension.authorization_hook = object()
+        assert extension.entry(ctx, uri)["cacheScope"] == "private"
+        extension.authorization_hook = None
         with pytest.raises(Exception) as exc:
             await extension.get_skill(
                 ctx, SimpleNamespace(uri="skill://missing/SKILL.md")
@@ -119,6 +132,32 @@ def test_get_list_and_cache_hints():
             await restricted.get_skill(
                 ctx, SimpleNamespace(uri="skill://extra/SKILL.md")
             )
+
+    anyio.run(check)
+
+
+def test_caller_dependent_access_has_private_cache_hints():
+    extension = SkillsExtension(
+        [CoreSkillProvider(set()), Provider({"SKILL.md": skill()})], 1000, "public"
+    )
+
+    async def check():
+        for user in ("allowed", "denied"):
+            ctx = SimpleNamespace(
+                protocol_version="2026-07-28",
+                request=SimpleNamespace(headers={"x-skill-user": user}),
+            )
+            listing = await extension.list_skills(ctx, SimpleNamespace(cursor=None))
+            assert len(listing["skills"]) == (2 if user == "allowed" else 1)
+            assert listing["cacheScope"] == "private"
+            for entry in listing["skills"]:
+                assert entry["cacheScope"] == "private"
+                result = await extension.get_skill(
+                    ctx, SimpleNamespace(uri=entry["uri"])
+                )
+                assert (
+                    result["cacheScope"] == result["skill"]["cacheScope"] == "private"
+                )
 
     anyio.run(check)
 
@@ -171,7 +210,25 @@ def snapshot(app_config, mock_llm_provider, enabled):
         resources = rpc(client, "resources/list", {}, headers)["result"]["resources"]
         listing = rpc(client, "skills/list", {}, headers)
         if enabled:
+            fallback = rpc(
+                client, "tools/call", {"name": "list_skills", "arguments": {}}, headers
+            )["result"]
+            assert (
+                json.loads(fallback["content"][0]["text"])["skills"]
+                == listing["result"]["skills"]
+            )
             entry = listing["result"]["skills"][0]
+            fetched = rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "get_skill",
+                    "arguments": {"uri": entry["uri"], "file": "SKILL.md"},
+                },
+                headers,
+            )["result"]
+            fetched = json.loads(fetched["content"][0]["text"])
+            assert fetched["skill"] == entry
             got = rpc(client, "skills/get", {"uri": entry["uri"]}, headers)["result"][
                 "skill"
             ]
@@ -204,6 +261,12 @@ def snapshot(app_config, mock_llm_provider, enabled):
             ]
             assert modern_list["ttlMs"] == 0
             assert modern_list["cacheScope"] == "private"
+            core = next(
+                entry
+                for entry in modern_list["skills"]
+                if "graph-working-method" in entry["uri"]
+            )
+            assert core["cacheScope"] == "public"
         return result, tools, resources, listing, discover, content if enabled else None
 
 
@@ -259,7 +322,11 @@ def test_opt_in_keeps_existing_inventory_and_serves_standard_methods(
         "extensions", {}
     )
     assert "io.modelcontextprotocol/skills" in discover_on["capabilities"]["extensions"]
-    assert tools_off == tools_on
+    assert tools_off == [
+        tool
+        for tool in tools_on
+        if tool["name"] not in {"refresh_skills", "list_skills", "get_skill"}
+    ]
     assert ("read_node_attachment" in {tool["name"] for tool in tools_on}) is expected
     assert ("Attachments" in content) is expected
     assert [
@@ -497,3 +564,244 @@ def test_graph_semantics_settings_validate_independently():
             "ttlMs": 0,
             "cacheScope": "private",
         }
+
+
+def test_refresh_replaces_owner_when_manifest_is_unchanged():
+    from mcp.server.mcpserver import MCPServer
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.skills.mcp import register_skill_tools
+
+    class Hook:
+        def evaluate(self, ctx):
+            return GraphAuthorizationDecision(allowed=True)
+
+    async def check():
+        schema = {"node_types": {}, "relationship_types": {}}
+        presentation = {
+            "default_language": "en",
+            "language_policy": {},
+            "prompt_prefix": "",
+        }
+        builtins = SkillsExtension(
+            [CoreSkillProvider(set()), GraphSemanticsProvider(schema, presentation)],
+            10,
+            "public",
+        )
+        builtin_server = MCPServer("builtins", extensions=[builtins])
+        register_skill_tools(builtin_server, builtins, Hook(), False)
+        request = SimpleNamespace(protocol_version="2026-07-28")
+        refresh_builtins = builtin_server._tool_manager.get_tool("refresh_skills").fn
+        first = await refresh_builtins(SimpleNamespace(request_context=request))
+        versions = {entry["uri"]: entry["version"] for entry in first["skills"]}
+        assert versions["skill://graph-working-method/SKILL.md"] == __version__
+        assert versions["skill://graph-semantics/SKILL.md"].startswith("sha256:")
+        assert first == await refresh_builtins(SimpleNamespace(request_context=request))
+        schema["node_types"]["New"] = {}
+        changed = await refresh_builtins(SimpleNamespace(request_context=request))
+        assert (
+            changed["skills"][1]["version"]
+            != versions["skill://graph-semantics/SKILL.md"]
+        )
+
+        original = Provider({"SKILL.md": skill(), "ref.md": "reference"})
+        replacement = Provider(dict(original.files))
+
+        async def deny(ctx, name):
+            return False
+
+        replacement.can_read = deny
+        extension = SkillsExtension([original], 10, "public")
+        server = MCPServer("test", extensions=[extension])
+        register_skill_tools(server, extension, Hook(), True)
+        events = []
+        server._subscriptions.subscribe(events.append)
+        request = SimpleNamespace(
+            protocol_version="2026-07-28",
+            request=SimpleNamespace(headers={"x-skill-user": "allowed"}),
+        )
+        uri = "skill://extra/SKILL.md"
+        assert await extension.allowed(request, uri)
+        extension.providers = [replacement]
+        refresh = server._tool_manager.get_tool("refresh_skills").fn
+        result = await refresh(SimpleNamespace(request_context=request))
+        assert result["skills"] == []
+        assert all(owner is replacement for owner, _ in extension.owners.values())
+        assert not await extension.allowed(request, uri)
+        assert not events
+
+    anyio.run(check)
+
+
+def test_refresh_and_fallback_share_authorized_snapshot():
+    from mcp.server.mcpserver import MCPServer
+    from backend.runtime.authorization import GraphAuthorizationDecision
+    from backend.skills.mcp import register_skill_tools
+
+    class Hook:
+        admin = False
+        read = True
+
+        def evaluate(self, ctx):
+            return GraphAuthorizationDecision(
+                allowed=self.admin if ctx.action == "admin" else self.read
+            )
+
+    async def check():
+        provider = Provider({"SKILL.md": skill(), "ref.md": "first"})
+        ext = SkillsExtension([provider], 10, "public")
+        server = MCPServer("test", extensions=[ext])
+        hook = Hook()
+        without_fallback = MCPServer(
+            "test", extensions=[SkillsExtension([provider], 0, "private")]
+        )
+        register_skill_tools(
+            without_fallback, without_fallback._extensions[0], hook, False
+        )
+        assert without_fallback._tool_manager.get_tool("refresh_skills") is not None
+        assert without_fallback._tool_manager.get_tool("list_skills") is None
+        assert without_fallback._tool_manager.get_tool("get_skill") is None
+        register_skill_tools(server, ext, hook, True)
+        events, other_events = [], []
+        server._subscriptions.subscribe(events.append)
+        server._subscriptions.subscribe(other_events.append)
+        request = SimpleNamespace(
+            protocol_version="2026-07-28",
+            request=SimpleNamespace(headers={"x-skill-user": "allowed"}),
+        )
+        ctx = SimpleNamespace(request_context=request)
+        refresh = server._tool_manager.get_tool("refresh_skills").fn
+        listing = server._tool_manager.get_tool("list_skills").fn
+        get = server._tool_manager.get_tool("get_skill").fn
+        uri = "skill://extra/SKILL.md"
+        provider.files["ref.md"] = "second"
+        assert (await refresh(ctx))["error_code"] == "access_denied"
+        assert not events
+        assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "first"
+        hook.admin = True
+        result = await refresh(ctx)
+        entry = result["skills"][0]
+        version = entry.pop("version")
+        assert version.startswith("sha256:")
+        assert result == await ext.list_skills(request, SimpleNamespace(cursor=None))
+        assert result["skills"][0]["cacheScope"] == "private"
+        assert result["cacheScope"] == "private"
+        fetched = await get(uri, ctx)
+        assert fetched["cacheScope"] == fetched["skill"]["cacheScope"] == "private"
+        assert len(events) == len(other_events) == 1
+        assert (await get(uri, ctx, "ref.md"))["file"]["text"] == "second"
+        assert (
+            await server._resource_manager.get_resource("skill://extra/ref.md", None)
+        ).text == "second"
+        assert (await refresh(ctx))["skills"][0]["version"] == version
+        assert len(events) == 1
+
+        # An unchanged refresh must not invalidate reads awaiting authorization.
+        started, resume = anyio.Event(), anyio.Event()
+        waiting = 0
+        original_check = provider.can_read
+
+        async def delayed_check(read_ctx, name):
+            nonlocal waiting
+            if read_ctx is not request:
+                waiting += 1
+                if waiting == 4:
+                    started.set()
+                await resume.wait()
+            return await original_check(request, name)
+
+        provider.can_read = delayed_check
+        read_request = SimpleNamespace(
+            protocol_version="2026-07-28", method="resources/read", params={"uri": uri}
+        )
+        read_ctx = SimpleNamespace(request_context=read_request)
+        results = []
+
+        async def call_next(_ctx):
+            resource = await server._resource_manager.get_resource(uri, None)
+            return {"text": resource.text}
+
+        async def read(operation):
+            results.append(await operation())
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                read,
+                lambda: ext.list_skills(read_request, SimpleNamespace(cursor=None)),
+            )
+            tasks.start_soon(
+                read, lambda: ext.get_skill(read_request, SimpleNamespace(uri=uri))
+            )
+            tasks.start_soon(read, lambda: get(uri, read_ctx, "ref.md"))
+            tasks.start_soon(read, lambda: ext.resource_access(read_request, call_next))
+            await started.wait()
+            assert (await refresh(ctx))["skills"][0]["version"] == version
+            resume.set()
+        provider.can_read = original_check
+        assert len(results) == 4 and len(events) == len(other_events) == 1
+        assert any(result.get("file", {}).get("text") == "second" for result in results)
+
+        assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
+        hook.read = False
+        hidden = await listing(ctx)
+        assert hidden["skills"] == [] and hidden["cacheScope"] == "private"
+        assert (await refresh(ctx))["skills"] == []
+        assert (await get(uri, ctx))["error_code"] == "not_found"
+        assert len(events) == 1
+        del provider.files["ref.md"]
+        hook.read = True
+        assert (await refresh(ctx))["skills"][0]["version"] != version
+        assert len(events) == 2
+        assert "skill://extra/ref.md" not in server._resource_manager._resources
+
+        # A refresh must not substitute a different owner's content after the
+        # original owner has authorized a resource read.
+        hook.read = True
+        started, resume = anyio.Event(), anyio.Event()
+
+        async def delayed_read(ctx, name):
+            started.set()
+            await resume.wait()
+            return True
+
+        provider.can_read = delayed_read
+        replacement = Provider({"SKILL.md": skill("replacement")})
+        read_ctx = SimpleNamespace(method="resources/read", params={"uri": uri})
+        errors = []
+
+        async def call_next_after_refresh(ctx):
+            resource = await server._resource_manager.get_resource(uri, None)
+            return {"text": resource.text}
+
+        async def read():
+            try:
+                await ext.resource_access(read_ctx, call_next_after_refresh)
+            except Exception as exc:
+                errors.append(exc)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(read)
+            await started.wait()
+            ext.providers = [replacement]
+            await refresh(ctx)
+            resume.set()
+        assert len(errors) == 1 and errors[0].code == -32602
+
+        # Identical content still installs the new owner's authorization rules.
+        restrictive = Provider(dict(replacement.files))
+
+        async def deny_read(ctx, name):
+            return False
+
+        restrictive.can_read = deny_read
+        ext.providers = [restrictive]
+        prior_events = len(events)
+        assert (await refresh(ctx))["skills"] == []
+        assert len(events) == len(other_events) == prior_events
+        assert (await listing(ctx))["skills"] == []
+        assert (await get(uri, ctx))["error_code"] == "not_found"
+        with pytest.raises(Exception):
+            await ext.get_skill(request, SimpleNamespace(uri=uri))
+        with pytest.raises(Exception):
+            await ext.resource_access(read_ctx, call_next_after_refresh)
+
+    anyio.run(check)
