@@ -135,7 +135,7 @@ class GraphSemanticsProvider:
         )
 
         # Only normalize fields whose order has set semantics. Other lists,
-        # including nested vocabulary values and UI settings, retain their order.
+        # including node fields, nested vocabulary values and UI settings, retain order.
         def sort_field(obj, key):
             if isinstance(obj, dict) and isinstance(obj.get(key), list):
                 obj[key].sort(key=canonical)
@@ -143,8 +143,7 @@ class GraphSemanticsProvider:
         snapshot = clean(source)
         for obj in (source, snapshot):
             for node in obj["node_types"].values():
-                for key in ("fields", "subtypes"):
-                    sort_field(node, key)
+                sort_field(node, "subtypes")
             for relationship in obj["relationship_types"].values():
                 for key in ("source_types", "target_types"):
                     sort_field(relationship, key)

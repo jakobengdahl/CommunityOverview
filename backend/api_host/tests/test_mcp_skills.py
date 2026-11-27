@@ -349,7 +349,7 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     content = ext.files[uri]
     assert "Content statistics are available through describe_graph" in content
     data = json.loads(content.split("```json\n")[1].split("\n```")[0])
-    assert data["node_types"]["Z"]["fields"] == ["a", "b"]
+    assert data["node_types"]["Z"]["fields"] == ["b", "a"]
     assert data["node_types"]["Z"]["subtypes"] == ["One", "Two"]
     assert data["node_types"]["Z"]["description"] == "<example>safe</example>"
     assert data["node_types"]["Z"]["static"] is False
@@ -363,7 +363,6 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
     assert data["language_policy"] == {"allowed_languages": ["en", "sv"]}
     assert data["prompt_prefix"] == "Profile prompt"
     reordered = json.loads(json.dumps(schema, sort_keys=True))
-    reordered["node_types"]["Z"]["fields"].reverse()
     other = SkillsExtension(
         [GraphSemanticsProvider(reordered, presentation)], 0, "private"
     )
@@ -377,6 +376,7 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
 
     for change in (
         "static",
+        "field_order",
         "vocabulary_order",
         "shape",
         "leading",
@@ -387,6 +387,8 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
         modified = json.loads(json.dumps(schema))
         if change == "static":
             modified["node_types"]["Z"]["static"] = True
+        elif change == "field_order":
+            modified["node_types"]["Z"]["fields"].reverse()
         elif change == "vocabulary_order":
             modified["vocabularies"]["terms"]["ordered"].reverse()
         elif change == "shape":
@@ -406,6 +408,11 @@ def test_schema_snapshot_is_stable_and_uses_per_skill_hints():
         )
         assert changed.files[uri] != content
         assert changed.entries[uri]["resources"] != ext.entries[uri]["resources"]
+        if change == "field_order":
+            changed_data = json.loads(
+                changed.files[uri].split("```json\n")[1].split("\n```")[0]
+            )
+            assert changed_data["node_types"]["Z"]["fields"] == ["a", "b"]
         if change == "stripped_html":
             changed_data = json.loads(
                 changed.files[uri].split("```json\n")[1].split("\n```")[0]
