@@ -81,6 +81,10 @@ class _LedgerStore:
                 "CREATE TABLE IF NOT EXISTS schedule_watermarks "
                 "(function_id TEXT PRIMARY KEY, fire_time REAL NOT NULL)"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS schedule_rate "
+                "(function_id TEXT NOT NULL, admitted_at REAL NOT NULL)"
+            )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -93,17 +97,21 @@ class _LedgerStore:
 
     def enqueue(self, job: ExecutionJob) -> ExecutionJob:
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO schedule_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(idempotency_key) DO NOTHING",
-                SqliteExecutionStore._to_row(job),
-            )
-            row = self._conn.execute(
-                "SELECT * FROM schedule_jobs WHERE idempotency_key = ?",
-                (job.idempotency_key,),
-            ).fetchone()
-            self._conn.commit()
-            return SqliteExecutionStore._row_to_job(row)
+            try:
+                self._conn.execute(
+                    "INSERT INTO schedule_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(idempotency_key) DO NOTHING",
+                    SqliteExecutionStore._to_row(job),
+                )
+                row = self._conn.execute(
+                    "SELECT * FROM schedule_jobs WHERE idempotency_key = ?",
+                    (job.idempotency_key,),
+                ).fetchone()
+                self._conn.commit()
+                return SqliteExecutionStore._row_to_job(row)
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _get_by_id(self, job_id: str):
         row = self._conn.execute(
@@ -120,13 +128,28 @@ class ScheduleSlots:
     window. Pending retries are independent of catch-up selection.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, rate_limit: int = 60):
         if str(path) in ("", ":memory:"):
             raise ValueError("Schedule slots require a file-backed database")
+        if type(rate_limit) is not int or rate_limit < 1:
+            raise ValueError("Invalid rate limit")
+        self.rate_limit = rate_limit
         self._store = _LedgerStore(path)
 
     def close(self):
         self._store.close()
+
+    def enqueue_manifest(self, root, function_id: str, fire_time: datetime):
+        """Validate the package and persist its declared schedule retry policy."""
+        from backend.functions.invocation import load_manifest
+
+        manifest, _ = load_manifest(root, function_id)
+        if not any(t["kind"] == "schedule" for t in manifest["triggers"]):
+            raise ValueError("Schedule trigger not declared")
+        retry = manifest.get("retry")
+        return self.enqueue(
+            function_id, fire_time, retry_policy=RetryPolicy(**retry) if retry else None
+        )
 
     def enqueue(
         self,
@@ -223,6 +246,30 @@ class ScheduleSlots:
                     """,
                         (row["agent_id"], ts),
                     )
+                    conn.execute(
+                        "DELETE FROM schedule_rate WHERE admitted_at <= ?", (ts - 60,)
+                    )
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM schedule_rate WHERE function_id = ? AND admitted_at > ?",
+                        (row["agent_id"], ts - 60),
+                    ).fetchone()[0]
+                    if count >= self.rate_limit:
+                        conn.execute(
+                            "UPDATE schedule_jobs SET state = ?, dead_letter_reason = ?, "
+                            "finished_at = ?, updated_at = ? WHERE id = ?",
+                            (
+                                ExecutionState.CANCELLED.value,
+                                "rate limited",
+                                ts,
+                                ts,
+                                row["id"],
+                            ),
+                        )
+                        conn.commit()
+                        return None
+                    conn.execute(
+                        "INSERT INTO schedule_rate VALUES (?, ?)", (row["agent_id"], ts)
+                    )
                 conn.execute(
                     """
                     UPDATE schedule_jobs SET state = ?, attempts = attempts + 1,
@@ -253,7 +300,65 @@ class ScheduleSlots:
         """Report a confirmed stopped failure, never an uncertain lease expiry."""
         return self._finish(job_id, attempt=attempt, now=now, success=False)
 
-    def _finish(self, job_id: str, *, attempt: int, now: datetime, success: bool):
+    def dispatch(
+        self,
+        service,
+        worker_id: str,
+        *,
+        actor_binding,
+        now: datetime,
+        lease_seconds: float,
+    ):
+        """Claim one slot and invoke it through the shared admission service.
+
+        An exception leaves the attempt running: its outcome may be uncertain.
+        """
+        job = self.claim_next(worker_id, now=now, lease_seconds=lease_seconds)
+        if job is None:
+            return None
+        result = service.invoke(
+            job.agent_id,
+            {},
+            trigger="schedule",
+            actor_binding=actor_binding,
+            idempotency_key=f"{job.idempotency_key}:attempt:{job.attempts}",
+            correlation_id=job.correlation_id,
+            chain_depth=0,
+        )
+        finished = datetime.now(timezone.utc)
+        if result.state == ExecutionState.SUCCEEDED:
+            self.complete(job.id, attempt=job.attempts, now=finished)
+        elif result.state == ExecutionState.DEAD_LETTER:
+            # The ledger is durable, but it is not authority to enable retry.
+            # Require the current validated manifest to declare the same policy.
+            from backend.functions.invocation import load_manifest
+
+            try:
+                manifest, _ = load_manifest(service.root, job.agent_id)
+                declared = manifest.get("retry")
+                retry = bool(declared) and RetryPolicy(
+                    **declared
+                ).to_dict() == job.payload.get("retry_policy")
+            except (OSError, ValueError, TypeError):
+                retry = False
+            self._finish(
+                job.id, attempt=job.attempts, now=finished, success=False, retry=retry
+            )
+        else:
+            self._finish(
+                job.id, attempt=job.attempts, now=finished, success=False, retry=False
+            )
+        return result
+
+    def _finish(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        now: datetime,
+        success: bool,
+        retry: bool = True,
+    ):
         if type(attempt) is not int or attempt < 1:
             raise ValueError("Attempt must be a positive integer")
         if not isinstance(now, datetime) or now.utcoffset() is None:
@@ -297,7 +402,7 @@ class ScheduleSlots:
                         job.run_at.timestamp(),
                         "invalid retry policy",
                     )
-                elif job.attempts >= policy.max_attempts:
+                elif not retry or job.attempts >= policy.max_attempts:
                     state, run_at, reason = (
                         ExecutionState.DEAD_LETTER,
                         job.run_at.timestamp(),

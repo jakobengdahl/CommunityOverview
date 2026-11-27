@@ -164,14 +164,50 @@ def _valid_input(manifest, input):
     return True
 
 
+def _valid_schedule_retry(manifest):
+    retry = manifest.get("retry")
+    if (
+        manifest.get("contract_version") != "5"
+        or not isinstance(retry, dict)
+        or set(retry) != {"max_attempts", "base_seconds", "factor", "max_seconds"}
+        or not any(
+            isinstance(item, dict) and item.get("kind") == "schedule"
+            for item in manifest.get("triggers", [])
+        )
+    ):
+        return False
+    if any(type(value) not in (int, float) for value in retry.values()):
+        return False
+    from backend.agents.execution import RetryPolicy
+    from backend.functions.schedule_slots import _valid_retry_policy
+
+    try:
+        return _valid_retry_policy(RetryPolicy(**retry))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _valid_triggers(manifest):
     triggers = manifest.get("triggers")
     if manifest.get("contract_version") == "1":
         return triggers == [{"kind": "manual"}]
+
+    def valid(item):
+        if item in ({"kind": "manual"}, {"kind": "webhook"}):
+            return True
+        return (
+            manifest.get("contract_version") == "5"
+            and isinstance(item, dict)
+            and set(item) == {"kind", "interval_seconds"}
+            and item["kind"] == "schedule"
+            and type(item["interval_seconds"]) is int
+            and 1 <= item["interval_seconds"] <= 86400
+        )
+
     return (
         isinstance(triggers, list)
         and bool(triggers)
-        and all(item in ({"kind": "manual"}, {"kind": "webhook"}) for item in triggers)
+        and all(valid(item) for item in triggers)
         and len({item["kind"] for item in triggers}) == len(triggers)
     )
 
@@ -217,16 +253,19 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2", "3", "4"}
+        manifest["contract_version"] not in {"1", "2", "3", "4", "5"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
         or not _valid_triggers(manifest)
         or manifest.get("write_target", "graph")
         not in (
-            ("graph", "session") if manifest["contract_version"] == "4" else ("graph",)
+            ("graph", "session")
+            if manifest["contract_version"] in {"4", "5"}
+            else ("graph",)
         )
-        or any(key in manifest for key in ("retry", "secrets", "egress"))
+        or any(key in manifest for key in ("secrets", "egress"))
+        or ("retry" in manifest and not _valid_schedule_retry(manifest))
         or ("description" in manifest and not isinstance(manifest["description"], str))
     ):
         raise ValueError("Unsupported manifest")
@@ -525,7 +564,7 @@ class FunctionInvocationService:
             manifest, package = load_manifest(self.root, function_id)
             if not set(manifest["grants"]).issubset(self.enabled[function_id]):
                 return "not_enabled", manifest, package
-            if {"kind": trigger} not in manifest["triggers"]:
+            if not any(item["kind"] == trigger for item in manifest["triggers"]):
                 return "invalid_manifest", manifest, package
             if not binding.get("actor_id"):
                 return "access_denied", manifest, package

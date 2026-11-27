@@ -1,6 +1,6 @@
 # User Function Contract
 
-**Contract versions:** 1, 2 and 3
+**Contract versions:** 1, 2, 3, 4 and 5
 **Status:** Draft contract, adopted by
 [ADR 0011](adr/0011-sandboxed-user-functions.md). It is normative for the first
 implementation slices. Implemented so far, in `backend/functions/`: the broker
@@ -8,7 +8,7 @@ and its protocol session (§6, §7, §9 attribution, the per-message and tool-ca
 limits of §8), and the default hardened-subprocess runner of ADR 0012 with the
 Python helper library (§3.1, the time, memory, disk and log limits of §8, §10). Also implemented: manifest validation, manual REST and CLI invocation through a
 shared admission service, graph-bound inbound webhooks, and function run records in the existing history store.
-**Scope:** Open-source core. These versions cover manual and webhook invocation of functions that
+**Scope:** Open-source core. These versions cover manual, webhook and scheduled invocation of functions that
 read and write the graph through a broker. Other triggers, tools and bindings
 is out of scope (see [§13](#13-reserved-for-later-versions)); the fields they
 will need are reserved here so that adding them is not a breaking change.
@@ -182,7 +182,7 @@ of a function that is enabled (§4.4).
 
 | Field | Required | Meaning |
 |---|---|---|
-| `contract_version` | yes | The version of this contract the manifest targets: `"1"`, `"2"` or `"3"`. |
+| `contract_version` | yes | The version of this contract the manifest targets: `"1"` through `"5"`. |
 | `id` | yes | Stable identifier: lowercase letters, digits and `-`, 3–64 characters. Equals the directory name. |
 | `version` | yes | Semantic version of the function. Recorded on every run. |
 | `name` | yes | Human-readable name. |
@@ -191,11 +191,11 @@ of a function that is enabled (§4.4).
 | `entry_point` | yes | Path, relative to the function directory, of the file the runner starts. Must not leave the directory. |
 | `input_schema` | no | JSON Schema the invocation `input` is validated against before the run starts. Absent means `input` must be an empty object. |
 | `output_schema` | no | JSON Schema the function's `result.output` is validated against. A mismatch fails the run. |
-| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 also accepts `webhook`, alone or alongside `manual` (§12). |
+| `triggers` | yes | List of trigger objects. Version 1 accepts exactly `[{"kind": "manual"}]`. Version 2 adds `webhook`; version 5 adds `schedule` (§12). |
 | `grants` | yes | List of grants the function needs (§7). May be empty. |
 | `write_target` | no | Where writes land. Versions 1–3 accept only `"graph"`, the default; version 4 also accepts `"session"` (§12). |
 | `limits` | no | Per-function limits, each at most the platform maximum (§8). |
-| `retry` | reserved | Retry policy for non-manual triggers (§13). Must be absent in version 1. |
+| `retry` | no | Version 5 schedule retry policy (§12); absent in earlier versions. |
 | `secrets` | reserved | Secret references (§13). Must be absent in version 1. |
 | `egress` | reserved | Outbound network allowlist (§13). Must be absent in version 1. |
 
@@ -490,7 +490,7 @@ the rules it must follow:
 - **Correlation is forwarded, not regenerated**, so a chain of runs can be
   traced through one id (as in `EXTERNAL_ADMIN_AND_AUTOMATION_SEAMS.md`).
 
-For manual and webhook triggers, `chain_depth` is always 0. The rules are
+For manual, webhook and schedule triggers, `chain_depth` is always 0. The rules are
 part of this version so that the trigger slice implements them, not designs them.
 
 ## 10. Runtimes
@@ -664,6 +664,29 @@ existing review and merge path. Attachment writes cannot be staged and are
 refused for session-targeted runs. Webhooks do not bind a session and therefore
 cannot invoke a session-targeted function.
 
+### Version 5: schedule slots and retries
+
+Version 5 adds `{"kind": "schedule", "interval_seconds": 60}`; the interval
+is an integer from 1 to 86400 seconds. The optional `retry` object contains
+`max_attempts` (integer 1–10), `base_seconds` (0–86400), `factor` (1–10),
+and `max_seconds` (0–86400). Backoff after attempt N is
+`min(base_seconds * factor ** (N - 1), max_seconds)`. Without `retry`, a
+failed slot is attempted once. Only confirmed failed or timed-out attempts
+are eligible for retry; rejected attempts are terminal. Each attempt is a
+separate run, with the slot correlation id and depth zero. A successful slot
+never runs again. Slot identities are retained separately from run history.
+An attempt with an uncertain outcome after a crash is not automatically reclaimed.
+
+The ledger admits at most 60 initial slots per function per rolling minute by
+default; a rate-limited slot is recorded as skipped. Retries do not consume
+this budget. On recovery the latest due initial slot per function is selected,
+and older due slots, including those subsequently queued through the recovery
+time, are recorded as skipped. Pending retries remain independent.
+
+The slot ledger and dispatch seam implement these policies; a scheduler that
+discovers manifests, generates fire times and supplies a graph-bound system
+actor is not yet wired into application startup.
+
 ## 13. Reserved for later versions
 
 These are deliberately outside version 1. Each is listed with the field or rule
@@ -672,7 +695,6 @@ already reserved for it, so that adding it is an additive contract version
 
 | Capability | Reserved now | Constraint already fixed |
 |---|---|---|
-| Scheduled triggers | `triggers[].kind = "schedule"`, `retry` | Idempotency per fire time, as in `DURABLE_EXECUTION_CONTRACT.md` §5. |
 | Graph-change triggers | `triggers[].kind = "graph_change"`, the `entity` envelope field, `chain_depth` | §9: mandatory self-exclusion, bounded chain depth, forwarded correlation. |
 | Deletion | grant `graph:delete` | A separate grant, never implied by `graph:write`. |
 | Outbound network | `egress`, a broker HTTP tool | Through the broker only, with a per-function allowlist and the existing SSRF guard; never raw sockets. |

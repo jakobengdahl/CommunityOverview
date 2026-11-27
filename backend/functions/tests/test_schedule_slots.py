@@ -3,6 +3,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 
 import pytest
 
@@ -273,4 +274,45 @@ def test_due_retry_is_not_cancelled_by_newer_due_slot(tmp_path):
         assert slots.enqueue("example", TIMEPOINT).state == ExecutionState.RUNNING
         assert slots.claim_next("w", now=due, lease_seconds=10).id == newer.id
     finally:
+        slots.close()
+
+
+def test_rate_limit_skips_initial_slot_but_not_retry(tmp_path):
+    slots = ScheduleSlots(tmp_path / "slots.db", rate_limit=1)
+    try:
+        first = slots.enqueue(
+            "example",
+            TIMEPOINT,
+            retry_policy=RetryPolicy(max_attempts=2, base_seconds=1),
+        )
+        slots.claim_next("w", now=TIMEPOINT, lease_seconds=10)
+        slots.fail(first.id, attempt=1, now=TIMEPOINT)
+        later = TIMEPOINT + timedelta(seconds=2)
+        skipped = slots.enqueue("example", later)
+        assert slots.claim_next("w", now=later, lease_seconds=10).id == first.id
+        assert slots.claim_next("w", now=later, lease_seconds=10) is None
+        assert slots.enqueue("example", later).dead_letter_reason == "rate limited"
+        assert slots.enqueue("example", later).id == skipped.id
+    finally:
+        slots.close()
+
+
+def test_enqueue_lock_failure_rolls_back(tmp_path):
+    path = tmp_path / "slots.db"
+    slots = ScheduleSlots(path)
+    other = sqlite3.connect(path)
+    try:
+        slots._store._conn.execute("PRAGMA busy_timeout = 1")
+        other.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError):
+            slots.enqueue("example", TIMEPOINT)
+        other.rollback()
+        job = slots.enqueue("example", TIMEPOINT)
+        assert slots.claim_next("w", now=TIMEPOINT, lease_seconds=1).id == job.id
+        assert (
+            slots.complete(job.id, attempt=1, now=TIMEPOINT).state
+            == ExecutionState.SUCCEEDED
+        )
+    finally:
+        other.close()
         slots.close()

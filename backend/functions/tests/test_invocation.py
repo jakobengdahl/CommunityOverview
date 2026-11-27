@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "5"),
+        ("contract_version", "6"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -771,3 +771,40 @@ def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypa
     assert rejected.payload["chain_depth"] == 4
     assert rejected.correlation_id == "chain"
     assert execute.call_count == 1
+
+
+def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path):
+    from datetime import datetime, timezone
+    from backend.functions.schedule_slots import ScheduleSlots
+
+    service, execute, manifest, directory = host
+    manifest["contract_version"] = "5"
+    manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+    (directory / "function.json").write_text(json.dumps(manifest))
+    now = datetime.now(timezone.utc)
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        slot = slots.enqueue_manifest(tmp_path, "example", now)
+        result = slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=now,
+            lease_seconds=10,
+        )
+        envelope = execute.call_args.args[3]
+        assert result.state == ExecutionState.SUCCEEDED
+        assert envelope["invocation"]["trigger"] == "schedule"
+        assert envelope["invocation"]["chain_depth"] == 0
+        assert envelope["origin"]["event_correlation_id"] == slot.correlation_id
+        assert (
+            slots.enqueue_manifest(tmp_path, "example", now).state
+            == ExecutionState.SUCCEEDED
+        )
+        for version in ("1", "2", "3", "4"):
+            manifest["contract_version"] = version
+            (directory / "function.json").write_text(json.dumps(manifest))
+            with pytest.raises(ValueError):
+                slots.enqueue_manifest(tmp_path, "example", now)
+    finally:
+        slots.close()
