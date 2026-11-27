@@ -28,6 +28,9 @@ def test_schedule_ledger_avoids_execution_store_and_survives_restart(
     monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
     monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
     _configure_function(tmp_path, monkeypatch, "schedule")
+    monkeypatch.setenv(
+        "COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", '{"example": "graph"}'
+    )
     collision = private / "function-schedule-slots.db"
     config = AppConfig(graph_file=str(tmp_path / "graph" / "graph.json"))
     if store == "import":
@@ -68,18 +71,32 @@ def _configure_function(tmp_path, monkeypatch, trigger):
     monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(tmp_path / "history.db"))
 
 
-def test_invalid_schedule_ledger_is_not_modified(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scheduling", ["unconfigured", "disabled", "enabled"])
+def test_invalid_schedule_ledger_is_not_modified(tmp_path, monkeypatch, scheduling):
     import sqlite3
 
     private = tmp_path / "private"
     private.mkdir()
     monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
     _configure_function(tmp_path, monkeypatch, "manual")
+    monkeypatch.delenv("COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", raising=False)
+    if scheduling != "unconfigured":
+        monkeypatch.setenv(
+            "COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", '{"example": "graph"}'
+        )
+    if scheduling == "disabled":
+        monkeypatch.setenv("COMMUNITYOVERVIEW_FUNCTIONS_ENABLED", "{}")
     ledger = private / "webhook_tokens.schedule_slots.db"
     ledger.write_bytes(b"not a sqlite database")
+    config = AppConfig(graph_file=str(tmp_path / "graph" / "graph.json"))
 
-    with pytest.raises(sqlite3.DatabaseError):
-        create_app(AppConfig(graph_file=str(tmp_path / "graph" / "graph.json")))
+    if scheduling == "enabled":
+        with pytest.raises(sqlite3.DatabaseError):
+            create_app(config)
+    else:
+        app = create_app(config)
+        assert app.state.function_scheduler is None
+        assert app.state.function_invocation_service.webhook_token_store is not None
     assert ledger.read_bytes() == b"not a sqlite database"
 
 
