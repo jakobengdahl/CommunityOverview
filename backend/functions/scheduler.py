@@ -1,5 +1,7 @@
 """Application scheduler for enabled, graph-bound function packages."""
 
+import hashlib
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -8,6 +10,12 @@ from backend.functions.invocation import load_manifest
 from backend.runtime.extensions import bind_runtime_extensions, get_runtime_extensions
 
 logger = logging.getLogger(__name__)
+
+
+def _trigger_fingerprint(trigger):
+    return hashlib.sha256(
+        json.dumps(trigger, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 class FunctionScheduler:
@@ -35,6 +43,10 @@ class FunctionScheduler:
         from backend.functions.graph_change import filtered_entity, matches
 
         origin = event.origin.event_origin or ""
+        # External refreshes can combine multiple writes and carry no reliable
+        # causation. Treating them as root events would bypass loop prevention.
+        if origin == "external-change":
+            return
         entity = event.to_webhook_payload()["entity"]
         data = entity["data"]
         # The broker denies untagged nodes to graph-bound functions.
@@ -95,6 +107,7 @@ class FunctionScheduler:
                         RetryPolicy(**retry) if retry else None,
                         graph_id=bound_graph,
                         node_types=sorted(types),
+                        matched_triggers=[_trigger_fingerprint(t) for t in matching],
                     )
             except (OSError, ValueError, TypeError):
                 logger.warning(
@@ -157,7 +170,12 @@ class FunctionScheduler:
             matching = [
                 trigger
                 for trigger in manifest["triggers"]
-                if trigger["kind"] == "graph_change" and matches(trigger, event)
+                if trigger["kind"] == "graph_change"
+                and (
+                    _trigger_fingerprint(trigger)
+                    in job.payload.get("matched_triggers", [])
+                    or matches(trigger, event)
+                )
             ]
             if not matching:
                 return None

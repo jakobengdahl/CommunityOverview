@@ -194,6 +194,7 @@ class ScheduleSlots:
         *,
         graph_id=None,
         node_types=None,
+        matched_triggers=None,
     ):
         payload = event.to_webhook_payload()
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
@@ -216,6 +217,7 @@ class ScheduleSlots:
                     "chain_depth": depth,
                     "graph_id": graph_id,
                     "node_types": node_types,
+                    "matched_triggers": matched_triggers or [],
                 },
             )
         )

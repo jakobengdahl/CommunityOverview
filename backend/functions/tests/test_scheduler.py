@@ -166,6 +166,8 @@ def test_graph_events_match_exclude_origin_and_survive_restart(tmp_path, monkeyp
     other.event_id = "ignored"
     other.origin.event_origin = "function:example@9.0.0"
     scheduler.on_graph_event(other)
+    other.origin.event_origin = "external-change"
+    scheduler.on_graph_event(other)
     other.origin.event_origin = "web-ui"
     other.entity.after["metadata"]["status"] = "open"
     scheduler.on_graph_event(other)
@@ -549,4 +551,25 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
         "SELECT state, dead_letter_reason FROM schedule_jobs WHERE dead_letter_reason = 'trigger_changed'"
     ).fetchone()
     assert row["state"] == ExecutionState.CANCELLED.value
+    # Matching must survive removal of the very values used by the trigger.
+    trigger["fields"] = ["metadata.secret"]
+    trigger["before"] = {"metadata.secret": "a"}
+    trigger["after"] = {"metadata.secret": "b"}
+    event4 = event.model_copy(deep=True)
+    event4.event_id = "fourth"
+    scheduler.on_graph_event(event4)
+    row = slots._store._conn.execute(
+        "SELECT payload FROM schedule_jobs ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+    assert '"secret": "a"' not in row and '"secret": "b"' not in row
+    scheduler.stop()
+    scheduler = FunctionScheduler(
+        service, ScheduleSlots(tmp_path / "manifest.db"), {"example": "g"},
+        sensitive_fields=schema,
+    )
+    scheduler.tick(datetime.now(timezone.utc))
+    assert service.invoke.call_count == 3
+    assert service.invoke.call_args.kwargs["entity"]["data"] == {
+        "before": {}, "after": {}, "patch": {}
+    }
     scheduler.stop()
