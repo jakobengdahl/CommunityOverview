@@ -339,7 +339,7 @@ version: "1.0"
     "cache_ttl_seconds": 3600,
     "max_skill_content_bytes": 50000,
     "max_skill_body_chars": 8000,
-    "mcp": {"enabled": false, "ttlMs": 0, "cacheScope": "private",
+    "mcp": {"enabled": false, "fallback": true, "ttlMs": 0, "cacheScope": "private",
             "graphSemantics": {"ttlMs": 0, "cacheScope": "private"}}
   }
 }
@@ -354,7 +354,23 @@ can vary between callers. This slice serves only the built-in provider;
 `create_app` does not accept additional providers. Third-party and remote
 providers are planned for a follow-up slice. The configured cache scope is used
 as supplied; it is not automatically changed for additional providers. `graphSemantics.ttlMs` and `graphSemantics.cacheScope` independently configure the schema skill, with the same defaults and validation as the working-method hints. Modern clients receive per-skill hints in the list and get results.
-These cache hints do not replace authorization or verification of file digests.
+The default authorization hook permits configured public cache scopes; custom
+authorization hooks and additional providers use private scope because access may vary
+between callers. The extension, resources and fallback tools check graph read
+access on every request. These cache hints do not replace authorization or
+verification of file digests.
+
+With MCP skills enabled, `refresh_skills` rebuilds the catalog after an admin
+authorization check. Its per-skill results include the frontmatter metadata version,
+or a SHA-256 version derived from the sorted file manifest when none is supplied.
+The manifest includes the file digests. A change in file names or digests publishes one standard
+`notifications/resources/list_changed` event to each `subscriptions/listen`
+subscriber. The publisher uses an in-process bus; clients must refresh their
+catalog and cannot assume every host reacts to changes. The `fallback` setting
+(default `true`) adds `list_skills` and `get_skill` tools for clients without
+the skills extension; `get_skill` accepts a skill URI and an optional relative
+file path. Set `fallback` to `false` to omit those tools. They use the same
+validated snapshot and access checks as the extension.
 Skills with more than 512 files, more than 16 MiB, or rejected content prevent
 startup; files are sanitized before their digests are calculated.
 
