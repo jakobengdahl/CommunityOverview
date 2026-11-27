@@ -24,10 +24,11 @@ from backend.agents.execution.store import JobNotFoundError
 
 
 class ScheduleSlots:
-    """Durable slot queue. Latest due initial slot per function wins catch-up.
+    """Durable slot queue with at most one initial claim per recovery window.
 
-    Pending retries are independent of catch-up selection. A permanent watermark
-    also skips older slots enqueued after a newer slot has already been claimed.
+    Of the slots already queued, the latest due slot wins. A claim also closes
+    the window through its claim time, skipping slots enqueued later for that
+    window. Pending retries are independent of catch-up selection.
     """
 
     def __init__(self, path: str | Path):
@@ -127,7 +128,7 @@ class ScheduleSlots:
                         ON CONFLICT(function_id) DO UPDATE SET fire_time =
                             MAX(fire_time, excluded.fire_time)
                     """,
-                        (row["agent_id"], row["run_at"]),
+                        (row["agent_id"], ts),
                     )
                 conn.execute(
                     """
@@ -152,14 +153,16 @@ class ScheduleSlots:
                 conn.rollback()
                 raise
 
-    def complete(self, job_id: str, *, now: datetime):
-        return self._finish(job_id, now=now, success=True)
+    def complete(self, job_id: str, *, attempt: int, now: datetime):
+        return self._finish(job_id, attempt=attempt, now=now, success=True)
 
-    def fail(self, job_id: str, *, now: datetime):
+    def fail(self, job_id: str, *, attempt: int, now: datetime):
         """Report a confirmed stopped failure, never an uncertain lease expiry."""
-        return self._finish(job_id, now=now, success=False)
+        return self._finish(job_id, attempt=attempt, now=now, success=False)
 
-    def _finish(self, job_id: str, *, now: datetime, success: bool):
+    def _finish(self, job_id: str, *, attempt: int, now: datetime, success: bool):
+        if type(attempt) is not int or attempt < 1:
+            raise ValueError("Attempt must be a positive integer")
         if not isinstance(now, datetime) or now.utcoffset() is None:
             raise ValueError("Completion time must be timezone-aware")
         store = self._store
@@ -171,7 +174,7 @@ class ScheduleSlots:
                 job = store._get_by_id(job_id)
                 if job is None:
                     raise JobNotFoundError(job_id)
-                if job.state != ExecutionState.RUNNING:
+                if job.state != ExecutionState.RUNNING or job.attempts != attempt:
                     conn.commit()
                     return job
                 # Old ledger rows have no declared retry and therefore fail closed.

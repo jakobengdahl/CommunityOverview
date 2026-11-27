@@ -38,7 +38,7 @@ def test_completed_slot_is_not_reclaimed_or_recreated(tmp_path):
     slots = ScheduleSlots(path)
     job = slots.enqueue("example", TIMEPOINT, retry_policy=policy)
     assert slots.claim_next("worker", now=TIMEPOINT, lease_seconds=10).id == job.id
-    assert slots.complete(job.id, now=TIMEPOINT).state == ExecutionState.SUCCEEDED
+    assert slots.complete(job.id, attempt=1, now=TIMEPOINT).state == ExecutionState.SUCCEEDED
     slots.close()
     slots = ScheduleSlots(path)
     try:
@@ -48,7 +48,8 @@ def test_completed_slot_is_not_reclaimed_or_recreated(tmp_path):
         slots.close()
 
 
-def test_failed_slot_obeys_store_backoff_and_attempt_limit(tmp_path):
+@pytest.mark.parametrize("stale_report", ["fail", "complete"])
+def test_failed_slot_obeys_store_backoff_and_attempt_limit(tmp_path, stale_report):
     slots = ScheduleSlots(tmp_path / "slots.db")
     try:
         job = slots.enqueue(
@@ -57,11 +58,16 @@ def test_failed_slot_obeys_store_backoff_and_attempt_limit(tmp_path):
             retry_policy=RetryPolicy(max_attempts=2, base_seconds=5),
         )
         assert slots.claim_next("worker", now=TIMEPOINT, lease_seconds=10).attempts == 1
-        assert slots.fail(job.id, now=TIMEPOINT).state == ExecutionState.PENDING
+        assert slots.fail(job.id, attempt=1, now=TIMEPOINT).state == ExecutionState.PENDING
         assert slots.claim_next("worker", now=TIMEPOINT, lease_seconds=10) is None
         later = TIMEPOINT + timedelta(seconds=5)
         assert slots.claim_next("worker", now=later, lease_seconds=10).attempts == 2
-        assert slots.fail(job.id, now=later).state == ExecutionState.DEAD_LETTER
+        assert (
+            getattr(slots, stale_report)(job.id, attempt=1, now=later).state
+            == ExecutionState.RUNNING
+        )
+        assert slots.claim_next("other", now=later, lease_seconds=10) is None
+        assert slots.fail(job.id, attempt=2, now=later).state == ExecutionState.DEAD_LETTER
         assert slots.claim_next("worker", now=later, lease_seconds=10) is None
     finally:
         slots.close()
@@ -81,7 +87,7 @@ def test_expired_lease_is_not_reclaimed_after_restart(tmp_path):
         )
         assert recovered is None
         assert (
-            slots.complete(job.id, now=TIMEPOINT + timedelta(seconds=10)).state
+            slots.complete(job.id, attempt=1, now=TIMEPOINT + timedelta(seconds=10)).state
             == ExecutionState.SUCCEEDED
         )
         assert (
@@ -118,9 +124,9 @@ def test_persisted_per_slot_retry_and_catchup(tmp_path):
     other = slots.enqueue("another", TIMEPOINT)
     now = TIMEPOINT + timedelta(seconds=2)
     assert slots.claim_next("w", now=now, lease_seconds=1).id == other.id
-    assert slots.fail(other.id, now=now).state == ExecutionState.DEAD_LETTER
+    assert slots.fail(other.id, attempt=1, now=now).state == ExecutionState.DEAD_LETTER
     assert slots.claim_next("w", now=now, lease_seconds=1).id == latest.id
-    assert slots.fail(latest.id, now=now).state == ExecutionState.PENDING
+    assert slots.fail(latest.id, attempt=1, now=now).state == ExecutionState.PENDING
     slots.close()
     slots = ScheduleSlots(path)
     try:
@@ -131,8 +137,33 @@ def test_persisted_per_slot_retry_and_catchup(tmp_path):
         assert slots.claim_next("w", now=now, lease_seconds=1) is None
         later = now + timedelta(seconds=5)
         assert slots.claim_next("w", now=later, lease_seconds=1).attempts == 2
-        assert slots.fail(latest.id, now=later).state == ExecutionState.DEAD_LETTER
+        assert slots.fail(latest.id, attempt=2, now=later).state == ExecutionState.DEAD_LETTER
         assert slots.enqueue("example", TIMEPOINT - timedelta(seconds=1)).id != old.id
         assert slots.claim_next("w", now=later, lease_seconds=1) is None
+    finally:
+        slots.close()
+
+
+def test_late_enqueued_missed_slots_are_skipped_after_restart(tmp_path):
+    path = tmp_path / "slots.db"
+    now = TIMEPOINT + timedelta(minutes=5)
+    slots = ScheduleSlots(path)
+    first = slots.enqueue("example", TIMEPOINT)
+    assert slots.claim_next("w", now=now, lease_seconds=1).id == first.id
+    slots.close()
+    slots = ScheduleSlots(path)
+    try:
+        for minute in (1, 2, 3, 4, 5):
+            slots.enqueue("example", TIMEPOINT + timedelta(minutes=minute))
+            assert slots.claim_next("w", now=now, lease_seconds=1) is None
+            assert (
+                slots.enqueue("example", TIMEPOINT + timedelta(minutes=minute)).state
+                == ExecutionState.CANCELLED
+            )
+        future = slots.enqueue("example", now + timedelta(minutes=1))
+        assert (
+            slots.claim_next("w", now=now + timedelta(minutes=1), lease_seconds=1).id
+            == future.id
+        )
     finally:
         slots.close()
