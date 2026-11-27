@@ -321,7 +321,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await start_session_registry()
-        function_scheduler.start()
+        if function_scheduler is not None:
+            function_scheduler.start()
         try:
             async with streamable_session_lifecycle():
                 yield
@@ -502,7 +503,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         target=_recover_import_jobs, name="import-startup-recovery", daemon=True
     ).start()
 
-    from backend.functions.invocation import FunctionInvocationService
+    from backend.functions.invocation import FunctionInvocationService, load_manifest
 
     function_invocation_service = FunctionInvocationService(
         graph_service,
@@ -533,12 +534,32 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         for key, value in schedule_graphs.items()
     ):
         raise ValueError("Invalid schedule graph bindings")
-    Path(token_path).parent.mkdir(parents=True, exist_ok=True)
-    function_scheduler = FunctionScheduler(
-        function_invocation_service,
-        ScheduleSlots(Path(token_path).with_name("function-schedule-slots.db")),
-        schedule_graphs,
-    )
+    schedule_enabled = False
+    for function_id in function_invocation_service.enabled:
+        try:
+            manifest, _ = load_manifest(function_invocation_service.root, function_id)
+            if any(trigger["kind"] == "schedule" for trigger in manifest["triggers"]):
+                schedule_enabled = True
+                break
+        except (OSError, ValueError, TypeError):
+            logger.warning("Cannot inspect function %s for scheduling", function_id)
+    function_scheduler = None
+    if schedule_enabled:
+        ledger_path = Path(token_path).with_name("webhook_tokens.schedule_slots.db")
+        execution_paths = [Path(import_job_store.db_path)]
+        history_path = getattr(agent_registry.run_history_store, "db_path", None)
+        if history_path and history_path != ":memory:":
+            execution_paths.append(Path(history_path))
+        if any(
+            ledger_path.resolve() == path.resolve()
+            or (ledger_path.exists() and path.exists() and ledger_path.samefile(path))
+            for path in execution_paths
+        ):
+            raise ValueError("Schedule ledger and execution databases must be separate")
+        ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        function_scheduler = FunctionScheduler(
+            function_invocation_service, ScheduleSlots(ledger_path), schedule_graphs
+        )
     app.state.function_scheduler = function_scheduler
     from backend.functions.token_store import WebhookTokenStore
 
@@ -704,7 +725,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             app.state.session_cleanup_task.cancel()
         if merge_record_retention is not None:
             merge_record_retention.stop()
-        function_scheduler.stop()
+        if function_scheduler is not None:
+            function_scheduler.stop()
         runtime.stop()
 
     return app

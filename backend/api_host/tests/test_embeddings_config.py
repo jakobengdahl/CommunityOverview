@@ -7,14 +7,79 @@ vectors somewhere other than the mounted data volume and orphans the ones it
 already has, with nothing failing to say so.
 """
 
+import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from backend.api_host.config import AppConfig
 from backend.api_host.server import create_app
+
+
+@pytest.mark.parametrize("store", ["import", "history"])
+def test_schedule_ledger_avoids_execution_store_and_survives_restart(
+    tmp_path, monkeypatch, store
+):
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
+    monkeypatch.delenv("AGENTS_RUN_HISTORY_DB", raising=False)
+    _configure_function(tmp_path, monkeypatch, "schedule")
+    collision = private / "function-schedule-slots.db"
+    config = AppConfig(graph_file=str(tmp_path / "graph" / "graph.json"))
+    if store == "import":
+        config.import_jobs_db = str(collision)
+    else:
+        monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(collision))
+    fire = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first = create_app(config)
+    job = first.state.function_scheduler.slots.enqueue("example", fire)
+    second = create_app(config)
+    assert second.state.function_scheduler.slots.enqueue("example", fire).id == job.id
+
+
+def _configure_function(tmp_path, monkeypatch, trigger):
+    root = tmp_path / "functions"
+    directory = root / "example"
+    directory.mkdir(parents=True)
+    manifest = {
+        "contract_version": "5",
+        "id": "example",
+        "version": "1.0.0",
+        "name": "Example",
+        "runtime": "python",
+        "entry_point": "main.py",
+        "triggers": (
+            [{"kind": "schedule", "interval_seconds": 60}]
+            if trigger == "schedule"
+            else [{"kind": "manual"}]
+        ),
+        "grants": [],
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+    }
+    (directory / "function.json").write_text(json.dumps(manifest))
+    (directory / "main.py").write_text("pass")
+    monkeypatch.setenv("COMMUNITYOVERVIEW_FUNCTIONS_ROOT", str(root))
+    monkeypatch.setenv("COMMUNITYOVERVIEW_FUNCTIONS_ENABLED", '{"example": []}')
+    monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(tmp_path / "history.db"))
+
+
+def test_disabled_schedule_leaves_ledger_untouched(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
+    _configure_function(tmp_path, monkeypatch, "manual")
+    ledger = private / "webhook_tokens.schedule_slots.db"
+    ledger.write_bytes(b"not a sqlite database")
+
+    app = create_app(AppConfig(graph_file=str(tmp_path / "graph" / "graph.json")))
+
+    assert app.state.function_scheduler is None
+    assert ledger.read_bytes() == b"not a sqlite database"
 
 
 def test_unset_means_derive_the_path():
