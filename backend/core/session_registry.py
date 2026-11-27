@@ -275,7 +275,8 @@ class SessionRegistry:
                     self.get_or_create(session_id)
                 queue = self._sessions[session_id]["queue"]
                 try:
-                    command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    async with asyncio.timeout(25.0):
+                        command = await queue.get()
                     self._touch(session_id)
                     yield command
                 except asyncio.TimeoutError:

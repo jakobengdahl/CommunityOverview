@@ -413,6 +413,19 @@ class TestConsumerRefCount:
         assert reg.has_consumer("1234-5678") is False
 
     @pytest.mark.asyncio
+    async def test_disconnect_during_delivery_releases_consumer(self):
+        reg = SessionRegistry()
+        gen, task = await self._attach(reg, "1234-5678", [])
+        # Wake the queue reader and cancel before it resumes. Cancellation must
+        # not be swallowed when delivery and disconnect happen together.
+        assert reg.push_command_sync("1234-5678", {"type": "command"})
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        await gen.aclose()
+        assert reg.consumer_count("1234-5678") == 0
+
+    @pytest.mark.asyncio
     async def test_idle_keepalive_ping_keeps_the_consumer_counted(self, monkeypatch):
         """An idle tab is still an attached tab.
 
@@ -421,14 +434,12 @@ class TestConsumerRefCount:
         would make every push to a quiet but genuinely open canvas report
         not delivered. The timeout is shortened so the branch runs here.
         """
-        real_wait_for = asyncio.wait_for
+        real_timeout = asyncio.timeout
 
-        async def fast_wait_for(awaitable, timeout):
-            return await real_wait_for(
-                awaitable, timeout=0.01 if timeout == 25.0 else timeout
-            )
+        def fast_timeout(delay):
+            return real_timeout(0.01 if delay == 25.0 else delay)
 
-        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+        monkeypatch.setattr(asyncio, "timeout", fast_timeout)
 
         reg = SessionRegistry()
         items = []

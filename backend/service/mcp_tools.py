@@ -334,6 +334,8 @@ def _session_aware(
         try:
             in_message, request = message_request()
             inherited = session_context.current_session_id()
+            if isinstance(request, StarletteRequest):
+                inherited = request.scope.get("mcp_opening_session") or inherited
             if not in_message:
                 return run(inherited, args, kwargs)
             # This message's own headers, for the session and for the
