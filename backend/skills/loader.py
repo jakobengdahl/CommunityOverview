@@ -32,7 +32,7 @@ import logging
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from enum import Enum
 from urllib.parse import urlparse, urljoin
 
@@ -115,9 +115,16 @@ def _drop_authorization(headers: Dict[str, str]) -> None:
         del headers[name]
 
 
+class MCPSkillsConfig(BaseModel):
+    enabled: bool = False
+    ttlMs: int = Field(default=0, ge=0)
+    cacheScope: Literal["private", "public"] = "private"
+
+
 class SkillsConfig(BaseModel):
     """Configuration for the skills loading system."""
 
+    mcp: MCPSkillsConfig = Field(default_factory=MCPSkillsConfig)
     skills_dir: str = "config/default/skills"
     allow_external_skills: bool = True
     trusted_domains: List[str] = Field(
