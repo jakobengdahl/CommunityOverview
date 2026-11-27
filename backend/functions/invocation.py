@@ -35,7 +35,7 @@ from backend.functions.runner import (
     run_function,
     safe_relative_path,
 )
-from backend.runtime.authorization import use_request_authorization
+from backend.runtime.authorization import GRAPH_OPERATION_STAGE, use_request_authorization
 from backend.runtime.session_context import current_session_id, not_supported
 from backend.service.access import evaluate_graph_access
 
@@ -619,6 +619,7 @@ class FunctionInvocationService:
                         self.graph_service.authorization_hook,
                         action="mutate",
                         target="invoke_function",
+                        graph_operation=GRAPH_OPERATION_STAGE,
                         session_id=session_id,
                     )
                 if not binding.get("actor_id") or not decision.allowed:

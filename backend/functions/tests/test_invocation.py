@@ -667,11 +667,15 @@ def test_session_admission_refuses_unauthorized_or_direct_sessions(host):
     with bind_session("session"), pytest.raises(ValueError):
         invoke(service, idempotency_key="key")
     service.graph_service.session_gate.named_mode.return_value = "staged"
-    service.graph_service.authorization_hook.evaluate.return_value = (
-        GraphAuthorizationDecision(allowed=False)
+    service.graph_service.authorization_hook.evaluate.side_effect = lambda context: (
+        GraphAuthorizationDecision(allowed=context.graph_operation != "stage")
     )
     with bind_session("session"), pytest.raises(PermissionError):
         invoke(service, idempotency_key="key")
+    context = service.graph_service.authorization_hook.evaluate.call_args.args[0]
+    assert (context.action, context.target, context.graph_operation, context.session_id) == (
+        "mutate", "invoke_function", "stage", "session"
+    )
     assert service.store.list_jobs(kind=ExecutionKind.FUNCTION) == []
     execute.assert_not_called()
 
