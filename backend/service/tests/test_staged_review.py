@@ -111,6 +111,25 @@ def test_review_exposes_only_recorded_function_identifiers(world):
     assert "function_origin" not in items[("node", "b")]
 
 
+def test_review_does_not_attribute_a_later_direct_edit_to_a_function(world):
+    svc, sid = world.service, world.staged_session()
+    origin = {"function_id": "fn", "function_version": "1", "run_id": "r1"}
+    with bind_function_origin(origin):
+        _stage(
+            world, sid, ("update_node", ("a",), {"updates": {"description": "function"}})
+        )
+    _stage(world, sid, ("update_node", ("a",), {"updates": {"name": "Human"}}))
+
+    item = _items(svc.get_staged_changes(sid))[("node", "a")]
+    assert set(item["fields"]) == {"description", "name"}
+    assert "function_origin" not in item
+
+    # A subsequent function write must not relabel the mixed entry either.
+    with bind_function_origin(origin):
+        _stage(world, sid, ("update_node", ("a",), {"updates": {"summary": "more"}}))
+    assert "function_origin" not in _items(svc.get_staged_changes(sid))[("node", "a")]
+
+
 def test_each_status_is_reported_where_the_contract_puts_it(world):
     svc, sid = world.service, world.staged_session()
     _stage(
