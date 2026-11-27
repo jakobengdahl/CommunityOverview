@@ -51,6 +51,12 @@ def _retry_at(policy: RetryPolicy, attempts: int, ts: float) -> float:
     return run_at
 
 
+# Graph events are delivered once from the in-process listener; an identity only
+# has to outlive redelivery of the same event, not run history.
+GRAPH_DELIVERY_RETENTION_SECONDS = 30 * 86400
+GRAPH_PURGE_INTERVAL = 3600
+
+
 class _LedgerStore:
     """Private persistence for schedule jobs, never the execution queue."""
 
@@ -141,16 +147,63 @@ class ScheduleSlots:
     window. Pending retries are independent of catch-up selection.
     """
 
-    def __init__(self, path: str | Path, *, rate_limit: int = 60):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        rate_limit: int = 60,
+        graph_retention_seconds: int = GRAPH_DELIVERY_RETENTION_SECONDS,
+    ):
         if str(path) in ("", ":memory:"):
             raise ValueError("Schedule slots require a file-backed database")
         if type(rate_limit) is not int or rate_limit < 1:
             raise ValueError("Invalid rate limit")
+        if type(graph_retention_seconds) is not int or graph_retention_seconds < 1:
+            raise ValueError("Invalid graph delivery retention")
         self.rate_limit = rate_limit
+        self.graph_retention_seconds = graph_retention_seconds
+        self._purged_at = None
         self._store = _LedgerStore(path)
 
     def close(self):
         self._store.close()
+
+    def purge_graph_deliveries(self, now: datetime):
+        """Delete finished graph deliveries, with their event identities, past retention.
+
+        Pending, running and uncertain deliveries are kept so retry and recovery
+        still find them. Runs at most once per purge interval.
+        """
+        ts = now.timestamp()
+        if self._purged_at is not None and ts - self._purged_at < GRAPH_PURGE_INTERVAL:
+            return 0
+        self._purged_at = ts
+        terminal = [
+            ExecutionState.SUCCEEDED.value,
+            ExecutionState.DEAD_LETTER.value,
+            ExecutionState.CANCELLED.value,
+        ]
+        with self._store._lock:
+            conn = self._store._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ids = [
+                    (row[0],)
+                    for row in conn.execute(
+                        "SELECT id FROM schedule_jobs WHERE idempotency_key GLOB 'function-graph:*' "
+                        "AND state IN (?, ?, ?) AND finished_at <= ?",
+                        (*terminal, ts - self.graph_retention_seconds),
+                    )
+                ]
+                conn.executemany(
+                    "DELETE FROM graph_batch_members WHERE job_id = ?", ids
+                )
+                conn.executemany("DELETE FROM schedule_jobs WHERE id = ?", ids)
+                conn.commit()
+                return len(ids)
+            except Exception:
+                conn.rollback()
+                raise
 
     def enqueue_manifest(self, root, function_id: str, fire_time: datetime):
         """Validate the package and persist its declared schedule retry policy."""
@@ -208,6 +261,7 @@ class ScheduleSlots:
         node_types=None,
         matched_triggers=None,
         batching=None,
+        projection=None,
     ):
         payload = event.to_webhook_payload()
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
@@ -231,6 +285,7 @@ class ScheduleSlots:
                 "graph_id": graph_id,
                 "node_types": node_types,
                 "matched_triggers": matched_triggers or [],
+                "projection": projection,
             },
         )
         return self._enqueue_graph(job, payload["event_id"], batching)
@@ -291,6 +346,7 @@ class ScheduleSlots:
                         "event_id": event_id,
                         "chain_depth": job.payload["chain_depth"],
                         "node_types": job.payload["node_types"],
+                        "projection": job.payload["projection"],
                     }
                     if existing:
                         job = existing
@@ -602,6 +658,7 @@ class ScheduleSlots:
                         **job.payload,
                         "entity": entry["entity"],
                         "node_types": entry["node_types"],
+                        "projection": entry.get("projection"),
                     }
                     filtered = (
                         graph_event_filter(

@@ -777,3 +777,41 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         ] == ["accepted"]
     finally:
         slots.close()
+
+
+def test_graph_retention_purges_only_finished_deliveries_and_their_identity(
+    tmp_path,
+):
+    """Finished graph deliveries and their event identities age out; pending ones stay."""
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    slots = ScheduleSlots(tmp_path / "graph.db", graph_retention_seconds=60)
+    events = [
+        Event(
+            event_type=EventType.NODE_UPDATE,
+            origin=EventContext(),
+            entity=EntityData(kind=EntityKind.NODE, id=node_id, type="Task"),
+        )
+        for node_id in ("done", "retry")
+    ]
+    policy = RetryPolicy(max_attempts=2, base_seconds=3600)
+    done, retry = (slots.enqueue_event("example", e, {}, policy) for e in events)
+    now = datetime.now(timezone.utc) + timedelta(seconds=1)
+    for _ in range(2):
+        job = slots.claim_next("w", now=now, lease_seconds=10)
+        finish = slots.complete if job.id == done.id else slots.fail
+        finish(job.id, attempt=1, now=now)
+    later = now + timedelta(seconds=61)
+    assert slots.purge_graph_deliveries(later) == 1
+    assert slots._store._get_by_id(done.id) is None
+    assert slots._store._get_by_id(retry.id).state == ExecutionState.PENDING
+    # The purge is throttled, and an aged-out identity no longer deduplicates.
+    assert slots.enqueue_event("example", events[0], {}).id != done.id
+    assert slots.purge_graph_deliveries(later + timedelta(days=1)) == 0
+    slots.close()
