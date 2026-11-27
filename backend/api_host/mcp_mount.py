@@ -1,6 +1,6 @@
 """MCP HTTP transport mounting for the api_host application.
 
-Builds the dynamic MCP instructions from the loaded schema, wraps the FastMCP
+Builds the dynamic MCP instructions from the loaded schema, wraps the MCPServer
 SSE / Streamable-HTTP transports so browser requests are routed correctly, and
 mounts them at ``/mcp``.
 """
@@ -276,17 +276,17 @@ def mount_mcp(app: FastAPI, mcp, tools_map):
     """
     _install_mcp_no_redirect_rewrite(app)
 
+    # Authentication is enforced by the host; accept its public Host header.
     mcp_sse_app = bind_request_authorization_to_asgi_app(
-        drop_response_after_sse_disconnect(mcp.sse_app())
+        drop_response_after_sse_disconnect(mcp.sse_app(host="0.0.0.0"))
     )
 
-    # FastMCP mounts its Streamable HTTP handler at settings.streamable_http_path
+    # MCPServer mounts its Streamable HTTP handler at streamable_http_path
     # ("/mcp" by default). This whole app is itself mounted at /mcp, so the
     # handler sees the already-stripped path "/" and the default would never
     # match — every POST /mcp answered 404. Serve it from the mount root.
-    mcp.settings.streamable_http_path = "/"
     mcp_streamable_app = bind_request_authorization_to_asgi_app(
-        mcp.streamable_http_app()
+        mcp.streamable_http_app(streamable_http_path="/", host="0.0.0.0")
     )
 
     streamable_state = {"started": False}
@@ -307,7 +307,7 @@ def mount_mcp(app: FastAPI, mcp, tools_map):
 def _streamable_session_lifecycle(mcp, state: dict):
     """Run the Streamable HTTP session manager for the lifetime of the host app.
 
-    FastMCP starts that manager from its own app's lifespan. We mount the app
+    MCPServer starts that manager from its own app's lifespan. We mount the app
     instead of running it, so that lifespan never fires and the first request
     fails with "Task group is not initialized". The host app's lifespan enters
     the returned context manager instead.

@@ -368,7 +368,7 @@ class TestRequestContextMcpTools:
             await response(scope, receive, send)
 
         with patch(
-            "backend.api_host.server.FastMCP.sse_app",
+            "backend.api_host.server.MCPServer.sse_app",
             return_value=fake_mcp_transport_app,
         ):
             config = AppConfig(
@@ -407,7 +407,7 @@ class TestRequestContextMcpTools:
     def test_streamable_transport_request_binds_request_authorization_headers(
         self, tmp_path, monkeypatch
     ):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         for var in (
             "COMMUNITYOVERVIEW_ACTOR_ID",
@@ -434,21 +434,21 @@ class TestRequestContextMcpTools:
             reached.append("sse")
             await JSONResponse({}, status_code=599)(scope, receive, send)
 
-        real_streamable_http_app = FastMCP.streamable_http_app
+        real_streamable_http_app = MCPServer.streamable_http_app
 
-        def streamable_http_app(self):
+        def streamable_http_app(self, **kwargs):
             # Still build the real app: it creates the session manager whose
             # startup gates routing to the streamable transport.
-            real_streamable_http_app(self)
+            real_streamable_http_app(self, **kwargs)
             return fake_streamable_app
 
         with (
             patch(
-                "backend.api_host.server.FastMCP.streamable_http_app",
+                "backend.api_host.server.MCPServer.streamable_http_app",
                 new=streamable_http_app,
             ),
             patch(
-                "backend.api_host.server.FastMCP.sse_app",
+                "backend.api_host.server.MCPServer.sse_app",
                 return_value=fake_sse_app,
             ),
         ):
@@ -529,6 +529,47 @@ class TestAuthorizationNarrowingRestAndMcp:
         payload = response.json()
         assert [node["name"] for node in payload["nodes"]] == ["Alpha result"]
         assert payload["federation"]["federated_nodes"] == 1
+
+    def test_modern_mcp_call_binds_actor_and_graph_scope(self, app_client):
+        client, app = app_client
+        _install_multi_graph_fixture(app)
+        hook = app.state.graph_service._authorization_hook
+        with client:
+            response = client.post(
+                "/mcp",
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Mcp-Protocol-Version": "2026-07-28",
+                    "Mcp-Method": "tools/call",
+                    "Mcp-Name": "search_graph",
+                    "X-CommunityOverview-Actor-Id": "actor-test",
+                    "X-CommunityOverview-Workspace-Id": "workspace-mcp",
+                    "X-CommunityOverview-Workspace-Kind": "team",
+                    "X-CommunityOverview-Graph-Id": "graph-alpha",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_graph",
+                        "arguments": {"query": "result", "limit": 10},
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                        },
+                    },
+                },
+            )
+        assert response.status_code == 200
+        assert [
+            node["name"]
+            for node in response.json()["result"]["structuredContent"]["result"][
+                "nodes"
+            ]
+        ] == ["Alpha result"]
+        assert hook.seen_contexts[-1].actor["actor_id"] == "actor-test"
+        assert hook.seen_contexts[-1].scope["graph_id"] == "graph-alpha"
 
     @pytest.mark.parametrize("path", ["/api/export", "/export_graph"])
     def test_export_graph_is_narrowed_to_selected_graph(self, app_client, path):

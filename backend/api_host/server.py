@@ -3,7 +3,7 @@ App Host Server - Unified FastAPI application exposing GraphService.
 
 This module provides create_app() which builds a FastAPI application that:
 - Exposes GraphService via REST API endpoints
-- Registers MCP tools via FastMCP
+- Registers MCP tools via MCPServer
 - Serves static files for web app and widget
 - Does NOT include LLM calls or chat logic (handled in later steps)
 
@@ -37,9 +37,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-# FastMCP is imported here (not only in mcp_mount) so it stays patchable as
-# backend.api_host.server.FastMCP in tests that stub the MCP transport.
-from mcp.server.fastmcp import FastMCP
+# MCPServer is imported here (not only in mcp_mount) so it stays patchable as
+# backend.api_host.server.MCPServer in tests that stub the MCP transport.
+from mcp.server.mcpserver import MCPServer
 
 from backend.core.session_auto_add import (
     SessionAutoAddRegistry,
@@ -617,18 +617,11 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         auto_add_registry=auto_add_registry,
     )
 
-    # Initialize FastMCP with dynamic instructions built from schema configuration
-    mcp = FastMCP(
+    # Initialize MCPServer with dynamic instructions built from schema configuration
+    mcp = MCPServer(
         config.mcp_name,
         instructions=build_mcp_instructions(),
-        # Disable DNS rebinding protection: the default host="127.0.0.1"
-        # auto-enables it, which rejects any Host header that isn't localhost.
-        # In production (Cloud Run) the Host header is the public URL, so
-        # requests get a 421 "Invalid Host header". Authentication is handled
-        # by the gateway / Cloud Run IAP, so this check is not needed.
-        # FastMCP only reads this to decide DNS rebinding protection; the app
-        # is mounted into the host ASGI app, so no socket is bound here.
-        host="0.0.0.0",  # nosec B104
+        subscriptions=False,
     )
     tools_map = register_mcp_tools(
         mcp,

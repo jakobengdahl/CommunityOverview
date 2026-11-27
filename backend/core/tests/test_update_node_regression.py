@@ -504,7 +504,7 @@ class TestServiceLayerUpdateNode:
 
     @pytest.fixture
     def mcp_with_data(self, temp_storage):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         from backend.service import GraphService, register_mcp_tools
 
@@ -520,19 +520,17 @@ class TestServiceLayerUpdateNode:
             ],
             [],
         )
-        mcp = FastMCP("update-node-regression")
+        mcp = MCPServer("update-node-regression")
         register_mcp_tools(mcp, GraphService(temp_storage))
         return mcp, temp_storage
 
     @pytest.mark.asyncio
     async def test_mcp_metadata_merge_and_tags_persist(self, mcp_with_data):
         """A successful combined tool update must reach memory and disk."""
-        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.client import Client
 
         mcp, storage = mcp_with_data
-        async with create_connected_server_and_client_session(
-            mcp._mcp_server
-        ) as client:
+        async with Client(mcp, mode="legacy") as client:
             result = await client.call_tool(
                 "update_node",
                 {
@@ -545,8 +543,8 @@ class TestServiceLayerUpdateNode:
                 },
             )
 
-        assert not result.isError
-        assert result.structuredContent["result"]["success"] is True
+        assert not result.is_error
+        assert result.structured_content["result"]["success"] is True
         # Assert requested values, never values copied from the tool response.
         expected_metadata = {
             "owner": "svc-team",
@@ -568,13 +566,11 @@ class TestServiceLayerUpdateNode:
     @pytest.mark.asyncio
     async def test_mcp_merge_null_tags_and_revision_conflict(self, mcp_with_data):
         """Null deletes a key, tags replace, and stale revisions change nothing."""
-        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.client import Client
 
         mcp, storage = mcp_with_data
         initial_revision = storage.get_node("svc-1").revision
-        async with create_connected_server_and_client_session(
-            mcp._mcp_server
-        ) as client:
+        async with Client(mcp, mode="legacy") as client:
             result = await client.call_tool(
                 "update_node",
                 {
@@ -584,8 +580,8 @@ class TestServiceLayerUpdateNode:
                     "expected_revision": initial_revision,
                 },
             )
-            assert not result.isError
-            assert result.structuredContent["result"]["success"] is True
+            assert not result.is_error
+            assert result.structured_content["result"]["success"] is True
             stored = storage.get_node("svc-1")
             assert stored.metadata == {"owner": "svc-team"}
             assert stored.tags == ["replacement"]
@@ -601,8 +597,8 @@ class TestServiceLayerUpdateNode:
                 },
             )
 
-        assert not rejected.isError
-        payload = rejected.structuredContent["result"]
+        assert not rejected.is_error
+        payload = rejected.structured_content["result"]
         assert payload["success"] is False
         assert payload["error"] == "entity_revision_conflict"
         stored = storage.get_node("svc-1")

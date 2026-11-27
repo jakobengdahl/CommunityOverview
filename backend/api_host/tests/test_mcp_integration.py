@@ -326,7 +326,7 @@ class TestStreamableHttpTransport:
                 # is started from the app's lifespan.
                 return TestClient(create_app(app_config))
 
-    def _initialize(self, client: TestClient, path: str):
+    def _initialize(self, client: TestClient, path: str, version="2025-03-26"):
         return client.post(
             path,
             json={
@@ -334,7 +334,7 @@ class TestStreamableHttpTransport:
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": version,
                     "capabilities": {},
                     "clientInfo": {"name": "test", "version": "1.0"},
                 },
@@ -342,13 +342,49 @@ class TestStreamableHttpTransport:
             headers={"Accept": "application/json, text/event-stream"},
         )
 
-    def test_initialize_over_streamable_http(self, app_config, mock_llm_provider):
-        with self._client(app_config, mock_llm_provider) as client:
-            response = self._initialize(client, "/mcp/")
+    @pytest.mark.parametrize("version", ["2025-03-26", "2026-07-28"])
+    def test_initialize_over_streamable_http(
+        self, app_config, mock_llm_provider, version
+    ):
+        import json
 
-        assert response.status_code == 200
-        assert response.headers.get("mcp-session-id")
-        assert '"protocolVersion"' in response.text
+        with self._client(app_config, mock_llm_provider) as client:
+            headers = {
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Protocol-Version": version,
+            }
+            if version == "2025-03-26":
+                response = self._initialize(client, "/mcp/", version)
+                assert response.status_code == 200
+                headers["Mcp-Session-Id"] = response.headers["mcp-session-id"]
+                result = json.loads(response.text.split("data: ", 1)[1])
+                assert result["result"]["protocolVersion"] == version
+            params = {}
+            if version == "2026-07-28":
+                headers["Mcp-Method"] = "tools/list"
+                params["_meta"] = {
+                    "io.modelcontextprotocol/protocolVersion": version,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                }
+            response = client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": params,
+                },
+                headers=headers,
+            )
+            assert response.status_code == 200
+            result = (
+                response.json()
+                if version == "2026-07-28"
+                else json.loads(response.text.split("data: ", 1)[1])
+            )
+            assert any(
+                tool["name"] == "search_graph" for tool in result["result"]["tools"]
+            )
 
     def test_bare_mount_path_also_works(self, app_config, mock_llm_provider):
         """Clients POST to /mcp without a trailing slash."""
@@ -372,7 +408,7 @@ class TestStreamableHttpTransport:
         from unittest.mock import patch
 
         with patch(
-            "backend.api_host.server.FastMCP.streamable_http_app",
+            "backend.api_host.server.MCPServer.streamable_http_app",
             side_effect=error("broken transport"),
         ):
             with pytest.raises(error, match="broken transport"):
@@ -397,7 +433,7 @@ class TestStreamableHttpTransport:
                 "run",
                 side_effect=RuntimeError("session manager failed to start"),
             ),
-            patch("backend.api_host.server.FastMCP.sse_app", return_value=sse),
+            patch("backend.api_host.server.MCPServer.sse_app", return_value=sse),
         ):
             with self._client(app_config, mock_llm_provider) as client:
                 response = self._initialize(client, "/mcp/")
@@ -558,12 +594,12 @@ class TestSSEClientDisconnect:
     def test_client_disconnect_ends_the_request_without_a_second_response(self):
         """A client closing the real SSE stream gets one response and no app error."""
         from fastapi import FastAPI
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         from backend.api_host.mcp_mount import mount_mcp
 
         app = FastAPI()
-        mount_mcp(app, FastMCP("disconnect-test", host="0.0.0.0"), {})
+        mount_mcp(app, MCPServer("disconnect-test"), {})
         http = TestMCPBrowserHandlerRouting._http
         scope = {**http("GET", "/mcp/sse", "text/event-stream"), "root_path": ""}
         sent = []
@@ -903,4 +939,4 @@ def test_requirements_pin_an_mcp_release_with_the_transport_body_limit():
         if line.split("#")[0].strip().startswith("mcp")
         and line.split("#")[0].strip()[3:4] in ("=", ">", "<", "~", "!", "")
     ]
-    assert pins == ["mcp>=1.29.1,<2"]
+    assert pins == ["mcp>=2.3.0,<3"]

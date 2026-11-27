@@ -825,13 +825,13 @@ async def test_attachment_missing_nodes_execute_endpoint(service, caplog):
 async def test_real_fastmcp_validation_is_safe_and_audited(service, caplog, name, args):
     import json
     import logging
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from backend.service.mcp_tools import register_mcp_tools
     from backend.api_host.logging_config import StructuredJsonFormatter, TEXT_LOG_FORMAT
 
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     register_mcp_tools(mcp, service, attachment_access="read")
-    schema = next(t for t in await mcp.list_tools() if t.name == name).inputSchema
+    schema = next(t for t in await mcp.list_tools() if t.name == name).input_schema
     assert (
         "node_ids" in schema["required"]
         if name.startswith("search")
@@ -933,10 +933,10 @@ def test_agent_search_graph_formatted_logs_hide_query(service, caplog, tainted):
 async def test_fastmcp_preserves_sdk_argument_coercion(service, caplog, name, args):
     import json
     import logging
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from backend.service.mcp_tools import register_mcp_tools
 
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     register_mcp_tools(mcp, service, attachment_access="read")
     with caplog.at_level("INFO"):
         result = await mcp.call_tool(name, args)

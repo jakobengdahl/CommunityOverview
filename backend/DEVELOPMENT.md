@@ -190,7 +190,7 @@ uvicorn backend.api_host.server:get_app --factory --reload --port 8000
 The server will be available at:
 - REST API: http://localhost:8000/api/
 - UI Backend (chat): http://localhost:8000/ui/
-- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients)
+- MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients). The same server supports protocol 2026-07-28 and legacy clients.
 - Health check: http://localhost:8000/health
 
 ### Production Mode
@@ -1928,8 +1928,7 @@ Inline `image_data` is smaller over MCP than over REST. Both MCP transports
 `RequestBodyLimitMiddleware`, which answers `413` to any request body over
 4 MiB — by declared `Content-Length` or, for a chunked upload, by counted
 bytes — before the JSON-RPC message is parsed. `backend/requirements.txt`
-pins `mcp>=1.29.1` because that is the first release that guards both
-transports; there is no other body-size guard in front of `/mcp`. Base64
+requires `mcp>=2.3.0,<3`, which guards both transports; there is no other body-size guard in front of `/mcp`. Base64
 inflates bytes by 4/3, so the largest source image that fits inline in one
 tool call is roughly 3 MiB, against the 20 MiB
 (`DEFAULT_MAX_SOURCE_IMAGE_BYTES`) the REST endpoint
