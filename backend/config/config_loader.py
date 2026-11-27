@@ -133,6 +133,7 @@ class NodeTypeConfig(BaseModel):
     fields: List[str] = Field(
         default_factory=lambda: ["name", "description", "summary"]
     )
+    subtypes: List[str] = Field(default_factory=list)
     static: bool = False
     category: str = "domain"  # "domain" = configurable, "system" = foundational
     description: str = ""
@@ -174,6 +175,7 @@ class SchemaConfig(BaseModel):
 
     node_types: Dict[str, NodeTypeConfig] = Field(default_factory=dict)
     relationship_types: Dict[str, RelationshipTypeConfig] = Field(default_factory=dict)
+    vocabularies: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("node_types", mode="before")
     @classmethod

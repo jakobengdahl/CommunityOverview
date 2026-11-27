@@ -115,10 +115,14 @@ def _drop_authorization(headers: Dict[str, str]) -> None:
         del headers[name]
 
 
-class MCPSkillsConfig(BaseModel):
-    enabled: bool = False
+class MCPSkillHints(BaseModel):
     ttlMs: int = Field(default=0, ge=0)
     cacheScope: Literal["private", "public"] = "private"
+
+
+class MCPSkillsConfig(MCPSkillHints):
+    enabled: bool = False
+    graphSemantics: MCPSkillHints = Field(default_factory=MCPSkillHints)
 
 
 class SkillsConfig(BaseModel):
