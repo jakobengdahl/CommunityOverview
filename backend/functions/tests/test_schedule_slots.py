@@ -355,8 +355,9 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
 @pytest.mark.parametrize("delivery", ["schedule", "graph"])
 @pytest.mark.parametrize("max_attempts", [1, 3, 11])
 @pytest.mark.parametrize("dispatch_limit", [1, 2])
+@pytest.mark.parametrize("change_after_claim", [False, True])
 def test_changed_retry_policy_governs_failed_and_pending_attempts(
-    tmp_path, monkeypatch, delivery, max_attempts, dispatch_limit
+    tmp_path, monkeypatch, delivery, max_attempts, dispatch_limit, change_after_claim
 ):
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -395,6 +396,14 @@ def test_changed_retry_policy_governs_failed_and_pending_attempts(
         assert current.run_at == now + timedelta(seconds=7)
         assert current.payload["retry_policy"] == changed.to_dict()
         declared[0] = RetryPolicy(max_attempts=dispatch_limit, base_seconds=9).to_dict()
+        if change_after_claim and dispatch_limit == 2:
+            read_retry = slots._retry_declared
+
+            def change_policy(service, job):
+                declared[0] = RetryPolicy(max_attempts=2, base_seconds=11).to_dict()
+                return read_retry(service, job)
+
+            monkeypatch.setattr(slots, "_retry_declared", change_policy)
         slots.dispatch(
             service,
             "w",
@@ -407,6 +416,26 @@ def test_changed_retry_policy_governs_failed_and_pending_attempts(
         if dispatch_limit == 2:
             assert current.state == ExecutionState.PENDING
             assert current.run_at == now + timedelta(seconds=9)
+            if change_after_claim:
+                slots.dispatch(
+                    service,
+                    "w",
+                    actor_binding={"graph_id": "g"},
+                    now=current.run_at,
+                    lease_seconds=10,
+                    graph_event_filter=lambda job: job.payload["entity"],
+                )
+                current = slots._store._get_by_id(job.id)
+                assert current.state == ExecutionState.PENDING
+                assert current.attempts == 1
+                assert current.run_at == now + timedelta(seconds=11)
+                assert service.invoke.call_count == 0
+                assert (
+                    slots._store._conn.execute(
+                        "SELECT COUNT(*) FROM schedule_rate"
+                    ).fetchone()[0]
+                    == 1
+                )
             slots.dispatch(
                 service,
                 "w",

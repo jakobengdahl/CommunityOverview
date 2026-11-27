@@ -435,7 +435,7 @@ class ScheduleSlots:
                         )
                         conn.commit()
                         return None
-                conn.execute(
+                admission = conn.execute(
                     "INSERT INTO schedule_rate VALUES (?, ?)", (row["agent_id"], ts)
                 )
                 conn.execute(
@@ -455,6 +455,8 @@ class ScheduleSlots:
                     ),
                 )
                 job = store._get_by_id(row["id"])
+                job._previous_update = row["updated_at"]
+                job._admission_id = admission.lastrowid
                 conn.commit()
                 return job
             except Exception:
@@ -564,6 +566,16 @@ class ScheduleSlots:
                     job.id, attempt=job.attempts, now=now, success=False, retry=False
                 )
                 return None
+            try:
+                run_at = _retry_at(policy, job.attempts - 1, job._previous_update)
+            except (OverflowError, ValueError, OSError):
+                self._finish(
+                    job.id, attempt=job.attempts, now=now, success=False, retry=False
+                )
+                return None
+            if run_at > now.timestamp():
+                self._defer_retry(job, run_at, now)
+                return None
         if actor_binding is None:
             self._finish(
                 job.id, attempt=job.attempts, now=now, success=False, retry=False
@@ -642,6 +654,35 @@ class ScheduleSlots:
         )
         self._finish_result(service, job, result, datetime.now(timezone.utc))
         return result
+
+    def _defer_retry(self, job, run_at, now):
+        with self._store._lock:
+            conn = self._store._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                updated = conn.execute(
+                    "UPDATE schedule_jobs SET state = ?, attempts = attempts - 1, "
+                    "run_at = ?, updated_at = ?, lease_owner = NULL, lease_expiry = NULL "
+                    "WHERE id = ? AND state = ? AND attempts = ? AND lease_owner = ?",
+                    (
+                        ExecutionState.PENDING.value,
+                        run_at,
+                        job._previous_update,
+                        job.id,
+                        ExecutionState.RUNNING.value,
+                        job.attempts,
+                        job.lease_owner,
+                    ),
+                )
+                if updated.rowcount:
+                    conn.execute(
+                        "DELETE FROM schedule_rate WHERE rowid = ? AND function_id = ? AND admitted_at = ?",
+                        (job._admission_id, job.agent_id, now.timestamp()),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _skip(self, job, now, reason):
         with self._store._lock:
