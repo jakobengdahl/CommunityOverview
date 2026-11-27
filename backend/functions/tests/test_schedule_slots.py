@@ -352,6 +352,189 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
         slots.close()
 
 
+def test_invalid_manifest_schema_only_dead_letters_its_delivery(tmp_path):
+    from types import SimpleNamespace
+    from jsonschema.exceptions import SchemaError
+    from backend.functions.invocation import load_manifest
+
+    old = RetryPolicy(max_attempts=3, base_seconds=1)
+    changed = RetryPolicy(max_attempts=3, base_seconds=9)
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        jobs = []
+        for name in ("first", "broken", "last"):
+            directory = tmp_path / name
+            directory.mkdir()
+            manifest = {
+                "contract_version": "5",
+                "id": name,
+                "version": "1.0.0",
+                "name": name,
+                "runtime": "python",
+                "entry_point": "main.py",
+                "triggers": [{"kind": "schedule", "interval_seconds": 60}],
+                "grants": [],
+                "retry": changed.to_dict(),
+                "input_schema": {"type": "invalid" if name == "broken" else "object"},
+            }
+            (directory / "function.json").write_text(json.dumps(manifest))
+            (directory / "main.py").write_text("pass")
+            job = slots.enqueue(name, TIMEPOINT, retry_policy=old)
+            slots.claim_next("w", now=TIMEPOINT, lease_seconds=10)
+            slots.fail(job.id, attempt=1, now=TIMEPOINT)
+            jobs.append(job)
+
+        with pytest.raises(SchemaError):
+            load_manifest(tmp_path, "broken")
+        slots._refresh_pending_retries(SimpleNamespace(root=tmp_path), TIMEPOINT)
+        first, broken, last = (slots._store._get_by_id(job.id) for job in jobs)
+        assert broken.state == ExecutionState.DEAD_LETTER
+        for job in (first, last):
+            assert job.state == ExecutionState.PENDING
+            assert job.run_at == TIMEPOINT + timedelta(seconds=9)
+            assert job.payload["retry_policy"] == changed.to_dict()
+    finally:
+        slots.close()
+
+
+def test_pending_retry_refresh_caps_backoff_at_one_day(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from backend.functions import invocation
+
+    old = RetryPolicy(max_attempts=3, base_seconds=0)
+    changed = RetryPolicy(
+        max_attempts=3, base_seconds=50000, factor=2, max_seconds=86400
+    )
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": changed.to_dict()}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        job = slots.enqueue("example", TIMEPOINT, retry_policy=old)
+        for attempt in (1, 2):
+            assert slots.claim_next("w", now=TIMEPOINT, lease_seconds=10).id == job.id
+            slots.fail(job.id, attempt=attempt, now=TIMEPOINT)
+        slots._refresh_pending_retries(SimpleNamespace(root=tmp_path), TIMEPOINT)
+        current = slots._store._get_by_id(job.id)
+        assert current.run_at == TIMEPOINT + timedelta(seconds=86400)
+        assert (
+            slots.claim_next(
+                "w", now=current.run_at - timedelta(seconds=1), lease_seconds=10
+            )
+            is None
+        )
+        assert slots.claim_next("w", now=current.run_at, lease_seconds=10).id == job.id
+    finally:
+        slots.close()
+
+
+@pytest.mark.parametrize("delivery", ["schedule", "graph"])
+@pytest.mark.parametrize("max_attempts", [1, 3, 11])
+@pytest.mark.parametrize("dispatch_limit", [1, 2])
+@pytest.mark.parametrize("change_after_claim", [False, True])
+def test_changed_retry_policy_governs_failed_and_pending_attempts(
+    tmp_path, monkeypatch, delivery, max_attempts, dispatch_limit, change_after_claim
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from backend.functions import invocation
+
+    old = RetryPolicy(max_attempts=2, base_seconds=5)
+    changed = RetryPolicy(max_attempts=max_attempts, base_seconds=7, factor=2)
+    declared = [changed.to_dict()]
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": declared[0]}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    service = SimpleNamespace(
+        root=tmp_path,
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    try:
+        if delivery == "schedule":
+            job = slots.enqueue("example", TIMEPOINT, retry_policy=old)
+        else:
+            event = SimpleNamespace(
+                to_webhook_payload=lambda: {"event_id": "e", "origin": {}}
+            )
+            job = slots.enqueue_event("example", event, {"id": "n"}, old, graph_id="g")
+        now = max(TIMEPOINT, job.run_at)
+        running = slots.claim_next("w", now=now, lease_seconds=10)
+        slots._finish_result(
+            service, running, SimpleNamespace(state=ExecutionState.DEAD_LETTER), now
+        )
+        current = slots._store._get_by_id(job.id)
+        if max_attempts != 3:
+            assert current.state == ExecutionState.DEAD_LETTER
+            assert service.invoke.call_count == 0
+            return
+        assert current.state == ExecutionState.PENDING
+        assert current.run_at == now + timedelta(seconds=7)
+        assert current.payload["retry_policy"] == changed.to_dict()
+        declared[0] = RetryPolicy(max_attempts=dispatch_limit, base_seconds=9).to_dict()
+        if change_after_claim and dispatch_limit == 2:
+            read_retry = slots._retry_declared
+
+            def change_policy(service, job):
+                declared[0] = RetryPolicy(max_attempts=2, base_seconds=11).to_dict()
+                return read_retry(service, job)
+
+            monkeypatch.setattr(slots, "_retry_declared", change_policy)
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"graph_id": "g"},
+            now=current.run_at,
+            lease_seconds=10,
+            graph_event_filter=lambda job: job.payload["entity"],
+        )
+        current = slots._store._get_by_id(job.id)
+        if dispatch_limit == 2:
+            assert current.state == ExecutionState.PENDING
+            assert current.run_at == now + timedelta(seconds=9)
+            if change_after_claim:
+                slots.dispatch(
+                    service,
+                    "w",
+                    actor_binding={"graph_id": "g"},
+                    now=current.run_at,
+                    lease_seconds=10,
+                    graph_event_filter=lambda job: job.payload["entity"],
+                )
+                current = slots._store._get_by_id(job.id)
+                assert current.state == ExecutionState.PENDING
+                assert current.attempts == 1
+                assert current.run_at == now + timedelta(seconds=11)
+                assert service.invoke.call_count == 0
+                assert (
+                    slots._store._conn.execute(
+                        "SELECT COUNT(*) FROM schedule_rate"
+                    ).fetchone()[0]
+                    == 1
+                )
+            slots.dispatch(
+                service,
+                "w",
+                actor_binding={"graph_id": "g"},
+                now=current.run_at,
+                lease_seconds=10,
+                graph_event_filter=lambda job: job.payload["entity"],
+            )
+            current = slots._store._get_by_id(job.id)
+        assert service.invoke.call_count == (dispatch_limit == 2)
+        assert current.state == (
+            ExecutionState.SUCCEEDED
+            if dispatch_limit == 2
+            else ExecutionState.DEAD_LETTER
+        )
+        assert current.payload["retry_policy"] == declared[0]
+        assert (
+            slots.claim_next("w", now=now + timedelta(days=1), lease_seconds=10) is None
+        )
+    finally:
+        slots.close()
+
+
 @pytest.mark.parametrize(
     "outcome,purge,expected",
     [
@@ -550,7 +733,8 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         service = SimpleNamespace(
             invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.DEAD_LETTER))
         )
-        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: policy)
+        monkeypatch.setattr(slots, "_read_retry_policy", lambda *args: policy)
         now = datetime.now(timezone.utc) + timedelta(seconds=1)
         slots.dispatch(
             service,
@@ -577,7 +761,8 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         ] == ["accepted"]
         slots.close()
         slots = ScheduleSlots(tmp_path / "slots.db")
-        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: policy)
+        monkeypatch.setattr(slots, "_read_retry_policy", lambda *args: policy)
         slots.dispatch(
             service,
             "w",
@@ -592,3 +777,48 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         ] == ["accepted"]
     finally:
         slots.close()
+
+
+@pytest.mark.parametrize("batching", [None, {"debounce_seconds": 1, "batch_size": 1}])
+def test_graph_retention_purges_only_finished_deliveries_and_their_identity(
+    tmp_path, batching
+):
+    """Finished graph deliveries and batches, with their event identities, age out; pending ones stay."""
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    slots = ScheduleSlots(tmp_path / "graph.db", graph_retention_seconds=60)
+    events = [
+        Event(
+            event_type=EventType.NODE_UPDATE,
+            origin=EventContext(),
+            entity=EntityData(kind=EntityKind.NODE, id=node_id, type="Task"),
+        )
+        for node_id in ("done", "retry")
+    ]
+    policy = RetryPolicy(max_attempts=2, base_seconds=3600)
+    done, retry = (
+        slots.enqueue_event("example", e, {}, policy, batching=batching) for e in events
+    )
+    assert done.id != retry.id
+    now = datetime.now(timezone.utc) + timedelta(seconds=1)
+    for _ in range(2):
+        job = slots.claim_next("w", now=now, lease_seconds=10)
+        finish = slots.complete if job.id == done.id else slots.fail
+        finish(job.id, attempt=1, now=now)
+    later = now + timedelta(seconds=61)
+    assert slots.purge_graph_deliveries(later) == 1
+    assert slots._store._get_by_id(done.id) is None
+    assert slots._store._get_by_id(retry.id).state == ExecutionState.PENDING
+    members = slots._store._conn.execute("SELECT job_id FROM graph_batch_members")
+    assert [row[0] for row in members] == [retry.id]
+    # The purge is throttled, and an aged-out identity no longer deduplicates.
+    again = slots.enqueue_event("example", events[0], {}, batching=batching)
+    assert again.id not in (done.id, retry.id)
+    assert slots.purge_graph_deliveries(later + timedelta(days=1)) == 0
+    slots.close()

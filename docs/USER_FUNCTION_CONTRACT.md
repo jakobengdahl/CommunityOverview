@@ -703,6 +703,10 @@ from null. Creates and deletes match when a listed field changes between absent
 and present; edge events do not match. The trigger requires a graph target and the `graph:read` grant. Fields and
 predicate paths may not overlap a schema-sensitive path, including its parents
 and descendants; triggers are checked against the current schema at delivery.
+A queued event whose trigger has changed since it was queued is matched again
+only when every path the changed trigger reads lies within a declared path the
+stored projection holds whole (no omitted sensitive part at, above or below it);
+otherwise it is skipped with reason `trigger_changed`.
 
 The invocation entity carries the entity kind, id, type and `changed_fields`
 (dot-separated names of changed paths, stopping at sensitive paths). Its `data.before`, `data.after` and
@@ -718,6 +722,11 @@ id and increases the causing run's depth by one. Agent-origin events also
 increase the causing event's depth by one; other events start at depth zero.
 Admission records refusals above the configured depth limit. One event has one
 durable delivery identity per function, retained independently of run history.
+A delivery that has finished (succeeded, dead-lettered or skipped, including
+rate-limited) is deleted with its identity 30 days after it finished; pending,
+running and uncertain deliveries are kept. Only events emitted by writes on the
+instance that runs the scheduler are delivered: changes reported from another
+writer (`external-change`) carry no reliable causation and never trigger a function.
 Graph events use the same retry policy, rate budget and delivery ledger as
 schedules; triggers without batching deliver each matching event individually. Enabled functions use the configured schedule graph binding and
 are restricted to events in that graph.
@@ -735,8 +744,11 @@ The invocation `entity` is `{"events": [{"event_id": "...",
 version 6 projected shape, except sensitive changed-field names are omitted.
 Only declared values are persisted, and no batch summary contains sensitive
 paths. The run record includes all member correlation IDs in `correlation_ids`.
-Each event belongs to at most one durable batch per function; the batch has one
-stable delivery identity independent of run history. The existing retry and
+While its batch is retained, each event belongs to at most one durable batch per
+function; the batch has one stable delivery identity independent of run history.
+Batches follow the version 6 retention rule: a finished batch is deleted with its
+member event identities 30 days after it finished, after which a re-seen event
+may join a new batch; pending, running and uncertain batches are kept. The existing retry and
 rate-limit rules apply to the batch. Self-origin events are excluded before
 batching; its chain depth is the maximum derived member depth and the normal
 admission limit applies. Triggers without these fields retain version 6 behavior.

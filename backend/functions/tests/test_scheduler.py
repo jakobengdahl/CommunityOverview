@@ -574,6 +574,62 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
     scheduler.stop()
 
 
+@pytest.mark.parametrize("batching", [{}, {"debounce_seconds": 1, "batch_size": 1}])
+def test_changed_trigger_is_not_rematched_on_a_partial_projection(
+    tmp_path, monkeypatch, batching
+):
+    """A changed trigger reading beyond the stored projection never admits a run."""
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["metadata.status"],
+        **batching,
+    }
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest",
+        lambda *args: ({"triggers": [trigger]}, None),
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    slots = ScheduleSlots(tmp_path / "rematch.db")
+    scheduler = FunctionScheduler(service, slots, {"example": "g"})
+    scheduler.on_graph_event(
+        Event(
+            event_type=EventType.NODE_UPDATE,
+            origin=EventContext(),
+            entity=EntityData(
+                kind=EntityKind.NODE,
+                id="n",
+                type="Task",
+                before={"metadata": {"origin_graph_id": "g", "status": "open"}},
+                after={"metadata": {"origin_graph_id": "g", "status": "done"}},
+            ),
+        )
+    )
+    # The original after-metadata also holds origin_graph_id, so this predicate
+    # does not match the event; only its projection {"status": "done"} would.
+    trigger["after"] = {"metadata": {"status": "done"}}
+    scheduler.tick(datetime.now(timezone.utc) + timedelta(seconds=2))
+    service.invoke.assert_not_called()
+    row = slots._store._conn.execute(
+        "SELECT state, dead_letter_reason FROM schedule_jobs"
+    ).fetchone()
+    assert tuple(row) == (ExecutionState.CANCELLED.value, "trigger_changed")
+    scheduler.stop()
+
+
 @pytest.mark.parametrize("location", ["fields", "before", "after"])
 @pytest.mark.parametrize(
     "path", ["metadata.private", "metadata.private.guess", "metadata"]
