@@ -61,6 +61,9 @@ ERR_CONCURRENT_CALL = "concurrent_call"
 MAX_TOOL_CALLS = 200
 MAX_MESSAGE_BYTES = 1024 * 1024
 
+# These system actors are confined to the graph that authorized the trigger.
+_GRAPH_BOUND_ACTORS = frozenset({"function_webhook", "function_schedule"})
+
 # Arguments a function may never pass: scope is fixed by the host (§3, §6.3).
 SCOPE_ARGUMENTS = frozenset(
     {
@@ -321,7 +324,11 @@ class FunctionBroker:
             raise BrokerError(ERR_UNKNOWN_TOOL, f"Unknown tool: {name[:100]}")
         if name == "graph.attach_run_file" and ctx.session_id:
             raise BrokerError(ERR_ACCESS_DENIED, "Attachments cannot be staged.")
-        if name == "graph.attach_run_file" and ctx.contract_version not in {"3", "4"}:
+        if name == "graph.attach_run_file" and ctx.contract_version not in {
+            "3",
+            "4",
+            "5",
+        }:
             raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
         if spec.grant is not None and (
@@ -341,7 +348,7 @@ class FunctionBroker:
         if spec.method == "add_nodes":
             call_args.setdefault("edges", [])
             call_args["allow_federated_endpoints"] = False
-            if ctx.authorization_inputs.get("actor_type") == "function_webhook":
+            if ctx.authorization_inputs.get("actor_type") in _GRAPH_BOUND_ACTORS:
                 graph_id = ctx.authorization_inputs.get("graph_id") or ""
                 call_args["nodes"] = [
                     {
@@ -358,7 +365,7 @@ class FunctionBroker:
             access.restrict_function_graph(
                 ctx.authorization_inputs.get("graph_id") or ""
             )
-            if ctx.authorization_inputs.get("actor_type") == "function_webhook"
+            if ctx.authorization_inputs.get("actor_type") in _GRAPH_BOUND_ACTORS
             else nullcontext()
         )
         from backend.runtime.session_context import bind_function_origin, bind_session
@@ -397,7 +404,7 @@ class FunctionBroker:
                 )
             if ctx.authorization_inputs.get(
                 "actor_type"
-            ) == "function_webhook" and not decision.graph_access.matches(
+            ) in _GRAPH_BOUND_ACTORS and not decision.graph_access.matches(
                 graph_id=ctx.authorization_inputs.get("graph_id") or ""
             ):
                 raise BrokerError(ERR_ACCESS_DENIED, "Graph access denied.")

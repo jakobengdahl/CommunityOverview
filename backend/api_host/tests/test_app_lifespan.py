@@ -1,3 +1,4 @@
+# covers: backend/api_host/server.py
 """The app's lifespan starts the session work and stops the background work."""
 
 import asyncio
@@ -11,7 +12,11 @@ from backend.api_host import create_app
 from backend.api_host.server import AppRuntime
 from backend.api_host.tests.conftest import _BUILT_APPS
 
-_BACKGROUND_THREADS = ("event-delivery-worker", "merge-record-retention")
+_BACKGROUND_THREADS = (
+    "event-delivery-worker",
+    "merge-record-retention",
+    "function-scheduler",
+)
 
 
 def _background_threads():
