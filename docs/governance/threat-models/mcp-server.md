@@ -91,14 +91,16 @@ Skill nodes created by existing tools are not the planned protocol capability.
 - Host authentication is conditional: [compute_auth_active and
   add_auth_middleware](../../../backend/api_host/middleware.py) support configured
   Basic credentials, bearer tokens and signed login sessions, and can guard MCP
-  paths. [session_auth](../../../backend/api_host/session_auth.py) signs and
-  validates session cookies. The middleware checks unsafe cookie-authenticated
+  paths. [mint_session_cookie and request_has_valid_session](../../../backend/api_host/session_auth.py)
+  sign and validate session cookies. The middleware checks unsafe cookie-authenticated
   requests for same-origin or requested-with signals, and handles Basic browser
   writes separately. `ActorHeaderMiddleware` strips inbound actor headers unless
   explicitly configured to trust a front layer that replaces them.
-- When used, the gateway checks bearer tokens and the user allow-list in
-  [_require_valid_token](../../../services/mcp_oauth_gateway/main.py), then
-  forwards requests via [proxy](../../../services/mcp_oauth_gateway/proxy.py).
+- When used, the gateway validates bearer tokens in
+  [_require_valid_token](../../../services/mcp_oauth_gateway/main.py). OAuth token
+  subjects must also pass the user allow-list; a matching static API key is
+  accepted before that check. The gateway forwards requests via
+  [proxy](../../../services/mcp_oauth_gateway/proxy.py).
   Its registration endpoint has a per-client rate limit in `_check_register_rate`.
 - [bind_request_authorization_to_asgi_app](../../../backend/api_host/mcp_mount.py)
   carries request authorization into the mounted transports.
@@ -118,9 +120,11 @@ Skill nodes created by existing tools are not the planned protocol capability.
 - The MCP SDK dependency in [requirements.txt](../../../backend/requirements.txt)
   supplies the transport body limit, exercised for both transports by
   [test_mcp_integration](../../../backend/api_host/tests/test_mcp_integration.py)
-  at 4 MiB. [attachment_tools](../../../backend/service/attachment_tools.py)
-  bounds decoded attachment content and extraction/search work; the MCP decoded
-  attachment limit defaults to and is capped at 3,000,000 bytes.
+  at 4 MiB. [ReadLimits.from_env, AttachmentReadTools.extracted and
+  AttachmentReadTools.search](../../../backend/service/attachment_tools.py) bound
+  extraction and search work. `ReadLimits.from_env` caps the decoded attachment
+  limit at 3,000,000 bytes (also its default), and `_store_attachment` enforces
+  it for content carried in tool arguments.
 - Mutation context and attribution flow through graph operations; for example,
   `add_nodes` sets its event origin to MCP in
   [mcp_tools.py](../../../backend/service/mcp_tools.py). This records an origin,
@@ -132,7 +136,8 @@ Skill nodes created by existing tools are not the planned protocol capability.
   configuration, and MCP authentication can be explicitly bypassed. The default
   graph authorization mode is permissive and does not narrow graph visibility.
   A trusted front layer must actually replace actor headers when that trust is
-  enabled. The optional gateway does not protect a separately reachable mount.
+  enabled. The optional gateway does not protect a separately reachable mount. A
+  static API key grants gateway access without a user allow-list check.
 - [mount_mcp](../../../backend/api_host/mcp_mount.py) disables the SDK's DNS
   rebinding protection for the mounted transports. Authentication and network
   placement are separate considerations; the mount itself supplies no host or
