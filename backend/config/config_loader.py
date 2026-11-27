@@ -65,6 +65,7 @@ SYSTEM_NODE_TYPES = {
     },
     "EventSubscription": {
         "fields": ["name", "description", "summary", "metadata"],
+        "sensitive_fields": ["metadata.delivery.webhook_url"],
         "static": True,
         "category": "system",
         "description": (
@@ -133,6 +134,7 @@ class NodeTypeConfig(BaseModel):
     fields: List[str] = Field(
         default_factory=lambda: ["name", "description", "summary"]
     )
+    sensitive_fields: List[str] = Field(default_factory=list)
     static: bool = False
     category: str = "domain"  # "domain" = configurable, "system" = foundational
     description: str = ""
@@ -815,6 +817,7 @@ def get_schema() -> Dict[str, Any]:
             name: {
                 **({"shape": cfg.shape} if cfg.shape is not None else {}),
                 "fields": cfg.fields,
+                "sensitive_fields": cfg.sensitive_fields,
                 "static": cfg.static,
                 "category": cfg.category,
                 "description": cfg.description,

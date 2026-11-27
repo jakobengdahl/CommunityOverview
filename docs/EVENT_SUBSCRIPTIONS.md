@@ -544,5 +544,5 @@ Federated cache updates emitted by the sync engine use `origin.event_origin = "f
 Enabled functions can react to node transitions through a version 6 manifest.
 Their graph binding, predicates, delivery and loop prevention are described in
 [the user function contract](USER_FUNCTION_CONTRACT.md#version-6-graph-change-triggers).
-These triggers use the same event snapshots shown above and do not require an
-EventSubscription node.
+These triggers project declared, non-sensitive fields from the event snapshots
+shown above and do not require an EventSubscription node.

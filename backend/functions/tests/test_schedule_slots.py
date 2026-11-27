@@ -421,3 +421,60 @@ def test_reconcile_retained_and_purged_outcomes(
     finally:
         store.close()
         slots.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_graph_attempt_purge_preserves_recovery_outcome(
+    tmp_path, monkeypatch, store_kind
+):
+    from types import SimpleNamespace
+    from backend.agents.execution import (
+        ExecutionJob,
+        ExecutionKind,
+        InMemoryExecutionStore,
+    )
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+    from backend.functions import invocation
+
+    policy = RetryPolicy(max_attempts=2, base_seconds=5)
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": policy.to_dict()}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "graph.db")
+    store = (
+        InMemoryExecutionStore()
+        if store_kind == "memory"
+        else SqliteExecutionStore(tmp_path / "runs.db")
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(kind=EntityKind.NODE, id="n", type="Task"),
+    )
+    slot = slots.enqueue_event("example", event, {}, policy)
+    slots.claim_next(
+        "w", now=datetime.now(timezone.utc) + timedelta(seconds=1), lease_seconds=10
+    )
+    run = ExecutionJob(
+        agent_id="example",
+        kind=ExecutionKind.FUNCTION,
+        idempotency_key=f"schedule-fn:example:{slot.idempotency_key}:attempt:1",
+        state=ExecutionState.DEAD_LETTER,
+        updated_at=TIMEPOINT,
+        finished_at=TIMEPOINT,
+    )
+    store.enqueue(run)
+    assert store.purge([run.id]) == 1
+    slots.reconcile(SimpleNamespace(store=store, root=tmp_path))
+    recovered = slots._store._get_by_id(slot.id)
+    assert recovered.state == ExecutionState.PENDING
+    assert recovered.run_at == TIMEPOINT + timedelta(seconds=5)
+    if store_kind == "sqlite":
+        store.close()
+    slots.close()

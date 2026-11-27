@@ -83,3 +83,73 @@ def matches(trigger, event):
         for side in ("before", "after")
         for path, value in trigger.get(side, {}).items()
     )
+
+
+def filtered_entity(entity, fields, sensitive_fields):
+    """Project declared paths before persisting an event; omit sensitive subtrees."""
+    from copy import deepcopy
+
+    sensitive = [tuple(path.split(".")) for path in sensitive_fields]
+
+    def project(value, path):
+        if any(path[: len(secret)] == secret for secret in sensitive):
+            return _MISSING
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                child = project(item, path + (key,))
+                if child is not _MISSING:
+                    result[key] = child
+            return result
+        # A container with a sensitive descendant cannot safely be projected.
+        if isinstance(value, list) and any(
+            secret[: len(path)] == path for secret in sensitive
+        ):
+            return _MISSING
+        return deepcopy(value)
+
+    def select(snapshot):
+        if snapshot is None:
+            return None
+        result = {}
+        for field in sorted(fields, key=lambda path: len(path.split("."))):
+            path = tuple(field.split("."))
+            value = _get(snapshot, field)
+            if value is _MISSING:
+                continue
+            value = project(value, path)
+            if value is _MISSING:
+                continue
+            target = result
+            for part in path[:-1]:
+                existing = target.setdefault(part, {})
+                if not isinstance(existing, dict):
+                    break
+                target = existing
+            else:
+                target[path[-1]] = value
+        return result
+
+    def changes(before, after, prefix=()):
+        if isinstance(before, dict) or isinstance(after, dict):
+            left = before if isinstance(before, dict) else {}
+            right = after if isinstance(after, dict) else {}
+            if not left and not right:
+                return [] if _json_equal(before, after) else [".".join(prefix)]
+            return [
+                name
+                for key in sorted(left.keys() | right.keys())
+                for name in changes(
+                    left.get(key, _MISSING), right.get(key, _MISSING), prefix + (key,)
+                )
+            ]
+        return [] if _json_equal(before, after) else [".".join(prefix)]
+
+    data = entity["data"]
+    return {
+        "kind": entity["kind"],
+        "id": entity["id"],
+        "type": entity["type"],
+        "changed_fields": changes(data["before"], data["after"]),
+        "data": {side: select(data[side]) for side in ("before", "after", "patch")},
+    }

@@ -274,13 +274,15 @@ block:
 ```
 
 - `entity` is `null` for a manual invocation. Graph-change triggers (§12) fill
-  it with the triggering entity's `before`, `after` and `patch`, subject to credential filtering, from
+  it with declared, non-sensitive triggering entity fields from
   the event payload.
 - `origin` describes **who started the run**. The origin the run's own writes
   carry is defined in §9.
 - `deadline` is informative: the function may use it to stop early. The runner
   enforces the limit regardless (§8).
-- The envelope never contains a secret, a credential or a token.
+- Secrets resolved by the runtime never enter the envelope. For graph-change
+  values, operators must mark sensitive schema paths and avoid declaring fields
+  that contain secrets (§12).
 
 ### 5.3 Idempotency
 
@@ -700,11 +702,14 @@ node snapshots. At least one listed field must change, and all optional
 from null. Creates and deletes match when a listed field changes between absent
 and present; edge events do not match. The trigger requires a graph target.
 
-The invocation entity contains the event `data.before`, `data.after` and
-`data.patch`, with credential-like fields, URLs and bearer values redacted before
-persistence. This filtering cannot identify arbitrary secrets in free text; graph
-data must not contain unmarked secrets. Both present snapshots must belong to the
-bound graph; snapshots without an origin graph belong to the host local graph.
+The invocation entity carries the entity kind, id, type and `changed_fields`
+(dot-separated names of changed paths). Its `data.before`, `data.after` and
+`data.patch` contain only paths declared in the matching triggers' `fields` or
+predicate keys. Values are preserved, except that paths listed in the node type's
+schema `sensitive_fields` are omitted, including from declared parent objects.
+Operators must mark sensitive paths and avoid declaring fields containing secrets.
+The projection is applied before persistence. Both present snapshots must have
+an origin graph tag matching the bound graph; untagged snapshots are excluded.
 Self-originated writes are excluded across all
 versions of the same function. A function-origin event forwards its correlation
 id and increases the causing run's depth by one; other events start at depth zero.

@@ -1457,6 +1457,7 @@ class TestAllowsAttachmentsSchemaField:
 
     RICH = {
         "fields": ["name", "description", "identifier"],
+        "sensitive_fields": [],
         "static": True,
         "category": "system",
         "description": "A rich type",

@@ -173,7 +173,17 @@ def test_graph_events_match_exclude_origin_and_survive_restart(tmp_path, monkeyp
     assert service.invoke.call_count == 1
     call = service.invoke.call_args.kwargs
     assert call["trigger"] == "graph_change"
-    assert call["entity"] == event.to_webhook_payload()["entity"]
+    assert call["entity"] == {
+        "kind": "node",
+        "id": "n",
+        "type": "Task",
+        "changed_fields": ["metadata.status"],
+        "data": {
+            "before": {"metadata": {"status": "open"}},
+            "after": {"metadata": {"status": "done"}},
+            "patch": {"metadata": {"status": "done"}},
+        },
+    }
     assert call["chain_depth"] == 3 and call["correlation_id"] == "corr"
     scheduler.stop()
     scheduler = FunctionScheduler(service, ScheduleSlots(path), {"example": "g"})
@@ -215,8 +225,8 @@ def test_graph_json_transitions(before, after, predicate, expected):
     [
         ("g", "other", "local", False),
         ("other", "g", "local", False),
-        (None, None, "g", True),
-        (None, "g", "g", True),
+        (None, None, "g", False),
+        (None, "g", "g", False),
         (None, "g", "other", False),
         (None, None, None, False),
         ("g", "g", "other", True),
@@ -279,9 +289,135 @@ def test_graph_scope_and_sensitive_entity(
         scheduler.tick(datetime.now(timezone.utc))
         entity = service.invoke.call_args.kwargs["entity"]
         assert entity["data"]["before"]["name"] == "old"
-        assert (
-            entity["data"]["after"]["metadata"]["delivery"]["webhook_url"]
-            == "[REDACTED]"
+        assert entity["data"]["after"] == {"name": "new"}
+        assert entity["data"]["patch"] == {}
+    scheduler.stop()
+
+
+def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
+    tmp_path, monkeypatch
+):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["metadata", "metadata.private"],
+        "before": {"name": "old"},
+    }
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest",
+        lambda *args: ({"triggers": [trigger]}, None),
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    slots = ScheduleSlots(tmp_path / "projection.db")
+    scheduler = FunctionScheduler(
+        service,
+        slots,
+        {"example": "g"},
+        sensitive_fields={"Task": ["metadata.private"]},
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={
+                "name": "old",
+                "metadata": {
+                    "origin_graph_id": "g",
+                    "url": "https://example.test",
+                    "private": "hidden",
+                },
+                "other": "unlisted",
+            },
+            after={
+                "name": "new",
+                "metadata": {
+                    "origin_graph_id": "g",
+                    "url": "https://example.test/new",
+                    "private": "hidden2",
+                },
+                "other": "unlisted2",
+            },
+            patch={
+                "metadata": {"url": "https://example.test/new", "private": "hidden2"},
+                "other": "unlisted2",
+            },
+        ),
+    )
+    scheduler.on_graph_event(event)
+    row = slots._store._conn.execute("SELECT payload FROM schedule_jobs").fetchone()[0]
+    assert "hidden" not in row and "unlisted" not in row
+    scheduler.tick(datetime.now(timezone.utc))
+    entity = service.invoke.call_args.kwargs["entity"]
+    assert entity["data"]["before"] == {
+        "name": "old",
+        "metadata": {"origin_graph_id": "g", "url": "https://example.test"},
+    }
+    assert entity["data"]["patch"] == {"metadata": {"url": "https://example.test/new"}}
+    assert entity["changed_fields"] == [
+        "metadata.private",
+        "metadata.url",
+        "name",
+        "other",
+    ]
+    scheduler.stop()
+
+
+def test_untagged_graph_nodes_never_reach_bound_function(tmp_path, monkeypatch):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    trigger = {"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest",
+        lambda *args: ({"triggers": [trigger]}, None),
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+    )
+    slots = ScheduleSlots(tmp_path / "untagged.db")
+    scheduler = FunctionScheduler(service, slots, {"example": "g"}, local_graph_id="g")
+    for before, after in [
+        ({"name": "a"}, {"name": "b"}),
+        ({"name": "a"}, {"name": "b", "metadata": {"origin_graph_id": "g"}}),
+    ]:
+        scheduler.on_graph_event(
+            Event(
+                event_type=EventType.NODE_UPDATE,
+                origin=EventContext(),
+                entity=EntityData(
+                    kind=EntityKind.NODE,
+                    id="n",
+                    type="Task",
+                    before=before,
+                    after=after,
+                ),
+            )
         )
-        assert entity["data"]["patch"]["url"] == "[REDACTED]"
+    assert (
+        slots._store._conn.execute("SELECT COUNT(*) FROM schedule_jobs").fetchone()[0]
+        == 0
+    )
     scheduler.stop()

@@ -11,11 +11,20 @@ logger = logging.getLogger(__name__)
 
 
 class FunctionScheduler:
-    def __init__(self, service, slots, graph_bindings, *, local_graph_id=None):
+    def __init__(
+        self,
+        service,
+        slots,
+        graph_bindings,
+        *,
+        local_graph_id=None,
+        sensitive_fields=None,
+    ):
         self.service = service
         self.slots = slots
         self.graph_bindings = graph_bindings
         self.local_graph_id = local_graph_id
+        self.sensitive_fields = sensitive_fields or {}
         self.extensions = get_runtime_extensions()
         self.stop_event = threading.Event()
         self.thread = None
@@ -23,16 +32,14 @@ class FunctionScheduler:
 
     def on_graph_event(self, event):
         from backend.agents.execution import RetryPolicy
-        from backend.functions.graph_change import matches
+        from backend.functions.graph_change import filtered_entity, matches
 
         origin = event.origin.event_origin or ""
         entity = event.to_webhook_payload()["entity"]
         data = entity["data"]
-        # Both snapshots must be visible; attribution describes the writer,
-        # not the node. Untagged nodes belong to the host's local graph.
+        # The broker denies untagged nodes to graph-bound functions.
         graph_ids = [
             (snapshot.get("metadata") or {}).get("origin_graph_id")
-            or self.local_graph_id
             for snapshot in (data["before"], data["after"])
             if snapshot is not None
         ]
@@ -46,13 +53,30 @@ class FunctionScheduler:
                 continue
             try:
                 manifest, _ = load_manifest(self.service.root, function_id)
-                if any(
-                    t["kind"] == "graph_change" and matches(t, event)
+                matching = [
+                    t
                     for t in manifest["triggers"]
-                ):
+                    if t["kind"] == "graph_change" and matches(t, event)
+                ]
+                if matching:
+                    fields = {
+                        field
+                        for t in matching
+                        for field in (
+                            t["fields"]
+                            + list(t.get("before", {}))
+                            + list(t.get("after", {}))
+                        )
+                    }
+                    projected = filtered_entity(
+                        entity, fields, self.sensitive_fields.get(entity["type"], [])
+                    )
                     retry = manifest.get("retry")
                     self.slots.enqueue_event(
-                        function_id, event, RetryPolicy(**retry) if retry else None
+                        function_id,
+                        event,
+                        projected,
+                        RetryPolicy(**retry) if retry else None,
                     )
             except (OSError, ValueError, TypeError):
                 logger.warning(

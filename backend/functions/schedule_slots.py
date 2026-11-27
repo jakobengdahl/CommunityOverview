@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -26,29 +25,6 @@ from backend.agents.execution import (
 )
 from backend.agents.execution.store import JobNotFoundError
 from backend.agents.execution.models import ABANDONED_REASON
-
-
-# Graph data is user-supplied. Do not persist obvious credential-bearing
-# fields or URLs, whose paths and queries commonly contain bearer tokens.
-_SECRET_KEY = re.compile(
-    r"password|passwd|secret|token|credential|authorization|api.?key|webhook.?url", re.I
-)
-_URL = re.compile(r"(?:https?://|[a-z][a-z0-9+.-]*://)", re.I)
-
-
-def _safe_entity(value):
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if _SECRET_KEY.search(str(key)) else _safe_entity(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_safe_entity(item) for item in value]
-    if isinstance(value, str) and (
-        _URL.search(value) or re.search(r"\bBearer\s+\S+", value, re.I)
-    ):
-        return "[REDACTED]"
-    return value
 
 
 def _valid_retry_policy(policy: RetryPolicy) -> bool:
@@ -209,7 +185,7 @@ class ScheduleSlots:
             )
         )
 
-    def enqueue_event(self, function_id, event, retry_policy=None):
+    def enqueue_event(self, function_id, event, entity, retry_policy=None):
         payload = event.to_webhook_payload()
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
         key = "function-graph:" + hashlib.sha256(identity.encode()).hexdigest()
@@ -227,7 +203,7 @@ class ScheduleSlots:
                 run_at=datetime.now(timezone.utc),
                 payload={
                     "retry_policy": policy.to_dict(),
-                    "entity": _safe_entity(payload["entity"]),
+                    "entity": entity,
                     "chain_depth": depth,
                 },
             )

@@ -305,7 +305,10 @@ class InMemoryExecutionStore:
                 if (
                     job.kind == ExecutionKind.FUNCTION
                     and job.idempotency_key.startswith("schedule-fn:")
-                    and ":function-schedule:" in job.idempotency_key
+                    and any(
+                        prefix in job.idempotency_key
+                        for prefix in (":function-schedule:", ":function-graph:")
+                    )
                     and ":attempt:" in job.idempotency_key
                 ):
                     self._schedule_outcomes[job.idempotency_key] = (
