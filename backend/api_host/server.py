@@ -659,13 +659,17 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     )
 
     # The catalog is fixed at construction, so its resource bindings match its manifest.
-    from backend.config.config_loader import get_skills_config
+    from backend.config.config_loader import _get_loader, get_skills_config
 
     skills_config = get_skills_config().mcp
     mcp_extensions = []
     if skills_config.enabled:
         from backend.runtime.attachment_access import attachment_tool_allowed
-        from backend.skills.mcp import CoreSkillProvider, SkillsExtension
+        from backend.skills.mcp import (
+            CoreSkillProvider,
+            GraphSemanticsProvider,
+            SkillsExtension,
+        )
 
         enabled_tools = set()
         if (
@@ -673,9 +677,30 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             and graph_service.attachment_settings is not None
         ):
             enabled_tools.add("read_node_attachment")
+        profile = _get_loader().config
         mcp_extensions.append(
             SkillsExtension(
-                [CoreSkillProvider(enabled_tools)],
+                [
+                    CoreSkillProvider(enabled_tools),
+                    GraphSemanticsProvider(
+                        {
+                            **profile.schema_.model_dump(),
+                            "node_shapes": {
+                                name: shape.model_dump()
+                                for name, shape in profile.node_shapes.items()
+                            },
+                        },
+                        profile.presentation.model_dump(
+                            include={
+                                "prompt_prefix",
+                                "default_language",
+                                "language_policy",
+                            }
+                        ),
+                        skills_config.graphSemantics.ttlMs,
+                        skills_config.graphSemantics.cacheScope,
+                    ),
+                ],
                 skills_config.ttlMs,
                 skills_config.cacheScope,
             )

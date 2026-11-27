@@ -339,20 +339,21 @@ version: "1.0"
     "cache_ttl_seconds": 3600,
     "max_skill_content_bytes": 50000,
     "max_skill_body_chars": 8000,
-    "mcp": {"enabled": false, "ttlMs": 0, "cacheScope": "private"}
+    "mcp": {"enabled": false, "ttlMs": 0, "cacheScope": "private",
+            "graphSemantics": {"ttlMs": 0, "cacheScope": "private"}}
   }
 }
 ```
 
 The optional `skills_config.mcp` section controls the MCP skills extension.
 `enabled` defaults to `false`; when enabled, clients can discover the core
-working-method skill and read its files through MCP resources. `ttlMs` is a
+working-method skill and a graph-semantics skill and read their files through MCP resources. The latter describes the loaded schema: node types, fields, declared subtypes, relationships, vocabularies, language policy and prompt prefix. It contains no graph data. Its snapshot date is a deterministic identifier derived from the schema, not a modification time; content statistics are planned through `describe_graph`. `ttlMs` is a
 non-negative freshness hint in milliseconds (default `0`), and `cacheScope` is
 `private` (the default) or `public`. Use `private` whenever content or access
 can vary between callers. This slice serves only the built-in provider;
 `create_app` does not accept additional providers. Third-party and remote
 providers are planned for a follow-up slice. The configured cache scope is used
-as supplied; it is not automatically changed for additional providers.
+as supplied; it is not automatically changed for additional providers. `graphSemantics.ttlMs` and `graphSemantics.cacheScope` independently configure the schema skill, with the same defaults and validation as the working-method hints. Modern clients receive per-skill hints in the list and get results.
 These cache hints do not replace authorization or verification of file digests.
 Skills with more than 512 files, more than 16 MiB, or rejected content prevent
 startup; files are sanitized before their digests are calculated.

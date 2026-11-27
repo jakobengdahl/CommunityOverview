@@ -5,6 +5,9 @@ All files are UTF-8 text and are validated before any are published.
 """
 
 import hashlib
+import json
+from copy import deepcopy
+from datetime import date, timedelta
 import re
 from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
@@ -16,7 +19,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, RequestParams
 
 from backend import __version__
-from backend.skills.loader import SkillsLoader
+from backend.skills.loader import _DANGEROUS_TAG_RE, _INJECTION_RE, SkillsLoader
 
 MAX_FILES = 512
 MAX_BYTES = 16 * 1024 * 1024
@@ -36,6 +39,10 @@ _PATH = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 class SkillFiles:
     name: str
     files: Mapping[str, str]
+
+
+class _GraphSemanticsFiles(SkillFiles):
+    """A snapshot whose schema strings have already been sanitized."""
 
 
 class SkillProvider(Protocol):
@@ -71,6 +78,81 @@ class CoreSkillProvider:
         return [SkillFiles("graph-working-method", {"SKILL.md": text})]
 
 
+class GraphSemanticsProvider:
+    """Publish a deterministic snapshot of the loaded profile schema."""
+
+    def __init__(self, schema, presentation, ttl_ms=0, cache_scope="private"):
+        self.schema = schema
+        self.presentation = presentation
+        self.ttl_ms = ttl_ms
+        self.cache_scope = cache_scope
+
+    async def can_read(self, ctx, skill_name: str) -> bool:
+        return True
+
+    def skills(self) -> Sequence[SkillFiles]:
+        def clean(value):
+            if isinstance(value, str):
+                result = value
+                while True:
+                    if _INJECTION_RE.search(result):
+                        raise ValueError("Schema content rejected")
+                    cleaned = _DANGEROUS_TAG_RE.sub("", result)
+                    if _INJECTION_RE.search(cleaned) or (
+                        value.strip() and not cleaned.strip()
+                    ):
+                        raise ValueError("Schema content rejected")
+                    if cleaned == result:
+                        return cleaned
+                    result = cleaned
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    sanitized_key = clean(key)
+                    if sanitized_key in result:
+                        raise ValueError("Duplicate sanitized schema key")
+                    result[sanitized_key] = clean(item)
+                return result
+            if isinstance(value, list):
+                return [clean(item) for item in value]
+            return value
+
+        def canonical(value):
+            return json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+
+        source = deepcopy(
+            {
+                "node_types": self.schema["node_types"],
+                "node_shapes": self.schema.get("node_shapes", {}),
+                "relationship_types": self.schema["relationship_types"],
+                "vocabularies": self.schema.get("vocabularies", {}),
+                "default_language": self.presentation["default_language"],
+                "language_policy": self.presentation["language_policy"],
+                "prompt_prefix": self.presentation["prompt_prefix"],
+            }
+        )
+
+        snapshot = clean(source)
+        data = canonical(snapshot)
+        source_digest = hashlib.sha256(canonical(source).encode()).hexdigest()
+        # A reproducible date identifier, not the time the schema was modified.
+        days = int(source_digest[:8], 16) % 36525
+        snapshot_date = date(2000, 1, 1) + timedelta(days=days)
+        text = (
+            "---\nname: graph-semantics\n"
+            "description: Understand the profile graph schema.\n---\n"
+            "# Graph semantics\n\n"
+            "Schema snapshot date identifier (derived from schema, not modification time): "
+            f"{snapshot_date.isoformat()}. Content statistics are available through "
+            "describe_graph when layer 3 is available.\n\n"
+            f"Schema input SHA-256: {source_digest}.\n\n"
+            f"```json\n{data}\n```\n"
+        )
+        return [_GraphSemanticsFiles("graph-semantics", {"SKILL.md": text})]
+
+
 class ListSkillParams(RequestParams):
     cursor: str | None = None
 
@@ -90,6 +172,7 @@ class SkillsExtension(Extension):
         self.entries = {}
         self.files = {}
         self.owners = {}
+        self.skill_hints = {}
         sanitizer = SkillsLoader()
         for provider in providers:
             for skill in provider.skills():
@@ -160,7 +243,14 @@ class SkillsExtension(Extension):
                     total += len(content.encode("utf-8"))
                     if total > MAX_BYTES:
                         raise ValueError("Skill exceeds size limit")
-                    clean = sanitizer._sanitize(content)
+                    # The graph snapshot was sanitized value by value before JSON
+                    # serialization; stripping across JSON strings corrupts it.
+                    clean = (
+                        content
+                        if isinstance(skill, _GraphSemanticsFiles)
+                        and path == "SKILL.md"
+                        else sanitizer._sanitize(content)
+                    )
                     if content.strip() and not clean:
                         raise ValueError("Skill content rejected")
                     uri = f"{root}/{path}"
@@ -175,6 +265,10 @@ class SkillsExtension(Extension):
                         }
                     )
                 uri = f"{root}/SKILL.md"
+                self.skill_hints[uri] = {
+                    "ttlMs": getattr(provider, "ttl_ms", ttl_ms),
+                    "cacheScope": getattr(provider, "cache_scope", cache_scope),
+                }
                 self.entries[uri] = {
                     "uri": uri,
                     "frontmatter": frontmatter,
@@ -195,29 +289,43 @@ class SkillsExtension(Extension):
             MethodBinding("skills/get", GetSkillParams, self.get_skill),
         ]
 
-    def hints(self, ctx):
-        return (
-            {"ttlMs": self.ttl_ms, "cacheScope": self.cache_scope}
-            if ctx.protocol_version >= "2026-07-28"
-            else {}
-        )
+    def hints(self, ctx, uris):
+        if ctx.protocol_version < "2026-07-28":
+            return {}
+        hints = [self.skill_hints[uri] for uri in uris]
+        return {
+            "ttlMs": min((hint["ttlMs"] for hint in hints), default=self.ttl_ms),
+            "cacheScope": "private"
+            if any(hint["cacheScope"] == "private" for hint in hints)
+            else self.cache_scope,
+        }
+
+    def entry(self, ctx, uri):
+        return {
+            **self.entries[uri],
+            **(self.skill_hints[uri] if ctx.protocol_version >= "2026-07-28" else {}),
+        }
 
     async def list_skills(self, ctx, params):
         if params.cursor is not None:
             raise MCPError(code=INVALID_PARAMS, message="Unknown cursor")
+        uris = [uri for uri in self.entries if await self.allowed(ctx, uri)]
         return {
-            "skills": [
-                entry
-                for uri, entry in self.entries.items()
-                if await self.allowed(ctx, uri)
-            ],
-            **self.hints(ctx),
+            "skills": [self.entry(ctx, uri) for uri in uris],
+            **self.hints(ctx, uris),
         }
 
     async def get_skill(self, ctx, params):
         if params.uri not in self.entries or not await self.allowed(ctx, params.uri):
             raise MCPError(code=INVALID_PARAMS, message="Unknown skill")
-        return {"skill": self.entries[params.uri], **self.hints(ctx)}
+        return {
+            "skill": self.entry(ctx, params.uri),
+            **(
+                self.skill_hints[params.uri]
+                if ctx.protocol_version >= "2026-07-28"
+                else {}
+            ),
+        }
 
     async def allowed(self, ctx, uri):
         provider, name = self.owners[uri]
