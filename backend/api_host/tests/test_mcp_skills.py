@@ -917,10 +917,15 @@ def test_profile_counts_visibility_order_and_freshness(monkeypatch):
 def test_profile_change_publishes_only_for_changed_profile():
     import asyncio
     from backend.core import Node
-    from backend.service.graph_profile import ProfileChangePublisher
+    from backend.service.graph_profile import (
+        _LISTEN_URIS,
+        PROFILE_URI,
+        ProfileChangePublisher,
+    )
     from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
 
     async def check():
+        _LISTEN_URIS.set(frozenset({PROFILE_URI}))
         nodes = [Node(id="a", name="A", type="Person")]
         storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
         from contextvars import ContextVar
@@ -940,6 +945,7 @@ def test_profile_change_publishes_only_for_changed_profile():
 
         publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
         publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0
         public, restricted = [], []
         publisher.subscribe(public.append)
         current_scope.set(GraphAccessNarrowing(enabled=True, allow_local_graph=True))
@@ -1000,5 +1006,74 @@ def test_profile_change_publishes_only_for_changed_profile():
         await asyncio.sleep(0.05)
         assert public == [] and restricted == []
         assert private == [ResourceUpdated(uri="graph://profile")]
+
+    anyio.run(check)
+
+
+def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
+    monkeypatch,
+):
+    import asyncio
+    from backend.core import Node
+    from backend.runtime.authorization import (
+        GraphAccessNarrowing,
+        GraphAuthorizationDecision,
+    )
+    from backend.service import graph_profile
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    computed = []
+    original_profile = graph_profile.profile
+    monkeypatch.setattr(
+        graph_profile,
+        "profile",
+        lambda storage, scope: (
+            computed.append(scope) or original_profile(storage, scope)
+        ),
+    )
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing()
+            )
+
+    async def listen(publisher, listener, uri):
+        ctx = SimpleNamespace(
+            method="subscriptions/listen",
+            params={"notifications": {"resourceSubscriptions": [uri]}},
+        )
+
+        async def call_next(ctx):
+            return publisher.subscribe(listener)
+
+        await publisher.listen_filter(ctx, call_next)
+
+    async def check():
+        nodes = [Node(id="a", name="A", type="Person")]
+        storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: [])
+        publisher = graph_profile.ProfileChangePublisher(
+            storage, InMemorySubscriptionBus(), Hook()
+        )
+        publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0.1
+        other, tracked = [], []
+        await listen(publisher, other.append, "skill://other")
+        for i in range(20):
+            nodes.append(Node(id=f"u{i}", name="U", type="Person"))
+            publisher.on_event(None)
+        await asyncio.sleep(0.3)
+        assert computed == []
+
+        await listen(publisher, tracked.append, graph_profile.PROFILE_URI)
+        computed.clear()
+        for i in range(20):
+            nodes.append(Node(id=f"t{i}", name="T", type="Person"))
+            publisher.on_event(None)
+        assert computed == []  # Nothing is computed inside the event callback.
+        await asyncio.sleep(0.3)
+        assert len(computed) == 1
+        assert tracked == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
+        assert other == []
 
     anyio.run(check)

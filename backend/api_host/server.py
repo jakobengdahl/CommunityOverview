@@ -729,6 +729,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     )
     if mcp_extensions:
         mcp.middleware.append(mcp_extensions[0].resource_access)
+        mcp.middleware.append(profile_publisher.listen_filter)
     tools_map = register_mcp_tools(
         mcp,
         graph_service,

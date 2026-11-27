@@ -1,11 +1,15 @@
 """Deterministic, access-filtered statistics for the visible local graph."""
 
+import asyncio
 from collections import Counter, defaultdict
 from contextlib import nullcontext
-from contextvars import copy_context
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
+
+from mcp_types import SubscriptionsListenRequestParams
+from pydantic import ValidationError
 
 from backend.runtime.authorization import GRAPH_ACTION_READ
 from . import access
@@ -13,6 +17,9 @@ from . import access
 # Bound every collection in the response, including type and subtype counts.
 MAX_ITEMS = 100
 MAX_STRING = 256
+PROFILE_URI = "graph://profile"
+# Resource URIs named by the subscriptions/listen request being served.
+_LISTEN_URIS = ContextVar("listen_uris", default=frozenset())
 
 
 def bounded(value):
@@ -112,37 +119,71 @@ class _ProfileUpdates:
 
 
 class ProfileChangePublisher:
-    """Bus adapter comparing the profile separately for every listen stream."""
+    """Bus adapter comparing the profile separately for every listen stream.
+
+    Only streams whose listen filter names ``graph://profile`` are tracked.
+    Graph events only mark the profile dirty; one flusher recomputes it at most
+    once per ``debounce`` seconds, outside the storage write lock.
+
+    Change notifications follow the main graph only: staged session layers do
+    not trigger them. A session-bound caller reading ``describe_graph`` or the
+    resource still gets its composed view on read.
+    """
+
+    debounce = 0.25
 
     def __init__(self, storage, bus, hook):
         self.storage, self.bus, self.hook = storage, bus, hook
         self.loop = None
         self.lock = RLock()
         self.listeners = {}
+        self.generation = 0
+        self.dirty = self.scheduled = False
+
+    async def listen_filter(self, ctx, call_next):
+        """Server middleware exposing a listen request's URIs to ``subscribe``."""
+        if ctx.method != "subscriptions/listen":
+            return await call_next(ctx)
+        try:
+            params = SubscriptionsListenRequestParams.model_validate(
+                ctx.params or {}, by_name=False
+            )
+            uris = frozenset(params.notifications.resource_subscriptions or ())
+        except ValidationError:
+            uris = frozenset()  # The listen handler rejects the request.
+        reset = _LISTEN_URIS.set(uris)
+        try:
+            return await call_next(ctx)
+        finally:
+            _LISTEN_URIS.reset(reset)
 
     def subscribe(self, listener):
         from mcp.shared.subscriptions import ResourceUpdated
 
         token = object()
         context = copy_context()
+        tracked = PROFILE_URI in _LISTEN_URIS.get()
+
+        def deliver(event):
+            if not isinstance(event, _ProfileUpdates):
+                listener(event)
+            elif tracked:
+                current, denied = context.copy().run(read_access, self.hook)
+                if not denied and (token, current) in event.tokens:
+                    listener(ResourceUpdated(uri=PROFILE_URI))
+
+        if not tracked:
+            return self.bus.subscribe(deliver)
+        with self.lock:
+            generation = self.generation
         scope, denied = context.copy().run(read_access, self.hook)
-        # Keep the same lock order as graph mutation callbacks.
-        with getattr(self.storage, "write_lock", nullcontext()):
-            with self.lock:
-                self.listeners[token] = (
-                    context,
-                    profile(self.storage, scope) if not denied else None,
-                )
-
-                def deliver(event):
-                    if isinstance(event, _ProfileUpdates):
-                        current, denied = context.copy().run(read_access, self.hook)
-                        if not denied and (token, current) in event.tokens:
-                            listener(ResourceUpdated(uri="graph://profile"))
-                    else:
-                        listener(event)
-
-                unsubscribe = self.bus.subscribe(deliver)
+        baseline = profile(self.storage, scope) if not denied else None
+        with self.lock:
+            self.listeners[token] = (context, baseline)
+            unsubscribe = self.bus.subscribe(deliver)
+            # A change that landed while the baseline was computed is not lost.
+            if self.generation != generation:
+                self._schedule()
 
         def close():
             with self.lock:
@@ -155,19 +196,47 @@ class ProfileChangePublisher:
         await self.bus.publish(event)
 
     def on_event(self, event):
-        import asyncio
+        # Runs under the storage write lock: O(1), no profile work here.
+        with self.lock:
+            self.generation += 1
+            if self.listeners:
+                self._schedule()
 
-        with getattr(self.storage, "write_lock", nullcontext()):
+    def _schedule(self):
+        self.dirty = True
+        if self.scheduled or self.loop is None or self.loop.is_closed():
+            return
+        self.scheduled = True
+        asyncio.run_coroutine_threadsafe(self._flush(), self.loop)
+
+    async def _flush(self):
+        try:
+            while True:
+                await asyncio.sleep(self.debounce)
+                with self.lock:
+                    self.dirty = False
+                    listeners = list(self.listeners.items())
+                changed = await asyncio.to_thread(self._recompute, listeners)
+                if changed:
+                    await self.bus.publish(_ProfileUpdates(frozenset(changed)))
+                with self.lock:
+                    if not self.dirty:
+                        self.scheduled = False
+                        return
+        except BaseException:
             with self.lock:
-                changed = set()
-                for token, (context, previous) in list(self.listeners.items()):
-                    scope, denied = context.copy().run(read_access, self.hook)
-                    updated = profile(self.storage, scope) if not denied else None
-                    # A listener whose read access returns has missed changes.
-                    if updated is not None and updated != previous:
-                        changed.add((token, scope))
+                self.scheduled = False
+            raise
+
+    def _recompute(self, listeners):
+        changed = set()
+        for token, (context, previous) in listeners:
+            scope, denied = context.copy().run(read_access, self.hook)
+            updated = profile(self.storage, scope) if not denied else None
+            # A listener whose read access returns has missed changes.
+            if updated is not None and updated != previous:
+                changed.add((token, scope))
+            with self.lock:
+                if token in self.listeners:
                     self.listeners[token] = (context, updated)
-                if changed and self.loop is not None and not self.loop.is_closed():
-                    asyncio.run_coroutine_threadsafe(
-                        self.bus.publish(_ProfileUpdates(frozenset(changed))), self.loop
-                    )
+        return changed
