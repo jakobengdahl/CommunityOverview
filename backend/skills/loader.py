@@ -126,7 +126,9 @@ class MCPSkillsConfig(MCPSkillHints):
 
     @field_validator("graphSemantics", mode="before")
     @classmethod
-    def _ignore_invalid_disabled_graph_hints(cls, value: Any, info: ValidationInfo) -> Any:
+    def _ignore_invalid_disabled_graph_hints(
+        cls, value: Any, info: ValidationInfo
+    ) -> Any:
         if not info.data.get("enabled", False):
             try:
                 return MCPSkillHints.model_validate(value)

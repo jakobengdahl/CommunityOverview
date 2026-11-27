@@ -48,20 +48,20 @@ class TestConfigLoader:
             assert schema["node_types"][system_type]["static"] is True
             assert schema["node_types"][system_type]["category"] == "system"
 
-    @pytest.mark.parametrize("invalid", [{"ttlMs": -1}, {"cacheScope": "shared"}, None, "bad"])
+    @pytest.mark.parametrize(
+        "x", [{"ttlMs": -1}, {"cacheScope": "shared"}, None, "bad"]
+    )
     @pytest.mark.parametrize("enabled", [False, None])
-    def test_disabled_mcp_invalid_graph_hints_preserve_profile(self, tmp_path, invalid, enabled):
+    def test_disabled_mcp_invalid_graph_hints_preserve_profile(
+        self, tmp_path, x, enabled
+    ):
         from backend.config import config_loader
 
-        mcp = {"graphSemantics": invalid}
-        if enabled is not None:
-            mcp["enabled"] = enabled
-        config_file = tmp_path / "schema_config.json"
-        config_file.write_text(json.dumps({
-            "presentation": {"skills_config": {"mcp": mcp}},
-            "schema": {"node_types": {"MyDomain": {"fields": ["name"]}}},
-        }), encoding="utf-8")
-        os.environ["SCHEMA_FILE"] = str(config_file)
+        mcp = {"graphSemantics": x, **({} if enabled is None else {"enabled": enabled})}
+        profile = {"presentation": {"skills_config": {"mcp": mcp}}}
+        profile["schema"] = {"node_types": {"MyDomain": {"fields": ["name"]}}}
+        (tmp_path / "s.json").write_text(json.dumps(profile), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(tmp_path / "s.json")
         config_loader.reset_loader()
         assert "MyDomain" in config_loader.get_schema()["node_types"]
         assert not config_loader.get_skills_config().mcp.enabled

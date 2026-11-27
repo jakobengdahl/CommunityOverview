@@ -494,5 +494,6 @@ def test_graph_semantics_settings_validate_independently():
         with pytest.raises(ValidationError):
             MCPSkillsConfig(enabled=True, graphSemantics=invalid)
         assert MCPSkillsConfig(graphSemantics=invalid).graphSemantics.model_dump() == {
-            "ttlMs": 0, "cacheScope": "private"
+            "ttlMs": 0,
+            "cacheScope": "private",
         }
