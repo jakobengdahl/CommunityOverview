@@ -352,6 +352,82 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
         slots.close()
 
 
+def test_invalid_manifest_schema_only_dead_letters_its_delivery(tmp_path):
+    from types import SimpleNamespace
+    from jsonschema.exceptions import SchemaError
+    from backend.functions.invocation import load_manifest
+
+    old = RetryPolicy(max_attempts=3, base_seconds=1)
+    changed = RetryPolicy(max_attempts=3, base_seconds=9)
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        jobs = []
+        for name in ("first", "broken", "last"):
+            directory = tmp_path / name
+            directory.mkdir()
+            manifest = {
+                "contract_version": "5",
+                "id": name,
+                "version": "1.0.0",
+                "name": name,
+                "runtime": "python",
+                "entry_point": "main.py",
+                "triggers": [{"kind": "schedule", "interval_seconds": 60}],
+                "grants": [],
+                "retry": changed.to_dict(),
+                "input_schema": {"type": "invalid" if name == "broken" else "object"},
+            }
+            (directory / "function.json").write_text(json.dumps(manifest))
+            (directory / "main.py").write_text("pass")
+            job = slots.enqueue(name, TIMEPOINT, retry_policy=old)
+            slots.claim_next("w", now=TIMEPOINT, lease_seconds=10)
+            slots.fail(job.id, attempt=1, now=TIMEPOINT)
+            jobs.append(job)
+
+        with pytest.raises(SchemaError):
+            load_manifest(tmp_path, "broken")
+        slots._refresh_pending_retries(SimpleNamespace(root=tmp_path), TIMEPOINT)
+        first, broken, last = (slots._store._get_by_id(job.id) for job in jobs)
+        assert broken.state == ExecutionState.DEAD_LETTER
+        for job in (first, last):
+            assert job.state == ExecutionState.PENDING
+            assert job.run_at == TIMEPOINT + timedelta(seconds=9)
+            assert job.payload["retry_policy"] == changed.to_dict()
+    finally:
+        slots.close()
+
+
+def test_pending_retry_refresh_caps_backoff_at_one_day(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from backend.functions import invocation
+
+    old = RetryPolicy(max_attempts=3, base_seconds=0)
+    changed = RetryPolicy(
+        max_attempts=3, base_seconds=50000, factor=2, max_seconds=86400
+    )
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": changed.to_dict()}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        job = slots.enqueue("example", TIMEPOINT, retry_policy=old)
+        for attempt in (1, 2):
+            assert slots.claim_next("w", now=TIMEPOINT, lease_seconds=10).id == job.id
+            slots.fail(job.id, attempt=attempt, now=TIMEPOINT)
+        slots._refresh_pending_retries(SimpleNamespace(root=tmp_path), TIMEPOINT)
+        current = slots._store._get_by_id(job.id)
+        assert current.run_at == TIMEPOINT + timedelta(seconds=86400)
+        assert (
+            slots.claim_next(
+                "w", now=current.run_at - timedelta(seconds=1), lease_seconds=10
+            )
+            is None
+        )
+        assert slots.claim_next("w", now=current.run_at, lease_seconds=10).id == job.id
+    finally:
+        slots.close()
+
+
 @pytest.mark.parametrize("delivery", ["schedule", "graph"])
 @pytest.mark.parametrize("max_attempts", [1, 3, 11])
 @pytest.mark.parametrize("dispatch_limit", [1, 2])

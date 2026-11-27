@@ -708,6 +708,9 @@ class ScheduleSlots:
 
         try:
             manifest, _ = load_manifest(service.root, job.agent_id)
+        except Exception:
+            return None
+        try:
             declared = manifest.get("retry")
             if (
                 not isinstance(declared, dict)
@@ -753,13 +756,20 @@ class ScheduleSlots:
         store = self._store
         with store._lock:
             conn = store._conn
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                rows = conn.execute(
-                    "SELECT * FROM schedule_jobs WHERE state = ? AND attempts > 0",
-                    (ExecutionState.PENDING.value,),
-                ).fetchall()
-                for row in rows:
+            ids = conn.execute(
+                "SELECT id FROM schedule_jobs WHERE state = ? AND attempts > 0",
+                (ExecutionState.PENDING.value,),
+            ).fetchall()
+            for item in ids:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM schedule_jobs WHERE id = ? AND state = ? AND attempts > 0",
+                        (item["id"], ExecutionState.PENDING.value),
+                    ).fetchone()
+                    if row is None:
+                        conn.commit()
+                        continue
                     job = SqliteExecutionStore._row_to_job(row)
                     policy = self._read_retry_policy(service, job)
                     try:
@@ -792,10 +802,10 @@ class ScheduleSlots:
                             "UPDATE schedule_jobs SET payload = ?, run_at = ? WHERE id = ?",
                             (json.dumps(job.payload), run_at, job.id),
                         )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
     def _finish(
         self,
