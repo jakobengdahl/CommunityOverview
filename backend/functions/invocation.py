@@ -167,11 +167,11 @@ def _valid_input(manifest, input):
 def _valid_schedule_retry(manifest):
     retry = manifest.get("retry")
     if (
-        manifest.get("contract_version") != "5"
+        manifest.get("contract_version") not in {"5", "6", "7"}
         or not isinstance(retry, dict)
         or set(retry) != {"max_attempts", "base_seconds", "factor", "max_seconds"}
         or not any(
-            isinstance(item, dict) and item.get("kind") == "schedule"
+            isinstance(item, dict) and item.get("kind") in {"schedule", "graph_change"}
             for item in manifest.get("triggers", [])
         )
     ):
@@ -195,8 +195,21 @@ def _valid_triggers(manifest):
     def valid(item):
         if item in ({"kind": "manual"}, {"kind": "webhook"}):
             return True
+        if isinstance(item, dict) and item.get("kind") == "graph_change":
+            from backend.functions.graph_change import valid_trigger
+
+            return (
+                manifest.get("contract_version") in {"6", "7"}
+                and (
+                    manifest.get("contract_version") == "7"
+                    or "debounce_seconds" not in item
+                    and "batch_size" not in item
+                )
+                and "graph:read" in manifest.get("grants", [])
+                and valid_trigger(item)
+            )
         return (
-            manifest.get("contract_version") == "5"
+            manifest.get("contract_version") in {"5", "6", "7"}
             and isinstance(item, dict)
             and set(item) == {"kind", "interval_seconds"}
             and item["kind"] == "schedule"
@@ -253,19 +266,21 @@ def load_manifest(root, function_id):
     ):
         raise ValueError("Invalid semantic version")
     if (
-        manifest["contract_version"] not in {"1", "2", "3", "4", "5"}
+        manifest["contract_version"] not in {"1", "2", "3", "4", "5", "6", "7"}
         or manifest["id"] != function_id
         or not _VERSION.fullmatch(manifest["version"])
         or manifest["runtime"] != "python"
         or not _valid_triggers(manifest)
         or (
             manifest.get("write_target", "graph") == "session"
-            and any(t["kind"] == "schedule" for t in manifest["triggers"])
+            and any(
+                t["kind"] in {"schedule", "graph_change"} for t in manifest["triggers"]
+            )
         )
         or manifest.get("write_target", "graph")
         not in (
             ("graph", "session")
-            if manifest["contract_version"] in {"4", "5"}
+            if manifest["contract_version"] in {"4", "5", "6", "7"}
             else ("graph",)
         )
         or any(key in manifest for key in ("secrets", "egress"))
@@ -589,7 +604,7 @@ class FunctionInvocationService:
                         target="invoke_function",
                     )
                     if not decision.allowed or (
-                        trigger in {"webhook", "schedule"}
+                        trigger in {"webhook", "schedule", "graph_change"}
                         and not decision.graph_access.matches(
                             graph_id=binding["graph_id"]
                         )
@@ -611,6 +626,8 @@ class FunctionInvocationService:
         idempotency_key=None,
         correlation_id=None,
         chain_depth=0,
+        entity=None,
+        correlation_ids=None,
     ) -> RunRecord:
         admitted = self.admit(
             function_id,
@@ -620,10 +637,11 @@ class FunctionInvocationService:
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
             chain_depth=chain_depth,
+            correlation_ids=correlation_ids,
         )
         if not isinstance(admitted, Admission):
             return admitted
-        return self.execute(admitted, input)
+        return self.execute(admitted, input, entity=entity)
 
     def admit(
         self,
@@ -636,6 +654,7 @@ class FunctionInvocationService:
         correlation_id=None,
         chain_depth=0,
         reservation=None,
+        correlation_ids=None,
     ):
         """Claim the run record, or return the replayed or rejected record.
 
@@ -665,7 +684,9 @@ class FunctionInvocationService:
         # Scheduled invocations have no staged session. Treat a changed or
         # invalid session target as graph-bound so admission records its refusal.
         write_target = (
-            "graph" if old_session_target or trigger == "schedule" else declared_target
+            "graph"
+            if old_session_target or trigger in {"schedule", "graph_change"}
+            else declared_target
         )
         if write_target == "graph" and session_id is not None:
             raise not_supported("Function invocation")
@@ -689,7 +710,7 @@ class FunctionInvocationService:
                 raise
             except Exception as exc:
                 raise ValueError("Invalid staged session") from exc
-        key_prefix = "schedule-fn" if trigger == "schedule" else "fn"
+        key_prefix = "schedule-fn" if trigger in {"schedule", "graph_change"} else "fn"
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
@@ -704,6 +725,11 @@ class FunctionInvocationService:
                 "function_binding_digest": _binding_digest(write_target, session_id),
                 "trigger": trigger,
                 "chain_depth": chain_depth,
+                **(
+                    {"correlation_ids": correlation_ids}
+                    if correlation_ids is not None
+                    else {}
+                ),
                 "attribution": {
                     "actor": {
                         key: binding[key]
@@ -742,7 +768,7 @@ class FunctionInvocationService:
             if (
                 manifest is not None
                 and manifest.get("write_target", "graph") != write_target
-                and not (trigger == "schedule" and code is not None)
+                and not (trigger in {"schedule", "graph_change"} and code is not None)
             ):
                 raise PermissionError("Invocation binding changed")
             if code is None and chain_depth > self.chain_depth_limit:
@@ -795,15 +821,15 @@ class FunctionInvocationService:
         )
         return self.store.get(admission.job.id)
 
-    def execute(self, admission, input, run_files=None) -> RunRecord:
+    def execute(self, admission, input, run_files=None, entity=None) -> RunRecord:
         """Run an admitted invocation; run files are deleted when it ends."""
         try:
-            return self._execute(admission, input, run_files)
+            return self._execute(admission, input, run_files, entity)
         finally:
             if run_files is not None:
                 run_files.close()
 
-    def _execute(self, admission, input, run_files):
+    def _execute(self, admission, input, run_files, entity):
         job, started, binding, trigger = (
             admission.job,
             admission.started,
@@ -849,13 +875,14 @@ class FunctionInvocationService:
                 run_files=run_files,
                 contract_version=manifest["contract_version"],
                 session_id=job.payload.get("session_id"),
+                chain_depth=job.payload["chain_depth"],
             )
             envelope = {
                 "schema_version": "1.0",
                 "event_id": f"evt-{uuid.uuid4()}",
                 "event_type": "function.invoke",
                 "occurred_at": job.started_at.isoformat(),
-                "entity": None,
+                "entity": entity,
                 "origin": {
                     "event_origin": trigger,
                     "event_session_id": None,

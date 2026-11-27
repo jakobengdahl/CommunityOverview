@@ -39,3 +39,20 @@ def agent_mutation_context(
         yield
     finally:
         _agent_mutation_context.reset(token)
+
+
+@contextmanager
+def function_mutation_context(
+    origin: str, correlation_id: str, depth: int
+) -> Iterator[None]:
+    token = _agent_mutation_context.set(
+        EventContext(
+            event_origin=origin,
+            event_correlation_id=correlation_id,
+            event_causation_depth=depth,
+        )
+    )
+    try:
+        yield
+    finally:
+        _agent_mutation_context.reset(token)

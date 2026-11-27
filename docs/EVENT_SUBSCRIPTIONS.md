@@ -538,3 +538,11 @@ To include federated changes in subscriptions, set:
 When omitted, `scope` defaults to `local_only`.
 
 Federated cache updates emitted by the sync engine use `origin.event_origin = "federation-sync"` for both node and edge events.
+
+### User function graph-change triggers
+
+Enabled functions can react to node transitions through a version 6 manifest.
+Their graph binding, predicates, delivery and loop prevention are described in
+[the user function contract](USER_FUNCTION_CONTRACT.md#version-6-graph-change-triggers).
+These triggers project declared, non-sensitive fields from the event snapshots
+shown above and do not require an EventSubscription node.

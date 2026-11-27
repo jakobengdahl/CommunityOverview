@@ -2276,11 +2276,12 @@ optional `shape` references on node types, and structured `shape_diagnostics` fo
 isolated malformed external definitions or missing references. Shape selections
 are opt-in; no renderer or appearance mutation endpoint is enabled yet.
 
-### Scheduled user functions
+### Scheduled and graph-change user functions
 
-Set `COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS` to a JSON object mapping
-operator-enabled function IDs to graph IDs. The application polls their version 5
-schedule manifests and invokes them as graph-bound `function_schedule` actors.
+For scheduled and graph-change functions, set `COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS` to a JSON object mapping
+operator-enabled function IDs to graph IDs. The application polls schedule manifests
+and listens for matching graph events, invoking both as graph-bound
+`function_schedule` actors.
 Intervals are aligned to the Unix epoch; after downtime only the latest due slot
 is generated. The persistent slot ledger is stored beside the webhook token store.
 See User Function Contract §12 for retry, rate-limit and recovery behavior.

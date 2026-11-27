@@ -421,3 +421,174 @@ def test_reconcile_retained_and_purged_outcomes(
     finally:
         store.close()
         slots.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_graph_attempt_purge_preserves_recovery_outcome(
+    tmp_path, monkeypatch, store_kind
+):
+    from types import SimpleNamespace
+    from backend.agents.execution import (
+        ExecutionJob,
+        ExecutionKind,
+        InMemoryExecutionStore,
+    )
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+    from backend.functions import invocation
+
+    policy = RetryPolicy(max_attempts=2, base_seconds=5)
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": policy.to_dict()}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "graph.db")
+    store = (
+        InMemoryExecutionStore()
+        if store_kind == "memory"
+        else SqliteExecutionStore(tmp_path / "runs.db")
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(kind=EntityKind.NODE, id="n", type="Task"),
+    )
+    slot = slots.enqueue_event("example", event, {}, policy)
+    slots.claim_next(
+        "w", now=datetime.now(timezone.utc) + timedelta(seconds=1), lease_seconds=10
+    )
+    run = ExecutionJob(
+        agent_id="example",
+        kind=ExecutionKind.FUNCTION,
+        idempotency_key=f"schedule-fn:example:{slot.idempotency_key}:attempt:1",
+        state=ExecutionState.DEAD_LETTER,
+        updated_at=TIMEPOINT,
+        finished_at=TIMEPOINT,
+    )
+    store.enqueue(run)
+    assert store.purge([run.id]) == 1
+    slots.reconcile(SimpleNamespace(store=store, root=tmp_path))
+    recovered = slots._store._get_by_id(slot.id)
+    assert recovered.state == ExecutionState.PENDING
+    assert recovered.run_at == TIMEPOINT + timedelta(seconds=5)
+    if store_kind == "sqlite":
+        store.close()
+    slots.close()
+
+
+@pytest.mark.parametrize("close_by", ["size", "window"])
+def test_graph_batch_selection_uses_time_after_lock(tmp_path, monkeypatch, close_by):
+    import threading
+    from types import SimpleNamespace
+    from backend.functions import schedule_slots
+
+    current = [TIMEPOINT]
+    waiting = threading.Event()
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if threading.current_thread().name == "enqueue-worker":
+                waiting.set()
+            return current[0]
+
+    monkeypatch.setattr(schedule_slots, "datetime", Clock)
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    batching = {"debounce_seconds": 10, "batch_size": 2}
+
+    def enqueue(event_id):
+        event = SimpleNamespace(
+            to_webhook_payload=lambda: {"event_id": event_id, "origin": {}}
+        )
+        return slots.enqueue_event("example", event, {}, batching=batching)
+
+    try:
+        first = enqueue("first")
+        result = []
+        with slots._store._lock:
+            thread = threading.Thread(
+                target=lambda: result.append(enqueue("waiting")), name="enqueue-worker"
+            )
+            thread.start()
+            assert waiting.wait(5)
+            current[0] += timedelta(seconds=11 if close_by == "window" else 1)
+            if close_by == "size":
+                assert enqueue("filler").id == first.id
+        thread.join(5)
+        assert not thread.is_alive()
+        assert result[0].id != first.id
+        first = slots._store._get_by_id(first.id)
+        assert len(first.payload["entries"]) == (2 if close_by == "size" else 1)
+        assert len(result[0].payload["entries"]) == 1
+    finally:
+        slots.close()
+
+
+def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    policy = RetryPolicy(max_attempts=2, base_seconds=0)
+    batching = {"debounce_seconds": 10, "batch_size": 2}
+
+    def enqueue(event_id):
+        event = SimpleNamespace(
+            to_webhook_payload=lambda: {"event_id": event_id, "origin": {}}
+        )
+        return slots.enqueue_event(
+            "example", event, {"id": event_id}, policy, graph_id="g", batching=batching
+        )
+
+    try:
+        job = enqueue("accepted")
+        assert enqueue("rejected").id == job.id
+        service = SimpleNamespace(
+            invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.DEAD_LETTER))
+        )
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        now = datetime.now(timezone.utc) + timedelta(seconds=1)
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"graph_id": "g"},
+            now=now,
+            lease_seconds=10,
+            graph_event_filter=lambda member: (
+                member.payload["entity"]
+                if member.payload["entity"]["id"] == "accepted"
+                else None
+            ),
+        )
+        rows = slots._store._conn.execute(
+            "SELECT event_id, refusal_reason FROM graph_batch_members ORDER BY event_id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("accepted", None),
+            ("rejected", "trigger_changed"),
+        ]
+        assert [
+            entry["event_id"]
+            for entry in service.invoke.call_args.kwargs["entity"]["events"]
+        ] == ["accepted"]
+        slots.close()
+        slots = ScheduleSlots(tmp_path / "slots.db")
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"graph_id": "g"},
+            now=now + timedelta(seconds=1),
+            lease_seconds=10,
+            graph_event_filter=lambda member: member.payload["entity"],
+        )
+        assert [
+            entry["event_id"]
+            for entry in service.invoke.call_args.kwargs["entity"]["events"]
+        ] == ["accepted"]
+    finally:
+        slots.close()

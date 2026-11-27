@@ -62,7 +62,9 @@ MAX_TOOL_CALLS = 200
 MAX_MESSAGE_BYTES = 1024 * 1024
 
 # These system actors are confined to the graph that authorized the trigger.
-_GRAPH_BOUND_ACTORS = frozenset({"function_webhook", "function_schedule"})
+_GRAPH_BOUND_ACTORS = frozenset(
+    {"function_webhook", "function_schedule", "function_graph_change"}
+)
 
 # Arguments a function may never pass: scope is fixed by the host (§3, §6.3).
 SCOPE_ARGUMENTS = frozenset(
@@ -194,6 +196,7 @@ class BrokerContext:
     run_files: Any = None
     contract_version: str = "1"
     session_id: str | None = None
+    chain_depth: int = 0
 
 
 @dataclass
@@ -328,6 +331,8 @@ class FunctionBroker:
             "3",
             "4",
             "5",
+            "6",
+            "7",
         }:
             raise BrokerError(ERR_UNKNOWN_TOOL, "Unknown tool.")
 
@@ -424,8 +429,15 @@ class FunctionBroker:
                 ):
                     result = attach_run_file(self._service, ctx.run_files, **call_args)
             else:
+                from backend.core.events.causation import function_mutation_context
+
                 try:
-                    result = getattr(self._service, spec.method)(**call_args)
+                    with function_mutation_context(
+                        function_origin(ctx.function_id, ctx.function_version),
+                        ctx.correlation_id,
+                        ctx.chain_depth,
+                    ):
+                        result = getattr(self._service, spec.method)(**call_args)
                 except Exception:
                     # Never forward internal exception text to function code.
                     logger.exception(

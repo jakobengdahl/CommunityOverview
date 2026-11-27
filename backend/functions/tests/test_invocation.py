@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "6"),
+        ("contract_version", "8"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -905,3 +905,135 @@ def test_schedule_reconciles_failed_run_after_restart(host, tmp_path, monkeypatc
     assert recovered.attempts == 2
     assert execute.call_count == 2
     scheduler.stop()
+
+
+def test_graph_trigger_version_and_envelope(host):
+    service, execute, manifest, directory = host
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["metadata.status"],
+    }
+    manifest["grants"].append("graph:read")
+    service.enabled["example"].append("graph:read")
+    manifest.update(contract_version="5", triggers=[trigger])
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        invocation.load_manifest(service.root, "example")
+    manifest["contract_version"] = "6"
+    (directory / "function.json").write_text(json.dumps(manifest))
+    entity = {
+        "kind": "node",
+        "id": "n",
+        "type": "Task",
+        "data": {"before": {"x": 1}, "after": {"x": 2}, "patch": {"x": 2}},
+    }
+    result = service.invoke(
+        "example",
+        {},
+        trigger="graph_change",
+        actor_binding={"actor_id": "system", "graph_id": "g"},
+        correlation_id="corr",
+        chain_depth=1,
+        entity=entity,
+    )
+    assert result.state == ExecutionState.SUCCEEDED
+    envelope = execute.call_args.args[3]
+    assert envelope["entity"] == entity
+    assert envelope["invocation"]["chain_depth"] == 1
+    assert envelope["origin"]["event_correlation_id"] == "corr"
+
+
+@pytest.mark.parametrize("batching", [False, True])
+def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path, batching):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+    from backend.core.events.causation import (
+        agent_mutation_context,
+        current_agent_mutation_context,
+    )
+    from backend.functions.schedule_slots import ScheduleSlots
+    from backend.functions.scheduler import FunctionScheduler
+
+    service, execute, manifest, directory = host
+    manifest["grants"].append("graph:read")
+    service.enabled["example"].append("graph:read")
+    manifest.update(
+        contract_version="7" if batching else "6",
+        triggers=[
+            {
+                "kind": "graph_change",
+                "node_types": ["Task"],
+                "fields": ["name"],
+                **({"debounce_seconds": 5, "batch_size": 1} if batching else {}),
+            }
+        ],
+        retry={"max_attempts": 2, "base_seconds": 0, "factor": 1, "max_seconds": 0},
+    )
+    (directory / "function.json").write_text(json.dumps(manifest))
+    scheduler = FunctionScheduler(
+        service, ScheduleSlots(tmp_path / "graph-slots.db"), {"example": "g"}
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(
+            event_origin="function:example@1.0.0",
+            event_correlation_id="corr",
+            event_causation_depth=2,
+        ),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={"name": "a", "metadata": {"origin_graph_id": "g"}},
+            after={"name": "b", "metadata": {"origin_graph_id": "g"}},
+        ),
+    )
+    # The agent observes the function's write and emits the next graph event.
+    with agent_mutation_context("example-agent", event.to_webhook_payload()):
+        event.origin = current_agent_mutation_context().model_copy()
+    assert event.origin.event_causation_depth == 3
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
+    records = service.store.list_jobs(agent_id="example", kind=ExecutionKind.FUNCTION)
+    assert (
+        len(records) == 1
+        and records[0].result["error"]["code"] == "chain_depth_exceeded"
+    )
+    assert (
+        records[0].correlation_id == "corr" and records[0].payload["chain_depth"] == 4
+    )
+    if batching:
+        assert records[0].payload["correlation_ids"] == ["corr"]
+    execute.assert_not_called()
+    event.event_id = "new-event"
+    event.origin.event_causation_depth = 0
+    execute.side_effect = [
+        FunctionRunResult("failed", code="function_error", wall_ms=1),
+        FunctionRunResult("succeeded", output={"done": True}, wall_ms=1),
+    ]
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
+    scheduler.tick(invocation.utcnow())
+    assert execute.call_count == 2
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
+    assert execute.call_count == 2
+    scheduler.stop()
+
+
+def test_graph_change_requires_read_grant(host):
+    service, _, manifest, directory = host
+    manifest.update(
+        contract_version="6",
+        grants=[],
+        triggers=[{"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}],
+    )
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        invocation.load_manifest(service.root, "example")
