@@ -128,6 +128,10 @@ class FunctionScheduler:
                         graph_id=bound_graph,
                         node_types=sorted(types),
                         matched_triggers=[_trigger_fingerprint(t) for t in matching],
+                        projection={
+                            "fields": sorted(fields),
+                            "sensitive": sorted(sensitive),
+                        },
                         batching=matching[0]
                         if "debounce_seconds" in matching[0]
                         else None,
@@ -141,6 +145,7 @@ class FunctionScheduler:
 
     def tick(self, now):
         self.slots.reconcile(self.service)
+        self.slots.purge_graph_deliveries(now)
         # Epoch-aligned slots make discovery deterministic across restarts. Only
         # the latest slot is generated, regardless of the length of downtime.
         for function_id, graph_id in self.graph_bindings.items():
@@ -187,6 +192,7 @@ class FunctionScheduler:
         from backend.functions.graph_change import (
             filtered_entity,
             matches,
+            projection_covers,
             valid_trigger,
         )
 
@@ -220,7 +226,10 @@ class FunctionScheduler:
                 and (
                     _trigger_fingerprint(trigger)
                     in job.payload.get("matched_triggers", [])
-                    or matches(trigger, event)
+                    or (
+                        projection_covers(trigger, job.payload.get("projection"))
+                        and matches(trigger, event)
+                    )
                 )
             ]
             if not matching:
