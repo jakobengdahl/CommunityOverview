@@ -89,8 +89,15 @@ class _LedgerStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS graph_batch_members "
                 "(function_id TEXT NOT NULL, event_id TEXT NOT NULL, job_id TEXT NOT NULL, "
-                "PRIMARY KEY (function_id, event_id))"
+                "refusal_reason TEXT, PRIMARY KEY (function_id, event_id))"
             )
+            if "refusal_reason" not in {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(graph_batch_members)")
+            }:
+                self._conn.execute(
+                    "ALTER TABLE graph_batch_members ADD COLUMN refusal_reason TEXT"
+                )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -226,14 +233,15 @@ class ScheduleSlots:
                 "matched_triggers": matched_triggers or [],
             },
         )
-        return self._enqueue_graph(job, payload["event_id"], batching, now)
+        return self._enqueue_graph(job, payload["event_id"], batching)
 
-    def _enqueue_graph(self, job, event_id, batching, now):
+    def _enqueue_graph(self, job, event_id, batching):
         store = self._store
         with store._lock:
             conn = store._conn
             conn.execute("BEGIN IMMEDIATE")
             try:
+                now = datetime.now(timezone.utc)
                 member = conn.execute(
                     "SELECT job_id FROM graph_batch_members WHERE function_id = ? AND event_id = ?",
                     (job.agent_id, event_id),
@@ -249,7 +257,7 @@ class ScheduleSlots:
                 if old:
                     existing = SqliteExecutionStore._row_to_job(old)
                     conn.execute(
-                        "INSERT INTO graph_batch_members VALUES (?, ?, ?)",
+                        "INSERT INTO graph_batch_members (function_id, event_id, job_id) VALUES (?, ?, ?)",
                         (job.agent_id, event_id, existing.id),
                     )
                     conn.commit()
@@ -272,6 +280,8 @@ class ScheduleSlots:
                             == job.payload["graph_id"]
                             and json.loads(row["payload"]).get("retry_policy")
                             == job.payload["retry_policy"]
+                            and len(json.loads(row["payload"]).get("entries", []))
+                            < batching["batch_size"]
                         ),
                         None,
                     )
@@ -321,7 +331,7 @@ class ScheduleSlots:
                         ).fetchone()
                     )
                 conn.execute(
-                    "INSERT INTO graph_batch_members VALUES (?, ?, ?)",
+                    "INSERT INTO graph_batch_members (function_id, event_id, job_id) VALUES (?, ?, ?)",
                     (job.agent_id, event_id, job.id),
                 )
                 conn.commit()
@@ -561,7 +571,18 @@ class ScheduleSlots:
                 from types import SimpleNamespace
 
                 entries = []
+                with self._store._lock:
+                    refused = {
+                        row[0]
+                        for row in self._store._conn.execute(
+                            "SELECT event_id FROM graph_batch_members WHERE job_id = ? AND refusal_reason IS NOT NULL",
+                            (job.id,),
+                        )
+                    }
+                newly_refused = []
                 for entry in job.payload["entries"]:
+                    if entry["event_id"] in refused:
+                        continue
                     member_payload = {
                         **job.payload,
                         "entity": entry["entity"],
@@ -584,6 +605,15 @@ class ScheduleSlots:
                                 "entity": filtered,
                             }
                         )
+                    else:
+                        newly_refused.append(entry["event_id"])
+                if newly_refused:
+                    with self._store._lock:
+                        self._store._conn.executemany(
+                            "UPDATE graph_batch_members SET refusal_reason = 'trigger_changed' WHERE job_id = ? AND event_id = ?",
+                            [(job.id, event_id) for event_id in newly_refused],
+                        )
+                        self._store._conn.commit()
                 entity = {"events": entries} if entries else None
             else:
                 entity = graph_event_filter(job) if graph_event_filter else None
