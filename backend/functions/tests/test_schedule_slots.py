@@ -2,6 +2,7 @@
 """Persistent schedule slot identity and bounded execution-store lifecycle."""
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -113,7 +114,11 @@ def test_expired_lease_is_not_reclaimed_after_restart(tmp_path):
         slots.close()
 
 
-def test_rejects_invalid_inputs(tmp_path):
+@pytest.mark.parametrize(
+    "field", ["max_attempts", "base_seconds", "factor", "max_seconds"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_rejects_invalid_inputs(tmp_path, field, value):
     for path in ("", ":memory:"):
         with pytest.raises(ValueError):
             ScheduleSlots(path)
@@ -121,6 +126,20 @@ def test_rejects_invalid_inputs(tmp_path):
     try:
         with pytest.raises(ValueError):
             slots.enqueue("example", datetime(2026, 1, 1))
+        policy = RetryPolicy(**{field: value})
+        with pytest.raises(ValueError, match="Invalid retry policy"):
+            slots.enqueue("example", TIMEPOINT, retry_policy=policy)
+        job = slots.enqueue("example", TIMEPOINT)
+        slots.claim_next("worker", now=TIMEPOINT, lease_seconds=10)
+        # Rows written before validation must not remain running on failure.
+        slots._store._conn.execute(
+            "UPDATE schedule_jobs SET payload = ? WHERE id = ?",
+            (json.dumps({"retry_policy": policy.to_dict()}), job.id),
+        )
+        slots._store._conn.commit()
+        failed = slots.fail(job.id, attempt=1, now=TIMEPOINT)
+        assert failed.state == ExecutionState.DEAD_LETTER
+        assert failed.dead_letter_reason == "invalid retry policy"
     finally:
         slots.close()
 

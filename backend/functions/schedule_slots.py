@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -23,6 +24,13 @@ from backend.agents.execution import (
     SqliteExecutionStore,
 )
 from backend.agents.execution.store import JobNotFoundError
+
+
+def _valid_retry_policy(policy: RetryPolicy) -> bool:
+    return type(policy.max_attempts) is int and all(
+        math.isfinite(value)
+        for value in (policy.base_seconds, policy.factor, policy.max_seconds)
+    )
 
 
 class _LedgerStore:
@@ -114,7 +122,10 @@ class ScheduleSlots:
             raise ValueError("Invalid function id")
         if not isinstance(fire_time, datetime) or fire_time.utcoffset() is None:
             raise ValueError("Fire time must be timezone-aware")
-        if retry_policy is not None and not isinstance(retry_policy, RetryPolicy):
+        if retry_policy is not None and (
+            not isinstance(retry_policy, RetryPolicy)
+            or not _valid_retry_policy(retry_policy)
+        ):
             raise ValueError("Invalid retry policy")
         fire_time = fire_time.astimezone(timezone.utc)
         identity = json.dumps(
@@ -247,16 +258,27 @@ class ScheduleSlots:
                     conn.commit()
                     return job
                 # Old ledger rows have no declared retry and therefore fail closed.
-                policy = (
-                    RetryPolicy.from_dict(job.payload["retry_policy"])
-                    if "retry_policy" in job.payload
-                    else RetryPolicy(max_attempts=1)
-                )
+                try:
+                    policy = (
+                        RetryPolicy.from_dict(job.payload["retry_policy"])
+                        if "retry_policy" in job.payload
+                        else RetryPolicy(max_attempts=1)
+                    )
+                    if not _valid_retry_policy(policy):
+                        raise ValueError("Invalid retry policy")
+                except (ValueError, TypeError, OverflowError):
+                    policy = None
                 if success:
                     state, run_at, reason = (
                         ExecutionState.SUCCEEDED,
                         job.run_at.timestamp(),
                         None,
+                    )
+                elif policy is None:
+                    state, run_at, reason = (
+                        ExecutionState.DEAD_LETTER,
+                        job.run_at.timestamp(),
+                        "invalid retry policy",
                     )
                 elif job.attempts >= policy.max_attempts:
                     state, run_at, reason = (
