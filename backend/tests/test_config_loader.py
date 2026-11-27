@@ -60,7 +60,9 @@ class TestConfigLoader:
             assert loaded["icon"] == type_config["icon"]
 
     @pytest.mark.parametrize("enabled", [False, True])
-    def test_system_node_types_in_config_are_stripped_not_doubled(self, tmp_path, enabled):
+    def test_system_node_types_in_config_are_stripped_not_doubled(
+        self, tmp_path, enabled
+    ):
         """System node types defined in a config file must not produce duplicates."""
         import json
         from backend.config import config_loader
@@ -93,8 +95,8 @@ class TestConfigLoader:
                         "description": "A domain type",
                         "color": "#123456",
                     },
-                }
-            }
+                },
+            },
         }
         config_file = tmp_path / "schema_config.json"
         config_file.write_text(json.dumps(config_with_system_types), encoding="utf-8")

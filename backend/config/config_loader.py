@@ -130,10 +130,12 @@ SYSTEM_NODE_TYPES = {
 class NodeTypeConfig(BaseModel):
     """Configuration for a single node type."""
 
+    # Preserve profile-specific schema metadata, including legacy subtypes.
+    model_config = ConfigDict(extra="allow")
+
     fields: List[str] = Field(
         default_factory=lambda: ["name", "description", "summary"]
     )
-    subtypes: Any = Field(default_factory=list)
     static: bool = False
     category: str = "domain"  # "domain" = configurable, "system" = foundational
     description: str = ""

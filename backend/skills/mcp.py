@@ -121,6 +121,7 @@ class GraphSemanticsProvider:
                 "prompt_prefix": self.presentation["prompt_prefix"],
             }
         )
+
         # Only normalize fields whose order has set semantics. Other lists,
         # including nested vocabulary values and UI settings, retain their order.
         def sort_field(obj, key):
