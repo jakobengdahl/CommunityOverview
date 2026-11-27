@@ -461,11 +461,20 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
                     }
                 )
                 manager._resources = resources
-            extension.entries, extension.files = updated.entries, updated.files
-            extension.owners, extension.skill_hints = (
-                updated.owners,
-                updated.skill_hints,
+            same_owners = extension.owners.keys() == updated.owners.keys() and all(
+                provider is updated.owners[uri][0] and name == updated.owners[uri][1]
+                for uri, (provider, name) in extension.owners.items()
             )
+            if (
+                old != new
+                or not same_owners
+                or extension.skill_hints != updated.skill_hints
+            ):
+                extension.entries, extension.files = updated.entries, updated.files
+                extension.owners, extension.skill_hints = (
+                    updated.owners,
+                    updated.skill_hints,
+                )
             if old != new:
                 await publisher.publish()
             result = await extension.list_skills(ctx.request_context, ListSkillParams())

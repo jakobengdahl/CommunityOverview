@@ -694,6 +694,53 @@ def test_refresh_and_fallback_share_authorized_snapshot():
         ).text == "second"
         assert (await refresh(ctx))["skills"][0]["version"] == version
         assert len(events) == 1
+
+        # An unchanged refresh must not invalidate reads awaiting authorization.
+        started, resume = anyio.Event(), anyio.Event()
+        waiting = 0
+        original_check = provider.can_read
+
+        async def delayed_check(read_ctx, name):
+            nonlocal waiting
+            if read_ctx is not request:
+                waiting += 1
+                if waiting == 4:
+                    started.set()
+                await resume.wait()
+            return await original_check(request, name)
+
+        provider.can_read = delayed_check
+        read_request = SimpleNamespace(
+            protocol_version="2026-07-28", method="resources/read", params={"uri": uri}
+        )
+        read_ctx = SimpleNamespace(request_context=read_request)
+        results = []
+
+        async def call_next(_ctx):
+            resource = await server._resource_manager.get_resource(uri, None)
+            return {"text": resource.text}
+
+        async def read(operation):
+            results.append(await operation())
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                read, lambda: ext.list_skills(read_request, SimpleNamespace(cursor=None))
+            )
+            tasks.start_soon(
+                read, lambda: ext.get_skill(read_request, SimpleNamespace(uri=uri))
+            )
+            tasks.start_soon(read, lambda: get(uri, read_ctx, "ref.md"))
+            tasks.start_soon(read, lambda: ext.resource_access(read_request, call_next))
+            await started.wait()
+            assert (await refresh(ctx))["skills"][0]["version"] == version
+            resume.set()
+        provider.can_read = original_check
+        assert len(results) == 4 and len(events) == len(other_events) == 1
+        assert any(
+            result.get("file", {}).get("text") == "second" for result in results
+        )
+
         assert (await get(uri, ctx, "missing"))["error_code"] == "not_found"
         hook.read = False
         hidden = await listing(ctx)
