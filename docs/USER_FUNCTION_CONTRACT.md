@@ -744,8 +744,11 @@ The invocation `entity` is `{"events": [{"event_id": "...",
 version 6 projected shape, except sensitive changed-field names are omitted.
 Only declared values are persisted, and no batch summary contains sensitive
 paths. The run record includes all member correlation IDs in `correlation_ids`.
-Each event belongs to at most one durable batch per function; the batch has one
-stable delivery identity independent of run history. The existing retry and
+While its batch is retained, each event belongs to at most one durable batch per
+function; the batch has one stable delivery identity independent of run history.
+Batches follow the version 6 retention rule: a finished batch is deleted with its
+member event identities 30 days after it finished, after which a re-seen event
+may join a new batch; pending, running and uncertain batches are kept. The existing retry and
 rate-limit rules apply to the batch. Self-origin events are excluded before
 batching; its chain depth is the maximum derived member depth and the normal
 admission limit applies. Triggers without these fields retain version 6 behavior.

@@ -779,10 +779,11 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         slots.close()
 
 
+@pytest.mark.parametrize("batching", [None, {"debounce_seconds": 1, "batch_size": 1}])
 def test_graph_retention_purges_only_finished_deliveries_and_their_identity(
-    tmp_path,
+    tmp_path, batching
 ):
-    """Finished graph deliveries and their event identities age out; pending ones stay."""
+    """Finished graph deliveries and batches, with their event identities, age out; pending ones stay."""
     from backend.core.events.models import (
         Event,
         EventContext,
@@ -801,7 +802,10 @@ def test_graph_retention_purges_only_finished_deliveries_and_their_identity(
         for node_id in ("done", "retry")
     ]
     policy = RetryPolicy(max_attempts=2, base_seconds=3600)
-    done, retry = (slots.enqueue_event("example", e, {}, policy) for e in events)
+    done, retry = (
+        slots.enqueue_event("example", e, {}, policy, batching=batching) for e in events
+    )
+    assert done.id != retry.id
     now = datetime.now(timezone.utc) + timedelta(seconds=1)
     for _ in range(2):
         job = slots.claim_next("w", now=now, lease_seconds=10)
@@ -811,7 +815,10 @@ def test_graph_retention_purges_only_finished_deliveries_and_their_identity(
     assert slots.purge_graph_deliveries(later) == 1
     assert slots._store._get_by_id(done.id) is None
     assert slots._store._get_by_id(retry.id).state == ExecutionState.PENDING
+    members = slots._store._conn.execute("SELECT job_id FROM graph_batch_members")
+    assert [row[0] for row in members] == [retry.id]
     # The purge is throttled, and an aged-out identity no longer deduplicates.
-    assert slots.enqueue_event("example", events[0], {}).id != done.id
+    again = slots.enqueue_event("example", events[0], {}, batching=batching)
+    assert again.id not in (done.id, retry.id)
     assert slots.purge_graph_deliveries(later + timedelta(days=1)) == 0
     slots.close()
