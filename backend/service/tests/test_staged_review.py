@@ -116,7 +116,9 @@ def test_review_does_not_attribute_a_later_direct_edit_to_a_function(world):
     origin = {"function_id": "fn", "function_version": "1", "run_id": "r1"}
     with bind_function_origin(origin):
         _stage(
-            world, sid, ("update_node", ("a",), {"updates": {"description": "function"}})
+            world,
+            sid,
+            ("update_node", ("a",), {"updates": {"description": "function"}}),
         )
     _stage(world, sid, ("update_node", ("a",), {"updates": {"name": "Human"}}))
 
