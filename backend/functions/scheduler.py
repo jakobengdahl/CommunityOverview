@@ -68,9 +68,20 @@ class FunctionScheduler:
                             + list(t.get("after", {}))
                         )
                     }
-                    projected = filtered_entity(
-                        entity, fields, self.sensitive_fields.get(entity["type"], [])
+                    types = {entity["type"]}
+                    types.update(
+                        snapshot_type
+                        for snapshot in (data["before"], data["after"])
+                        if isinstance(snapshot, dict)
+                        for snapshot_type in (snapshot.get("type"),)
+                        if isinstance(snapshot_type, str)
                     )
+                    sensitive = {
+                        path
+                        for node_type in types
+                        for path in self.sensitive_fields.get(node_type, [])
+                    }
+                    projected = filtered_entity(entity, fields, sensitive)
                     retry = manifest.get("retry")
                     self.slots.enqueue_event(
                         function_id,

@@ -294,8 +294,9 @@ def test_graph_scope_and_sensitive_entity(
     scheduler.stop()
 
 
+@pytest.mark.parametrize("sensitive_type", ["Task", "Legacy"])
 def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, sensitive_type
 ):
     from backend.core.events.models import (
         Event,
@@ -326,7 +327,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
         service,
         slots,
         {"example": "g"},
-        sensitive_fields={"Task": ["metadata.private"]},
+        sensitive_fields={sensitive_type: ["metadata.private"]},
     )
     event = Event(
         event_type=EventType.NODE_UPDATE,
@@ -336,6 +337,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
             id="n",
             type="Task",
             before={
+                "type": "Legacy",
                 "name": "old",
                 "metadata": {
                     "origin_graph_id": "g",
@@ -345,6 +347,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
                 "other": "unlisted",
             },
             after={
+                "type": "Task",
                 "name": "new",
                 "metadata": {
                     "origin_graph_id": "g",
@@ -374,6 +377,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
         "metadata.url",
         "name",
         "other",
+        "type",
     ]
     scheduler.stop()
 
