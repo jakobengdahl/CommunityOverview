@@ -198,7 +198,11 @@ def _valid_triggers(manifest):
         if isinstance(item, dict) and item.get("kind") == "graph_change":
             from backend.functions.graph_change import valid_trigger
 
-            return manifest.get("contract_version") == "6" and valid_trigger(item)
+            return (
+                manifest.get("contract_version") == "6"
+                and "graph:read" in manifest.get("grants", [])
+                and valid_trigger(item)
+            )
         return (
             manifest.get("contract_version") in {"5", "6"}
             and isinstance(item, dict)

@@ -700,10 +700,12 @@ nonempty lists. Fields and predicate keys are dot-separated paths into the
 node snapshots. At least one listed field must change, and all optional
 `before` and `after` equality predicates must match. A missing path is distinct
 from null. Creates and deletes match when a listed field changes between absent
-and present; edge events do not match. The trigger requires a graph target.
+and present; edge events do not match. The trigger requires a graph target and the `graph:read` grant. Fields and
+predicate paths may not overlap a schema-sensitive path, including its parents
+and descendants; triggers are checked against the current schema at delivery.
 
 The invocation entity carries the entity kind, id, type and `changed_fields`
-(dot-separated names of changed paths). Its `data.before`, `data.after` and
+(dot-separated names of changed paths, stopping at sensitive paths). Its `data.before`, `data.after` and
 `data.patch` contain only paths declared in the matching triggers' `fields` or
 predicate keys. Values are preserved, except that paths listed in the node type's
 schema `sensitive_fields` are omitted, including from declared parent objects.
@@ -712,7 +714,8 @@ The projection is applied before persistence. Both present snapshots must have
 an origin graph tag matching the bound graph; untagged snapshots are excluded.
 Self-originated writes are excluded across all
 versions of the same function. A function-origin event forwards its correlation
-id and increases the causing run's depth by one; other events start at depth zero.
+id and increases the causing run's depth by one. Agent-origin events also
+increase the causing event's depth by one; other events start at depth zero.
 Admission records refusals above the configured depth limit. One event has one
 durable delivery identity per function, retained independently of run history.
 Graph events use the same retry policy, rate budget and delivery ledger as

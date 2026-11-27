@@ -1,7 +1,7 @@
 """Validation and matching for declarative node transition triggers."""
 
 
-def valid_trigger(trigger):
+def valid_trigger(trigger, sensitive_fields=()):
     if not isinstance(trigger, dict) or set(trigger) - {
         "kind",
         "node_types",
@@ -28,14 +28,28 @@ def valid_trigger(trigger):
         )
     ):
         return False
-    return all(
+    if not all(
         isinstance(trigger.get(side, {}), dict)
         and all(
             isinstance(k, str) and k and all(k.split("."))
             for k in trigger.get(side, {})
         )
         for side in ("before", "after")
-    )
+    ):
+        return False
+    paths = fields + [
+        key for side in ("before", "after") for key in trigger.get(side, {})
+    ]
+    for path in paths:
+        parts = tuple(path.split("."))
+        for secret in sensitive_fields:
+            secret_parts = tuple(secret.split("."))
+            if (
+                parts[: len(secret_parts)] == secret_parts
+                or secret_parts[: len(parts)] == parts
+            ):
+                return False
+    return True
 
 
 _MISSING = object()
@@ -131,6 +145,8 @@ def filtered_entity(entity, fields, sensitive_fields):
         return result
 
     def changes(before, after, prefix=()):
+        if any(prefix[: len(secret)] == secret for secret in sensitive):
+            return [] if _json_equal(before, after) else [".".join(prefix)]
         if isinstance(before, dict) or isinstance(after, dict):
             left = before if isinstance(before, dict) else {}
             right = after if isinstance(after, dict) else {}

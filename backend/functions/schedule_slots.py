@@ -200,7 +200,7 @@ class ScheduleSlots:
         identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
         key = "function-graph:" + hashlib.sha256(identity.encode()).hexdigest()
         origin = payload["origin"]
-        caused = (origin.get("event_origin") or "").startswith("function:")
+        caused = (origin.get("event_origin") or "").startswith(("function:", "agent:"))
         depth = origin.get("event_causation_depth", 0) + 1 if caused else 0
         policy = retry_policy or RetryPolicy(max_attempts=1)
         return self._store.enqueue(

@@ -40,7 +40,11 @@ class FunctionScheduler:
 
     def on_graph_event(self, event):
         from backend.agents.execution import RetryPolicy
-        from backend.functions.graph_change import filtered_entity, matches
+        from backend.functions.graph_change import (
+            filtered_entity,
+            matches,
+            valid_trigger,
+        )
 
         origin = event.origin.event_origin or ""
         # External refreshes can combine multiple writes and carry no reliable
@@ -65,10 +69,35 @@ class FunctionScheduler:
                 continue
             try:
                 manifest, _ = load_manifest(self.service.root, function_id)
+                types = {entity["type"]}
+                types.update(
+                    snapshot.get("type")
+                    for snapshot in (data["before"], data["after"])
+                    if isinstance(snapshot, dict)
+                    and isinstance(snapshot.get("type"), str)
+                )
+                schema = (
+                    self.sensitive_fields()
+                    if callable(self.sensitive_fields)
+                    else self.sensitive_fields
+                )
+                sensitive = {
+                    path for node_type in types for path in schema.get(node_type, [])
+                }
                 matching = [
                     t
                     for t in manifest["triggers"]
-                    if t["kind"] == "graph_change" and matches(t, event)
+                    if t["kind"] == "graph_change"
+                    and valid_trigger(
+                        t,
+                        sensitive
+                        | {
+                            path
+                            for node_type in t.get("node_types", [])
+                            for path in schema.get(node_type, [])
+                        },
+                    )
+                    and matches(t, event)
                 ]
                 if matching:
                     fields = {
@@ -79,24 +108,6 @@ class FunctionScheduler:
                             + list(t.get("before", {}))
                             + list(t.get("after", {}))
                         )
-                    }
-                    types = {entity["type"]}
-                    types.update(
-                        snapshot_type
-                        for snapshot in (data["before"], data["after"])
-                        if isinstance(snapshot, dict)
-                        for snapshot_type in (snapshot.get("type"),)
-                        if isinstance(snapshot_type, str)
-                    )
-                    schema = (
-                        self.sensitive_fields()
-                        if callable(self.sensitive_fields)
-                        else self.sensitive_fields
-                    )
-                    sensitive = {
-                        path
-                        for node_type in types
-                        for path in schema.get(node_type, [])
                     }
                     projected = filtered_entity(entity, fields, sensitive)
                     retry = manifest.get("retry")
@@ -161,16 +172,39 @@ class FunctionScheduler:
 
     def _filter_graph_event(self, job):
         from types import SimpleNamespace
-        from backend.functions.graph_change import filtered_entity, matches
+        from backend.functions.graph_change import (
+            filtered_entity,
+            matches,
+            valid_trigger,
+        )
 
         entity = job.payload["entity"]
         event = SimpleNamespace(to_webhook_payload=lambda: {"entity": entity})
         try:
             manifest, _ = load_manifest(self.service.root, job.agent_id)
+            schema = (
+                self.sensitive_fields()
+                if callable(self.sensitive_fields)
+                else self.sensitive_fields
+            )
+            sensitive = {
+                field
+                for node_type in (job.payload.get("node_types") or [entity["type"]])
+                for field in schema.get(node_type, [])
+            }
             matching = [
                 trigger
                 for trigger in manifest["triggers"]
                 if trigger["kind"] == "graph_change"
+                and valid_trigger(
+                    trigger,
+                    sensitive
+                    | {
+                        path
+                        for node_type in trigger.get("node_types", [])
+                        for path in schema.get(node_type, [])
+                    },
+                )
                 and (
                     _trigger_fingerprint(trigger)
                     in job.payload.get("matched_triggers", [])
@@ -188,18 +222,21 @@ class FunctionScheduler:
                     + list(trigger.get("after", {}))
                 )
             }
-            schema = (
-                self.sensitive_fields()
-                if callable(self.sensitive_fields)
-                else self.sensitive_fields
-            )
-            sensitive = {
-                field
-                for node_type in (job.payload.get("node_types") or [entity["type"]])
-                for field in schema.get(node_type, [])
-            }
             projected = filtered_entity(entity, fields, sensitive)
-            projected["changed_fields"] = entity["changed_fields"]
+            projected["changed_fields"] = sorted(
+                {
+                    min(
+                        (
+                            secret
+                            for secret in sensitive
+                            if path == secret or path.startswith(secret + ".")
+                        ),
+                        default=path,
+                        key=len,
+                    )
+                    for path in entity["changed_fields"]
+                }
+            )
             return projected
         except (OSError, ValueError, TypeError, KeyError):
             logger.warning(

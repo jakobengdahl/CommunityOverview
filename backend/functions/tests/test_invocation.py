@@ -914,6 +914,8 @@ def test_graph_trigger_version_and_envelope(host):
         "node_types": ["Task"],
         "fields": ["metadata.status"],
     }
+    manifest["grants"].append("graph:read")
+    service.enabled["example"].append("graph:read")
     manifest.update(contract_version="5", triggers=[trigger])
     (directory / "function.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError):
@@ -950,10 +952,16 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
         EntityKind,
         EventType,
     )
+    from backend.core.events.causation import (
+        agent_mutation_context,
+        current_agent_mutation_context,
+    )
     from backend.functions.schedule_slots import ScheduleSlots
     from backend.functions.scheduler import FunctionScheduler
 
     service, execute, manifest, directory = host
+    manifest["grants"].append("graph:read")
+    service.enabled["example"].append("graph:read")
     manifest.update(
         contract_version="6",
         triggers=[{"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}],
@@ -966,9 +974,9 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
     event = Event(
         event_type=EventType.NODE_UPDATE,
         origin=EventContext(
-            event_origin="function:other@1.0.0",
+            event_origin="function:example@1.0.0",
             event_correlation_id="corr",
-            event_causation_depth=3,
+            event_causation_depth=2,
         ),
         entity=EntityData(
             kind=EntityKind.NODE,
@@ -978,6 +986,10 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
             after={"name": "b", "metadata": {"origin_graph_id": "g"}},
         ),
     )
+    # The agent observes the function's write and emits the next graph event.
+    with agent_mutation_context("example-agent", event.to_webhook_payload()):
+        event.origin = current_agent_mutation_context().model_copy()
+    assert event.origin.event_causation_depth == 3
     scheduler.on_graph_event(event)
     scheduler.tick(invocation.utcnow())
     records = service.store.list_jobs(agent_id="example", kind=ExecutionKind.FUNCTION)
@@ -1003,3 +1015,15 @@ def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
     scheduler.tick(invocation.utcnow())
     assert execute.call_count == 2
     scheduler.stop()
+
+
+def test_graph_change_requires_read_grant(host):
+    service, _, manifest, directory = host
+    manifest.update(
+        contract_version="6",
+        grants=[],
+        triggers=[{"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}],
+    )
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        invocation.load_manifest(service.root, "example")

@@ -311,7 +311,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
     trigger = {
         "kind": "graph_change",
         "node_types": ["Task"],
-        "fields": ["metadata", "metadata.private"],
+        "fields": ["metadata.url"],
         "before": {"name": "old"},
     }
     monkeypatch.setattr(
@@ -371,7 +371,7 @@ def test_graph_entity_projects_declared_fields_and_excludes_schema_sensitive(
     entity = service.invoke.call_args.kwargs["entity"]
     assert entity["data"]["before"] == {
         "name": "old",
-        "metadata": {"origin_graph_id": "g", "url": "https://example.test"},
+        "metadata": {"url": "https://example.test"},
     }
     assert entity["data"]["patch"] == {"metadata": {"url": "https://example.test/new"}}
     assert entity["changed_fields"] == [
@@ -531,7 +531,7 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
     event2 = event.model_copy(deep=True)
     event2.event_id = "second"
     scheduler.on_graph_event(event2)
-    trigger["fields"] = ["name", "metadata.secret"]
+    trigger["fields"] = ["name"]
     schema["Task"] = ["metadata.secret"]
     scheduler.tick(datetime.now(timezone.utc))
     entity = service.invoke.call_args.kwargs["entity"]
@@ -551,7 +551,7 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
         "SELECT state, dead_letter_reason FROM schedule_jobs WHERE dead_letter_reason = 'trigger_changed'"
     ).fetchone()
     assert row["state"] == ExecutionState.CANCELLED.value
-    # Matching must survive removal of the very values used by the trigger.
+    # Sensitive trigger paths are rejected before matching and persistence.
     trigger["fields"] = ["metadata.secret"]
     trigger["before"] = {"metadata.secret": "a"}
     trigger["after"] = {"metadata.secret": "b"}
@@ -570,10 +570,39 @@ def test_dispatch_rechecks_manifest_and_current_sensitive_fields(tmp_path, monke
         sensitive_fields=schema,
     )
     scheduler.tick(datetime.now(timezone.utc))
-    assert service.invoke.call_count == 3
-    assert service.invoke.call_args.kwargs["entity"]["data"] == {
-        "before": {},
-        "after": {},
-        "patch": {},
-    }
+    assert service.invoke.call_count == 2
     scheduler.stop()
+
+
+@pytest.mark.parametrize("location", ["fields", "before", "after"])
+@pytest.mark.parametrize(
+    "path", ["metadata.private", "metadata.private.guess", "metadata"]
+)
+def test_sensitive_trigger_paths_are_rejected(location, path):
+    from backend.functions.graph_change import valid_trigger
+
+    trigger = {"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}
+    if location == "fields":
+        trigger[location] = [path]
+    else:
+        trigger[location] = {path: "guess"}
+    assert not valid_trigger(trigger, {"metadata.private"})
+    if path != "metadata":
+        assert valid_trigger(trigger, {"metadata.other"})
+
+
+def test_changed_fields_stops_at_sensitive_dictionary():
+    from backend.functions.graph_change import filtered_entity
+
+    entity = {
+        "kind": "node",
+        "id": "n",
+        "type": "Task",
+        "data": {
+            "before": {"metadata": {"private": {"old-key": 1}}},
+            "after": {"metadata": {"private": {"new-key": 2}}},
+            "patch": {},
+        },
+    }
+    projected = filtered_entity(entity, ["name"], {"metadata.private"})
+    assert projected["changed_fields"] == ["metadata.private"]
