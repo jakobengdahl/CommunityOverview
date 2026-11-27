@@ -350,9 +350,15 @@ def test_invalid_graph_manifest_replays_before_validation(host, version, target)
     assert invoke(service, idempotency_key="delivery").id == rejected.id
     binding = {"actor_id": "operator"}
     assert service.replay_webhook("example", "delivery", binding).id == rejected.id
-    assert service.refuse(
-        "example", "invalid_manifest", actor_binding=binding, idempotency_key="delivery"
-    ).id == rejected.id
+    assert (
+        service.refuse(
+            "example",
+            "invalid_manifest",
+            actor_binding=binding,
+            idempotency_key="delivery",
+        ).id
+        == rejected.id
+    )
     execute.assert_not_called()
 
 
@@ -673,9 +679,12 @@ def test_session_admission_refuses_unauthorized_or_direct_sessions(host):
     with bind_session("session"), pytest.raises(PermissionError):
         invoke(service, idempotency_key="key")
     context = service.graph_service.authorization_hook.evaluate.call_args.args[0]
-    assert (context.action, context.target, context.graph_operation, context.session_id) == (
-        "mutate", "invoke_function", "stage", "session"
-    )
+    assert (
+        context.action,
+        context.target,
+        context.graph_operation,
+        context.session_id,
+    ) == ("mutate", "invoke_function", "stage", "session")
     assert service.store.list_jobs(kind=ExecutionKind.FUNCTION) == []
     execute.assert_not_called()
 
