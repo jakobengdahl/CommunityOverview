@@ -287,6 +287,7 @@ def create_app(
     *,
     authorization_hook: Optional[GraphAuthorizationHook] = None,
     runtime_extensions: Optional[RuntimeExtensions] = None,
+    skill_providers=(),
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -298,6 +299,7 @@ def create_app(
                       already carry runtime_extensions when both are supplied.
         authorization_hook: Graph access decisions for the constructed GraphService.
         runtime_extensions: Fixed collaborators selected before any construction.
+        skill_providers: Additional caller-independent MCP skill snapshots.
 
     Returns:
         Configured FastAPI application with REST API, MCP tools, and static file serving.
@@ -312,10 +314,14 @@ def create_app(
     # Bind only for construction; do not change the process default. Background
     # work retains the explicit instance via storage or AppRuntime.run_function().
     with bind_runtime_extensions(extensions):
-        return _create_app(config, graph_storage, authorization_hook, extensions)
+        return _create_app(
+            config, graph_storage, authorization_hook, extensions, skill_providers
+        )
 
 
-def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
+def _create_app(
+    config, graph_storage, authorization_hook, runtime_extensions, skill_providers
+):
     # The hooks it runs are bound further down, once their services exist.
     # Startup failing before the try skips shutdown, as with on_startup hooks.
     @contextlib.asynccontextmanager
@@ -617,11 +623,35 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         auto_add_registry=auto_add_registry,
     )
 
+    # The catalog is fixed at construction, so its resource bindings match its manifest.
+    from backend.config.config_loader import get_skills_config
+
+    skills_config = get_skills_config().mcp
+    mcp_extensions = []
+    if skills_config.enabled:
+        from backend.skills.mcp import CoreSkillProvider, SkillsExtension
+
+        enabled_tools = set()
+        if (
+            config.mcp_attachment_tools != "off"
+            and graph_service.attachment_settings is not None
+        ):
+            enabled_tools.add("read_node_attachment")
+        mcp_extensions.append(
+            SkillsExtension(
+                [CoreSkillProvider(enabled_tools), *skill_providers],
+                skills_config.ttlMs,
+                # Additional providers may expose content that varies by caller.
+                "private" if skill_providers else skills_config.cacheScope,
+            )
+        )
+
     # Initialize MCPServer with dynamic instructions built from schema configuration
     mcp = MCPServer(
         config.mcp_name,
         instructions=build_mcp_instructions(),
         subscriptions=False,
+        **({"extensions": mcp_extensions} if mcp_extensions else {}),
     )
     tools_map = register_mcp_tools(
         mcp,

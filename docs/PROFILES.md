@@ -338,10 +338,22 @@ version: "1.0"
     "trusted_domains": ["github.com", "raw.githubusercontent.com", "agentskills.io"],
     "cache_ttl_seconds": 3600,
     "max_skill_content_bytes": 50000,
-    "max_skill_body_chars": 8000
+    "max_skill_body_chars": 8000,
+    "mcp": {"enabled": false, "ttlMs": 0, "cacheScope": "private"}
   }
 }
 ```
+
+The optional `skills_config.mcp` section controls the MCP skills extension.
+`enabled` defaults to `false`; when enabled, clients can discover the core
+working-method skill and read its files through MCP resources. `ttlMs` is a
+non-negative freshness hint in milliseconds (default `0`), and `cacheScope` is
+`private` (the default) or `public`. Use `private` whenever content or access
+can vary between callers. Additional providers passed to `create_app` supply
+caller-independent snapshots at startup and force the catalog scope to private.
+These cache hints do not replace authorization or verification of file digests.
+Skills with more than 512 files, more than 16 MiB, or rejected content prevent
+startup; files are sanitized before their digests are calculated.
 
 Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
 
