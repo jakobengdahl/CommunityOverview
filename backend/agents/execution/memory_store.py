@@ -304,6 +304,7 @@ class InMemoryExecutionStore:
                     continue
                 if (
                     job.kind == ExecutionKind.FUNCTION
+                    and job.idempotency_key.startswith("schedule-fn:")
                     and ":function-schedule:" in job.idempotency_key
                     and ":attempt:" in job.idempotency_key
                 ):

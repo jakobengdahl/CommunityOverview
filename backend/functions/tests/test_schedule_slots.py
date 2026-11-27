@@ -361,6 +361,9 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
         ("abandoned", True, ExecutionState.RUNNING),
         ("succeeded", True, ExecutionState.SUCCEEDED),
         ("no_retry", True, ExecutionState.DEAD_LETTER),
+        ("manual", False, ExecutionState.RUNNING),
+        ("manual", True, ExecutionState.RUNNING),
+        ("legacy_schedule", False, ExecutionState.SUCCEEDED),
     ],
 )
 def test_reconcile_retained_and_purged_outcomes(
@@ -387,12 +390,13 @@ def test_reconcile_retained_and_purged_outcomes(
         run = ExecutionJob(
             agent_id="example",
             kind=ExecutionKind.FUNCTION,
-            idempotency_key=f"fn:example:{slot.idempotency_key}:attempt:1",
+            idempotency_key=f"{'fn' if outcome in ('manual', 'legacy_schedule') else 'schedule-fn'}:example:{slot.idempotency_key}:attempt:1",
+            payload={"trigger": "manual" if outcome == "manual" else "schedule"},
             state=(
                 ExecutionState.RUNNING
                 if outcome == "abandoned"
                 else ExecutionState.SUCCEEDED
-                if outcome == "succeeded"
+                if outcome in ("succeeded", "manual", "legacy_schedule")
                 else ExecutionState.DEAD_LETTER
             ),
             updated_at=TIMEPOINT,

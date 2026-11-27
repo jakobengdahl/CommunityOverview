@@ -780,12 +780,21 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_sch
 
     service, execute, manifest, directory = host
     manifest["contract_version"] = "5"
-    manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+    manifest["triggers"] = [
+        {"kind": "schedule", "interval_seconds": 60}, {"kind": "manual"}
+    ]
     (directory / "function.json").write_text(json.dumps(manifest))
     now = datetime.now(timezone.utc)
     slots = ScheduleSlots(tmp_path / "slots.db")
     try:
         slot = slots.enqueue_manifest(tmp_path, "example", now)
+        manual = service.invoke(
+            "example",
+            {},
+            actor_binding={"actor_id": "operator"},
+            idempotency_key=f"{slot.idempotency_key}:attempt:1",
+        )
+        assert manual.state == ExecutionState.SUCCEEDED
         result = slots.dispatch(
             service,
             "w",
@@ -817,7 +826,7 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_sch
             actor_binding={"actor_id": "scheduler", "graph_id": "graph"},
         )
         assert denied.result["error"]["code"] == "access_denied"
-        assert execute.call_count == 1
+        assert execute.call_count == 2
         # A queued slot must be refused and finished if its manifest changes
         # to a session target after enqueue, and new slots must be rejected.
         next_time = now + timedelta(seconds=1)
@@ -838,7 +847,7 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_sch
         assert refused.state == ExecutionState.CANCELLED
         assert refused.result["error"]["code"] == "invalid_manifest"
         assert slots.enqueue("example", next_time).state == ExecutionState.DEAD_LETTER
-        assert execute.call_count == 1
+        assert execute.call_count == 2
         del manifest["write_target"]
         manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
         for version in ("1", "2", "3", "4"):

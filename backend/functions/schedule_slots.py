@@ -319,11 +319,19 @@ class ScheduleSlots:
             ).fetchall()
             jobs = [SqliteExecutionStore._row_to_job(row) for row in rows]
         for job in jobs:
-            key = f"fn:{job.agent_id}:{job.idempotency_key}:attempt:{job.attempts}"
+            suffix = f"{job.agent_id}:{job.idempotency_key}:attempt:{job.attempts}"
+            key = f"schedule-fn:{suffix}"
+            legacy_key = f"fn:{suffix}"
             runs = service.store.list_jobs(
                 agent_id=job.agent_id, kind=ExecutionKind.FUNCTION
             )
-            run = next((run for run in runs if run.idempotency_key == key), None)
+            run = next(
+                (run for run in runs if run.idempotency_key == key or (
+                    run.idempotency_key == legacy_key
+                    and (run.payload or {}).get("trigger") == "schedule"
+                )),
+                None,
+            )
             if run is None:
                 lookup = getattr(service.store, "schedule_attempt_outcome", None)
                 outcome = lookup(key) if lookup else None

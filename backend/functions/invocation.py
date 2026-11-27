@@ -689,10 +689,11 @@ class FunctionInvocationService:
                 raise
             except Exception as exc:
                 raise ValueError("Invalid staged session") from exc
+        key_prefix = "schedule-fn" if trigger == "schedule" else "fn"
         job = ExecutionJob(
             agent_id=function_id,
             kind=ExecutionKind.FUNCTION,
-            idempotency_key=f"fn:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
+            idempotency_key=f"{key_prefix}:{function_id}:{idempotency_key if idempotency_key is not None else uuid.uuid4()}",
             state=ExecutionState.RUNNING,
             attempts=1,
             correlation_id=correlation_id or str(uuid.uuid4()),

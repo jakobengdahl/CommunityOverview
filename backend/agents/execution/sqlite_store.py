@@ -729,7 +729,7 @@ class SqliteExecutionStore:
                               COALESCE(finished_at, updated_at)
                        FROM execution_jobs WHERE id = ? AND state IN (?,?,?)
                          AND kind = 'function'
-                         AND idempotency_key GLOB 'fn:*:function-schedule:*:attempt:*'""",
+                         AND idempotency_key GLOB 'schedule-fn:*:function-schedule:*:attempt:*'""",
                     [(ABANDONED_REASON, *param) for param in params],
                 )
                 cur = self._conn.executemany(

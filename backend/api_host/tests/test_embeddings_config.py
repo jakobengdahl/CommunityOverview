@@ -68,7 +68,8 @@ def _configure_function(tmp_path, monkeypatch, trigger):
     monkeypatch.setenv("AGENTS_RUN_HISTORY_DB", str(tmp_path / "history.db"))
 
 
-def test_disabled_schedule_leaves_ledger_untouched(tmp_path, monkeypatch):
+def test_invalid_schedule_ledger_is_not_modified(tmp_path, monkeypatch):
+    import sqlite3
     private = tmp_path / "private"
     private.mkdir()
     monkeypatch.setenv("COMMUNITYOVERVIEW_PRIVATE_STATE_DIR", str(private))
@@ -76,10 +77,38 @@ def test_disabled_schedule_leaves_ledger_untouched(tmp_path, monkeypatch):
     ledger = private / "webhook_tokens.schedule_slots.db"
     ledger.write_bytes(b"not a sqlite database")
 
-    app = create_app(AppConfig(graph_file=str(tmp_path / "graph" / "graph.json")))
-
-    assert app.state.function_scheduler is None
+    with pytest.raises(sqlite3.DatabaseError):
+        create_app(AppConfig(graph_file=str(tmp_path / "graph" / "graph.json")))
     assert ledger.read_bytes() == b"not a sqlite database"
+
+
+@pytest.mark.parametrize("initial", ["manual", "invalid"])
+def test_scheduler_discovers_manifest_fixed_after_startup(tmp_path, monkeypatch, initial):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from backend.agents.execution import ExecutionState
+
+    _configure_function(tmp_path, monkeypatch, "manual")
+    monkeypatch.setenv(
+        "COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", '{"example": "graph"}'
+    )
+    manifest_path = tmp_path / "functions" / "example" / "function.json"
+    manifest = json.loads(manifest_path.read_text())
+    if initial == "invalid":
+        manifest_path.write_text("invalid")
+    app = create_app(AppConfig(graph_file=str(tmp_path / "graph" / "graph.json")))
+    scheduler = app.state.function_scheduler
+    scheduler.service.invoke = Mock()
+    now = datetime.now(timezone.utc)
+    scheduler.tick(now)
+    scheduler.service.invoke.assert_not_called()
+    manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+    manifest_path.write_text(json.dumps(manifest))
+    scheduler.service.invoke.return_value = SimpleNamespace(state=ExecutionState.SUCCEEDED)
+    scheduler.tick(now)
+    assert scheduler.service.invoke.call_count == 1
+    scheduler.stop()
 
 
 def test_unset_means_derive_the_path():
