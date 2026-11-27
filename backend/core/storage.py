@@ -591,6 +591,7 @@ class GraphStorage:
         self._delivery_worker: Optional["DeliveryWorker"] = None
         self._events_enabled = False
         self._system_listeners: List[Callable[["Event"], None]] = []
+        self._reload_listeners: List[Callable[[], None]] = []
 
         # Listening starts BEFORE the load, and the gate keeps the seam's
         # promise that nothing is reported against a model that does not exist
@@ -771,6 +772,16 @@ class GraphStorage:
         """
         with self._lock:
             self._system_listeners.append(listener)
+
+    def add_reload_listener(self, listener: Callable[[], None]) -> None:
+        """Call `listener` after every successful load.
+
+        A reload emits no events, so a component that follows graph content
+        through system listeners needs this as well. Runs under _lock: the
+        listener must be quick and must not call back into storage.
+        """
+        with self._lock:
+            self._reload_listeners.append(listener)
 
     def setup_events(
         self,
@@ -1174,6 +1185,11 @@ class GraphStorage:
                     f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from "
                     f"{self._persistence_destination()}"
                 )
+                for listener in self._reload_listeners:
+                    try:
+                        listener()
+                    except Exception:
+                        logger.exception("Reload listener failed")
 
             except Exception as e:
                 logger.error(f"Error loading graph: {e}")

@@ -949,6 +949,11 @@ def test_profile_change_publishes_only_for_changed_profile():
         publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
         publisher.loop = asyncio.get_running_loop()
         publisher.debounce = 0
+
+        async def settle():
+            while publisher.scheduled:
+                await asyncio.sleep(0.01)
+
         public, restricted = [], []
         publisher.subscribe(public.append)
         current_scope.set(GraphAccessNarrowing(enabled=True, allow_local_graph=True))
@@ -967,41 +972,59 @@ def test_profile_change_publishes_only_for_changed_profile():
             )
         )
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert public == [ResourceUpdated(uri="graph://profile")]
         assert restricted == [] and restored == []
         revoked["allowed"] = True
         nodes.append(Node(id="b", name="B", type="Person"))
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(public) == 2 and len(restricted) == 1 and len(restored) == 1
         nodes[0].metadata["origin_graph_id"] = "hidden"
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(public) == 2 and len(restricted) == 2 and len(restored) == 2
 
         # Access returning to an unchanged profile announces nothing.
         revoked["allowed"] = False
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         revoked["allowed"] = True
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(restored) == 2
         # A failing hook for one stream neither blocks the others nor loses
         # that stream's change.
         revoked["raise"] = True
         nodes.append(Node(id="c", name="C", type="Person"))
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(public) == 3 and len(restricted) == 3 and len(restored) == 2
         del revoked["raise"]
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert len(public) == 3 and len(restricted) == 3 and len(restored) == 3
+        # Access lost between recompute and delivery keeps the baseline, so
+        # the change is still announced once access returns.
+        publish = publisher.bus.publish
+
+        async def revoke_then_publish(event):
+            revoked["allowed"] = False
+            await publish(event)
+            revoked["allowed"] = True
+
+        publisher.bus.publish = revoke_then_publish
+        nodes.append(Node(id="d", name="D", type="Person"))
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 4 and len(restored) == 3
+        publisher.bus.publish = publish
+        publisher.on_event(None)
+        await settle()
+        assert len(public) == 4 and len(restored) == 4
 
         # Changes hidden by the unrestricted cap still reach an unobserved scope.
         nodes[:] = [Node(id=str(i), name=str(i), type=f"A{i:03}") for i in range(101)]
@@ -1014,7 +1037,7 @@ def test_profile_change_publishes_only_for_changed_profile():
             )
         )
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         public.clear()
         restricted.clear()
         current_scope.set(
@@ -1026,11 +1049,55 @@ def test_profile_change_publishes_only_for_changed_profile():
         publisher.subscribe(private.append)
         nodes[-1].name = "Changed"
         publisher.on_event(None)
-        await asyncio.sleep(0.05)
+        await settle()
         assert public == [] and restricted == []
         assert private == [ResourceUpdated(uri="graph://profile")]
 
     anyio.run(check)
+
+
+def test_profile_change_from_storage_reload_is_announced(tmp_path):
+    import asyncio
+    from backend.core import GraphStorage, Node
+    from backend.runtime.authorization import (
+        GraphAccessNarrowing,
+        GraphAuthorizationDecision,
+    )
+    from backend.service import graph_profile
+    from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
+
+    class Hook:
+        def evaluate(self, context):
+            return GraphAuthorizationDecision(
+                allowed=True, graph_access=GraphAccessNarrowing()
+            )
+
+    paths = {"json_path": str(tmp_path / "g.json")}
+    storage = GraphStorage(**paths, embeddings_path=str(tmp_path / "a.pkl"))
+    writer = GraphStorage(**paths, embeddings_path=str(tmp_path / "b.pkl"))
+
+    async def check():
+        graph_profile._LISTEN_URIS.set(frozenset({graph_profile.PROFILE_URI}))
+        publisher = graph_profile.ProfileChangePublisher(
+            storage, InMemorySubscriptionBus(), Hook()
+        )
+        publisher.loop = asyncio.get_running_loop()
+        publisher.debounce = 0
+        storage.add_reload_listener(publisher.on_event)
+        received = []
+        publisher.subscribe(received.append)
+        writer.add_nodes([Node(id="n", name="N", type="Actor")], [])
+        writer.flush()
+        await asyncio.to_thread(storage.reload)
+        while publisher.scheduled:
+            await asyncio.sleep(0.01)
+        assert received == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
+
+    try:
+        anyio.run(check)
+    finally:
+        storage.flush()
+        writer.flush()
 
 
 def test_profile_recomputes_once_per_window_and_only_for_profile_streams(

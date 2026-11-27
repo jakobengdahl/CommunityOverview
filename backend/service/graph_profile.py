@@ -119,7 +119,8 @@ def describe(storage, hook, publisher=None):
 
 @dataclass(frozen=True)
 class _ProfileUpdates:
-    tokens: frozenset
+    # token -> (scope, profile) computed for that stream's changed profile.
+    updates: dict
 
 
 class ProfileChangePublisher:
@@ -190,9 +191,19 @@ class ProfileChangePublisher:
             if not isinstance(event, _ProfileUpdates):
                 listener(event)
             elif tracked:
+                update = event.updates.get(token)
+                if update is None:
+                    return
                 current, denied = self._access(context, self.hook)
-                if not denied and (token, current) in event.tokens:
-                    listener(ResourceUpdated(uri=PROFILE_URI))
+                if denied or current != update[0]:
+                    # Baseline kept: the next graph change compares against
+                    # what this stream was last told, so nothing is lost.
+                    return
+                with self.lock:
+                    if token not in self.listeners:
+                        return
+                    self.listeners[token] = (context, update[1])
+                listener(ResourceUpdated(uri=PROFILE_URI))
 
         if not tracked:
             return self.bus.subscribe(deliver)
@@ -217,8 +228,9 @@ class ProfileChangePublisher:
     async def publish(self, event):
         await self.bus.publish(event)
 
-    def on_event(self, event):
-        # Runs under the storage write lock: O(1), no profile work here.
+    def on_event(self, event=None):
+        # Also the storage reload listener (no event). Runs under the storage
+        # write lock: O(1), no profile work here.
         with self.lock:
             self.generation += 1
             if self.listeners:
@@ -240,7 +252,7 @@ class ProfileChangePublisher:
                     listeners = list(self.listeners.items())
                 changed = await asyncio.to_thread(self._recompute, listeners)
                 if changed:
-                    await self.bus.publish(_ProfileUpdates(frozenset(changed)))
+                    await self.bus.publish(_ProfileUpdates(changed))
                 with self.lock:
                     if not self.dirty:
                         self.scheduled = False
@@ -251,7 +263,7 @@ class ProfileChangePublisher:
             raise
 
     def _recompute(self, listeners):
-        changed = set()
+        changed = {}
         for token, (context, previous) in listeners:
             scope, denied = self._access(context, self.hook)
             if denied:
@@ -263,9 +275,7 @@ class ProfileChangePublisher:
             except Exception:
                 logger.exception("Graph profile recompute failed")
                 continue
+            # The baseline advances only when ``deliver`` announces it.
             if updated != previous:
-                changed.add((token, scope))
-            with self.lock:
-                if token in self.listeners:
-                    self.listeners[token] = (context, updated)
+                changed[token] = (scope, updated)
         return changed

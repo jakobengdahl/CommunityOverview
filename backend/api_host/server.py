@@ -719,6 +719,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             graph_storage, InMemorySubscriptionBus(), graph_service.authorization_hook
         )
         graph_storage.add_system_listener(profile_publisher.on_event)
+        graph_storage.add_reload_listener(profile_publisher.on_event)
 
     # Initialize MCPServer with dynamic instructions built from schema configuration
     mcp = MCPServer(

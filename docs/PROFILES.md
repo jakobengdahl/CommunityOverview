@@ -574,9 +574,10 @@ When MCP skills are enabled, each listen stream compares its own authorized
 profile, evaluated with the listen request's own authorization headers,
 starting when it subscribes, and receives the standard
 `notifications/resources/updated` for `graph://profile` only when that profile
-differs from the last one the stream could read. While its read access is
-denied nothing is sent, and access returning to an unchanged profile announces
-nothing. A stream that has never been able to read the profile is notified on
+differs from the one it held at subscription or at its last notification.
+Graph changes and whole-graph reloads (including an external change applied as
+a reload) both trigger the comparison. While its read access is denied nothing
+is sent, and access returning to an unchanged profile announces nothing. A stream that has never been able to read the profile is notified on
 the first graph change after access is granted. The comparison uses the main
 graph, not a staged session's composed view: staged session writes send no
 notification, and a main-graph change masked by a session layer still sends
