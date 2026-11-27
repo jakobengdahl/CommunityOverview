@@ -321,6 +321,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await start_session_registry()
+        if function_scheduler is not None:
+            function_scheduler.start()
         try:
             async with streamable_session_lifecycle():
                 yield
@@ -521,6 +523,35 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     ):
         raise ValueError("Invalid webhook graph bindings")
     app.state.function_invocation_service = function_invocation_service
+    schedule_graphs = json.loads(
+        os.getenv("COMMUNITYOVERVIEW_FUNCTIONS_SCHEDULE_GRAPHS", "{}")
+    )
+    if not isinstance(schedule_graphs, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in schedule_graphs.items()
+    ):
+        raise ValueError("Invalid schedule graph bindings")
+    function_scheduler = None
+    if any(key in function_invocation_service.enabled for key in schedule_graphs):
+        from backend.functions.schedule_slots import ScheduleSlots
+        from backend.functions.scheduler import FunctionScheduler
+
+        ledger_path = Path(token_path).with_name("webhook_tokens.schedule_slots.db")
+        execution_paths = [Path(import_job_store.db_path)]
+        history_path = getattr(agent_registry.run_history_store, "db_path", None)
+        if history_path and history_path != ":memory:":
+            execution_paths.append(Path(history_path))
+        if any(
+            ledger_path.resolve() == path.resolve()
+            or (ledger_path.exists() and path.exists() and ledger_path.samefile(path))
+            for path in execution_paths
+        ):
+            raise ValueError("Schedule ledger and execution databases must be separate")
+        ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        function_scheduler = FunctionScheduler(
+            function_invocation_service, ScheduleSlots(ledger_path), schedule_graphs
+        )
+    app.state.function_scheduler = function_scheduler
     from backend.functions.token_store import WebhookTokenStore
 
     function_invocation_service.webhook_token_store = WebhookTokenStore(token_path)
@@ -678,6 +709,8 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             app.state.session_cleanup_task.cancel()
         if merge_record_retention is not None:
             merge_record_retention.stop()
+        if function_scheduler is not None:
+            function_scheduler.stop()
         runtime.stop()
 
     return app

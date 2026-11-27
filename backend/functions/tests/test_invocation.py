@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "5"),
+        ("contract_version", "6"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -771,3 +771,137 @@ def test_shared_trigger_forwards_context_and_refuses_excess_depth(host, monkeypa
     assert rejected.payload["chain_depth"] == 4
     assert rejected.correlation_id == "chain"
     assert execute.call_count == 1
+
+
+@pytest.mark.parametrize("remove_schedule", [False, True])
+def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_schedule):
+    from datetime import datetime, timedelta, timezone
+    from backend.functions.schedule_slots import ScheduleSlots
+
+    service, execute, manifest, directory = host
+    manifest["contract_version"] = "5"
+    manifest["triggers"] = [
+        {"kind": "schedule", "interval_seconds": 60},
+        {"kind": "manual"},
+    ]
+    (directory / "function.json").write_text(json.dumps(manifest))
+    now = datetime.now(timezone.utc)
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        slot = slots.enqueue_manifest(tmp_path, "example", now)
+        manual = service.invoke(
+            "example",
+            {},
+            actor_binding={"actor_id": "operator"},
+            idempotency_key=f"{slot.idempotency_key}:attempt:1",
+        )
+        assert manual.state == ExecutionState.SUCCEEDED
+        result = slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=now,
+            lease_seconds=10,
+        )
+        envelope = execute.call_args.args[3]
+        assert result.state == ExecutionState.SUCCEEDED
+        assert envelope["invocation"]["trigger"] == "schedule"
+        assert envelope["invocation"]["chain_depth"] == 0
+        assert envelope["origin"]["event_correlation_id"] == slot.correlation_id
+        assert (
+            slots.enqueue_manifest(tmp_path, "example", now).state
+            == ExecutionState.SUCCEEDED
+        )
+        service.graph_service.authorization_hook.evaluate.return_value = (
+            GraphAuthorizationDecision(
+                allowed=True,
+                graph_access=GraphAccessNarrowing(
+                    enabled=True, allow_local_graph=False, include_graph_ids=("other",)
+                ),
+            )
+        )
+        denied = service.invoke(
+            "example",
+            {},
+            trigger="schedule",
+            actor_binding={"actor_id": "scheduler", "graph_id": "graph"},
+        )
+        assert denied.result["error"]["code"] == "access_denied"
+        assert execute.call_count == 2
+        # A queued slot must be refused and finished if its manifest changes
+        # to a session target after enqueue, and new slots must be rejected.
+        next_time = now + timedelta(seconds=1)
+        slots.enqueue_manifest(tmp_path, "example", next_time)
+        manifest["write_target"] = "session"
+        if remove_schedule:
+            manifest["triggers"] = [{"kind": "manual"}]
+        (directory / "function.json").write_text(json.dumps(manifest))
+        with pytest.raises(ValueError):
+            slots.enqueue_manifest(tmp_path, "example", next_time)
+        refused = slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=next_time,
+            lease_seconds=10,
+        )
+        assert refused.state == ExecutionState.CANCELLED
+        assert refused.result["error"]["code"] == "invalid_manifest"
+        assert slots.enqueue("example", next_time).state == ExecutionState.DEAD_LETTER
+        assert execute.call_count == 2
+        del manifest["write_target"]
+        manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+        for version in ("1", "2", "3", "4"):
+            manifest["contract_version"] = version
+            (directory / "function.json").write_text(json.dumps(manifest))
+            with pytest.raises(ValueError):
+                slots.enqueue_manifest(tmp_path, "example", now)
+    finally:
+        slots.close()
+
+
+def test_schedule_reconciles_failed_run_after_restart(host, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from backend.functions.schedule_slots import ScheduleSlots
+    from backend.functions.scheduler import FunctionScheduler
+
+    service, execute, manifest, directory = host
+    manifest["contract_version"] = "5"
+    manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+    manifest["retry"] = {
+        "max_attempts": 2,
+        "base_seconds": 0,
+        "factor": 2,
+        "max_seconds": 300,
+    }
+    (directory / "function.json").write_text(json.dumps(manifest))
+    execute.side_effect = [
+        FunctionRunResult("failed", code="runner_lost", wall_ms=1),
+        FunctionRunResult("succeeded", output={}, wall_ms=1),
+    ]
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "slots.db"
+    slots = ScheduleSlots(path)
+    slot = slots.enqueue_manifest(tmp_path, "example", now)
+    monkeypatch.setattr(
+        slots, "_finish_result", Mock(side_effect=RuntimeError("crash"))
+    )
+    with pytest.raises(RuntimeError, match="crash"):
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=now,
+            lease_seconds=10,
+        )
+    slots.close()
+    slots = ScheduleSlots(path)
+    scheduler = FunctionScheduler(service, slots, {"example": "graph"})
+    scheduler.tick(now)
+    scheduler.tick(now)
+    recovered = slots.enqueue_manifest(tmp_path, "example", now)
+    assert recovered.id == slot.id
+    assert recovered.state == ExecutionState.SUCCEEDED
+    assert recovered.attempts == 2
+    assert execute.call_count == 2
+    scheduler.stop()

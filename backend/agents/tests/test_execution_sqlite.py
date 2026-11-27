@@ -1,3 +1,4 @@
+# covers: backend/agents/execution/sqlite_store.py
 """
 Durable SQLite execution-store adapter tests.
 
@@ -121,7 +122,7 @@ def test_migration_is_idempotent_across_reopens(tmp_path):
     second = SqliteExecutionStore(db)
     try:
         version = second._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == 3
         assert len(second.list_jobs()) == 1
     finally:
         second.close()
@@ -147,7 +148,7 @@ def test_v1_database_migrates_forward_keeping_rows(tmp_path):
 
     store = SqliteExecutionStore(db)
     try:
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 3
         job = store.get("job-v1")
         assert job is not None and job.redacted_at is None
         assert store.redact(["job-v1"], now=T0) == 1
@@ -246,7 +247,7 @@ def test_migration_survives_crash_between_alter_and_version_bump(tmp_path):
 
     store = SqliteExecutionStore(db)
     try:
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         store.close()
 
@@ -552,7 +553,7 @@ def test_failed_migration_rolls_back_and_the_next_open_succeeds(tmp_path, monkey
     monkeypatch.undo()
     store = SqliteExecutionStore(db)
     try:
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 3
         assert "redacted_at" in store._columns()
     finally:
         store.close()

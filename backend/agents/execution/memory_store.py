@@ -41,6 +41,7 @@ class InMemoryExecutionStore:
         self._jobs: Dict[str, ExecutionJob] = {}
         # idempotency_key -> job id, so enqueue can dedup in O(1).
         self._by_key: Dict[str, str] = {}
+        self._schedule_outcomes = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -290,6 +291,10 @@ class InMemoryExecutionStore:
                 count += 1
         return count
 
+    def schedule_attempt_outcome(self, key: str):
+        with self._lock:
+            return self._schedule_outcomes.get(key)
+
     def purge(self, job_ids: Sequence[str]) -> int:
         count = 0
         with self._lock:
@@ -297,6 +302,17 @@ class InMemoryExecutionStore:
                 job = self._jobs.get(job_id)
                 if job is None or not job.is_terminal:
                     continue
+                if (
+                    job.kind == ExecutionKind.FUNCTION
+                    and job.idempotency_key.startswith("schedule-fn:")
+                    and ":function-schedule:" in job.idempotency_key
+                    and ":attempt:" in job.idempotency_key
+                ):
+                    self._schedule_outcomes[job.idempotency_key] = (
+                        job.state,
+                        job.dead_letter_reason == ABANDONED_REASON,
+                        job.finished_at or job.updated_at,
+                    )
                 del self._jobs[job_id]
                 self._by_key.pop(job.idempotency_key, None)
                 count += 1
