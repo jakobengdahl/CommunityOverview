@@ -314,7 +314,7 @@ def test_crashed_run_is_never_claimed_or_executed_again(host):
         ("version", "1.1٢.0"),
         ("version", "1.0.1٢"),
         ("entry_point", "../outside.py"),
-        ("contract_version", "6"),
+        ("contract_version", "7"),
         ("limits", {"timeout_seconds": 121}),
         ("limits", {"memory_mib": True}),
         ("triggers", [{"kind": "webhook"}]),
@@ -903,5 +903,103 @@ def test_schedule_reconciles_failed_run_after_restart(host, tmp_path, monkeypatc
     assert recovered.id == slot.id
     assert recovered.state == ExecutionState.SUCCEEDED
     assert recovered.attempts == 2
+    assert execute.call_count == 2
+    scheduler.stop()
+
+
+def test_graph_trigger_version_and_envelope(host):
+    service, execute, manifest, directory = host
+    trigger = {
+        "kind": "graph_change",
+        "node_types": ["Task"],
+        "fields": ["metadata.status"],
+    }
+    manifest.update(contract_version="5", triggers=[trigger])
+    (directory / "function.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        invocation.load_manifest(service.root, "example")
+    manifest["contract_version"] = "6"
+    (directory / "function.json").write_text(json.dumps(manifest))
+    entity = {
+        "kind": "node",
+        "id": "n",
+        "type": "Task",
+        "data": {"before": {"x": 1}, "after": {"x": 2}, "patch": {"x": 2}},
+    }
+    result = service.invoke(
+        "example",
+        {},
+        trigger="graph_change",
+        actor_binding={"actor_id": "system", "graph_id": "g"},
+        correlation_id="corr",
+        chain_depth=1,
+        entity=entity,
+    )
+    assert result.state == ExecutionState.SUCCEEDED
+    envelope = execute.call_args.args[3]
+    assert envelope["entity"] == entity
+    assert envelope["invocation"]["chain_depth"] == 1
+    assert envelope["origin"]["event_correlation_id"] == "corr"
+
+
+def test_graph_delivery_records_depth_refusal_and_retries(host, tmp_path):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+    from backend.functions.schedule_slots import ScheduleSlots
+    from backend.functions.scheduler import FunctionScheduler
+
+    service, execute, manifest, directory = host
+    manifest.update(
+        contract_version="6",
+        triggers=[{"kind": "graph_change", "node_types": ["Task"], "fields": ["name"]}],
+        retry={"max_attempts": 2, "base_seconds": 0, "factor": 1, "max_seconds": 0},
+    )
+    (directory / "function.json").write_text(json.dumps(manifest))
+    scheduler = FunctionScheduler(
+        service, ScheduleSlots(tmp_path / "graph-slots.db"), {"example": "g"}
+    )
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(
+            event_origin="function:other@1.0.0",
+            event_correlation_id="corr",
+            event_causation_depth=3,
+        ),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={"name": "a", "metadata": {"origin_graph_id": "g"}},
+            after={"name": "b", "metadata": {"origin_graph_id": "g"}},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
+    records = service.store.list_jobs(agent_id="example", kind=ExecutionKind.FUNCTION)
+    assert (
+        len(records) == 1
+        and records[0].result["error"]["code"] == "chain_depth_exceeded"
+    )
+    assert (
+        records[0].correlation_id == "corr" and records[0].payload["chain_depth"] == 4
+    )
+    execute.assert_not_called()
+    event.event_id = "new-event"
+    event.origin.event_causation_depth = 0
+    execute.side_effect = [
+        FunctionRunResult("failed", code="function_error", wall_ms=1),
+        FunctionRunResult("succeeded", output={"done": True}, wall_ms=1),
+    ]
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
+    scheduler.tick(invocation.utcnow())
+    assert execute.call_count == 2
+    scheduler.on_graph_event(event)
+    scheduler.tick(invocation.utcnow())
     assert execute.call_count == 2
     scheduler.stop()

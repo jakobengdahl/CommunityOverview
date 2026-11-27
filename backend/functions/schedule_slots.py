@@ -1,6 +1,6 @@
 """Persistent schedule-slot identities, separate from purgable run history.
 
-The ledger stores no function input or output. An uncertain running attempt is
+The ledger stores graph event snapshots needed for delivery, but no function output. An uncertain running attempt is
 never automatically reclaimed: the caller must establish that it has stopped
 and failed before reporting failure. This favors at-most-once execution over
 recovery after a crash with an unknown outcome.
@@ -185,6 +185,30 @@ class ScheduleSlots:
             )
         )
 
+    def enqueue_event(self, function_id, event, retry_policy=None):
+        payload = event.to_webhook_payload()
+        identity = json.dumps([function_id, payload["event_id"]], separators=(",", ":"))
+        key = "function-graph:" + hashlib.sha256(identity.encode()).hexdigest()
+        origin = payload["origin"]
+        caused = (origin.get("event_origin") or "").startswith("function:")
+        depth = origin.get("event_causation_depth", 0) + 1 if caused else 0
+        policy = retry_policy or RetryPolicy(max_attempts=1)
+        return self._store.enqueue(
+            ExecutionJob(
+                agent_id=function_id,
+                kind=ExecutionKind.SCHEDULED,
+                idempotency_key=key,
+                correlation_id=origin.get("event_correlation_id")
+                or payload["event_id"],
+                run_at=datetime.now(timezone.utc),
+                payload={
+                    "retry_policy": policy.to_dict(),
+                    "entity": payload["entity"],
+                    "chain_depth": depth,
+                },
+            )
+        )
+
     def claim_next(self, worker_id: str, *, now: datetime, lease_seconds: float):
         if not isinstance(worker_id, str) or not worker_id:
             raise ValueError("Worker id is required")
@@ -232,7 +256,7 @@ class ScheduleSlots:
                 row = conn.execute(
                     """
                     SELECT * FROM schedule_jobs WHERE kind = ?
-                      AND idempotency_key GLOB 'function-schedule:*'
+                      AND (idempotency_key GLOB 'function-schedule:*' OR idempotency_key GLOB 'function-graph:*')
                       AND state = ? AND run_at <= ?
                       AND (attempts = 0 OR (SELECT COUNT(*) FROM schedule_rate AS r
                            WHERE r.function_id = schedule_jobs.agent_id
@@ -250,7 +274,9 @@ class ScheduleSlots:
                 if row is None:
                     conn.commit()
                     return None
-                if row["attempts"] == 0:
+                if row["attempts"] == 0 and row["idempotency_key"].startswith(
+                    "function-schedule:"
+                ):
                     conn.execute(
                         """
                         INSERT INTO schedule_watermarks VALUES (?, ?)
@@ -259,6 +285,7 @@ class ScheduleSlots:
                     """,
                         (row["agent_id"], ts),
                     )
+                if row["attempts"] == 0:
                     count = conn.execute(
                         "SELECT COUNT(*) FROM schedule_rate WHERE function_id = ? AND admitted_at > ?",
                         (row["agent_id"], ts - 60),
@@ -399,14 +426,17 @@ class ScheduleSlots:
                 job.id, attempt=job.attempts, now=now, success=False, retry=False
             )
             return None
+        graph_event = job.idempotency_key.startswith("function-graph:")
+        extra = {"entity": job.payload["entity"]} if graph_event else {}
         result = service.invoke(
             job.agent_id,
             {},
-            trigger="schedule",
+            trigger="graph_change" if graph_event else "schedule",
             actor_binding=actor_binding,
             idempotency_key=f"{job.idempotency_key}:attempt:{job.attempts}",
             correlation_id=job.correlation_id,
-            chain_depth=0,
+            chain_depth=job.payload.get("chain_depth", 0),
+            **extra,
         )
         self._finish_result(service, job, result, datetime.now(timezone.utc))
         return result
@@ -447,7 +477,9 @@ class ScheduleSlots:
                 if (
                     job is None
                     or job.kind != ExecutionKind.SCHEDULED
-                    or not job.idempotency_key.startswith("function-schedule:")
+                    or not job.idempotency_key.startswith(
+                        ("function-schedule:", "function-graph:")
+                    )
                 ):
                     raise JobNotFoundError(job_id)
                 if job.state != ExecutionState.RUNNING or job.attempts != attempt:

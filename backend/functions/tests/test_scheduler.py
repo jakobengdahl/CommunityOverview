@@ -1,4 +1,4 @@
-# covers: backend/functions/scheduler.py
+# covers: backend/functions/scheduler.py, backend/functions/graph_change.py, backend/functions/schedule_slots.py
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -109,3 +109,73 @@ def test_scheduler_thread_binds_application_admission(tmp_path):
     assert done.wait(5)
     scheduler.stop()
     assert seen == [extensions]
+
+
+def test_graph_events_match_exclude_origin_and_survive_restart(tmp_path, monkeypatch):
+    from backend.core.events.models import (
+        Event,
+        EventContext,
+        EntityData,
+        EntityKind,
+        EventType,
+    )
+
+    manifest = {
+        "triggers": [
+            {
+                "kind": "graph_change",
+                "node_types": ["Task"],
+                "fields": ["metadata.status"],
+                "before": {"metadata.status": "open"},
+                "after": {"metadata.status": "done"},
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "backend.functions.scheduler.load_manifest", lambda *args: (manifest, None)
+    )
+    service = SimpleNamespace(
+        root=tmp_path,
+        enabled={"example": []},
+        store=SimpleNamespace(list_jobs=lambda **kwargs: []),
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    path = tmp_path / "slots.db"
+    scheduler = FunctionScheduler(service, ScheduleSlots(path), {"example": "g"})
+    event = Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(
+            event_origin="function:other@1.0.0",
+            event_correlation_id="corr",
+            event_causation_depth=2,
+        ),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="n",
+            type="Task",
+            before={"metadata": {"origin_graph_id": "g", "status": "open"}},
+            after={"metadata": {"origin_graph_id": "g", "status": "done"}},
+            patch={"metadata": {"origin_graph_id": "g", "status": "done"}},
+        ),
+    )
+    scheduler.on_graph_event(event)
+    scheduler.on_graph_event(event)
+    other = event.model_copy(deep=True)
+    other.event_id = "ignored"
+    other.origin.event_origin = "function:example@9.0.0"
+    scheduler.on_graph_event(other)
+    other.origin.event_origin = "web-ui"
+    other.entity.after["metadata"]["status"] = "open"
+    scheduler.on_graph_event(other)
+    scheduler.tick(datetime.now(timezone.utc))
+    assert service.invoke.call_count == 1
+    call = service.invoke.call_args.kwargs
+    assert call["trigger"] == "graph_change"
+    assert call["entity"] == event.to_webhook_payload()["entity"]
+    assert call["chain_depth"] == 3 and call["correlation_id"] == "corr"
+    scheduler.stop()
+    scheduler = FunctionScheduler(service, ScheduleSlots(path), {"example": "g"})
+    scheduler.on_graph_event(event)
+    scheduler.tick(datetime.now(timezone.utc))
+    assert service.invoke.call_count == 1
+    scheduler.stop()

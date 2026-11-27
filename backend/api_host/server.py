@@ -551,6 +551,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         function_scheduler = FunctionScheduler(
             function_invocation_service, ScheduleSlots(ledger_path), schedule_graphs
         )
+        graph_storage.add_system_listener(function_scheduler.on_graph_event)
     app.state.function_scheduler = function_scheduler
     from backend.functions.token_store import WebhookTokenStore
 

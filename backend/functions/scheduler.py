@@ -20,6 +20,41 @@ class FunctionScheduler:
         self.thread = None
         self.slots.reconcile(self.service)
 
+    def on_graph_event(self, event):
+        from backend.agents.execution import RetryPolicy
+        from backend.functions.graph_change import matches
+
+        origin = event.origin.event_origin or ""
+        entity = event.to_webhook_payload()["entity"]
+        data = entity["data"]
+        snapshot = data["after"] or data["before"] or {}
+        graph_id = (snapshot.get("metadata") or {}).get("origin_graph_id")
+        if not graph_id and event.origin.attribution:
+            graph_id = event.origin.attribution.scope.graph_id
+        for function_id, bound_graph in self.graph_bindings.items():
+            if (
+                function_id not in self.service.enabled
+                or graph_id != bound_graph
+                or origin.startswith(f"function:{function_id}@")
+            ):
+                continue
+            try:
+                manifest, _ = load_manifest(self.service.root, function_id)
+                if any(
+                    t["kind"] == "graph_change" and matches(t, event)
+                    for t in manifest["triggers"]
+                ):
+                    retry = manifest.get("retry")
+                    self.slots.enqueue_event(
+                        function_id, event, RetryPolicy(**retry) if retry else None
+                    )
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "Cannot enqueue graph event for function %s",
+                    function_id,
+                    exc_info=True,
+                )
+
     def tick(self, now):
         self.slots.reconcile(self.service)
         # Epoch-aligned slots make discovery deterministic across restarts. Only

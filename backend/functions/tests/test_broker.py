@@ -1263,3 +1263,12 @@ def test_attach_run_file_uses_upload_authorization_and_audits(
         files.close()
         other.close()
         config_loader.reset_loader()
+
+
+def test_function_writes_carry_run_causation_depth(service, storage):
+    events = []
+    storage.add_system_listener(events.append)
+    add_node(make_broker(service, chain_depth=2))
+    assert events[-1].origin.event_origin == function_origin("recompute", "1.2.0")
+    assert events[-1].origin.event_correlation_id == "corr-1"
+    assert events[-1].origin.event_causation_depth == 2

@@ -249,7 +249,7 @@ async def _invoke_with_files(
         manifest, _ = load_manifest(service.root, function_id)
     except (ValueError, OSError):
         raise HTTPException(422)
-    if manifest["contract_version"] not in {"3", "4", "5"} or not boundary:
+    if manifest["contract_version"] not in {"3", "4", "5", "6"} or not boundary:
         raise HTTPException(422)
     key = (function_id, idempotency_key)
     while True:
