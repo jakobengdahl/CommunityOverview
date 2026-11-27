@@ -6,6 +6,7 @@ All files are UTF-8 text and are validated before any are published.
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import date, timedelta
 import re
 from dataclasses import dataclass
@@ -94,6 +95,8 @@ class GraphSemanticsProvider:
             if isinstance(value, str):
                 result = value
                 while True:
+                    if _INJECTION_RE.search(result):
+                        raise ValueError("Schema content rejected")
                     cleaned = _DANGEROUS_TAG_RE.sub("", result)
                     if _INJECTION_RE.search(cleaned) or (
                         value.strip() and not cleaned.strip()
@@ -119,7 +122,7 @@ class GraphSemanticsProvider:
                 value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
 
-        snapshot = clean(
+        source = deepcopy(
             {
                 "node_types": self.schema["node_types"],
                 "node_shapes": self.schema.get("node_shapes", {}),
@@ -137,16 +140,19 @@ class GraphSemanticsProvider:
             if isinstance(obj, dict) and isinstance(obj.get(key), list):
                 obj[key].sort(key=canonical)
 
-        for node in snapshot["node_types"].values():
-            for key in ("fields", "subtypes"):
-                sort_field(node, key)
-        for relationship in snapshot["relationship_types"].values():
-            for key in ("source_types", "target_types"):
-                sort_field(relationship, key)
-        sort_field(snapshot["language_policy"], "allowed_languages")
+        snapshot = clean(source)
+        for obj in (source, snapshot):
+            for node in obj["node_types"].values():
+                for key in ("fields", "subtypes"):
+                    sort_field(node, key)
+            for relationship in obj["relationship_types"].values():
+                for key in ("source_types", "target_types"):
+                    sort_field(relationship, key)
+            sort_field(obj["language_policy"], "allowed_languages")
         data = canonical(snapshot)
+        source_digest = hashlib.sha256(canonical(source).encode()).hexdigest()
         # A reproducible date identifier, not the time the schema was modified.
-        days = int(hashlib.sha256(data.encode()).hexdigest()[:8], 16) % 36525
+        days = int(source_digest[:8], 16) % 36525
         snapshot_date = date(2000, 1, 1) + timedelta(days=days)
         text = (
             "---\nname: graph-semantics\n"
@@ -155,6 +161,7 @@ class GraphSemanticsProvider:
             "Schema snapshot date identifier (derived from schema, not modification time): "
             f"{snapshot_date.isoformat()}. Content statistics are available through "
             "describe_graph when layer 3 is available.\n\n"
+            f"Schema input SHA-256: {source_digest}.\n\n"
             f"```json\n{data}\n```\n"
         )
         return [_GraphSemanticsFiles("graph-semantics", {"SKILL.md": text})]
