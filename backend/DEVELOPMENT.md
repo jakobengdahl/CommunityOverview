@@ -193,6 +193,12 @@ The server will be available at:
 - MCP endpoint: http://localhost:8000/mcp  (also `/mcp/sse` for legacy SSE clients). The same server supports protocol 2026-07-28 and legacy clients.
 - Health check: http://localhost:8000/health
 
+The backend uses the MCP 2.x SDK's `MCPServer` class. One instance registers
+the tools, resources, and schema-derived instructions shared by both protocol
+generations. Its Streamable HTTP transport serves clients including protocol
+2026-07-28 at `/mcp`; its legacy SSE transport is available at `/mcp/sse`.
+The mount routes requests to the appropriate transport on that same instance.
+
 ### Production Mode
 
 ```bash
