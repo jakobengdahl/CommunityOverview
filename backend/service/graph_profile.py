@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
 
-from backend.runtime.authorization import GRAPH_ACTION_READ, GraphAccessNarrowing
+from backend.runtime.authorization import GRAPH_ACTION_READ
 from . import access
 
 # Bound every collection in the response, including type and subtype counts.
