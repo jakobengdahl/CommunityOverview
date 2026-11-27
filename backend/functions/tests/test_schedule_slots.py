@@ -6,13 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.agents.execution import (
-    ExecutionJob,
-    ExecutionKind,
     ExecutionState,
     RetryPolicy,
     SqliteExecutionStore,
 )
-from backend.agents.execution.store import JobNotFoundError
 from backend.functions.schedule_slots import ScheduleSlots
 
 
@@ -188,47 +185,56 @@ def test_late_enqueued_missed_slots_are_skipped_after_restart(tmp_path):
         slots.close()
 
 
-@pytest.mark.parametrize(
-    "kind,key",
-    [
-        (ExecutionKind.SCHEDULED, "agent-schedule"),
-        (ExecutionKind.EVENT, "function-schedule:unrelated"),
-    ],
-)
-def test_shared_store_jobs_are_not_claimed_or_superseded(tmp_path, kind, key):
+def test_rejects_existing_execution_store_without_changing_jobs(tmp_path):
     path = tmp_path / "shared.db"
-    slots = ScheduleSlots(path)
     store = SqliteExecutionStore(path)
     try:
-        old = store.enqueue(
-            ExecutionJob(
-                agent_id="example",
-                kind=kind,
-                idempotency_key=key + ":old",
-                run_at=TIMEPOINT - timedelta(seconds=1),
-            )
-        )
-        newer = store.enqueue(
-            ExecutionJob(
-                agent_id="example",
-                kind=kind,
-                idempotency_key=key + ":new",
-                run_at=TIMEPOINT + timedelta(seconds=1),
-            )
-        )
-        slot = slots.enqueue("example", TIMEPOINT)
-        now = TIMEPOINT + timedelta(seconds=2)
-        assert (
-            slots.claim_next("schedule-worker", now=now, lease_seconds=10).id == slot.id
-        )
-        assert slots.claim_next("schedule-worker", now=now, lease_seconds=10) is None
-        assert store.get(old.id).state == ExecutionState.PENDING
-        assert store.get(newer.id).state == ExecutionState.PENDING
-        assert store.claim_next("other", now=now, lease_seconds=10).id == old.id
-        for report in (slots.fail, slots.complete):
-            with pytest.raises(JobNotFoundError):
-                report(old.id, attempt=1, now=now)
-        assert store.get(old.id).state == ExecutionState.RUNNING
+        with pytest.raises(ValueError, match="execution store database"):
+            ScheduleSlots(path)
+        assert store.list_jobs() == []
     finally:
         store.close()
+
+
+def test_general_consumer_cannot_access_ledger_jobs(tmp_path):
+    path = tmp_path / "slots.db"
+    slots = ScheduleSlots(path)
+    job = slots.enqueue("example", TIMEPOINT)
+    store = SqliteExecutionStore(path)
+    try:
+        assert store.get(job.id) is None
+        assert store.claim_next("other", now=TIMEPOINT, lease_seconds=10) is None
+        assert not store.cancel(job.id, now=TIMEPOINT)
+        assert (
+            slots.claim_next("schedule-worker", now=TIMEPOINT, lease_seconds=10).id
+            == job.id
+        )
+        with pytest.raises(ValueError, match="execution store database"):
+            ScheduleSlots(path)
+    finally:
+        store.close()
+        slots.close()
+
+
+def test_due_retry_is_not_cancelled_by_newer_due_slot(tmp_path):
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    try:
+        retry = slots.enqueue(
+            "example",
+            TIMEPOINT,
+            retry_policy=RetryPolicy(max_attempts=2, base_seconds=5),
+        )
+        assert slots.claim_next("w", now=TIMEPOINT, lease_seconds=10).id == retry.id
+        assert (
+            slots.fail(retry.id, attempt=1, now=TIMEPOINT).state
+            == ExecutionState.PENDING
+        )
+        due = TIMEPOINT + timedelta(seconds=6)
+        newer = slots.enqueue("example", due)
+        claimed = slots.claim_next("w", now=due, lease_seconds=10)
+        assert claimed.id == retry.id
+        assert claimed.attempts == 2
+        assert slots.enqueue("example", TIMEPOINT).state == ExecutionState.RUNNING
+        assert slots.claim_next("w", now=due, lease_seconds=10).id == newer.id
+    finally:
         slots.close()
