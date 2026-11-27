@@ -309,6 +309,38 @@ class ScheduleSlots:
         """Report a confirmed stopped failure, never an uncertain lease expiry."""
         return self._finish(job_id, attempt=attempt, now=now, success=False)
 
+    def reconcile(self, service):
+        """Finish running slots whose exact invocation has a durable outcome."""
+        with self._store._lock:
+            rows = self._store._conn.execute(
+                "SELECT * FROM schedule_jobs WHERE state = ?",
+                (ExecutionState.RUNNING.value,),
+            ).fetchall()
+            jobs = [SqliteExecutionStore._row_to_job(row) for row in rows]
+        for job in jobs:
+            key = f"fn:{job.agent_id}:{job.idempotency_key}:attempt:{job.attempts}"
+            runs = service.store.list_jobs(
+                agent_id=job.agent_id, kind=ExecutionKind.FUNCTION
+            )
+            run = next((run for run in runs if run.idempotency_key == key), None)
+            if run is not None and run.state.is_terminal:
+                self._finish_result(
+                    service, job, run, run.finished_at or run.updated_at
+                )
+
+    def _finish_result(self, service, job, result, finished):
+        if result.state == ExecutionState.SUCCEEDED:
+            self.complete(job.id, attempt=job.attempts, now=finished)
+        elif result.state == ExecutionState.DEAD_LETTER:
+            retry = self._retry_declared(service, job)
+            self._finish(
+                job.id, attempt=job.attempts, now=finished, success=False, retry=retry
+            )
+        else:
+            self._finish(
+                job.id, attempt=job.attempts, now=finished, success=False, retry=False
+            )
+
     def dispatch(
         self,
         service,
@@ -346,18 +378,7 @@ class ScheduleSlots:
             correlation_id=job.correlation_id,
             chain_depth=0,
         )
-        finished = datetime.now(timezone.utc)
-        if result.state == ExecutionState.SUCCEEDED:
-            self.complete(job.id, attempt=job.attempts, now=finished)
-        elif result.state == ExecutionState.DEAD_LETTER:
-            retry = self._retry_declared(service, job)
-            self._finish(
-                job.id, attempt=job.attempts, now=finished, success=False, retry=retry
-            )
-        else:
-            self._finish(
-                job.id, attempt=job.attempts, now=finished, success=False, retry=False
-            )
+        self._finish_result(service, job, result, datetime.now(timezone.utc))
         return result
 
     @staticmethod

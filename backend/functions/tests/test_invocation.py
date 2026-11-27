@@ -848,3 +848,50 @@ def test_schedule_slot_dispatch_uses_shared_admission(host, tmp_path, remove_sch
                 slots.enqueue_manifest(tmp_path, "example", now)
     finally:
         slots.close()
+
+
+def test_schedule_reconciles_failed_run_after_restart(host, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from backend.functions.schedule_slots import ScheduleSlots
+    from backend.functions.scheduler import FunctionScheduler
+
+    service, execute, manifest, directory = host
+    manifest["contract_version"] = "5"
+    manifest["triggers"] = [{"kind": "schedule", "interval_seconds": 60}]
+    manifest["retry"] = {
+        "max_attempts": 2,
+        "base_seconds": 0,
+        "factor": 2,
+        "max_seconds": 300,
+    }
+    (directory / "function.json").write_text(json.dumps(manifest))
+    execute.side_effect = [
+        FunctionRunResult("failed", code="runner_lost", wall_ms=1),
+        FunctionRunResult("succeeded", output={}, wall_ms=1),
+    ]
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "slots.db"
+    slots = ScheduleSlots(path)
+    slot = slots.enqueue_manifest(tmp_path, "example", now)
+    monkeypatch.setattr(
+        slots, "_finish_result", Mock(side_effect=RuntimeError("crash"))
+    )
+    with pytest.raises(RuntimeError, match="crash"):
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"actor_id": "operator"},
+            now=now,
+            lease_seconds=10,
+        )
+    slots.close()
+    slots = ScheduleSlots(path)
+    scheduler = FunctionScheduler(service, slots, {"example": "graph"})
+    scheduler.tick(now)
+    scheduler.tick(now)
+    recovered = slots.enqueue_manifest(tmp_path, "example", now)
+    assert recovered.id == slot.id
+    assert recovered.state == ExecutionState.SUCCEEDED
+    assert recovered.attempts == 2
+    assert execute.call_count == 2
+    scheduler.stop()

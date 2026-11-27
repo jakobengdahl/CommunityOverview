@@ -16,8 +16,10 @@ class FunctionScheduler:
         self.graph_bindings = graph_bindings
         self.stop_event = threading.Event()
         self.thread = None
+        self.slots.reconcile(self.service)
 
     def tick(self, now):
+        self.slots.reconcile(self.service)
         # Epoch-aligned slots make discovery deterministic across restarts. Only
         # the latest slot is generated, regardless of the length of downtime.
         for function_id, graph_id in self.graph_bindings.items():
@@ -43,7 +45,7 @@ class FunctionScheduler:
             self.slots.dispatch(
                 self.service,
                 "function-scheduler",
-                now=now,
+                now=datetime.now(timezone.utc),
                 lease_seconds=3600,
                 actor_binding=lambda function_id: (
                     {
