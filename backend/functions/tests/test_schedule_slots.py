@@ -352,6 +352,84 @@ def test_retry_revoked_before_dispatch(tmp_path, monkeypatch):
         slots.close()
 
 
+@pytest.mark.parametrize("delivery", ["schedule", "graph"])
+@pytest.mark.parametrize("max_attempts", [1, 3, 11])
+@pytest.mark.parametrize("dispatch_limit", [1, 2])
+def test_changed_retry_policy_governs_failed_and_pending_attempts(
+    tmp_path, monkeypatch, delivery, max_attempts, dispatch_limit
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from backend.functions import invocation
+
+    old = RetryPolicy(max_attempts=2, base_seconds=5)
+    changed = RetryPolicy(max_attempts=max_attempts, base_seconds=7, factor=2)
+    declared = [changed.to_dict()]
+    monkeypatch.setattr(
+        invocation, "load_manifest", lambda *args: ({"retry": declared[0]}, None)
+    )
+    slots = ScheduleSlots(tmp_path / "slots.db")
+    service = SimpleNamespace(
+        root=tmp_path,
+        invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.SUCCEEDED)),
+    )
+    try:
+        if delivery == "schedule":
+            job = slots.enqueue("example", TIMEPOINT, retry_policy=old)
+        else:
+            event = SimpleNamespace(
+                to_webhook_payload=lambda: {"event_id": "e", "origin": {}}
+            )
+            job = slots.enqueue_event("example", event, {"id": "n"}, old, graph_id="g")
+        now = max(TIMEPOINT, job.run_at)
+        running = slots.claim_next("w", now=now, lease_seconds=10)
+        slots._finish_result(
+            service, running, SimpleNamespace(state=ExecutionState.DEAD_LETTER), now
+        )
+        current = slots._store._get_by_id(job.id)
+        if max_attempts != 3:
+            assert current.state == ExecutionState.DEAD_LETTER
+            assert service.invoke.call_count == 0
+            return
+        assert current.state == ExecutionState.PENDING
+        assert current.run_at == now + timedelta(seconds=7)
+        assert current.payload["retry_policy"] == changed.to_dict()
+        declared[0] = RetryPolicy(max_attempts=dispatch_limit, base_seconds=9).to_dict()
+        slots.dispatch(
+            service,
+            "w",
+            actor_binding={"graph_id": "g"},
+            now=current.run_at,
+            lease_seconds=10,
+            graph_event_filter=lambda job: job.payload["entity"],
+        )
+        current = slots._store._get_by_id(job.id)
+        if dispatch_limit == 2:
+            assert current.state == ExecutionState.PENDING
+            assert current.run_at == now + timedelta(seconds=9)
+            slots.dispatch(
+                service,
+                "w",
+                actor_binding={"graph_id": "g"},
+                now=current.run_at,
+                lease_seconds=10,
+                graph_event_filter=lambda job: job.payload["entity"],
+            )
+            current = slots._store._get_by_id(job.id)
+        assert service.invoke.call_count == (dispatch_limit == 2)
+        assert current.state == (
+            ExecutionState.SUCCEEDED
+            if dispatch_limit == 2
+            else ExecutionState.DEAD_LETTER
+        )
+        assert current.payload["retry_policy"] == declared[0]
+        assert (
+            slots.claim_next("w", now=now + timedelta(days=1), lease_seconds=10) is None
+        )
+    finally:
+        slots.close()
+
+
 @pytest.mark.parametrize(
     "outcome,purge,expected",
     [
@@ -550,7 +628,8 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         service = SimpleNamespace(
             invoke=Mock(return_value=SimpleNamespace(state=ExecutionState.DEAD_LETTER))
         )
-        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: policy)
+        monkeypatch.setattr(slots, "_read_retry_policy", lambda *args: policy)
         now = datetime.now(timezone.utc) + timedelta(seconds=1)
         slots.dispatch(
             service,
@@ -577,7 +656,8 @@ def test_graph_batch_records_member_refusal_across_retry(tmp_path, monkeypatch):
         ] == ["accepted"]
         slots.close()
         slots = ScheduleSlots(tmp_path / "slots.db")
-        monkeypatch.setattr(slots, "_retry_declared", lambda *args: True)
+        monkeypatch.setattr(slots, "_retry_declared", lambda *args: policy)
+        monkeypatch.setattr(slots, "_read_retry_policy", lambda *args: policy)
         slots.dispatch(
             service,
             "w",
