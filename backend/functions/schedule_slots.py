@@ -95,9 +95,12 @@ class ScheduleSlots:
                     UPDATE execution_jobs AS j SET state = ?,
                         dead_letter_reason = 'superseded schedule slot',
                         finished_at = ?, updated_at = ?
-                    WHERE j.state = ? AND j.attempts = 0 AND j.run_at <= ?
+                    WHERE j.kind = ? AND j.idempotency_key GLOB 'function-schedule:*'
+                      AND j.state = ? AND j.attempts = 0 AND j.run_at <= ?
                       AND (EXISTS (SELECT 1 FROM execution_jobs AS newer
-                            WHERE newer.agent_id = j.agent_id AND newer.attempts = 0
+                            WHERE newer.kind = ?
+                              AND newer.idempotency_key GLOB 'function-schedule:*'
+                              AND newer.agent_id = j.agent_id AND newer.attempts = 0
                               AND newer.run_at <= ? AND newer.run_at > j.run_at)
                            OR EXISTS (SELECT 1 FROM schedule_watermarks AS w
                             WHERE w.function_id = j.agent_id AND w.fire_time >= j.run_at))
@@ -106,17 +109,21 @@ class ScheduleSlots:
                         ExecutionState.CANCELLED.value,
                         ts,
                         ts,
+                        ExecutionKind.SCHEDULED.value,
                         ExecutionState.PENDING.value,
                         ts,
+                        ExecutionKind.SCHEDULED.value,
                         ts,
                     ),
                 )
                 row = conn.execute(
                     """
-                    SELECT * FROM execution_jobs WHERE state = ? AND run_at <= ?
+                    SELECT * FROM execution_jobs WHERE kind = ?
+                      AND idempotency_key GLOB 'function-schedule:*'
+                      AND state = ? AND run_at <= ?
                     ORDER BY run_at, created_at LIMIT 1
                 """,
-                    (ExecutionState.PENDING.value, ts),
+                    (ExecutionKind.SCHEDULED.value, ExecutionState.PENDING.value, ts),
                 ).fetchone()
                 if row is None:
                     conn.commit()
@@ -172,7 +179,11 @@ class ScheduleSlots:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 job = store._get_by_id(job_id)
-                if job is None:
+                if (
+                    job is None
+                    or job.kind != ExecutionKind.SCHEDULED
+                    or not job.idempotency_key.startswith("function-schedule:")
+                ):
                     raise JobNotFoundError(job_id)
                 if job.state != ExecutionState.RUNNING or job.attempts != attempt:
                     conn.commit()
