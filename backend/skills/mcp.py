@@ -316,8 +316,10 @@ class SkillsExtension(Extension):
             "ttlMs": min((hint["ttlMs"] for hint in hints), default=self.ttl_ms),
             "cacheScope": "private"
             if self.authorization_hook is not None
-            or any(type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
-                   for provider in self.providers)
+            or any(
+                type(provider) not in (CoreSkillProvider, GraphSemanticsProvider)
+                for provider in self.providers
+            )
             or len(uris) != len(self.entries)
             or any(hint["cacheScope"] == "private" for hint in hints)
             else self.cache_scope,
