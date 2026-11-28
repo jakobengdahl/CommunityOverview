@@ -137,15 +137,18 @@ author whose annotations or templates carry unsafe content.
   [session_store.py](../../../backend/core/session_store.py) to every
   annotation, then rebuilds the asset table with `_assets` and requires it to
   equal the document's `assets`.
-- **No overwrite.** Inside the store transactions `restore_backup` refuses any
-  existing session or template, template IDs that collide with profile
-  templates, restored sessions or staged records, and staged records other than
-  active ones for restored staged sessions. `open_restore` writes only to a
+- **No overwrite.** While validating the document, `restore_backup` refuses
+  template IDs that collide with profile templates. Inside the store
+  transactions it then refuses any existing session or template, template IDs
+  that collide with restored sessions or staged records, and staged records
+  other than active ones for restored staged sessions. `open_restore` writes only to a
   fresh temporary directory beside the output, and `_publish` uses Linux
   `renameat2` with no-replace so an existing output is never replaced.
 - **Error hygiene.** Refusals use fixed `BackupRefused` and `RestoreRefused`
-  reasons and suppress the original exception (`from None`), so record content
-  and session IDs are not chained into tracebacks; until restore begins,
+  reasons and, with one exception, suppress the original exception
+  (`from None`), so record content and session IDs are not chained into
+  tracebacks. The exception is `_assets` in `session_backup.py`, which chains
+  the decode error of an invalid embedded asset (`from exc`); until restore begins,
   `restore_sessions.py` reports any failure only as `access denied`.
 - Behaviour is exercised by
   [test_session_backup.py](../../../backend/service/tests/test_session_backup.py)
@@ -164,8 +167,11 @@ author whose annotations or templates carry unsafe content.
 - Authorization covers what the operator's policy allows, not what the original
   author intended. A policy that grants admin and permissive reads covers every
   session in the snapshot. Restore
-  authorizes against the paired graph; references missing from it are reported,
-  not refused, and the report is session data the operator must protect.
+  authorizes against the paired graph with `authorize_capture_refs` in
+  [views.py](../../../backend/service/views.py). With graph narrowing enabled a
+  missing node or edge refuses the restore; without narrowing, references missing from
+  the graph are reported, not refused, and the report is session data the
+  operator must protect.
 - The integration and authorization modules run unsandboxed with the operator's
   privileges. A malicious or misconfigured module defeats every control here.
 - Consistency depends on the operator: snapshots taken with active writers are
