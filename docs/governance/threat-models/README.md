@@ -25,4 +25,4 @@ Use the following sections for each model:
 
 - [MCP server](mcp-server.md)
 - [Session backup and restore](session-backup-restore.md)
-- User functions and triggers — planned.
+- [User functions and triggers](user-functions-triggers.md)
