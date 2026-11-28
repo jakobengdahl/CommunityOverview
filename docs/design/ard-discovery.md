@@ -173,7 +173,7 @@ Identifiers are `urn:air:<publisher_domain>:<slug>:mcp` for the server and
 {
   "entries": [
     {
-      "identifier": "urn:air:example.org:research-graph:mcp",
+      "identifier": "urn:air:graph.example.org:research-graph:mcp",
       "displayName": "Research knowledge graph",
       "type": "application/mcp-server-card+json",
       "data": {
@@ -215,13 +215,13 @@ skill, in catalogue order:
 
 ```json
 {
-  "identifier": "urn:air:example.org:research-graph:skill:graph-working-method",
+  "identifier": "urn:air:graph.example.org:research-graph:skill:graph-working-method",
   "displayName": "Graph working method",
   "type": "application/agent-skills+md",
   "url": "skill://graph-working-method/SKILL.md",
   "description": "How to search, inspect and change this knowledge graph with its MCP tools.",
   "metadata": {
-    "mcpServer": "urn:air:example.org:research-graph:mcp",
+    "mcpServer": "urn:air:graph.example.org:research-graph:mcp",
     "sha256": "<digest of the served SKILL.md bytes>"
   },
   "updatedAt": "2026-11-28T09:00:00Z"
@@ -337,7 +337,10 @@ if (
 The gateway only proxies explicit routes, so `/.well-known/ard.json` on its
 origin returns `404` today. For `listed` behind the gateway it gets one route,
 `GET`/`HEAD /.well-known/ard.json`, that forwards to the upstream without a
-gateway token. It forwards only the method, path and `If-None-Match`, and
+gateway token. It forwards only the method, path and `If-None-Match` from the
+client, adds the gateway's own upstream ID token when `UPSTREAM_USE_ID_TOKEN`
+is on (as every other proxied route does through `_upstream_headers`), so an
+upstream that requires it serves the manifest instead of `401`/`403`, and
 passes back only the status, body, `Content-Type`, `Cache-Control`, `ETag`
 and `Last-Modified`. The gateway's own OAuth metadata routes do not change.
 
@@ -363,16 +366,27 @@ class DiscoveryProvider(Protocol):
 - The default provider returns `core_entries` unchanged.
 - Core validates everything a provider returns and fails closed, per entry:
   - The required ARD fields are present, with exactly one of `url` and `data`.
-  - The identifier starts with `urn:air:<publisher_domain>:<slug>:`.
-  - Every URL in the entry passes a scheme allowlist. Core walks every string
+  - The identifier starts with `urn:air:<publisher_domain>:<slug>:`,
+    `metadata.mcpServer`, when present, equals the core server entry's
+    identifier exactly, and every other string value at any depth that starts
+    with `urn:air:` carries the same `urn:air:<publisher_domain>:<slug>:`
+    prefix, so an own-namespaced entry cannot bind itself to another
+    instance's server.
+  - Every URL in the entry passes an origin allowlist. Core walks every string
     value at any depth, in every field (`url`, `data`, `description`,
-    `metadata`, `trustManifest` and any other key), and treats as a URL each
-    match of `[A-Za-z][A-Za-z0-9+.-]*://` and each value starting with `//`.
-    Each must be either `http`/`https` with exactly the scheme, host and port of
-    `public_base_url` after normalisation, or `skill://` naming a skill in the
-    current `public` build. Any other scheme (`wss://`, `mcp+https://`, `ftp://`,
-    …) or a scheme-relative `//` value drops the entry, even when the host
-    matches.
+    `metadata`, `trustManifest` and any other key). Each string, and each
+    URL-like token inside free text, is parsed with a WHATWG-compatible URL
+    parser against `public_base_url` as base, so every form a client would
+    resolve to some origin (`https://`, `https:host`, `https:/host`,
+    backslashes such as `https:\\host`, `https:/\host` or a leading `\\`, and
+    scheme-relative `//host`) is checked by its resolved origin, not by its
+    spelling. A value that resolves to `http`/`https` must have exactly the
+    scheme, host and port of `public_base_url` after normalisation and must
+    itself be written as an absolute `http://` or `https://` URL without
+    backslashes; `skill://` must name a skill in the current `public` build.
+    Any other scheme (`wss://`, `mcp+https://`, `ftp://`, …), any foreign
+    origin, and any relative, scheme-relative, single-slash, slash-less or
+    backslash form drops the entry, even when it resolves to the own host.
   - `type` is one of the media types listed here.
   - The size limits above hold.
   Entries that fail are dropped and logged by identifier only. A provider that
@@ -422,8 +436,11 @@ required.
    the same `updatedAt`, `Last-Modified` and ETag.
 10. **Provider seam:** in `public`, one parametrised test where a provider
     returns an own-namespaced entry carrying, in turn, a foreign identifier, a
-    foreign `https` origin in `url`, a `wss://`, an `mcp+https://` and a
-    scheme-relative URL on the own host, a foreign URL inside `metadata`,
+    `metadata.mcpServer` naming another instance's server, a foreign `https`
+    origin in `url`, a `wss://`, an `mcp+https://` and a scheme-relative URL on
+    the own host, foreign hosts written as `https:\\host`, `https:/\host`,
+    `https:/host`, `https:host` and `\\host` in `url` and `data.remotes`, a
+    foreign URL inside `metadata`,
     `description` and `trustManifest`, and a `skill://` name not in the build;
     each such entry is dropped and the core entries remain.
     In `listed`, a provider that adds an entry, rewrites the server entry's
