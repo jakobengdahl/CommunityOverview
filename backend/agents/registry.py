@@ -70,6 +70,7 @@ class AgentRegistry:
         skills_config: Optional[SkillsConfig] = None,
         execution_store: Optional[ExecutionStore] = None,
         proposal_store: Optional[ProposalStore] = None,
+        skill_provider=None,
     ):
         """
         Initialize the agent registry.
@@ -85,8 +86,11 @@ class AgentRegistry:
             proposal_store: Store backing durable agent proposals (governance).
                 When None, one is created from settings.governance_db. Injectable
                 for tests.
+            skill_provider: The app's GraphSkillProvider, shared with the
+                assistant and the MCP catalog, for agents' linked Skill nodes.
         """
         self.settings = settings
+        self._skill_provider = skill_provider
         self._storage = graph_storage
         self._service = graph_service
         self._skills_config = skills_config or SkillsConfig()
@@ -285,6 +289,7 @@ class AgentRegistry:
                 graph_storage=self._storage,
                 run_recorder=self._run_recorder,
                 proposal_store=self._proposal_store,
+                skill_provider=self._skill_provider,
             )
             worker.start()
             self._workers[config.agent_id] = worker

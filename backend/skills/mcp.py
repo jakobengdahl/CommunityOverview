@@ -43,6 +43,8 @@ _PATH = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 class SkillFiles:
     name: str
     files: Mapping[str, str]
+    # Optional skill:// path whose last segment is the name, e.g. "team/name".
+    path: str = ""
 
 
 class _GraphSemanticsFiles(SkillFiles):
@@ -220,7 +222,14 @@ class SkillsExtension(Extension):
                     raise ValueError("Invalid skill name or file count")
                 if "SKILL.md" not in skill.files:
                     raise ValueError("Skill requires SKILL.md")
-                root = f"skill://{skill.name}"
+                segments = (skill.path or skill.name).split("/")
+                if (
+                    len(segments) > 8
+                    or segments[-1] != skill.name
+                    or not all(_NAME.fullmatch(s) for s in segments)
+                ):
+                    raise ValueError("Invalid skill path")
+                root = "skill://" + "/".join(segments)
                 if not isinstance(skill.files["SKILL.md"], str):
                     raise ValueError("Skill files must be UTF-8 text")
                 uri = f"{root}/SKILL.md"
@@ -289,6 +298,9 @@ class SkillsExtension(Extension):
                     if content.strip() and not clean:
                         raise ValueError("Skill content rejected")
                     uri = f"{root}/{path}"
+                    if uri in self.files:
+                        # One skill's directory may not hold another's files.
+                        raise ValueError("Duplicate skill file")
                     data = clean.encode("utf-8")
                     self.files[uri] = clean
                     self.owners[uri] = (provider, skill.name)
@@ -324,6 +336,14 @@ class SkillsExtension(Extension):
             MethodBinding("skills/get", GetSkillParams, self.get_skill),
         ]
 
+    def custom_skills(self):
+        # A provider that serves nothing (a graph without Skill nodes) cannot
+        # make access vary between callers.
+        return any(
+            type(provider) not in _BUILTIN_PROVIDERS
+            for provider, _ in self.owners.values()
+        )
+
     def hints(self, ctx, uris):
         if ctx.protocol_version < "2026-07-28":
             return {}
@@ -335,9 +355,7 @@ class SkillsExtension(Extension):
                 self.authorization_hook is not None
                 and type(self.authorization_hook) is not DefaultGraphAuthorizationHook
             )
-            or any(
-                type(provider) not in _BUILTIN_PROVIDERS for provider in self.providers
-            )
+            or self.custom_skills()
             or len(uris) != len(self.entries)
             or any(hint["cacheScope"] == "private" for hint in hints)
             else self.cache_scope,
@@ -348,9 +366,7 @@ class SkillsExtension(Extension):
         if (
             self.authorization_hook is not None
             and type(self.authorization_hook) is not DefaultGraphAuthorizationHook
-        ) or any(
-            type(provider) not in _BUILTIN_PROVIDERS for provider in self.providers
-        ):
+        ) or self.custom_skills():
             hints["cacheScope"] = "private"
         return {
             **self.entries[uri],
@@ -412,6 +428,12 @@ class SkillsExtension(Extension):
         check = getattr(provider, "can_read", None)
         return check is not None and await check(ctx, name) is True
 
+    def audit_read(self, uri):
+        provider = self.owners[uri][0]
+        audit = getattr(provider, "audit_read", None)
+        if audit is not None:
+            audit(uri, self.files[uri])
+
     async def resource_access(self, ctx, call_next):
         entries = self.entries
         if ctx.method == "resources/read":
@@ -419,6 +441,8 @@ class SkillsExtension(Extension):
             if uri in self.owners and not await self.allowed(ctx, uri):
                 raise MCPError(code=INVALID_PARAMS, message="Unknown resource")
         result = await call_next(ctx)
+        if ctx.method == "resources/read" and uri in self.owners:
+            self.audit_read(uri)
         if ctx.method == "resources/list":
             resources = [
                 resource
@@ -527,4 +551,5 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
                 ):
                     return {"error_code": "not_found"}
                 result["file"] = {"uri": file_uri, "text": extension.files[file_uri]}
+                extension.audit_read(file_uri)
             return result

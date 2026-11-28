@@ -442,6 +442,20 @@ class TestLoadSkills:
         assert graph_skill.allowed_tools == ["search_graph"]
         assert graph_skill.source_url == "graph://skill/skill-node"
 
+    def test_skill_nodes_alone_load_through_the_shared_provider(
+        self, make_worker, mock_storage
+    ):
+        from backend.skills.graph import GraphSkillProvider
+
+        self._skill_node(mock_storage, "skill-node", content="<script>x</script>ok")
+        worker = make_worker(FakeSkillsLoader(), skill_node_ids=["skill-node"])
+        worker._graph_storage = None
+        worker._skill_provider = GraphSkillProvider(mock_storage)
+
+        [skill] = worker._load_skills()
+
+        assert (skill.id, skill.content) == ("skill-node", "ok")
+
     def test_no_skills_urls_skips_url_loading(self, make_worker):
         loader = FakeSkillsLoader(url_skills=[_skill("from-url")])
         worker = make_worker(loader)

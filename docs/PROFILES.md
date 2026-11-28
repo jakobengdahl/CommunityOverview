@@ -350,8 +350,8 @@ The optional `skills_config.mcp` section controls the MCP skills extension.
 working-method skill and a graph-semantics skill and read their files through MCP resources. The latter describes the loaded schema: node types, fields, declared subtypes, relationships, vocabularies, language policy and prompt prefix. It contains no graph data. Its snapshot date is a deterministic identifier derived from the schema, not a modification time; content statistics are available through `describe_graph`. `ttlMs` is a
 non-negative freshness hint in milliseconds (default `0`), and `cacheScope` is
 `private` (the default) or `public`. Use `private` whenever content or access
-can vary between callers. This slice serves only the built-in provider;
-`create_app` does not accept additional providers. Third-party and remote
+can vary between callers. Besides the built-in skills, the server serves
+Skill nodes from the graph (see below); `create_app` does not accept additional providers. Third-party and remote
 providers are planned for a follow-up slice. The configured cache scope is used
 as supplied; it is not automatically changed for additional providers. `graphSemantics.ttlMs` and `graphSemantics.cacheScope` independently configure the schema skill, with the same defaults and validation as the working-method hints. Modern clients receive per-skill hints in the list and get results.
 The default authorization hook permits configured public cache scopes; custom
@@ -373,6 +373,38 @@ file path. Set `fallback` to `false` to omit those tools. They use the same
 validated snapshot and access checks as the extension.
 Skills with more than 512 files, more than 16 MiB, or rejected content prevent
 startup; files are sanitized before their digests are calculated.
+
+#### Skill nodes as MCP skills
+
+With MCP skills enabled, every Skill node with `metadata.content` that is not
+archived is also served as a skill. `metadata.content` becomes the body of
+`SKILL.md` (a frontmatter block in it is replaced); the frontmatter is
+generated from the node: `name` from the node name (lower-case, hyphenated),
+`description` from the node description or `when_to_use`, `allowed-tools` from
+`allowed_tools`, and `metadata` with `node-id`, `revision` (the node revision)
+and `version` when set. The optional `metadata.skill_path` sets the skill URI
+path, for example `team/review` serves `skill://team/review/SKILL.md` with the
+name `review`. When MCP attachment reading is enabled for the instance, the
+node's UTF-8 text attachments are served as `references/<filename>`; binary
+attachments are not served.
+
+Skill nodes go through the same validation and sanitisation as the built-in
+skills, but an invalid node — rejected content, more than 512 files or 16 MiB,
+a name or path already in use, or a path inside another skill — is skipped
+with a warning instead of preventing startup. When two nodes claim the same
+name or path, the oldest node is served. A caller sees a Skill node's skill
+only when it may read that node under the node-read access rules; a skill with
+attachment files additionally needs the access `read_node_attachment` needs
+(`get_node_attachment` and `read_node_attachment_content`, including their
+graph narrowing), and each served attachment file read is audited as an
+`attachment_content_read`. As soon as the graph serves a Skill node, every
+skill uses `cacheScope: private`. The catalog is a snapshot: `refresh_skills`
+picks up created, changed or deleted Skill nodes; an archived or deleted node
+is hidden at once. Agents (`skill_node_ids` on Agent nodes) and expert agents
+in the assistant (`skill_node_ids` on expert agent configs, which needs no
+`skills_urls`) read Skill nodes through the same provider, so they get the same
+sanitised body. With MCP skills disabled, agents and experts still read their
+linked Skill nodes, but nothing is served over MCP.
 
 Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
 

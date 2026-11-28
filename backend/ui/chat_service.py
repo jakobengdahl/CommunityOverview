@@ -77,6 +77,7 @@ class ChatService:
         *,
         assistant_attachment_access: str = "off",
         conversation_registry=None,
+        skill_provider=None,
     ):
         """
         Initialize ChatService with a GraphService instance.
@@ -89,6 +90,8 @@ class ChatService:
             assistant_attachment_access, "ASSISTANT_ATTACHMENT_ACCESS"
         )
         self._graph_service = graph_service
+        # The app's GraphSkillProvider; expert Skill nodes are read through it.
+        self._skill_provider = skill_provider
 
         # Build tools map that routes to GraphService methods
         self._tools_map = self._build_tools_map()
@@ -237,8 +240,12 @@ class ChatService:
             experts: List of ExpertAgentConfig objects
             skills_config: SkillsConfig to use for the loader
         """
+        from backend.skills.graph import GraphSkillProvider
         from backend.skills.loader import SkillsLoader
 
+        provider = self._skill_provider or GraphSkillProvider(
+            self._graph_service.storage
+        )
         # Clear stale state from any previous load (handles config reload)
         self._expert_contexts.clear()
         self._expert_skills.clear()
@@ -270,6 +277,18 @@ class ChatService:
             else:
                 self._expert_skills[expert.id] = []
                 self._expert_skills_full[expert.id] = []
+            for node_id in getattr(expert, "skill_node_ids", []):
+                try:
+                    skill = provider.skill_definition(
+                        node_id, skills_config.max_skill_body_chars
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Expert %s: Skill node load failed: %s", expert.id, exc
+                    )
+                    continue
+                if skill is not None:
+                    self._expert_skills_full[expert.id].append(skill)
 
     def load_expert_skills_sync(self, experts: list, skills_config) -> None:
         """Synchronous wrapper for startup use outside an async context."""

@@ -1219,3 +1219,43 @@ def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
         )
 
     anyio.run(check)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_app_shares_one_skill_provider_and_loads_node_only_experts(
+    app_config, mock_llm_provider, tmp_path, enabled
+):
+    from backend.config.config_loader import ExpertAgentConfig
+    from backend.core import GraphStorage, Node
+
+    storage = GraphStorage(
+        json_path=str(tmp_path / "g.json"), embeddings_path=str(tmp_path / "e.pkl")
+    )
+    metadata = {"content": "Body"}
+    node = Node(
+        id="s", type="Skill", name="Review", description="Reviews", metadata=metadata
+    )
+    storage.add_nodes([node], [])
+    expert = ExpertAgentConfig(id="e", name="Expert", skill_node_ids=["s"])
+    settings = SkillsConfig(mcp=MCPSkillsConfig(enabled=enabled))
+    with (
+        patch("backend.config.config_loader.get_skills_config", return_value=settings),
+        patch(
+            "backend.config.config_loader.get_expert_agent_configs",
+            return_value=[expert],
+        ),
+        patch("backend.ui.chat_logic.create_provider", return_value=mock_llm_provider),
+        patch("backend.skills.mcp.SkillsExtension", wraps=SkillsExtension) as factory,
+    ):
+        app = create_app(app_config, storage)
+
+    provider = app.state.runtime.skill_provider
+    assert provider.authorization_hook is app.state.graph_service.authorization_hook
+    assert provider.attachment_settings is None  # MCP attachment tools are off.
+    assert app.state.chat_service._skill_provider is provider
+    assert app.state.agent_registry._skill_provider is provider
+    assert [s.id for s in app.state.chat_service._expert_skills_full["e"]] == ["s"]
+    assert factory.called is enabled
+    if enabled:
+        assert factory.call_args.args[0][2] is provider
+        assert provider.node_ids == {"review": "s"}

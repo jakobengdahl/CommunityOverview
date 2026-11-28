@@ -95,7 +95,8 @@ SYSTEM_NODE_TYPES = {
         "ui_form": "skill",
         "description": (
             "Reusable AI skill definition (SKILL.md-compatible). "
-            "metadata: {source_url, content, allowed_tools, when_to_use, version, effort}. "
+            "metadata: {source_url, content, allowed_tools, when_to_use, version, effort, "
+            "skill_path}. "
             "Can be linked to Agent nodes via USES_SKILL edges."
         ),
         "color": "#8B5CF6",
@@ -220,6 +221,8 @@ class ExpertAgentConfig(BaseModel):
     # URLs to SKILL.md files or GitHub repos.
     # Loaded and injected into system_context at startup — wired in server.py (TODO: Phase 3).
     skills_urls: List[str] = Field(default_factory=list)
+    # Skill node IDs in the graph, read through the app's GraphSkillProvider.
+    skill_node_ids: List[str] = Field(default_factory=list)
 
 
 from backend.skills.loader import SkillsConfig  # noqa: E402,F401 — mid-module import breaks a cycle; re-exported for callers

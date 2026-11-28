@@ -68,6 +68,7 @@ from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
 from backend.agents.execution import SqliteExecutionStore
 from backend.agents.execution.import_worker import recover_import_jobs
+from backend.skills.graph import GraphSkillProvider
 from backend.federation import (
     FederationFileConfig,
     FederationManager,
@@ -118,6 +119,7 @@ class AppRuntime:
     federation_summary: dict
     federation_manager: FederationManager
     agent_registry: AgentRegistry
+    skill_provider: GraphSkillProvider
 
     def stop(self) -> None:
         """Stop background work and flush storage."""
@@ -229,12 +231,26 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
     federation_manager.sync_on_startup()
     federation_manager.start()
 
+    # One Skill node provider for agents, the assistant and the MCP catalog.
+    from backend.config.config_loader import get_skills_config
+    from backend.runtime.attachment_access import attachment_tool_allowed
+
+    skill_provider = GraphSkillProvider(
+        graph_storage,
+        graph_service.authorization_hook,
+        graph_service.attachment_settings
+        if attachment_tool_allowed("read_node_attachment", config.mcp_attachment_tools)
+        else None,
+        get_skills_config().mcp.ttlMs,
+    )
+
     # Initialize Agent Registry for background agent workers
     agent_settings = AgentsSettings.from_env()
     agent_registry = AgentRegistry(
         settings=agent_settings,
         graph_storage=graph_storage,
         graph_service=graph_service,
+        skill_provider=skill_provider,
     )
 
     # Connect agent delivery callback to event system
@@ -278,6 +294,7 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
         federation_summary=federation_summary,
         federation_manager=federation_manager,
         agent_registry=agent_registry,
+        skill_provider=skill_provider,
     )
 
 
@@ -590,10 +607,11 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         graph_service,
         assistant_attachment_access=config.assistant_attachment_access,
         conversation_registry=FileTaintRegistry(sessions_dir),
+        skill_provider=runtime.skill_provider,
     )
     document_service = DocumentService()
 
-    # Load skills for expert agents that have skills_urls configured.
+    # Load skills for expert agents with skills_urls or skill_node_ids.
     # Runs once synchronously at startup (a new event loop is created so this
     # is safe regardless of whether the caller is inside an async context).
     try:
@@ -603,11 +621,11 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         )
 
         _expert_configs = get_expert_agent_configs()
-        if any(e.skills_urls for e in _expert_configs):
+        if any(e.skills_urls or e.skill_node_ids for e in _expert_configs):
             chat_service.load_expert_skills_sync(_expert_configs, get_skills_config())
             logger.info(
-                "Expert agent skills loaded for %d expert(s) with skills_urls",
-                sum(1 for e in _expert_configs if e.skills_urls),
+                "Expert agent skills loaded for %d expert(s)",
+                sum(1 for e in _expert_configs if e.skills_urls or e.skill_node_ids),
             )
     except Exception as _exc:
         logger.warning("Expert agent skills startup load failed (non-fatal): %s", _exc)
@@ -668,7 +686,6 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
     skills_config = get_skills_config().mcp
     mcp_extensions = []
     if skills_config.enabled:
-        from backend.runtime.attachment_access import attachment_tool_allowed
         from backend.skills.mcp import (
             CoreSkillProvider,
             GraphSemanticsProvider,
@@ -676,10 +693,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         )
 
         enabled_tools = {"describe_graph"}
-        if (
-            attachment_tool_allowed("read_node_attachment", config.mcp_attachment_tools)
-            and graph_service.attachment_settings is not None
-        ):
+        if runtime.skill_provider.attachment_settings is not None:
             enabled_tools.add("read_node_attachment")
         profile = _get_loader().config
         mcp_extensions.append(
@@ -704,6 +718,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
                         skills_config.graphSemantics.ttlMs,
                         skills_config.graphSemantics.cacheScope,
                     ),
+                    runtime.skill_provider,
                 ],
                 skills_config.ttlMs,
                 skills_config.cacheScope,

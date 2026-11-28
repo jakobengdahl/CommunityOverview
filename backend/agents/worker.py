@@ -40,6 +40,7 @@ from backend.core.events.causation import (
     agent_mutation_context,
 )
 from backend.core.events.dispatcher import _copy_payload
+from backend.skills.graph import GraphSkillProvider
 from backend.skills.loader import (
     SkillDefinition,
     SkillMetadata,
@@ -137,6 +138,7 @@ class AgentWorker:
         run_recorder: Optional[Any] = None,
         proposal_store: Optional[Any] = None,
         runtime_extensions=None,
+        skill_provider: Optional[GraphSkillProvider] = None,
     ):
         """
         Initialize the agent worker.
@@ -151,6 +153,7 @@ class AgentWorker:
             graph_storage: GraphStorage for reading linked Skill nodes
             run_recorder: Optional AgentRunRecorder for durable run history
             proposal_store: Optional ProposalStore backing agent governance
+            skill_provider: The app's GraphSkillProvider for linked Skill nodes
         """
         self.config = config
         self.settings = settings
@@ -159,6 +162,7 @@ class AgentWorker:
         self.on_result = on_result
         self._skills_config = skills_config or SkillsConfig()
         self._graph_storage = graph_storage
+        self._skill_provider = skill_provider
         self._run_recorder = run_recorder
         self._proposal_store = proposal_store
         storage = graph_storage or getattr(graph_service, "_storage", None)
@@ -423,44 +427,22 @@ class AgentWorker:
             loop.close()
 
         # Load from linked Skill nodes in the graph
-        if self.config.skill_node_ids and self._graph_storage:
+        provider = self._skill_provider or (
+            self._graph_storage and GraphSkillProvider(self._graph_storage)
+        )
+        if self.config.skill_node_ids and provider:
             for node_id in self.config.skill_node_ids:
                 try:
-                    node = self._graph_storage.get_node(node_id)
-                    if not node:
-                        logger.debug("Skill node %s not found in graph", node_id)
-                        continue
-                    node_type = (
-                        node.type.value
-                        if hasattr(node.type, "value")
-                        else str(node.type)
+                    skill = provider.skill_definition(
+                        node_id, self._skills_config.max_skill_body_chars
                     )
-                    if node_type != "Skill":
-                        logger.warning(
-                            "Node %s is type %s, expected Skill", node_id, node_type
-                        )
+                    if skill is None:
+                        logger.debug("Node %s is no usable Skill node", node_id)
                         continue
-                    meta = node.metadata or {}
-                    content = meta.get("content", "")
-                    if not content:
-                        logger.debug(
-                            "Skill node %s has no content in metadata", node_id
-                        )
-                        continue
-                    skill = SkillDefinition(
-                        id=node.id,
-                        name=node.name,
-                        description=node.description or "",
-                        content=content[: self._skills_config.max_skill_body_chars],
-                        allowed_tools=meta.get("allowed_tools", []),
-                        when_to_use=meta.get("when_to_use"),
-                        effort=meta.get("effort"),
-                        source_url=meta.get("source_url", f"graph://skill/{node.id}"),
-                    )
                     if skill.id not in seen_ids:
                         seen_ids.add(skill.id)
                         skills.append(skill)
-                        logger.debug("Loaded Skill node: %s", node.name)
+                        logger.debug("Loaded Skill node: %s", skill.name)
                     else:
                         logger.debug("Skipping duplicate graph skill id=%s", skill.id)
                 except Exception as exc:
