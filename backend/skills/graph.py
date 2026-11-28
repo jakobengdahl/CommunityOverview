@@ -194,7 +194,7 @@ class GraphSkillProvider:
         if found is not None:
             from backend.service.attachment_tools import AttachmentReadTools
 
-            AttachmentReadTools.audit("read_skill_attachment", *found, len(text))
+            AttachmentReadTools.audit("read", *found, len(text))
 
     async def can_read(self, ctx, skill_name: str) -> bool:
         from backend.runtime.authorization import GRAPH_ACTION_READ

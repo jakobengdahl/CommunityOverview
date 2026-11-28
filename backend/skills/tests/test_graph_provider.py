@@ -238,12 +238,14 @@ def test_resource_reads_of_attachment_files_are_audited(storage, caplog):
         anyio.run(read, "skill://a-skill/references/ref.md")
 
     [record] = [r for r in caplog.records if hasattr(r, "attachment_id")]
-    assert (record.event, record.node_id, record.attachment_id, record.chars) == (
-        "attachment_content_read",
-        "a",
-        "0",
-        4,
-    )
+    assert (
+        record.event,
+        record.tool,
+        record.actor["type"],
+        record.node_id,
+        record.attachment_id,
+        record.chars,
+    ) == ("attachment_content_read", "read_node_attachment", "mcp", "a", "0", 4)
 
 
 def test_assistant_experts_read_skill_nodes_through_the_given_provider(storage):

@@ -429,10 +429,14 @@ class SkillsExtension(Extension):
         return check is not None and await check(ctx, name) is True
 
     def audit_read(self, uri):
+        from backend.service.attachment_tools import tool_caller
+
         provider = self.owners[uri][0]
         audit = getattr(provider, "audit_read", None)
         if audit is not None:
-            audit(uri, self.files[uri])
+            # Same caller identity as read_node_attachment over MCP.
+            with tool_caller("mcp"):
+                audit(uri, self.files[uri])
 
     async def resource_access(self, ctx, call_next):
         entries = self.entries
