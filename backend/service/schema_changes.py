@@ -60,6 +60,14 @@ def graph_conflicts(storage, schema, active):
         )["allowed"]
 
     for edge in storage.get_all_edges():
+        # A removed type must be checked by name: the endpoint rules below
+        # admit any unconfigured relationship type.
+        if (
+            edge.type_str in active.relationship_types
+            and edge.type_str not in schema.relationship_types
+        ):
+            conflicts.append({"kind": "edge", "id": edge.id, "type": edge.type_str})
+            continue
         source, target = nodes.get(edge.source), nodes.get(edge.target)
         if source is None or target is None:
             continue

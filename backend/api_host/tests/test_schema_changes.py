@@ -179,6 +179,10 @@ def test_accepted_change_recomputes_and_announces_with_standard_events(live):
             "schema_conflicts_with_graph",
         ),
         (
+            lambda raw: raw["schema"]["relationship_types"].pop("IMPLEMENTS"),
+            "schema_conflicts_with_graph",
+        ),
+        (
             lambda raw: raw["schema"]["relationship_types"]["PRODUCES"].update(
                 target_types=["Data"]
             ),
