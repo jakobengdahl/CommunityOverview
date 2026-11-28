@@ -88,7 +88,7 @@ or profile text can reach the manifest by mistake. A missing file means `off`.
     "mode": "listed",
     "mcp_front": "oauth_gateway",
     "public_base_url": "https://graph.example.org",
-    "publisher_domain": "example.org",
+    "publisher_domain": "graph.example.org",
     "entry": {
       "slug": "research-graph",
       "display_name": "Research knowledge graph",
@@ -109,7 +109,7 @@ or profile text can reach the manifest by mistake. A missing file means `off`.
 | `mode` | `off` | `off`, `listed` or `public`. Anything else fails startup. |
 | `mcp_front` | none; required unless `off` | `direct` or `oauth_gateway`: what clients reach the MCP endpoint through. The backend cannot detect a gateway in front of it, so the operator states it. |
 | `public_base_url` | none; required unless `off` | Absolute `https` origin without path, query or fragment (`http` only for `localhost`). The MCP URL is `<public_base_url>/mcp`. Never derived from the request's `Host` header. |
-| `publisher_domain` | none; required unless `off` | Lower-case FQDN (IDNA A-labels, no port). The host of `public_base_url` must equal it or be a subdomain of it, so an instance cannot claim someone else's domain. |
+| `publisher_domain` | none; required unless `off` | Lower-case FQDN (IDNA A-labels, no port). Must equal the host of `public_base_url` exactly; a parent domain is refused. Sibling hosts under a shared parent, or under a public suffix, therefore get distinct publishers and cannot mint each other's identifiers. This only binds the identifier to the host that serves the manifest over `https`; it proves nothing about the wider domain, which is left to a later `trustManifest`. |
 | `entry.slug` | none; required unless `off` | `^[a-z0-9]+(-[a-z0-9]+)*$`, at most 63 characters. It is the namespace for every identifier this instance publishes. |
 | `entry.display_name` | none; required | 1–100 characters. |
 | `entry.description` | none; required | 1–500 characters. |
@@ -364,8 +364,15 @@ class DiscoveryProvider(Protocol):
 - Core validates everything a provider returns and fails closed, per entry:
   - The required ARD fields are present, with exactly one of `url` and `data`.
   - The identifier starts with `urn:air:<publisher_domain>:<slug>:`.
-  - Every HTTP(S) URL in `url` or `data` has the origin of `public_base_url`.
-  - `skill://` URLs name a skill that is in the current `public` build.
+  - Every URL in the entry passes a scheme allowlist. Core walks every string
+    value at any depth, in every field (`url`, `data`, `description`,
+    `metadata`, `trustManifest` and any other key), and treats as a URL each
+    match of `[A-Za-z][A-Za-z0-9+.-]*://` and each value starting with `//`.
+    Each must be either `http`/`https` with exactly the scheme, host and port of
+    `public_base_url` after normalisation, or `skill://` naming a skill in the
+    current `public` build. Any other scheme (`wss://`, `mcp+https://`, `ftp://`,
+    …) or a scheme-relative `//` value drops the entry, even when the host
+    matches.
   - `type` is one of the media types listed here.
   - The size limits above hold.
   Entries that fail are dropped and logged by identifier only. A provider that
@@ -389,7 +396,8 @@ required.
    `TRUST_FRONT_LAYER_ACTOR` rule, through one parametrised test asserting the
    resulting allowed set or startup refusal.
 3. **Config validation:** invalid `public_base_url`, a `publisher_domain` that
-   is not a parent of the base URL's host, query counts outside 2–5, and entry
+   differs from the base URL's host (including a parent domain and a public
+   suffix such as `example.org` for `graph.example.org`), query counts outside 2–5, and entry
    text that matches an injection pattern each fail startup (parametrised).
 4. **`listed` manifest:** equals the exact expected structure built from a
    fixture configuration.
@@ -412,8 +420,12 @@ required.
    leaves the server entry's `updatedAt` alone; in `listed`, rebuilding after a
    simulated restart and schema load with an unchanged configuration file gives
    the same `updatedAt`, `Last-Modified` and ETag.
-10. **Provider seam:** in `public`, a provider returning a foreign identifier or
-    a foreign URL origin has those entries dropped, and the core entries remain.
+10. **Provider seam:** in `public`, one parametrised test where a provider
+    returns an own-namespaced entry carrying, in turn, a foreign identifier, a
+    foreign `https` origin in `url`, a `wss://`, an `mcp+https://` and a
+    scheme-relative URL on the own host, a foreign URL inside `metadata`,
+    `description` and `trustManifest`, and a `skill://` name not in the build;
+    each such entry is dropped and the core entries remain.
     In `listed`, a provider that adds an entry, rewrites the server entry's
     text or adds a `trustManifest` is never called, and the manifest equals the
     build without a provider (parametrised over both modes).
