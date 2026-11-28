@@ -54,6 +54,7 @@ is a historical archive.
 | [CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md](CORE_RUNTIME_AND_EXTENSION_ENABLEMENT.md) | Public-core enablement plan for standalone/embedded/extensible runtime modes |
 | [CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md](CORE_ENABLEMENT_IMPLEMENTATION_PLAN.md) | Concrete implementation slices for the runtime/extension enablement above |
 | [PLUGIN_RUNTIME_CORE_ENABLEMENT.md](PLUGIN_RUNTIME_CORE_ENABLEMENT.md) | Generic core work to load, discover, and manage plugins at runtime |
+| [design/ard-discovery.md](design/ard-discovery.md) | Publishing the MCP server and its skills in an ARD manifest at `/.well-known/ard.json`, per discovery mode |
 
 ## Historical
 
