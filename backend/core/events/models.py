@@ -27,6 +27,8 @@ class EventType(str, Enum):
     EDGE_CREATE = "edge.create"
     EDGE_UPDATE = "edge.update"
     EDGE_DELETE = "edge.delete"
+    # The active profile schema changed (backend/service/schema_changes.py).
+    SCHEMA_UPDATE = "schema.update"
 
 
 class EntityKind(str, Enum):
@@ -34,6 +36,7 @@ class EntityKind(str, Enum):
 
     NODE = "node"
     EDGE = "edge"
+    SCHEMA = "schema"
 
 
 class EventOrigin:

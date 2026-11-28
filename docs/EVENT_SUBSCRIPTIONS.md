@@ -59,6 +59,12 @@ The system generates events for:
 | `edge.create` | A new edge was added |
 | `edge.update` | An existing edge was modified |
 | `edge.delete` | An edge was removed |
+| `schema.update` | The active profile schema changed (see [PROFILES.md](PROFILES.md#live-schema-changes)) |
+
+A `schema.update` event has entity kind `schema`, id `profile`, and lists the
+node and relationship type names before and after the change. A subscription
+receives it with `target.entity_kind` set to `"schema"` and `update` among its
+operations. It is not recorded in graph history.
 
 A merge import (`POST /api/import/merge`, see
 [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#committing-a-merge-import)) fires these
@@ -100,7 +106,7 @@ Configuration is stored in the EventSubscription node's `metadata` field:
 
 | Field | Description |
 |-------|-------------|
-| `target.entity_kind` | "node" or "edge" |
+| `target.entity_kind` | "node", "edge" or "schema" |
 | `target.node_types` | Array of node types to match (empty = all) |
 | `operations` | Array of operations: "create", "update", "delete" |
 | `keywords.any` | Match if any keyword appears in name/description/summary/tags |
