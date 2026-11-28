@@ -136,7 +136,8 @@ class SchemaChangeCoordinator:
             return {"accepted": False, "error_code": "invalid_schema"}
         loader = config_loader._get_loader()
         before = loader.config
-        if not self.stale and candidate.config.model_dump() == before.model_dump():
+        unchanged = candidate.config.model_dump() == before.model_dump()
+        if unchanged and not self.stale:
             return {"accepted": True, "changed": False}
         # Held to activation, so no write admits a node the check did not see.
         with getattr(self.storage, "write_lock", nullcontext()):
@@ -160,6 +161,9 @@ class SchemaChangeCoordinator:
             if refresh is not None:
                 refresh()
         self._pending = [commit for commit in commits if commit is not None]
+        if unchanged:
+            # A retry of failed commits: the change itself was already announced.
+            return None
         self._pending_event = Event(
             event_type=EventType.SCHEMA_UPDATE,
             origin=EventContext(event_origin=EventOrigin.SYSTEM),
@@ -182,10 +186,11 @@ class SchemaChangeCoordinator:
                 self.stale = True
                 logger.exception("Schema change listener failed after activation")
         event, self._pending, self._pending_event = self._pending_event, [], None
-        try:
-            await asyncio.to_thread(self.storage.dispatch_event, event)
-        except Exception:
-            logger.exception("Schema change event dispatch failed")
+        if event is not None:
+            try:
+                await asyncio.to_thread(self.storage.dispatch_event, event)
+            except Exception:
+                logger.exception("Schema change event dispatch failed")
         if self.stale:
             return {"accepted": True, "changed": True, "error_code": "listener_failed"}
         return {"accepted": True, "changed": True}

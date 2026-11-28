@@ -169,9 +169,12 @@ def test_accepted_change_recomputes_and_announces_with_standard_events(live):
     restore = {"description": "Tables"}
     result = live.apply(lambda raw: raw["schema"]["node_types"].update(Dataset=restore))
     assert result["error_code"] == "listener_failed"
+    announced = len(live.dispatched)
     assert live.apply(lambda raw: None) == {"accepted": True, "changed": True}
     assert live.apply(lambda raw: None) == {"accepted": True, "changed": False}
     assert commits == [True, True]
+    # The retry re-runs commits only; the change was announced once already.
+    assert len(live.dispatched) == announced
 
 
 @pytest.mark.parametrize(
