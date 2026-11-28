@@ -8,9 +8,9 @@ A ``SchemaSource`` (``backend/config/config_loader.py``) announces a change;
    longer be admitted,
 3. lets each registered listener prepare its derived state; a listener that
    raises refuses the change,
-4. activates the config in place, rebuilds the storage's search index and
-   emits ``schema.update`` through the event dispatcher,
-5. commits every prepared listener.
+4. activates the config in place and rebuilds the storage's search index,
+5. commits every prepared listener, then emits ``schema.update`` through the
+   event dispatcher, so a reaction to the event sees the recomputed state.
 
 A refused change leaves the active schema and everything derived from it as
 it was.
@@ -110,8 +110,9 @@ class SchemaChangeCoordinator:
             return await self._commit()
 
     def _activate(self, raw_config):
-        # Returns a refusal, or None with the commits left in self._pending.
+        # Returns a refusal, or None with the commits and event left pending.
         self._pending = []
+        self._pending_event = None
         try:
             if raw_config is None:
                 raw_config = config_loader.get_schema_source().load()
@@ -145,7 +146,7 @@ class SchemaChangeCoordinator:
             if refresh is not None:
                 refresh()
         self._pending = [commit for commit in commits if commit is not None]
-        event = Event(
+        self._pending_event = Event(
             event_type=EventType.SCHEMA_UPDATE,
             origin=EventContext(event_origin=EventOrigin.SYSTEM),
             entity=EntityData(
@@ -156,11 +157,6 @@ class SchemaChangeCoordinator:
                 after=_type_names(candidate.config),
             ),
         )
-        try:
-            self.storage.dispatch_event(event)
-        except Exception:
-            # The schema is active; what derives from it must still follow.
-            logger.exception("Schema change event dispatch failed")
         return None
 
     async def _commit(self):
@@ -169,7 +165,11 @@ class SchemaChangeCoordinator:
                 await commit()
             except Exception:
                 logger.exception("Schema change listener failed after activation")
-        self._pending = []
+        event, self._pending, self._pending_event = self._pending_event, [], None
+        try:
+            await asyncio.to_thread(self.storage.dispatch_event, event)
+        except Exception:
+            logger.exception("Schema change event dispatch failed")
         return {"accepted": True, "changed": True}
 
 

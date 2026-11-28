@@ -184,6 +184,9 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
         from backend.config.config_loader import set_schema_source
 
         set_schema_source(runtime_extensions.schema_source)
+        if graph_storage is not None:
+            # Pre-built storage derived its search text from the file schema.
+            graph_storage.refresh_schema_search()
     federation_config = load_federation_config()
     federation_summary = summarize_federation_config(federation_config)
 

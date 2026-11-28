@@ -18,7 +18,7 @@ from mcp.shared.subscriptions import (
 from backend.api_host.mcp_mount import build_mcp_instructions
 from backend.api_host.server import create_app, create_worker_runtime
 from backend.config import config_loader
-from backend.core import Node
+from backend.core import GraphStorage, Node
 from backend.core.events.models import EntityKind, EventType
 from backend.runtime.extensions import RuntimeExtensions
 from backend.skills.loader import MCPSkillsConfig, SkillsConfig
@@ -63,7 +63,13 @@ def live(app_config, mock_llm_provider):
         )
         live.events = []
         mcp._subscriptions.subscribe(live.events.append)
-        changes.storage.dispatch_event = live.dispatched.append
+        live.seen = []
+
+        def dispatch(event):
+            live.dispatched.append(event)
+            live.seen.append((mcp.instructions, live.skill()))
+
+        changes.storage.dispatch_event = dispatch
 
         def apply(mutate):
             source.raw = deepcopy(source.raw)
@@ -132,6 +138,7 @@ def test_accepted_change_recomputes_and_announces_with_standard_events(live):
     assert [(e.event_type, e.entity.kind) for e in live.dispatched] == [
         (EventType.SCHEMA_UPDATE, EntityKind.SCHEMA)
     ]
+    assert live.seen == [(build_mcp_instructions(), expected)]
     assert live.events == [ResourcesListChanged(), ResourceUpdated(uri=SKILL_URI)]
 
     assert live.apply(lambda raw: None) == {"accepted": True, "changed": False}
@@ -198,26 +205,35 @@ def test_refused_change_leaves_schema_instructions_and_skills(live, mutate, erro
     assert live.dispatched == [] and live.events == []
 
 
+@pytest.mark.parametrize("prebuilt", [False, True])
 def test_worker_runtime_follows_changes_and_search_matches_new_labels(
-    app_config, monkeypatch
+    app_config, monkeypatch, prebuilt
 ):
-    """G4: a worker-only runtime activates a change and search uses its labels."""
+    """G4: search uses the source's labels from startup and after a change."""
     monkeypatch.setenv("AGENTS_ENABLED", "false")
     raw = config_loader.FileSchemaSource().load()
-    raw["schema"]["node_types"]["Dataset"] = {"description": "Tables"}
+    raw["schema"]["node_types"]["Dataset"] = {
+        "description": "Tables",
+        "labels": {"en": "Spreadsheet"},
+    }
     source = Source(raw)
-    runtime = create_worker_runtime(
-        app_config, runtime_extensions=RuntimeExtensions(schema_source=source)
+    extensions = RuntimeExtensions(schema_source=source)
+    storage = (
+        GraphStorage(str(app_config.get_graph_path()), runtime_extensions=extensions)
+        if prebuilt
+        else None
     )
+    runtime = create_worker_runtime(app_config, storage, runtime_extensions=extensions)
     try:
         storage = runtime.graph_storage
         storage.add_nodes([Node(id="ds", name="Census", type="Dataset")], [])
-        assert storage.search_nodes("spreadsheet") == []
+        assert [node.id for node in storage.search_nodes("spreadsheet")] == ["ds"]
+        assert storage.search_nodes("workbook") == []
         source.raw = deepcopy(raw)
-        source.raw["schema"]["node_types"]["Dataset"]["labels"] = {"en": "Spreadsheet"}
+        source.raw["schema"]["node_types"]["Dataset"]["labels"] = {"en": "Workbook"}
         assert asyncio.run(source.on_change()) == {"accepted": True, "changed": True}
         labels = config_loader.get_schema()["node_types"]["Dataset"]["labels"]
-        assert labels == {"en": "Spreadsheet"}
-        assert [node.id for node in storage.search_nodes("spreadsheet")] == ["ds"]
+        assert labels == {"en": "Workbook"}
+        assert [node.id for node in storage.search_nodes("workbook")] == ["ds"]
     finally:
         runtime.stop()
