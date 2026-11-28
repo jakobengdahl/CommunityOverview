@@ -275,13 +275,22 @@ its inputs changes:
 Each entry's `updatedAt` is the time its content last changed. The builder
 compares each rebuilt entry, without `updatedAt`, with the previous build and
 keeps the old timestamp when nothing differs. Timestamps are RFC 3339 UTC with
-a `Z` suffix; ARD gives no format, so this is the conservative choice. After a
-restart, the server entry takes the modification time of `discovery_config.json`
-(in both modes, so it follows the configuration only), the layer 1 and layer 2
-skill entries take the time of the schema load, and Skill node entries take the
-node's `updated_at`. In `listed` the server entry is the only entry, so its
-`updatedAt` and `Last-Modified` stay the same across restarts and schema loads
-while the configuration file is unchanged.
+a `Z` suffix; ARD gives no format, so this is the conservative choice. A
+restart has no previous build to compare with, so every entry's start value is
+taken from the source of its content, never from the time of the start or the
+schema load:
+
+| Entry | `updatedAt` after a restart |
+|---|---|
+| Server entry (both modes) | modification time of `discovery_config.json` |
+| `graph-working-method` (layer 1) | modification time of its bundled `SKILL.md` source |
+| `graph-semantics` (layer 2) | latest modification time of the schema and presentation files `SchemaSource` loaded |
+| Skill node entries | the node's `updated_at` |
+
+An in-process rebuild sets a changed entry's `updatedAt` to the time of the
+event that changed it. With the source files unchanged, a restart therefore
+leaves every entry's `updatedAt`, the manifest's `Last-Modified` and the ETag
+as they were, in both modes.
 
 Requests never touch storage or take a storage lock: they serialise the cached
 build. That keeps an unauthenticated path from adding load to graph reads.
@@ -368,25 +377,44 @@ class DiscoveryProvider(Protocol):
   - The required ARD fields are present, with exactly one of `url` and `data`.
   - The identifier starts with `urn:air:<publisher_domain>:<slug>:`,
     `metadata.mcpServer`, when present, equals the core server entry's
-    identifier exactly, and every other string value at any depth that starts
-    with `urn:air:` carries the same `urn:air:<publisher_domain>:<slug>:`
+    identifier exactly, and every other string value or whitespace-separated
+    token at any depth that starts with `urn:air:` carries the same `urn:air:<publisher_domain>:<slug>:`
     prefix, so an own-namespaced entry cannot bind itself to another
     instance's server.
   - Every URL in the entry passes an origin allowlist. Core walks every string
     value at any depth, in every field (`url`, `data`, `description`,
-    `metadata`, `trustManifest` and any other key). Each string, and each
-    URL-like token inside free text, is parsed with a WHATWG-compatible URL
-    parser against `public_base_url` as base, so every form a client would
-    resolve to some origin (`https://`, `https:host`, `https:/host`,
-    backslashes such as `https:\\host`, `https:/\host` or a leading `\\`, and
-    scheme-relative `//host`) is checked by its resolved origin, not by its
-    spelling. A value that resolves to `http`/`https` must have exactly the
-    scheme, host and port of `public_base_url` after normalisation and must
-    itself be written as an absolute `http://` or `https://` URL without
-    backslashes; `skill://` must name a skill in the current `public` build.
-    Any other scheme (`wss://`, `mcp+https://`, `ftp://`, …), any foreign
-    origin, and any relative, scheme-relative, single-slash, slash-less or
-    backslash form drops the entry, even when it resolves to the own host.
+    `metadata`, `trustManifest` and any other key), and picks the URL
+    candidates in it:
+    - The value of any key named `url`, at any depth, is one candidate as a
+      whole.
+    - Every other string is split on whitespace. A token is a candidate when it
+      contains a scheme followed by `/` or `\` (`[A-Za-z][A-Za-z0-9+.-]*:[/\\]`),
+      a WHATWG special scheme followed by `:` (`http`, `https`, `ws`, `wss`,
+      `ftp`, `file`, case-insensitive, which covers slash-less forms such as
+      `https:host`), or one of `//`, `\\`, `/\` and `\/`. The candidate is the
+      token from the start of that match.
+    - Not candidates, because their own rule checks them: `identifier`,
+      `metadata.mcpServer` and every token starting with `urn:air:` (the
+      namespace rule above; such a token must match
+      `urn:air:<publisher_domain>:<slug>:[A-Za-z0-9._:-]+` exactly, so no URL
+      can hide in it), `type` (one of the media types listed here) and
+      `updatedAt` (must parse as RFC 3339 UTC). Plain text, media types and timestamps contain none of the
+      patterns above, so core's own entries and well-formed provider entries
+      pass.
+
+    Each candidate is parsed with a WHATWG-compatible URL parser against
+    `public_base_url` as base, so every form a client would resolve to some
+    origin (`https://`, `https:host`, `https:/host`, backslashes such as
+    `https:\\host`, `https:/\host` or a leading `\\`, and scheme-relative
+    `//host`) is checked by its resolved origin, not by its spelling. A
+    candidate that resolves to `http`/`https` must have exactly the scheme,
+    host and port of `public_base_url` after normalisation and must itself be
+    written as an absolute `http://` or `https://` URL without backslashes;
+    `skill://` must name a skill in the current `public` build. Any other
+    scheme (`wss://`, `mcp+https://`, `ftp://`, …), any foreign origin, and any
+    relative, scheme-relative, single-slash, slash-less or backslash form drops
+    the entry, even when it resolves to the own host. A `url` value that is
+    not an absolute URL drops the entry.
   - `type` is one of the media types listed here.
   - The size limits above hold.
   Entries that fail are dropped and logged by identifier only. A provider that
@@ -431,9 +459,10 @@ required.
    valid credentials.
 9. **Caching and `updatedAt`:** a matching `If-None-Match` gets `304`; a
    schema-changed event moves the layer 2 entry's `updatedAt` and the ETag and
-   leaves the server entry's `updatedAt` alone; in `listed`, rebuilding after a
-   simulated restart and schema load with an unchanged configuration file gives
-   the same `updatedAt`, `Last-Modified` and ETag.
+   leaves the server entry's `updatedAt` alone; rebuilding after a
+   simulated restart and schema load with unchanged configuration, schema and
+   skill files gives the same per-entry `updatedAt`, `Last-Modified` and ETag
+   (parametrised over `listed` and `public`).
 10. **Provider seam:** in `public`, one parametrised test where a provider
     returns an own-namespaced entry carrying, in turn, a foreign identifier, a
     `metadata.mcpServer` naming another instance's server, a foreign `https`
@@ -442,7 +471,11 @@ required.
     `https:/host`, `https:host` and `\\host` in `url` and `data.remotes`, a
     foreign URL inside `metadata`,
     `description` and `trustManifest`, and a `skill://` name not in the build;
-    each such entry is dropped and the core entries remain.
+    each such entry is dropped and the core entries remain. In the same test,
+    the default provider's manifest keeps every core entry, and an
+    own-namespaced provider entry with plain-text `displayName` and
+    `description`, a listed `type`, an RFC 3339 `updatedAt` and an own-origin
+    `url` is kept.
     In `listed`, a provider that adds an entry, rewrites the server entry's
     text or adds a `trustManifest` is never called, and the manifest equals the
     build without a provider (parametrised over both modes).
