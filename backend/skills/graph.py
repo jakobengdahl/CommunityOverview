@@ -69,6 +69,11 @@ class GraphSkillProvider:
             return ""
         return self._sanitizer._sanitize(_FRONTMATTER.sub("", content, count=1))
 
+    def _optional_text(self, value) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        return self._sanitizer._sanitize(value) or None
+
     def skill_definition(
         self, node_id: str, max_chars: Optional[int] = None
     ) -> Optional[SkillDefinition]:
@@ -79,16 +84,21 @@ class GraphSkillProvider:
         body = self._body(node)
         if not body:
             return None
+        name, description = node.name or "", node.description or ""
+        # Like the served frontmatter: a name or description the sanitizer
+        # would change rejects the skill rather than being silently rewritten.
+        if any(self._sanitizer._sanitize(v) != v.strip() for v in (name, description)):
+            return None
         meta = node.metadata or {}
         tools = meta.get("allowed_tools")
         return SkillDefinition(
             id=node.id,
-            name=node.name,
-            description=node.description or "",
+            name=name.strip(),
+            description=description.strip(),
             content=body[:max_chars] if max_chars else body,
             allowed_tools=tools if isinstance(tools, list) else [],
-            when_to_use=meta.get("when_to_use") or None,
-            effort=meta.get("effort") or None,
+            when_to_use=self._optional_text(meta.get("when_to_use")),
+            effort=self._optional_text(meta.get("effort")),
             source_url=meta.get("source_url") or f"graph://skill/{node.id}",
         )
 
@@ -195,6 +205,13 @@ class GraphSkillProvider:
             from backend.service.attachment_tools import AttachmentReadTools
 
             AttachmentReadTools.audit("read", *found, len(text))
+
+    def audit_refusal(self, uri: str) -> None:
+        """Record a denied attachment file read like a refused attachment read."""
+        if uri in self.attachment_records:
+            from backend.service.attachment_tools import audit_attachment_refusal
+
+            audit_attachment_refusal("read_node_attachment", "access_denied")
 
     async def can_read(self, ctx, skill_name: str) -> bool:
         from backend.runtime.authorization import GRAPH_ACTION_READ

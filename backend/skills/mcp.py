@@ -438,11 +438,21 @@ class SkillsExtension(Extension):
             with tool_caller("mcp"):
                 audit(uri, self.files[uri])
 
+    def audit_refusal(self, uri):
+        from backend.service.attachment_tools import tool_caller
+
+        owner = self.owners.get(uri)
+        audit = getattr(owner[0], "audit_refusal", None) if owner else None
+        if audit is not None:
+            with tool_caller("mcp"):
+                audit(uri)
+
     async def resource_access(self, ctx, call_next):
         entries = self.entries
         if ctx.method == "resources/read":
             uri = str((ctx.params or {}).get("uri", ""))
             if uri in self.owners and not await self.allowed(ctx, uri):
+                self.audit_refusal(uri)
                 raise MCPError(code=INVALID_PARAMS, message="Unknown resource")
         result = await call_next(ctx)
         if ctx.method == "resources/read" and uri in self.owners:
@@ -540,15 +550,17 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
             """Get a skill manifest and optionally one of its files."""
             request = ctx.request_context
             entries = extension.entries
+            file_uri = uri.rsplit("/", 1)[0] + "/" + file
             if uri not in extension.entries or not await extension.allowed(
                 request, uri
             ):
+                if file and extension.owners.get(file_uri) == extension.owners.get(uri):
+                    extension.audit_refusal(file_uri)
                 return {"error_code": "not_found"}
             result = await extension.get_skill(request, GetSkillParams(uri=uri))
             if extension.entries is not entries:
                 return {"error_code": "not_found"}
             if file:
-                file_uri = uri.rsplit("/", 1)[0] + "/" + file
                 if (
                     file_uri not in extension.files
                     or extension.owners.get(file_uri) != extension.owners[uri]
