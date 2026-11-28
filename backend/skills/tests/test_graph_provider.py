@@ -10,7 +10,7 @@ import anyio
 import pytest
 
 from backend.core import GraphStorage, Node
-from backend.core.attachment_store import AttachmentRecord
+from backend.core.attachment_store import AttachmentNotFound, AttachmentRecord
 from backend.runtime.authorization import (
     GraphAccessNarrowing,
     GraphAuthorizationDecision,
@@ -35,7 +35,10 @@ class Store:
         ]
 
     def open_read(self, namespace, node_id, attachment_id):
-        return io.BytesIO(list(self.files[node_id].values())[int(attachment_id)])
+        data = list(self.files.get(node_id, {}).values())
+        if int(attachment_id) >= len(data):
+            raise AttachmentNotFound(attachment_id)
+        return io.BytesIO(data[int(attachment_id)])
 
 
 class Hook:
@@ -281,6 +284,36 @@ def test_served_and_denied_attachment_file_reads_are_audited(storage, caplog):
         ("access_denied", None),
     ]
     assert (records[0].attachment_id, records[0].chars) == ("0", 4)
+
+
+def test_attachment_deleted_after_snapshot_is_not_served(storage):
+    from mcp.server.mcpserver import MCPServer
+    from mcp.shared.exceptions import MCPError
+
+    from backend.skills.mcp import register_skill_tools
+
+    storage.add("a", "Body")
+    files = {"a": {"ref.md": b"data"}}
+    extension = SkillsExtension([provider(storage, files)], 0, "private")
+    server = MCPServer("test", extensions=[extension])
+    register_skill_tools(server, extension, None, True)
+    get = server._tool_manager.get_tool("get_skill").fn
+    ref = "skill://a-skill/references/ref.md"
+    files["a"].clear()
+
+    async def read():
+        ctx = SimpleNamespace(method="resources/read", params={"uri": ref})
+
+        async def call_next(ctx):
+            return {"contents": []}
+
+        await extension.resource_access(ctx, call_next)
+
+    with pytest.raises(MCPError):
+        anyio.run(read)
+    ctx = SimpleNamespace(request_context=CTX)
+    result = anyio.run(get, "skill://a-skill/SKILL.md", ctx, "references/ref.md")
+    assert result["error_code"] == "not_found"
 
 
 def test_prompt_skill_text_fields_are_sanitized_or_rejected(storage):

@@ -221,6 +221,20 @@ class GraphSkillProvider:
         self._roots = {node.id: root for node, _, root, _ in served}
         return [skill for _, skill, _, _ in served]
 
+    def file_available(self, uri: str) -> bool:
+        """Whether a served attachment file still exists and opens now."""
+        found = self.attachment_records.get(uri)
+        if found is None:
+            return True
+        from backend.core.attachment_store import AttachmentNotFound
+
+        settings = self.attachment_settings
+        try:
+            settings.store.open_read(settings.namespace, found[0], found[1].id).close()
+        except (AttachmentNotFound, OSError):
+            return False
+        return True
+
     def audit_read(self, uri: str, text: str) -> None:
         """Record a served attachment file like an attachment content read."""
         found = self.attachment_records.get(uri)

@@ -428,6 +428,11 @@ class SkillsExtension(Extension):
         check = getattr(provider, "can_read", None)
         return check is not None and await check(ctx, name) is True
 
+    def available(self, uri):
+        # A file backed by mutable storage may be gone since the snapshot.
+        check = getattr(self.owners[uri][0], "file_available", None)
+        return check is None or check(uri)
+
     def audit_read(self, uri):
         from backend.service.attachment_tools import tool_caller
 
@@ -453,6 +458,8 @@ class SkillsExtension(Extension):
             uri = str((ctx.params or {}).get("uri", ""))
             if uri in self.owners and not await self.allowed(ctx, uri):
                 self.audit_refusal(uri)
+                raise MCPError(code=INVALID_PARAMS, message="Unknown resource")
+            if uri in self.owners and not self.available(uri):
                 raise MCPError(code=INVALID_PARAMS, message="Unknown resource")
         result = await call_next(ctx)
         if ctx.method == "resources/read" and uri in self.owners:
@@ -565,6 +572,7 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
                 if (
                     file_uri not in extension.files
                     or extension.owners.get(file_uri) != extension.owners[uri]
+                    or not extension.available(file_uri)
                 ):
                     return {"error_code": "not_found"}
                 result["file"] = {"uri": file_uri, "text": extension.files[file_uri]}
