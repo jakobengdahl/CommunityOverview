@@ -31,7 +31,7 @@ class NamedInput(CreateInput):
 
 
 class TargetInput(CreateInput):
-    entity_kind: Literal["node", "edge"] = "node"
+    entity_kind: Literal["node", "edge", "schema"] = "node"
     node_types: List[str] = Field(default_factory=list)
     relationship_types: List[str] = Field(default_factory=list)
 

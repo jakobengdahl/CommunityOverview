@@ -745,15 +745,33 @@ class GraphStorage:
             from backend.config.config_loader import get_schema
 
             schema = get_schema()
+            type_text = {}
             for type_name, type_config in schema.get("node_types", {}).items():
                 labels = type_config.get("labels", {})
                 label_values = " ".join(labels.values()) if labels else ""
-                self._type_searchable_text[type_name] = (
-                    f"{type_name} {label_values}".lower().strip()
-                )
+                type_text[type_name] = f"{type_name} {label_values}".lower().strip()
+            # One swap, so a search during a live schema change sees either map.
+            self._type_searchable_text = type_text
         except Exception:
             # Config not available; type matching will use type name only
             pass
+
+    def refresh_schema_search(self) -> None:
+        """Rebuild what search derives from the schema after a live change.
+
+        Type names and labels are part of every node's match fields, so the
+        per-node index is rebuilt too, in ``nodes`` order (see ``load``).
+        """
+        with self._lock:
+            self._build_type_searchable_text()
+            searchable = storage_search.LexicalIndex()
+            searchable.update(
+                {
+                    node.id: self._build_match_fields(node)
+                    for node in self.nodes.values()
+                }
+            )
+            self._searchable_text_cache = searchable
 
     def _build_match_fields(self, node: "Node") -> storage_search.MatchFields:
         """Prepare everything search matches and ranks a node on, lowered once.

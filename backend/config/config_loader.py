@@ -592,13 +592,16 @@ class ConfigLoader:
         """A detached loader built from ``raw_config``; raises when it is invalid.
 
         Unlike startup, a live change that does not validate is refused rather
-        than replaced by defaults.
+        than replaced by defaults, and a malformed entry is not dropped: the
+        per-entry clean-up of ``_parse`` is skipped, so it fails validation.
         """
         if not isinstance(raw_config, dict):
             raise ValueError("Profile config must be a JSON object")
         loader = object.__new__(cls)
         loader._config_path = _get_loader().config_path
-        loader._parse(deepcopy(raw_config))
+        loader.shape_diagnostics = []
+        loader._dropped_capability_ids = set()
+        loader._config = SchemaFileConfig(**deepcopy(raw_config))
         loader._strip_system_types_from_config()
         loader._apply_system_types()
         return loader

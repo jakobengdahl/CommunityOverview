@@ -449,14 +449,17 @@ loop after each change; the result reports `accepted` and, when refused, an
 `error_code`.
 
 A change is refused, and the active schema, instructions and skills stay as
-they were, when the new config does not validate (`invalid_schema`), when a
+they were, when the new config does not validate (`invalid_schema`; unlike at
+startup, a malformed node type, relationship type or capability is not dropped
+but refuses the whole change), when a
 stored node or edge the active schema admits would no longer be admitted
 (`schema_conflicts_with_graph`, with up to 20 `conflicts`), or when the
 schema-derived skill fails the skill sanitisation and limits
 (`schema_rejected`). Data the active schema already refuses does not block a
 change. An accepted change emits a `schema.update` event to event
 subscriptions (see [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md)), then
-recomputes the MCP instructions, which clients receive on their next
+rebuilds the search index's type names and labels, recomputes the MCP
+instructions, which clients receive on their next
 `initialize` or `server/discover`, and, with MCP skills enabled, the
 `graph-semantics` skill. Changed skill files are announced with the standard
 `notifications/resources/list_changed` and `notifications/resources/updated`,
@@ -464,7 +467,9 @@ and a changed tool listing with `notifications/tools/list_changed`. Applying
 a schema identical to the active one changes and announces nothing. With
 `RuntimeExtensions(subscription_bus=...)` the listen streams use a shared bus
 backend, so clients connected to other replicas receive the notifications too;
-each replica still needs its source to announce the change locally.
+each replica still needs its source to announce the change locally. A
+worker-only runtime (`create_worker_runtime`) follows the source too, so its
+loader and search use the new schema.
 
 ## Example: SCB Profile
 

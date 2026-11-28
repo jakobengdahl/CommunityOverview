@@ -8,8 +8,8 @@ A ``SchemaSource`` (``backend/config/config_loader.py``) announces a change;
    longer be admitted,
 3. lets each registered listener prepare its derived state; a listener that
    raises refuses the change,
-4. activates the config in place and emits ``schema.update`` through the
-   event dispatcher,
+4. activates the config in place, rebuilds the storage's search index and
+   emits ``schema.update`` through the event dispatcher,
 5. commits every prepared listener.
 
 A refused change leaves the active schema and everything derived from it as
@@ -141,6 +141,9 @@ class SchemaChangeCoordinator:
                 logger.warning("Schema change refused by a listener", exc_info=True)
                 return {"accepted": False, "error_code": "schema_rejected"}
             loader.activate(candidate)
+            refresh = getattr(self.storage, "refresh_schema_search", None)
+            if refresh is not None:
+                refresh()
         self._pending = [commit for commit in commits if commit is not None]
         event = Event(
             event_type=EventType.SCHEMA_UPDATE,

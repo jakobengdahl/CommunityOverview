@@ -31,7 +31,7 @@ import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -100,6 +100,9 @@ from .system_routes import register_system_routes
 from .agent_routes import register_agent_routes
 from .federation_routes import register_federation_routes
 
+if TYPE_CHECKING:
+    from backend.service.schema_changes import SchemaChangeCoordinator
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +121,7 @@ class AppRuntime:
     federation_summary: dict
     federation_manager: FederationManager
     agent_registry: AgentRegistry
+    schema_changes: "SchemaChangeCoordinator"
 
     def stop(self) -> None:
         """Stop background work and flush storage."""
@@ -273,6 +277,14 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
 
     graph_storage.add_system_listener(agent_lifecycle_listener)
 
+    # Live schema changes reach every runtime, worker-only included; the HTTP
+    # app adds its MCP listener to this coordinator.
+    from backend.config.config_loader import get_schema_source
+    from backend.service.schema_changes import SchemaChangeCoordinator
+
+    schema_changes = SchemaChangeCoordinator(graph_storage)
+    schema_changes.attach(get_schema_source())
+
     return AppRuntime(
         config=config,
         graph_storage=graph_storage,
@@ -282,6 +294,7 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
         federation_summary=federation_summary,
         federation_manager=federation_manager,
         agent_registry=agent_registry,
+        schema_changes=schema_changes,
     )
 
 
@@ -745,15 +758,11 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             skills_config.fallback,
         )
 
-    # Live schema changes: the source announces, the coordinator validates and
-    # recomputes the loader, instructions and schema-derived skills.
-    from backend.config.config_loader import get_schema_source
-    from backend.service.schema_changes import (
-        SchemaChangeCoordinator,
-        mcp_schema_listener,
-    )
+    # Live schema changes: the runtime's coordinator validates and activates;
+    # this listener recomputes instructions and schema-derived skills.
+    from backend.service.schema_changes import mcp_schema_listener
 
-    schema_changes = SchemaChangeCoordinator(graph_storage)
+    schema_changes = runtime.schema_changes
     schema_changes.add_listener(
         mcp_schema_listener(
             mcp,
@@ -761,7 +770,6 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             mcp_extensions[0] if mcp_extensions else None,
         )
     )
-    schema_changes.attach(get_schema_source())
     app.state.schema_changes = schema_changes
 
     # Store MCP instance and tools map on app state

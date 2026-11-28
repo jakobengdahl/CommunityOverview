@@ -1,6 +1,7 @@
 # covers: backend/service/schema_changes.py
 """Live profile schema changes reach a running MCP server."""
 
+import asyncio
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -15,8 +16,9 @@ from mcp.shared.subscriptions import (
 )
 
 from backend.api_host.mcp_mount import build_mcp_instructions
-from backend.api_host.server import create_app
+from backend.api_host.server import create_app, create_worker_runtime
 from backend.config import config_loader
+from backend.core import Node
 from backend.core.events.models import EntityKind, EventType
 from backend.runtime.extensions import RuntimeExtensions
 from backend.skills.loader import MCPSkillsConfig, SkillsConfig
@@ -154,6 +156,18 @@ def test_accepted_change_recomputes_and_announces_with_standard_events(live):
             "invalid_schema",
         ),
         (
+            lambda raw: raw["schema"]["node_types"]["Dataset"].update(
+                allows_attachments="ture"
+            ),
+            "invalid_schema",
+        ),
+        (
+            lambda raw: raw.setdefault("presentation", {}).update(
+                capabilities=[{"enabled": False}]
+            ),
+            "invalid_schema",
+        ),
+        (
             lambda raw: raw["schema"]["node_types"].pop("Actor"),
             "schema_conflicts_with_graph",
         ),
@@ -182,3 +196,28 @@ def test_refused_change_leaves_schema_instructions_and_skills(live, mutate, erro
     assert config_loader._get_loader().config.model_dump() == config
     assert (live.mcp.instructions, live.skill()) == (instructions, skill)
     assert live.dispatched == [] and live.events == []
+
+
+def test_worker_runtime_follows_changes_and_search_matches_new_labels(
+    app_config, monkeypatch
+):
+    """G4: a worker-only runtime activates a change and search uses its labels."""
+    monkeypatch.setenv("AGENTS_ENABLED", "false")
+    raw = config_loader.FileSchemaSource().load()
+    raw["schema"]["node_types"]["Dataset"] = {"description": "Tables"}
+    source = Source(raw)
+    runtime = create_worker_runtime(
+        app_config, runtime_extensions=RuntimeExtensions(schema_source=source)
+    )
+    try:
+        storage = runtime.graph_storage
+        storage.add_nodes([Node(id="ds", name="Census", type="Dataset")], [])
+        assert storage.search_nodes("spreadsheet") == []
+        source.raw = deepcopy(raw)
+        source.raw["schema"]["node_types"]["Dataset"]["labels"] = {"en": "Spreadsheet"}
+        assert asyncio.run(source.on_change()) == {"accepted": True, "changed": True}
+        labels = config_loader.get_schema()["node_types"]["Dataset"]["labels"]
+        assert labels == {"en": "Spreadsheet"}
+        assert [node.id for node in storage.search_nodes("spreadsheet")] == ["ds"]
+    finally:
+        runtime.stop()
