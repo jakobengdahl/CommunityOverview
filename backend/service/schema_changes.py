@@ -12,6 +12,10 @@ A ``SchemaSource`` (``backend/config/config_loader.py``) announces a change;
 5. commits every prepared listener, then emits ``schema.update`` through the
    event dispatcher, so a reaction to the event sees the recomputed state.
 
+A commit that fails leaves derived state behind the active schema; until
+every commit succeeds, re-applying the same schema runs the listeners again
+instead of reporting it unchanged.
+
 A refused change leaves the active schema and everything derived from it as
 it was.
 """
@@ -92,6 +96,8 @@ class SchemaChangeCoordinator:
         self.storage = storage
         self.listeners = []
         self.lock = asyncio.Lock()
+        # A commit failed after activation: derived state may be stale.
+        self.stale = False
 
     def add_listener(self, prepare):
         """Register ``prepare(config)``, called before activation.
@@ -130,7 +136,7 @@ class SchemaChangeCoordinator:
             return {"accepted": False, "error_code": "invalid_schema"}
         loader = config_loader._get_loader()
         before = loader.config
-        if candidate.config.model_dump() == before.model_dump():
+        if not self.stale and candidate.config.model_dump() == before.model_dump():
             return {"accepted": True, "changed": False}
         # Held to activation, so no write admits a node the check did not see.
         with getattr(self.storage, "write_lock", nullcontext()):
@@ -168,16 +174,20 @@ class SchemaChangeCoordinator:
         return None
 
     async def _commit(self):
+        self.stale = False
         for commit in reversed(self._pending):
             try:
                 await commit()
             except Exception:
+                self.stale = True
                 logger.exception("Schema change listener failed after activation")
         event, self._pending, self._pending_event = self._pending_event, [], None
         try:
             await asyncio.to_thread(self.storage.dispatch_event, event)
         except Exception:
             logger.exception("Schema change event dispatch failed")
+        if self.stale:
+            return {"accepted": True, "changed": True, "error_code": "listener_failed"}
         return {"accepted": True, "changed": True}
 
 

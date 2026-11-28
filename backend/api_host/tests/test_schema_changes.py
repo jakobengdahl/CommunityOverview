@@ -154,6 +154,25 @@ def test_accepted_change_recomputes_and_announces_with_standard_events(live):
     live.apply(lambda raw: raw["schema"]["node_types"].pop("Dataset"))
     assert live.events[-1] == ToolsListChanged()
 
+    # A commit failing after activation is retried by re-applying the schema.
+    commits = []
+
+    def flaky(config):
+        async def commit():
+            commits.append(config.schema_.node_types.keys() >= {"Dataset"})
+            if len(commits) == 1:
+                raise RuntimeError("listener failure")
+
+        return commit
+
+    live.changes.add_listener(flaky)
+    restore = {"description": "Tables"}
+    result = live.apply(lambda raw: raw["schema"]["node_types"].update(Dataset=restore))
+    assert result["error_code"] == "listener_failed"
+    assert live.apply(lambda raw: None) == {"accepted": True, "changed": True}
+    assert live.apply(lambda raw: None) == {"accepted": True, "changed": False}
+    assert commits == [True, True]
+
 
 @pytest.mark.parametrize(
     "mutate, error_code",

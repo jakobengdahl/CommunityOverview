@@ -466,10 +466,14 @@ only then does it emit a `schema.update` event to event subscriptions (see
 sees the new state. Changed skill files are announced with the standard
 `notifications/resources/list_changed` and `notifications/resources/updated`,
 and a changed tool listing with `notifications/tools/list_changed`. Applying
-a schema identical to the active one changes and announces nothing. With
+a schema identical to the active one changes and announces nothing, unless
+a listener failed while committing the previous change (reported as
+`listener_failed`): then re-applying it recomputes everything again. With
 `RuntimeExtensions(subscription_bus=...)` the listen streams use a shared bus
-backend, so clients connected to other replicas receive the notifications too;
-each replica still needs its source to announce the change locally. A
+backend, which carries only the standard events above, so clients connected
+to other replicas receive the notifications too; each replica still needs its
+source to announce the change locally. `graph://profile` changes are computed
+per replica and stay off the shared bus. A
 worker-only runtime (`create_worker_runtime`) follows the source too, so its
 loader and search use the new schema.
 
