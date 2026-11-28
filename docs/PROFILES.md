@@ -391,8 +391,10 @@ attachments are not served.
 Skill nodes go through the same validation and sanitisation as the built-in
 skills, but an invalid node — rejected content, more than 512 files or 16 MiB,
 a name or path already in use, or a path inside another skill — is skipped
-with a warning instead of preventing startup. When two nodes claim the same
-name or path, the oldest node is served. A caller sees a Skill node's skill
+with a warning instead of preventing startup. On a name or path clash the
+node already being served keeps it and every clashing newcomer is withheld;
+after a restart no node is being served yet, so every clashing node is
+withheld. A caller sees a Skill node's skill
 only when it may read that node under the node-read access rules; a skill with
 attachment files additionally needs the access `read_node_attachment` needs
 (`get_node_attachment` and `read_node_attachment_content`, including their
