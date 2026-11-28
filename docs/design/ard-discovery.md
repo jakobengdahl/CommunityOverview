@@ -204,7 +204,9 @@ mode. Clients get those by connecting, and on a `listed` instance the endpoint
 answers with its normal `401` and, behind the gateway, its OAuth metadata.
 
 `updatedAt` in `listed` changes only when the discovery configuration changes:
-schema changes do not touch a manifest that contains no schema-derived text.
+it is the modification time of `discovery_config.json`, so neither a restart
+nor a schema change moves it, and schema changes do not touch a manifest that
+contains no schema-derived text.
 
 ### `public`
 
@@ -274,8 +276,12 @@ Each entry's `updatedAt` is the time its content last changed. The builder
 compares each rebuilt entry, without `updatedAt`, with the previous build and
 keeps the old timestamp when nothing differs. Timestamps are RFC 3339 UTC with
 a `Z` suffix; ARD gives no format, so this is the conservative choice. After a
-restart, the server and core skill entries take the time of the schema load and
-Skill node entries take the node's `updated_at`.
+restart, the server entry takes the modification time of `discovery_config.json`
+(in both modes, so it follows the configuration only), the layer 1 and layer 2
+skill entries take the time of the schema load, and Skill node entries take the
+node's `updated_at`. In `listed` the server entry is the only entry, so its
+`updatedAt` and `Last-Modified` stay the same across restarts and schema loads
+while the configuration file is unchanged.
 
 Requests never touch storage or take a storage lock: they serialise the cached
 build. That keeps an unauthenticated path from adding load to graph reads.
@@ -307,14 +313,21 @@ rule:
 if (
     discovery_mode != "off"
     and request.method in {"GET", "HEAD"}
+    and request.scope.get("raw_path") == b"/.well-known/ard.json"
     and request.url.path == "/.well-known/ard.json"
 ):
     return await call_next(request)
 ```
 
-- An exact string match on the path. `/.well-known/ard.json/`,
-  `/.well-known//ard.json`, `/.well-known/ARD.json`, percent-encoded variants
-  and any other `/.well-known/` path stay guarded.
+- An exact match on the raw request path. Starlette's `request.url.path` is
+  the percent-decoded `scope["path"]`, so `/.well-known%2Fard.json` or
+  `/.well-known/ard%2Ejson` would match a check on it alone and then reach the
+  route. The check therefore compares the undecoded ASGI `raw_path` bytes
+  (which exclude the query string), and also the decoded path, so a non-empty
+  `root_path` cannot shift it. A server that does not set `raw_path` gets no
+  bypass. `/.well-known/ard.json/`, `/.well-known//ard.json`,
+  `/.well-known/ARD.json`, percent-encoded variants and any other
+  `/.well-known/` path stay guarded.
 - `discovery_mode` is read once from the validated configuration at app
   construction, not per request.
 - With `mode: off` there is no bypass and no route (see C1).
@@ -332,7 +345,10 @@ and `Last-Modified`. The gateway's own OAuth metadata routes do not change.
 
 Core builds the manifest for exactly one instance. A deployment can register
 its own provider through `RuntimeExtensions`, for example to add a
-`trustManifest` or adjust tags, but never to list other instances.
+`trustManifest` or adjust tags in `public`, but never to list other instances.
+In `listed` the provider is not called at all (see C5): the manifest is the
+core-built server entry, so its text comes from the discovery configuration
+only.
 
 ```python
 class DiscoveryProvider(Protocol):
@@ -353,8 +369,12 @@ class DiscoveryProvider(Protocol):
   - `type` is one of the media types listed here.
   - The size limits above hold.
   Entries that fail are dropped and logged by identifier only. A provider that
-  raises leaves the core entries in place. A provider never widens the mode: in
-  `listed`, anything other than the MCP server entry is dropped.
+  raises leaves the core entries in place.
+- A provider never widens the mode. In `listed` core skips the provider and
+  publishes the core entries, so it cannot add entries, rewrite `description`,
+  `displayName`, `tags` or `metadata`, or add keys such as `trustManifest`.
+  Validating a rewritten entry field by field could not tell configured text
+  from schema or content text, so skipping is the only check that holds.
 - Providers run on rebuild, not per request.
 
 ## Tests
@@ -381,16 +401,22 @@ required.
    in the allowlist.
 6. **`public` manifest:** layer 1 and 2 entries, a discoverable readable Skill
    node, no non-discoverable or unreadable node, and no layer 3 entry.
-7. **Bypass exactness:** the path variants listed under *Middleware bypass* and
-   a `POST` to the exact path all stay `401` on a guarded instance.
+7. **Bypass exactness:** the path variants listed under *Middleware bypass*,
+   including `/.well-known%2Fard.json` and `/.well-known/ard%2Ejson` sent with
+   their raw bytes, a request without `raw_path`, and a `POST` to the exact
+   path all stay `401` on a guarded instance.
 8. **Caller independence:** bodies and ETags are identical with and without
    valid credentials.
 9. **Caching and `updatedAt`:** a matching `If-None-Match` gets `304`; a
    schema-changed event moves the layer 2 entry's `updatedAt` and the ETag and
-   leaves the server entry's `updatedAt` alone.
-10. **Provider seam:** a provider returning a foreign identifier, a foreign URL
-    origin or an extra entry in `listed` has those entries dropped, and the core
-    entries remain.
+   leaves the server entry's `updatedAt` alone; in `listed`, rebuilding after a
+   simulated restart and schema load with an unchanged configuration file gives
+   the same `updatedAt`, `Last-Modified` and ETag.
+10. **Provider seam:** in `public`, a provider returning a foreign identifier or
+    a foreign URL origin has those entries dropped, and the core entries remain.
+    In `listed`, a provider that adds an entry, rewrites the server entry's
+    text or adds a `trustManifest` is never called, and the manifest equals the
+    build without a provider (parametrised over both modes).
 11. **Gateway:** the pass-through route forwards without a token and returns
     only the allowed headers, and the other gateway routes still require a token
     (in the gateway's existing test file).
@@ -399,8 +425,8 @@ required.
 
 ARD's `trustManifest` can carry identity binding and attestations, verified by
 whatever trust framework it declares. Core does not emit one. A deployment that
-needs one adds it through its `DiscoveryProvider`. Core validation then checks
-that `trustManifest.identity` names `publisher_domain`, so the identity matches
+needs one adds it through its `DiscoveryProvider`, in `public` only (C5).
+Core validation then checks that `trustManifest.identity` names `publisher_domain`, so the identity matches
 the identifier as ARD requires. Signing stays outside core.
 
 ## Changes to the direction (owner decision needed)
@@ -423,6 +449,11 @@ points refine it in ways the owner should confirm:
   allows.
 - **C4 — `listed` lists only the MCP server.** Listing skill entries would
   publish skill names and descriptions from the graph for a protected server.
+- **C5 — no `DiscoveryProvider` in `listed`.** The direction gives deployments a
+  provider seam; this spec does not call it in `listed`, so a protected
+  instance cannot carry a provider-added `trustManifest` or adjusted tags. A
+  `listed` `trustManifest`, if needed, would come from the discovery
+  configuration with the same text checks, as a later change.
 
 ## Implementation tasks
 
@@ -432,9 +463,10 @@ points refine it in ways the owner should confirm:
    against their published schemas first.
 2. **Manifest builder, route and bypass:** the allowlist builder for `listed`
    and `public`, the cached build, the `/.well-known/ard.json` route, the
-   exact-path bypass in `add_auth_middleware`, and the caching headers.
+   exact raw-path bypass in `add_auth_middleware`, and the caching headers.
 3. **`DiscoveryProvider` seam:** the protocol, `DiscoveryContext`,
-   registration on `RuntimeExtensions`, and core validation of provider output.
+   registration on `RuntimeExtensions`, core validation of provider output in
+   `public`, and skipping the provider in `listed`.
 4. **Skill entries and the `discoverable` flag:** the `SkillInput` field and
    skill entries in `public`, built from the skills catalogue and filtered by
    anonymous `can_read`. Depends on curated Skill nodes being served as skills.
