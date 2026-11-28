@@ -164,8 +164,9 @@ claim another actor's run.
   descendant it sees before reporting. `run_function` enforces the wall-clock
   deadline; [protocol.py](../../../backend/functions/protocol.py) `run_session`
   bounds each message and the result size (`MAX_OUTPUT_BYTES`) without
-  buffering past them, and `_LogReader` keeps at
-  most `MAX_LOG_BYTES` of standard error.
+  buffering past them, and `_LogReader` in
+  [runner.py](../../../backend/functions/runner.py) keeps at most
+  `MAX_LOG_BYTES` of standard error.
 - **Broker scope and grants.** `FunctionBroker._dispatch` in
   [broker.py](../../../backend/functions/broker.py) accepts only tools in
   `TOOLS`, checks the declared grant and the live `grant_enabled` callback on
@@ -181,15 +182,22 @@ claim another actor's run.
   [access.py](../../../backend/service/access.py), requires the decision to
   match the bound graph, and stamps `origin_graph_id` on added nodes.
   `_narrow_similar_nodes` filters similarity results the service does not
-  narrow. Service exceptions become a fixed `tool_failed` message.
-- **Attribution.** Broker writes carry `function_origin` and the run's
-  correlation id, and run inside `function_mutation_context` with the run's
-  chain depth. Run records keep the actor, scope, origin, trigger, tool names,
-  outcomes and durations, but no tool arguments or results (`ToolCallRecord`).
+  narrow. Service exceptions become a fixed `tool_failed` message; a denied
+  decision's reason and a service result's `error` or `message` text are
+  forwarded through `_sanitize`, which only trims and truncates them.
+- **Attribution.** Broker writes other than `graph.attach_run_file` carry
+  `function_origin` and the run's correlation id, and run inside
+  `function_mutation_context` with the run's chain depth;
+  `graph.attach_run_file` runs under `bind_execution_context` with the run's
+  correlation id only. Run records keep the actor, scope, origin, trigger, tool
+  names, outcomes and durations; the per-call `ToolCallRecord` holds no tool
+  arguments or results, but the record also stores the function's output and
+  error text.
 - **Idempotency and replay.** `admit` stores keys as `fn:<id>:<key>` (or
   `schedule-fn:` for scheduler runs) and `_replay` returns an existing run only
-  to the same actor and scope, after a fresh read decision, and only for the
-  same write target and session (`_binding_digest`). One run per function at a
+  for the same write target and session (`_binding_digest`), to a caller with
+  an actor id, after a fresh read decision; for a record that is not redacted
+  it also requires the same actor and scope. One run per function at a
   time (`_busy`), serialized by `_admission`.
 - **Webhook tokens.** `WebhookTokenStore` in
   [token_store.py](../../../backend/functions/token_store.py) creates the
@@ -258,10 +266,20 @@ claim another actor's run.
 - Function code is trusted to the extent of its enabled grants and the invoking
   actor's access. A `graph:write` function may make any write the actor could,
   and writes made before a timeout or kill stay in the graph.
-- Run records include the function's own captured log. The run-history routes
-  in [agent_routes.py](../../../backend/api_host/agent_routes.py) do not apply
-  the authorization hook per record, so graph content a function writes to its
-  log is readable by whoever can read run history.
+- Run records include the function's own captured log, its output and its
+  error message and `function_code`, which `function_run_to_dict` in
+  [run_history.py](../../../backend/agents/run_history.py) returns as stored.
+  The run-history routes in
+  [agent_routes.py](../../../backend/api_host/agent_routes.py) do not apply the
+  authorization hook per record, so graph content or tool results a function
+  puts in any of these are readable by whoever can read run history.
+- Error text that the authorization hook or a service result returns reaches
+  the function after `_sanitize` trims and truncates it; it is not replaced by
+  a fixed message, so whatever detail that text carries is visible to function
+  code.
+- A redacted run record keeps no attribution, so `_replay` cannot compare actor
+  and scope; any caller with an actor id whose current read decision allows it
+  gets the redacted record back for a reused idempotency key.
 - A webhook token is a bearer credential: any holder acts as the
   `function_webhook` actor, and callers sharing a token cannot be told apart.
   The token database is not encrypted, is excluded from graph export, and must
