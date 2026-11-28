@@ -28,6 +28,11 @@ def _is_skill(node) -> bool:
     return getattr(node.type, "value", node.type) == "Skill"
 
 
+def _allowed_tools(meta) -> list:
+    tools = meta.get("allowed_tools")
+    return [str(t) for t in tools] if isinstance(tools, list) else []
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:64].strip("-")
 
@@ -87,19 +92,22 @@ class GraphSkillProvider:
         body = self._body(node)
         if not body:
             return None
-        name, description = node.name or "", node.description or ""
-        # Like the served frontmatter: a name or description the sanitizer
-        # would change rejects the skill rather than being silently rewritten.
-        if any(self._sanitizer._sanitize(v) != v.strip() for v in (name, description)):
-            return None
         meta = node.metadata or {}
-        tools = meta.get("allowed_tools")
+        name, description = node.name or "", node.description or ""
+        tools = _allowed_tools(meta)
+        # Like the served frontmatter: a name, description or allowed-tools the
+        # sanitizer would change rejects the skill rather than being rewritten.
+        if any(
+            self._sanitizer._sanitize(v) != v.strip()
+            for v in (name, description, " ".join(tools))
+        ):
+            return None
         return SkillDefinition(
             id=node.id,
             name=name.strip(),
             description=description.strip(),
             content=body[:max_chars] if max_chars else body,
-            allowed_tools=tools if isinstance(tools, list) else [],
+            allowed_tools=tools,
             when_to_use=self._optional_text(meta.get("when_to_use")),
             effort=self._optional_text(meta.get("effort")),
             source_url=meta.get("source_url") or f"graph://skill/{node.id}",
@@ -140,9 +148,9 @@ class GraphSkillProvider:
         name = path.rsplit("/", 1)[-1] if path else _slug(node.name or "")
         description = node.description or meta.get("when_to_use") or ""
         frontmatter = {"name": name, "description": description[:1024].strip()}
-        tools = meta.get("allowed_tools")
-        if isinstance(tools, list) and tools:
-            frontmatter["allowed-tools"] = " ".join(str(t) for t in tools)
+        tools = _allowed_tools(meta)
+        if tools:
+            frontmatter["allowed-tools"] = " ".join(tools)
         metadata = {"node-id": node.id, "revision": str(node.revision)}
         if meta.get("version"):
             metadata["version"] = str(meta["version"])
