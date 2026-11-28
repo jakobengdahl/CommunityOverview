@@ -456,12 +456,14 @@ stored node or edge the active schema admits would no longer be admitted
 (`schema_conflicts_with_graph`, with up to 20 `conflicts`), or when the
 schema-derived skill fails the skill sanitisation and limits
 (`schema_rejected`). Data the active schema already refuses does not block a
-change. An accepted change emits a `schema.update` event to event
-subscriptions (see [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md)), then
-rebuilds the search index's type names and labels, recomputes the MCP
-instructions, which clients receive on their next
-`initialize` or `server/discover`, and, with MCP skills enabled, the
-`graph-semantics` skill. Changed skill files are announced with the standard
+change, and removing a relationship type that stored edges use is a conflict
+like removing a node type that stored nodes use. An accepted change is
+activated, then rebuilds the search index's type names and labels, recomputes
+the MCP instructions, which clients receive on their next `initialize` or
+`server/discover`, and, with MCP skills enabled, the `graph-semantics` skill;
+only then does it emit a `schema.update` event to event subscriptions (see
+[EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md)), so a reaction to the event
+sees the new state. Changed skill files are announced with the standard
 `notifications/resources/list_changed` and `notifications/resources/updated`,
 and a changed tool listing with `notifications/tools/list_changed`. Applying
 a schema identical to the active one changes and announces nothing. With
