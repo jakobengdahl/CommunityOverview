@@ -127,8 +127,9 @@ author whose annotations or templates carry unsafe content.
 - **Strict document validation.** `restore_backup` accepts only integer format
   versions 1 and 2, recomputes `integrity.sha256`, requires the exact top-level
   and per-session field sets, refuses nonempty import tables, validates IDs with
-  `is_valid_session_id`, revisions, names, descriptions, timestamps and modes,
-  and refuses a mirror that records staged mode for a session restored as
+  `is_valid_session_id`, revisions, names, descriptions and modes, requires
+  `created_at` and `updated_at` to be nonempty strings without checking their
+  format, and refuses a mirror that records staged mode for a session restored as
   direct. `_validate_reference_fields` and `_validate_state_values` check state
   values; templates pass [validate_template](../../../backend/core/template_store.py).
 - **Annotation and asset safety.** Restore applies
@@ -141,9 +142,13 @@ author whose annotations or templates carry unsafe content.
   template IDs that collide with profile templates. Inside the store
   transactions it then refuses any existing session or template, template IDs
   that collide with restored sessions or staged records, and staged records
-  other than active ones for restored staged sessions. `open_restore` writes only to a
-  fresh temporary directory beside the output, and `_publish` uses Linux
-  `renameat2` with no-replace so an existing output is never replaced.
+  other than active ones for restored staged sessions. `open_restore` never
+  writes to the source stores: restore writes into the session and template
+  backends of the `session-backup-*` temporary directory that `open_backup`
+  creates in the system temporary location; `publish` copies them into
+  `result` inside a fresh `session-restore-*` temporary directory beside the
+  output, and `_publish` uses Linux `renameat2` with no-replace so an existing
+  output is never replaced.
 - **Error hygiene.** Refusals use fixed `BackupRefused` and `RestoreRefused`
   reasons and, with one exception, suppress the original exception
   (`from None`), so record content and session IDs are not chained into
@@ -182,8 +187,10 @@ author whose annotations or templates carry unsafe content.
 - The 512 MiB input limit still allows a much larger in-memory parse, and the
   whole backup, copied graph and restored data must fit in memory and on disk.
   Legacy image URLs that fail current safety rules are backed up but refuse
-  restore until corrected. Interrupted restores can leave a temporary directory
-  for the operator to remove.
+  restore until corrected. Interrupted restores can leave temporary directories
+  for the operator to remove: a `session-backup-*` directory in the system
+  temporary location, holding the graph copy and restored session and template
+  data, and a `session-restore-*` directory beside the output.
 - Neither command records an audit event, and restored sessions carry no
   activity history; attribution of a backup or restore rests on the operator's
   own process records.
