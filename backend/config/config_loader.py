@@ -15,7 +15,8 @@ import os
 import re
 import json
 import logging
-from typing import Dict, List, Optional, Any
+from copy import deepcopy
+from typing import Dict, List, Optional, Any, Protocol
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -477,6 +478,45 @@ class SchemaFileConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SchemaSource(Protocol):
+    """Supplies the raw profile config: the object ``schema_config.json`` holds.
+
+    A deployment registers its own with ``set_schema_source`` or
+    ``RuntimeExtensions(schema_source=...)``. A source whose content can change
+    may also define ``subscribe(on_change)`` and await ``on_change()`` on the
+    server's event loop after each change; the server then validates and
+    activates the new schema (``backend/service/schema_changes.py``).
+    """
+
+    def load(self) -> Dict[str, Any]: ...
+
+
+class FileSchemaSource:
+    """The default source: the profile's ``schema_config.json``."""
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = path
+
+    def load(self) -> Dict[str, Any]:
+        path = self.path or resolve_schema_config_path_info(DEFAULT_CONFIG_PATH)["path"]
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+_schema_source: Optional[SchemaSource] = None
+
+
+def get_schema_source() -> SchemaSource:
+    return _schema_source or FileSchemaSource()
+
+
+def set_schema_source(source: Optional[SchemaSource]) -> None:
+    """Register the profile schema source (None restores the file) and reload."""
+    global _schema_source
+    _schema_source = source
+    reset_loader()
+
+
 class ConfigLoader:
     """
     Singleton configuration loader.
@@ -515,15 +555,8 @@ class ConfigLoader:
         self.shape_diagnostics = []
 
         try:
-            with open(self._config_path, "r", encoding="utf-8") as f:
-                raw_config = json.load(f)
-
-            self.shape_diagnostics = sanitize_shapes(raw_config)
-            self._sanitize_node_types(raw_config)
-            self._sanitize_relationship_types(raw_config)
-            self._sanitize_rest_interfaces(raw_config)
-            self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
-            self._config = SchemaFileConfig(**raw_config)
+            raw_config = get_schema_source().load()
+            self._parse(raw_config)
             logger.info(f"Loaded schema configuration from: {self._config_path}")
 
         except FileNotFoundError:
@@ -545,6 +578,36 @@ class ConfigLoader:
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
         self._strip_system_types_from_config()
         self._apply_system_types()
+
+    def _parse(self, raw_config: Dict[str, Any]) -> None:
+        self.shape_diagnostics = sanitize_shapes(raw_config)
+        self._sanitize_node_types(raw_config)
+        self._sanitize_relationship_types(raw_config)
+        self._sanitize_rest_interfaces(raw_config)
+        self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
+        self._config = SchemaFileConfig(**raw_config)
+
+    @classmethod
+    def candidate(cls, raw_config: Any) -> "ConfigLoader":
+        """A detached loader built from ``raw_config``; raises when it is invalid.
+
+        Unlike startup, a live change that does not validate is refused rather
+        than replaced by defaults.
+        """
+        if not isinstance(raw_config, dict):
+            raise ValueError("Profile config must be a JSON object")
+        loader = object.__new__(cls)
+        loader._config_path = _get_loader().config_path
+        loader._parse(deepcopy(raw_config))
+        loader._strip_system_types_from_config()
+        loader._apply_system_types()
+        return loader
+
+    def activate(self, candidate: "ConfigLoader") -> None:
+        """Adopt a candidate's state in place, so every holder of the loader follows."""
+        self._config = candidate._config
+        self._dropped_capability_ids = candidate._dropped_capability_ids
+        self.shape_diagnostics = candidate.shape_diagnostics
 
     @staticmethod
     def _sanitize_node_types(raw_config: Dict[str, Any]) -> None:
@@ -763,7 +826,7 @@ class ConfigLoader:
             self._config.schema_.node_types[type_name] = NodeTypeConfig(**type_config)
 
     def reload(self) -> None:
-        """Reload the configuration from disk."""
+        """Reload the configuration from the schema source."""
         self._config = None
         self._load_config()
 
@@ -851,15 +914,16 @@ def relationship_type_allows_node_types(
     target_type: str,
     source_subtypes: list[str] | None = None,
     target_subtypes: list[str] | None = None,
+    schema: Optional[SchemaConfig] = None,
 ) -> Dict[str, Any]:
     """Validate relationship type applicability for a directed source->target pair.
 
     Missing source_types/target_types rules are intentionally permissive for
     backward compatibility. A "*" entry on either side also permits any node type.
     Profile rules may name either a concrete node type or one of that node's
-    subtypes.
+    subtypes. ``schema`` checks against a schema other than the active one.
     """
-    schema = _get_loader().config.schema_
+    schema = schema or _get_loader().config.schema_
     config = schema.relationship_types.get(relationship_type)
     if config is None:
         # Unconfigured relationship types are allowed for backward compatibility.

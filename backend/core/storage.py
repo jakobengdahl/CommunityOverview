@@ -956,6 +956,17 @@ class GraphStorage:
             context=context,
         )
 
+    def dispatch_event(self, event: "Event") -> int:
+        """Send a non-mutation event, such as a schema change, to subscriptions.
+
+        Unlike graph writes it is not recorded in history nor passed to system
+        listeners.
+        """
+        dispatcher = self._event_dispatcher
+        if not self._events_enabled or dispatcher is None:
+            return 0
+        return dispatcher.dispatch(event)
+
     def emit_federated_node_event(
         self,
         operation: str,
