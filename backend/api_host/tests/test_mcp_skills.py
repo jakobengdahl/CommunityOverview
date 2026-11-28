@@ -843,7 +843,11 @@ def test_profile_counts_visibility_order_and_freshness(monkeypatch):
         Edge(source="b", target="e", type="MEMBER"),
         Edge(source="b", target="c", type="OTHER", archived=True),
     ]
-    storage = SimpleNamespace(get_all_nodes=lambda: nodes, get_all_edges=lambda: edges)
+    from threading import RLock
+
+    storage = SimpleNamespace(
+        get_all_nodes=lambda: nodes, get_all_edges=lambda: edges, write_lock=RLock()
+    )
     narrowing = GraphAccessNarrowing(enabled=True, allow_local_graph=True)
     result = profile(storage, narrowing)
     assert result["node_count"] == 3
@@ -897,17 +901,26 @@ def test_profile_counts_visibility_order_and_freshness(monkeypatch):
         describe(storage, TargetHook(False, narrowing))["error_code"] == "access_denied"
     )
     assert describe(storage, TargetHook(True, narrowing))["node_count"] == 4
-    from backend.service import access
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.service import graph_profile
 
-    original_filter = access.filter_nodes_and_edges
+    original_aggregate = graph_profile.aggregate
+    lock_free = []
 
-    def mutate_after_snapshot(**kwargs):
+    def mutate_after_snapshot(graph, scope):
+        # Writers are not excluded while the snapshot is aggregated.
+        with ThreadPoolExecutor(1) as pool:
+            free = pool.submit(storage.write_lock.acquire, False).result()
+            if free:
+                pool.submit(storage.write_lock.release).result()
+        lock_free.append(free)
         next(n for n in nodes if n.id == "a").metadata["origin_graph_id"] = "hidden"
-        return original_filter(**kwargs)
+        return original_aggregate(graph, scope)
 
-    monkeypatch.setattr(access, "filter_nodes_and_edges", mutate_after_snapshot)
+    monkeypatch.setattr(graph_profile, "aggregate", mutate_after_snapshot)
     assert profile(storage, narrowing)["node_count"] == 4
-    monkeypatch.setattr(access, "filter_nodes_and_edges", original_filter)
+    assert lock_free == [True]
+    monkeypatch.setattr(graph_profile, "aggregate", original_aggregate)
     long = "z" * 10000
     nodes[:] = [Node(id=long, name="Name", type=long, tags=["tag"], subtypes=[long])]
     bounded = profile(storage, GraphAccessNarrowing())
@@ -968,6 +981,7 @@ def test_profile_change_publishes_only_for_changed_profile():
         restored = []
         publisher.subscribe(restored.append)
         gate.reset(reset)
+        await settle()  # Baselines are taken by the first flush.
         nodes.append(
             Node(
                 id="h",
@@ -1052,6 +1066,7 @@ def test_profile_change_publishes_only_for_changed_profile():
         )
         private = []
         publisher.subscribe(private.append)
+        await settle()
         nodes[-1].name = "Changed"
         publisher.on_event(None)
         await settle()
@@ -1093,6 +1108,8 @@ def test_profile_change_from_storage_reload_is_announced(tmp_path, change):
         storage.add_reload_listener(publisher.on_event)
         received = []
         publisher.subscribe(received.append)
+        while publisher.scheduled:
+            await asyncio.sleep(0.01)
         node = Node(id="n", name="N", type="Actor")
         if change == "replace":
             await asyncio.to_thread(storage.replace_all_nodes_and_edges, [node], [])
@@ -1123,13 +1140,23 @@ def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
     from backend.service import graph_profile
     from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
 
-    computed = []
-    original_profile = graph_profile.profile
+    import threading
+
+    computed, snapshots = [], []
+    original_aggregate, original_snapshot = (
+        graph_profile.aggregate,
+        graph_profile.snapshot,
+    )
     monkeypatch.setattr(
         graph_profile,
-        "profile",
-        lambda storage, scope: (
-            computed.append(scope) or original_profile(storage, scope)
+        "aggregate",
+        lambda graph, scope: computed.append(scope) or original_aggregate(graph, scope),
+    )
+    monkeypatch.setattr(
+        graph_profile,
+        "snapshot",
+        lambda storage: (
+            snapshots.append(threading.get_ident()) or original_snapshot(storage)
         ),
     )
 
@@ -1175,14 +1202,21 @@ def test_profile_recomputes_once_per_window_and_only_for_profile_streams(
         await asyncio.sleep(0.3)
         assert computed == []
 
+        # Two streams of one scope: subscribing computes nothing on the loop.
         await listen(publisher, tracked.append, graph_profile.PROFILE_URI)
+        await listen(publisher, [].append, graph_profile.PROFILE_URI)
+        assert computed == [] and snapshots == []
+        while publisher.scheduled:
+            await asyncio.sleep(0.01)
+        assert len(computed) == 1 and len(snapshots) == 1
         computed.clear()
         for i in range(20):
             nodes.append(Node(id=f"t{i}", name="T", type="Person"))
             publisher.on_event(None)
         assert computed == []  # Nothing is computed inside the event callback.
         await asyncio.sleep(0.3)
-        assert len(computed) == 1
+        assert len(computed) == 1 and len(snapshots) == 2
+        assert threading.get_ident() not in snapshots
         assert tracked == [ResourceUpdated(uri=graph_profile.PROFILE_URI)]
         assert other == []
         assert seen and all(

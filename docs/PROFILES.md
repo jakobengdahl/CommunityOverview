@@ -613,9 +613,15 @@ by descending count then name. A self-loop contributes two to degree.
 
 When MCP skills are enabled, each listen stream compares its own authorized
 profile, evaluated with the listen request's own authorization headers,
-starting when it subscribes, and receives the standard
+and receives the standard
 `notifications/resources/updated` for `graph://profile` only when that profile
-differs from the one it held at subscription or at its last notification.
+differs from its baseline or the one at its last notification. The baseline is
+taken in the background right after the stream subscribes, or within one
+debounce window (250 ms) if a comparison is already pending; a change landing
+before it is part of the baseline. Comparisons run at most once per debounce
+window, from one snapshot of the graph shared by every stream, and once per
+distinct access scope; the storage write lock is held only while the snapshot's
+plain fields are copied.
 Graph changes, whole-graph imports and reloads (including an external change applied as
 a reload) all trigger the comparison. While its read access is denied nothing
 is sent, and access returning to an unchanged profile announces nothing. A stream that has never been able to read the profile is notified on
