@@ -959,7 +959,12 @@ def test_profile_change_publishes_only_for_changed_profile():
                     allowed=gate.get()["allowed"], graph_access=current_scope.get()
                 )
 
-        publisher = ProfileChangePublisher(storage, InMemorySubscriptionBus(), Hook())
+        # The shared bus carries only standard events (a replica bus must
+        # serialize them); per-stream comparisons stay process-local.
+        shared = InMemorySubscriptionBus()
+        published = []
+        shared.subscribe(published.append)
+        publisher = ProfileChangePublisher(storage, shared, Hook())
         publisher.loop = asyncio.get_running_loop()
         publisher.debounce = 0
 
@@ -1023,19 +1028,19 @@ def test_profile_change_publishes_only_for_changed_profile():
         assert len(public) == 3 and len(restricted) == 3 and len(restored) == 3
         # Access lost between recompute and delivery keeps the baseline, so
         # the change is still announced once access returns.
-        publish = publisher.bus.publish
+        publish = publisher.local.publish
 
         async def revoke_then_publish(event):
             revoked["allowed"] = False
             await publish(event)
             revoked["allowed"] = True
 
-        publisher.bus.publish = revoke_then_publish
+        publisher.local.publish = revoke_then_publish
         nodes.append(Node(id="d", name="D", type="Person"))
         publisher.on_event(None)
         await settle()
         assert len(public) == 4 and len(restored) == 3
-        publisher.bus.publish = publish
+        publisher.local.publish = publish
         publisher.on_event(None)
         await settle()
         assert len(public) == 4 and len(restored) == 4
@@ -1067,6 +1072,7 @@ def test_profile_change_publishes_only_for_changed_profile():
         await settle()
         assert public == [] and restricted == []
         assert private == [ResourceUpdated(uri="graph://profile")]
+        assert published == []
 
     anyio.run(check)
 

@@ -15,8 +15,10 @@ def preserve_config_loader():
     """
     loader = config_loader._loader
     instance = config_loader.ConfigLoader._instance
+    source = config_loader._schema_source
     try:
         yield
     finally:
         config_loader._loader = loader
         config_loader.ConfigLoader._instance = instance
+        config_loader._schema_source = source

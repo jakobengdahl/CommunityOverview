@@ -31,7 +31,7 @@ import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -100,6 +100,9 @@ from .system_routes import register_system_routes
 from .agent_routes import register_agent_routes
 from .federation_routes import register_federation_routes
 
+if TYPE_CHECKING:
+    from backend.service.schema_changes import SchemaChangeCoordinator
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +121,7 @@ class AppRuntime:
     federation_summary: dict
     federation_manager: FederationManager
     agent_registry: AgentRegistry
+    schema_changes: "SchemaChangeCoordinator"
 
     def stop(self) -> None:
         """Stop background work and flush storage."""
@@ -176,6 +180,13 @@ def create_worker_runtime(
 def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions):
     # Extensions are bound before any store, delivery worker or registry is built.
     # Storage receives them explicitly; dispatchers and agent workers inherit them.
+    if runtime_extensions.schema_source is not None:
+        from backend.config.config_loader import set_schema_source
+
+        set_schema_source(runtime_extensions.schema_source)
+        if graph_storage is not None:
+            # Pre-built storage derived its search text from the file schema.
+            graph_storage.refresh_schema_search()
     federation_config = load_federation_config()
     federation_summary = summarize_federation_config(federation_config)
 
@@ -269,6 +280,14 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
 
     graph_storage.add_system_listener(agent_lifecycle_listener)
 
+    # Live schema changes reach every runtime, worker-only included; the HTTP
+    # app adds its MCP listener to this coordinator.
+    from backend.config.config_loader import get_schema_source
+    from backend.service.schema_changes import SchemaChangeCoordinator
+
+    schema_changes = SchemaChangeCoordinator(graph_storage)
+    schema_changes.attach(get_schema_source())
+
     return AppRuntime(
         config=config,
         graph_storage=graph_storage,
@@ -278,6 +297,7 @@ def _build_runtime(config, graph_storage, authorization_hook, runtime_extensions
         federation_summary=federation_summary,
         federation_manager=federation_manager,
         agent_registry=agent_registry,
+        schema_changes=schema_changes,
     )
 
 
@@ -673,6 +693,7 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             CoreSkillProvider,
             GraphSemanticsProvider,
             SkillsExtension,
+            graph_semantics_inputs,
         )
 
         enabled_tools = {"describe_graph"}
@@ -681,26 +702,12 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             and graph_service.attachment_settings is not None
         ):
             enabled_tools.add("read_node_attachment")
-        profile = _get_loader().config
         mcp_extensions.append(
             SkillsExtension(
                 [
                     CoreSkillProvider(enabled_tools),
                     GraphSemanticsProvider(
-                        {
-                            **profile.schema_.model_dump(),
-                            "node_shapes": {
-                                name: shape.model_dump()
-                                for name, shape in profile.node_shapes.items()
-                            },
-                        },
-                        profile.presentation.model_dump(
-                            include={
-                                "prompt_prefix",
-                                "default_language",
-                                "language_policy",
-                            }
-                        ),
+                        *graph_semantics_inputs(_get_loader().config),
                         skills_config.graphSemantics.ttlMs,
                         skills_config.graphSemantics.cacheScope,
                     ),
@@ -716,7 +723,9 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
         from backend.service.graph_profile import ProfileChangePublisher
 
         profile_publisher = ProfileChangePublisher(
-            graph_storage, InMemorySubscriptionBus(), graph_service.authorization_hook
+            graph_storage,
+            runtime_extensions.subscription_bus or InMemorySubscriptionBus(),
+            graph_service.authorization_hook,
         )
         graph_storage.add_system_listener(profile_publisher.on_event)
         graph_storage.add_reload_listener(profile_publisher.on_event)
@@ -751,6 +760,20 @@ def _create_app(config, graph_storage, authorization_hook, runtime_extensions):
             graph_service.authorization_hook,
             skills_config.fallback,
         )
+
+    # Live schema changes: the runtime's coordinator validates and activates;
+    # this listener recomputes instructions and schema-derived skills.
+    from backend.service.schema_changes import mcp_schema_listener
+
+    schema_changes = runtime.schema_changes
+    schema_changes.add_listener(
+        mcp_schema_listener(
+            mcp,
+            build_mcp_instructions,
+            mcp_extensions[0] if mcp_extensions else None,
+        )
+    )
+    app.state.schema_changes = schema_changes
 
     # Store MCP instance and tools map on app state
     app.state.mcp = mcp

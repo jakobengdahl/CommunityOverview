@@ -436,6 +436,47 @@ The metadata model is automatically exposed to MCP clients (like ChatGPT). When 
 
 This means MCP clients understand your custom domain concepts without additional configuration.
 
+### Live schema changes
+
+The profile schema comes from a schema source. The default source reads
+`schema_config.json`, so a server without another source behaves as before. A
+deployment that keeps its schema elsewhere passes its own source as
+`RuntimeExtensions(schema_source=...)` (or calls
+`config_loader.set_schema_source`): an object with `load()` returning the same
+object `schema_config.json` holds. A source whose content can change also
+defines `subscribe(on_change)` and awaits `on_change()` on the server's event
+loop after each change; the result reports `accepted` and, when refused, an
+`error_code`.
+
+A change is refused, and the active schema, instructions and skills stay as
+they were, when the new config does not validate (`invalid_schema`; unlike at
+startup, a malformed node type, relationship type or capability is not dropped
+but refuses the whole change), when a
+stored node or edge the active schema admits would no longer be admitted
+(`schema_conflicts_with_graph`, with up to 20 `conflicts`), or when the
+schema-derived skill fails the skill sanitisation and limits
+(`schema_rejected`). Data the active schema already refuses does not block a
+change, and removing a relationship type that stored edges use is a conflict
+like removing a node type that stored nodes use. An accepted change is
+activated, then rebuilds the search index's type names and labels, recomputes
+the MCP instructions, which clients receive on their next `initialize` or
+`server/discover`, and, with MCP skills enabled, the `graph-semantics` skill;
+only then does it emit a `schema.update` event to event subscriptions (see
+[EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md)), so a reaction to the event
+sees the new state. Changed skill files are announced with the standard
+`notifications/resources/list_changed` and `notifications/resources/updated`,
+and a changed tool listing with `notifications/tools/list_changed`. Applying
+a schema identical to the active one changes and announces nothing, unless
+a listener failed while committing the previous change (reported as
+`listener_failed`): then re-applying it recomputes everything again. With
+`RuntimeExtensions(subscription_bus=...)` the listen streams use a shared bus
+backend, which carries only the standard events above, so clients connected
+to other replicas receive the notifications too; each replica still needs its
+source to announce the change locally. `graph://profile` changes are computed
+per replica and stay off the shared bus. A
+worker-only runtime (`create_worker_runtime`) follows the source too, so its
+loader and search use the new schema.
+
 ## Example: SCB Profile
 
 The `config/scb/` profile demonstrates a domain-specific configuration for Statistics Sweden (SCB). It adds node types like:
