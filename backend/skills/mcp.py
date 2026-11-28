@@ -551,10 +551,11 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
             request = ctx.request_context
             entries = extension.entries
             file_uri = uri.rsplit("/", 1)[0] + "/" + file
-            if uri not in extension.entries or not await extension.allowed(
-                request, uri
-            ):
-                if file and extension.owners.get(file_uri) == extension.owners.get(uri):
+            if uri not in entries:
+                return {"error_code": "not_found"}
+            if not await extension.allowed(request, uri):
+                owner = extension.owners.get(uri)
+                if file and owner and extension.owners.get(file_uri) == owner:
                     extension.audit_refusal(file_uri)
                 return {"error_code": "not_found"}
             result = await extension.get_skill(request, GetSkillParams(uri=uri))

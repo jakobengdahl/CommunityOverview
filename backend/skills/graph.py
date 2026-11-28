@@ -7,7 +7,8 @@ applies the same sanitisation to the same node content.
 
 import logging
 import re
-from typing import List, Optional, Sequence
+from types import SimpleNamespace
+from typing import Optional, Sequence
 
 import yaml
 
@@ -61,6 +62,8 @@ class GraphSkillProvider:
         self.with_attachments: set = set()
         # Served attachment file URI -> (node id, attachment record), for audit.
         self.attachment_records: dict = {}
+        # Node id -> root it was last served under; incumbents win clashes.
+        self._roots: dict = {}
         self._sanitizer = SkillsLoader()
 
     def _body(self, node) -> str:
@@ -157,19 +160,11 @@ class GraphSkillProvider:
         return SkillFiles(name, {**files, "SKILL.md": text}, path)
 
     def skills(self) -> Sequence[SkillFiles]:
-        result: List[SkillFiles] = []
-        roots = list(_RESERVED_ROOTS)
-        node_ids = {}
-        with_attachments = set()
-        attachment_records = {}
-        # On a name or path clash the oldest node wins, so a node added later
-        # cannot take over a skill that is already served.
-        nodes = sorted(
-            (n for n in self.storage.get_all_nodes() if _is_skill(n)),
-            key=lambda n: (n.created_at, n.id),
-        )
-        for node in nodes:
-            if node.archived or not (node.metadata or {}).get("content"):
+        candidates = []
+        for node in sorted(self.storage.get_all_nodes(), key=lambda n: n.id):
+            if not _is_skill(node) or node.archived:
+                continue
+            if not (node.metadata or {}).get("content"):
                 continue
             records = {}
             try:
@@ -180,23 +175,43 @@ class GraphSkillProvider:
             except Exception as exc:
                 logger.warning("Skill node %s not served: %s", node.id, exc)
                 continue
-            root = skill.path or skill.name
-            if skill.name in node_ids or any(
-                root == r or root.startswith(r + "/") or r.startswith(root + "/")
-                for r in roots
-            ):
-                logger.warning("Skill node %s not served: path in use", node.id)
+            candidates.append((node, skill, skill.path or skill.name, records))
+
+        def clash(a, b) -> bool:
+            return (
+                a[1].name == b[1].name
+                or a[2] == b[2]
+                or a[2].startswith(b[2] + "/")
+                or b[2].startswith(a[2] + "/")
+            )
+
+        # On a name or path clash the skill already served under that root
+        # keeps it; node fields such as created_at are caller-supplied, so no
+        # newcomer can claim precedence. Clashing newcomers are all withheld.
+        incumbents = [c for c in candidates if self._roots.get(c[0].id) == c[2]]
+        newcomers = [c for c in candidates if self._roots.get(c[0].id) != c[2]]
+        reserved = [(None, SimpleNamespace(name=r), r) for r in _RESERVED_ROOTS]
+        served = []
+        for candidate in incumbents + newcomers:
+            rivals = reserved + served
+            if candidate in newcomers:
+                rivals += [c for c in newcomers if c is not candidate]
+            if any(clash(candidate, other) for other in rivals):
+                logger.warning("Skill node %s not served: path in use", candidate[0].id)
                 continue
-            roots.append(root)
+            served.append(candidate)
+
+        node_ids, with_attachments, attachment_records = {}, set(), {}
+        for node, skill, root, records in served:
             node_ids[skill.name] = node.id
             if len(skill.files) > 1:
                 with_attachments.add(skill.name)
             for path, record in records.items():
                 attachment_records[f"skill://{root}/{path}"] = (node.id, record)
-            result.append(skill)
         self.node_ids, self.with_attachments = node_ids, with_attachments
         self.attachment_records = attachment_records
-        return result
+        self._roots = {node.id: root for node, _, root, _ in served}
+        return [skill for _, skill, _, _ in served]
 
     def audit_read(self, uri: str, text: str) -> None:
         """Record a served attachment file like an attachment content read."""
