@@ -78,18 +78,24 @@ def test_agent_can_be_created_disabled(client):
     assert storage.get_node(result["created_node_id"]).metadata["enabled"] is False
 
 
-def test_event_subscription_has_loadable_filters_and_delivery(client):
+@pytest.mark.parametrize("kind", ["node", "schema"])
+def test_event_subscription_has_loadable_filters_and_delivery(client, kind):
     tools, _, storage, _ = client
     result = tools["create_event_subscription"](
         config={
             "name": "Webhook",
             "webhook_url": "https://8.8.8.8/events",
-            "filters": {"operations": ["update"], "keywords": {"any": ["review"]}},
+            "filters": {
+                "target": {"entity_kind": kind},
+                "operations": ["update"],
+                "keywords": {"any": ["review"]},
+            },
             "ignore_origins": ["integration"],
         }
     )
     assert result["success"], result
     subscription = EventDispatcher(storage)._load_subscriptions()[0]
+    assert subscription["filters"].target.entity_kind == kind
     assert subscription["filters"].operations == ["update"]
     assert subscription["filters"].keywords.any == ["review"]
     assert subscription["delivery"].ignore_origins == ["integration"]

@@ -169,6 +169,20 @@ class GraphSemanticsProvider:
         return [_GraphSemanticsFiles("graph-semantics", {"SKILL.md": text})]
 
 
+def graph_semantics_inputs(profile):
+    """The schema and presentation inputs ``GraphSemanticsProvider`` takes."""
+    schema = {
+        **profile.schema_.model_dump(),
+        "node_shapes": {
+            name: shape.model_dump() for name, shape in profile.node_shapes.items()
+        },
+    }
+    presentation = profile.presentation.model_dump(
+        include={"prompt_prefix", "default_language", "language_policy"}
+    )
+    return schema, presentation
+
+
 _BUILTIN_PROVIDERS = (CoreSkillProvider, GraphSemanticsProvider)
 
 
@@ -202,6 +216,7 @@ class SkillsExtension(Extension):
     ):
         self.providers = providers
         self.authorization_hook = None
+        self.refresh_lock = anyio.Lock()
         self.ttl_ms = ttl_ms
         self.cache_scope = cache_scope
         self.entries = {}
@@ -435,6 +450,47 @@ class SkillsExtension(Extension):
         return result
 
 
+async def apply_catalog(mcp, extension, updated, publisher):
+    """Swap ``updated``'s validated catalog into ``extension`` and its resources.
+
+    Publishes the resource-list change when served files changed and returns
+    the URIs of the files whose bytes changed, appeared or disappeared.
+    """
+    old = {uri: entry["resources"] for uri, entry in extension.entries.items()}
+    new = {uri: entry["resources"] for uri, entry in updated.entries.items()}
+    if old != new:
+        manager = mcp._resource_manager
+        resources = dict(manager._resources)
+        for uri in extension.files:
+            resources.pop(uri, None)
+        resources.update(
+            {
+                str(binding.resource.uri): binding.resource
+                for binding in updated.resources()
+            }
+        )
+        manager._resources = resources
+    same_owners = extension.owners.keys() == updated.owners.keys() and all(
+        provider is updated.owners[uri][0] and name == updated.owners[uri][1]
+        for uri, (provider, name) in extension.owners.items()
+    )
+    if old != new or not same_owners or extension.skill_hints != updated.skill_hints:
+        extension.entries, extension.files = updated.entries, updated.files
+        extension.owners, extension.skill_hints = updated.owners, updated.skill_hints
+    extension.providers = updated.providers
+    if old == new:
+        return []
+
+    def digests(manifests):
+        return {f["uri"]: f["digest"] for files in manifests.values() for f in files}
+
+    before, after = digests(old), digests(new)
+    await publisher.publish()
+    return sorted(
+        uri for uri in before.keys() | after.keys() if before.get(uri) != after.get(uri)
+    )
+
+
 def register_skill_tools(mcp, extension, authorization_hook, fallback):
     """Register tools over the extension's validated, shared catalog."""
     from backend.runtime.authorization import GRAPH_ACTION_ADMIN
@@ -442,7 +498,6 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
 
     extension.authorization_hook = authorization_hook
     publisher: SkillChangePublisher = InProcessSkillChangePublisher(mcp._subscriptions)
-    lock = anyio.Lock()
 
     @mcp.tool()
     async def refresh_skills(ctx: Context) -> dict:
@@ -455,40 +510,15 @@ def register_skill_tools(mcp, extension, authorization_hook, fallback):
             denied = True
         if denied:
             return {"error_code": "access_denied"}
-        async with lock:
-            updated = SkillsExtension(
-                extension.providers, extension.ttl_ms, extension.cache_scope
+        async with extension.refresh_lock:
+            await apply_catalog(
+                mcp,
+                extension,
+                SkillsExtension(
+                    extension.providers, extension.ttl_ms, extension.cache_scope
+                ),
+                publisher,
             )
-            old = {uri: entry["resources"] for uri, entry in extension.entries.items()}
-            new = {uri: entry["resources"] for uri, entry in updated.entries.items()}
-            if old != new:
-                manager = mcp._resource_manager
-                resources = dict(manager._resources)
-                for uri in extension.files:
-                    resources.pop(uri, None)
-                resources.update(
-                    {
-                        str(binding.resource.uri): binding.resource
-                        for binding in updated.resources()
-                    }
-                )
-                manager._resources = resources
-            same_owners = extension.owners.keys() == updated.owners.keys() and all(
-                provider is updated.owners[uri][0] and name == updated.owners[uri][1]
-                for uri, (provider, name) in extension.owners.items()
-            )
-            if (
-                old != new
-                or not same_owners
-                or extension.skill_hints != updated.skill_hints
-            ):
-                extension.entries, extension.files = updated.entries, updated.files
-                extension.owners, extension.skill_hints = (
-                    updated.owners,
-                    updated.skill_hints,
-                )
-            if old != new:
-                await publisher.publish()
             result = await extension.list_skills(ctx.request_context, ListSkillParams())
             for entry in result["skills"]:
                 manifest = json.dumps(

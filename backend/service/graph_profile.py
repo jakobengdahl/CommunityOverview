@@ -167,6 +167,10 @@ class ProfileChangePublisher:
     A new stream's baseline is taken by the next flush, not by ``subscribe``
     on the event loop; a change landing before that flush is part of it.
 
+    The per-stream comparison results travel on a process-local bus; the
+    shared ``bus`` carries only standard events, so a cross-replica backend
+    never has to serialize them.
+
     Change notifications follow the main graph only: staged session layers do
     not trigger them. A session-bound caller reading ``describe_graph`` or the
     resource still gets its composed view on read.
@@ -184,7 +188,10 @@ class ProfileChangePublisher:
     debounce = 0.25
 
     def __init__(self, storage, bus, hook):
+        from mcp.server.subscriptions import InMemorySubscriptionBus
+
         self.storage, self.bus, self.hook = storage, bus, hook
+        self.local = InMemorySubscriptionBus()
         self.loop = None
         self.lock = RLock()
         self.listeners = {}
@@ -224,34 +231,33 @@ class ProfileChangePublisher:
         tracked = PROFILE_URI in _LISTEN_URIS.get()
 
         def deliver(event):
-            if not isinstance(event, _ProfileUpdates):
-                listener(event)
-            elif tracked:
-                update = event.updates.get(token)
-                if update is None:
+            update = event.updates.get(token)
+            if update is None:
+                return
+            current, denied = self._access(context, self.hook)
+            if denied or current != update[0]:
+                # Baseline kept: the next graph change compares against
+                # what this stream was last told, so nothing is lost.
+                return
+            with self.lock:
+                if token not in self.listeners:
                     return
-                current, denied = self._access(context, self.hook)
-                if denied or current != update[0]:
-                    # Baseline kept: the next graph change compares against
-                    # what this stream was last told, so nothing is lost.
-                    return
-                with self.lock:
-                    if token not in self.listeners:
-                        return
-                    self.listeners[token] = (context, update[1])
-                listener(ResourceUpdated(uri=PROFILE_URI))
+                self.listeners[token] = (context, update[1])
+            listener(ResourceUpdated(uri=PROFILE_URI))
 
         if not tracked:
-            return self.bus.subscribe(deliver)
+            return self.bus.subscribe(listener)
         with self.lock:
             self.listeners[token] = (context, _PENDING)
-            unsubscribe = self.bus.subscribe(deliver)
+            unsubscribe = self.bus.subscribe(listener)
+            unsubscribe_local = self.local.subscribe(deliver)
             self._schedule(prompt=True)
 
         def close():
             with self.lock:
                 self.listeners.pop(token, None)
                 unsubscribe()
+                unsubscribe_local()
 
         return close
 
@@ -290,7 +296,7 @@ class ProfileChangePublisher:
                         if entry is not None and entry[1] is _PENDING:
                             self.listeners[token] = (entry[0], baseline)
                 if changed:
-                    await self.bus.publish(_ProfileUpdates(changed))
+                    await self.local.publish(_ProfileUpdates(changed))
                 with self.lock:
                     if not self.dirty:
                         self.scheduled = False

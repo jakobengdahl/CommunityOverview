@@ -263,6 +263,8 @@ class RuntimeExtensions:
         event_sink=None,
         event_delivery=None,
         federation_key_provider=None,
+        schema_source=None,
+        subscription_bus=None,
     ):
         self.mutation_policy = mutation_policy or DefaultMutationPolicyHook()
         self.execution_admission = (
@@ -277,6 +279,11 @@ class RuntimeExtensions:
         # Serves federation publish access "external"; see
         # backend/federation/publish.py FederationKeyProvider.
         self.federation_key_provider = federation_key_provider
+        # Profile schema supplier; see backend/config/config_loader.py SchemaSource.
+        self.schema_source = schema_source
+        # MCP listen-stream fan-out (mcp.server.subscriptions.SubscriptionBus);
+        # a shared backend lets several replicas notify their clients.
+        self.subscription_bus = subscription_bus
 
     def evaluate_mutation(self, context, changes):
         changes = tuple(changes)
